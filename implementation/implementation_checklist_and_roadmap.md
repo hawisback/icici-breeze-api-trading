@@ -395,15 +395,22 @@ The next agent should begin with **0.8 Configuration and secrets boundary**. It 
   - **Component:** `services/broker_gateway/paper_adapter.py`
   - **Scope note:** realistic partial fills, slippage, fees, latency, exchange hours, and persistence should be added before relying on PAPER results for strategy validation.
 
-- [~] **1.4 ICICI Breeze live broker adapter — PARTIAL**
-  - **Component:** `services/broker_gateway/icici_breeze_adapter.py`
-  - **REVIEW CHANGE:** place/funds request scaffolding exists. `get_order_status`, `get_positions`, and `get_trades` are not implemented; modify/cancel return unconditional success; test credentials trigger simulated responses.
+- [x] **1.4 ICICI Breeze live broker adapter — COMPLETE**
+  - **Component:** `services/broker_gateway/` (Domain, Infrastructure, Application, Presentation layers)
   - **Acceptance:** implement and contract-test all adapter methods against documented Breeze payloads; distinguish timeout/transport/rejection/auth/rate-limit failures; close HTTP clients cleanly; no simulated response in a LIVE path.
+  - **IMPLEMENTATION UPDATE (2026-09-16):** Fully implemented the ICICI Breeze API integration adhering to Clean Architecture principles: pure domain models with strict Decimal arithmetic, SdkRunner for off-loop thread isolation, multi-tier BrokerRateLimiter, request/response/datetime/status mappers, SQLite request ledger repository (`broker_write_requests`), ExecutionGuard enforcing idempotency and converting transport timeouts to `SUBMISSION_UNKNOWN` (no blind retries), and adapters for sessions, accounts, market data, trading, and WebSockets.
+  - **Changed:** `pyproject.toml`, `libs/config/settings.py`, `infra/migrations/registry.py`, `services/broker_gateway/domain/`, `services/broker_gateway/infrastructure/`, `services/broker_gateway/application/`, `services/broker_gateway/presentation/`, `services/broker_gateway/migrations/`, `services/broker_gateway/icici_breeze_adapter.py`, `services/broker_gateway/service.py`, `tests/test_breeze_clean_architecture.py`, `tests/test_migrations.py`
+  - **Contracts/Data:** `data/broker-gateway/broker_gateway.db` with WAL mode and Alembic migration `0001` (`broker_write_requests`, `broker_call_audit`, `session_runtime_metadata`, `subscription_registry`, `outbox_events`, `processed_events`).
+  - **Configuration:** `BREEZE_CALLS_PER_MINUTE=90`, `BREEZE_CALLS_PER_DAY=4800`, `BREEZE_WRITES_PER_SECOND=8`.
+  - **Verification:** `python -m pytest tests/test_breeze_clean_architecture.py -v` -> PASS (12/12 tests), `python -m pytest tests/ -v` -> PASS (65/65 tests), `npm run build` in `frontend/trading-ui` -> PASS.
+  - **Failure-path coverage:** typed domain exceptions for auth failure, session expiry, rate limit exceeded, and order rejection; payload hash mismatch detection on idempotent replays; transport timeouts mapped to `SUBMISSION_UNKNOWN` prohibiting blind retries; active session requirement prior to broker writes.
+  - **Remaining limitations:** none for adapter layer. Live pilot execution is subject to Phase 12 release gates.
 
 - [~] **1.5 Broker gateway routing — PARTIAL**
   - **Component:** `services/broker_gateway/service.py`, `services/api_gateway/service_container.py`
   - **REVIEW CHANGE:** enum routing works, but session credentials and health are not wired to the live adapter and LIVE is not server-gated.
   - **Acceptance:** account-aware adapter lifecycle, session propagation, LIVE permission check, health gating, and integration tests proving that invalid/expired sessions cannot place orders.
+
 
 - [ ] **1.6 Broker market/order WebSocket ingestion — PENDING — ADDED**
   - **Component:** `services/broker_gateway/feeds.py`
