@@ -84,15 +84,20 @@ class BreezeClientManager:
 
         Calls BreezeConnect.generate_session(api_secret, session_token) off the event loop.
         """
+        api_key_str = (
+            credentials.api_key.get_secret_value()
+            if isinstance(credentials.api_key, SecretStr)
+            else str(credentials.api_key)
+        )
         self._status = SessionStatus.ACTIVATING
         self._last_error = None
-        self._account_id = credentials.api_key[:8]
+        self._account_id = api_key_str[:8]
 
         try:
             # If a custom SDK instance was not injected (e.g. for testing), instantiate official BreezeConnect
             if self._sdk is None:
                 from breeze_connect import BreezeConnect
-                self._sdk = BreezeConnect(api_key=credentials.api_key)
+                self._sdk = BreezeConnect(api_key=api_key_str)
 
             secret_val = credentials.secret_key.get_secret_value()
             session_val = credentials.session_token.get_secret_value()

@@ -137,15 +137,19 @@ class IciciBreezeAdapter(BrokerAdapter):
 
     async def authenticate(self, api_key: str, secret_key: str, session_token: str) -> bool:
         """Activate daily session using credentials."""
-        self.api_key = api_key
-        self.secret_key = secret_key
-        self.session_token = session_token
+        api_key_str = api_key.get_secret_value() if isinstance(api_key, SecretStr) else str(api_key)
+        secret_key_str = secret_key.get_secret_value() if isinstance(secret_key, SecretStr) else str(secret_key)
+        session_token_str = session_token.get_secret_value() if isinstance(session_token, SecretStr) else str(session_token)
+
+        self.api_key = api_key_str
+        self.secret_key = secret_key_str
+        self.session_token = session_token_str
 
         try:
             creds = SessionCredentials(
-                api_key=api_key,
-                secret_key=SecretStr(secret_key),
-                session_token=SecretStr(session_token),
+                api_key=api_key_str,
+                secret_key=SecretStr(secret_key_str),
+                session_token=SecretStr(session_token_str),
             )
             snapshot = await self.session_adapter.activate(creds)
             return snapshot.status == SessionStatus.ACTIVE

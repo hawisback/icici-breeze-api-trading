@@ -15,7 +15,7 @@ from libs.contracts.models import TradingMode
 
 def test_default_settings():
     """Verify safe defaults: PAPER mode, memory bus, simulated market, no live trading."""
-    settings = PlatformSettings()
+    settings = PlatformSettings(_env_file=None)
     assert settings.default_trading_mode == TradingMode.PAPER
     assert settings.live_trading_enabled is False
     assert settings.event_bus_backend == EventBusBackend.MEMORY

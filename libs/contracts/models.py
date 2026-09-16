@@ -278,7 +278,7 @@ class Candle(BaseDomainModel):
     low: float
     close: float
     volume: int
-    open_interest: int = 0
+    open_interest: Optional[int] = 0
     source: str = "BREEZE"
 
 

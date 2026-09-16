@@ -46,12 +46,34 @@ class BreezeAccountAdapter(BrokerAccountPort):
         elif not isinstance(data, dict):
             data = {}
 
-        # Parse balances into Decimal with safe fallbacks
-        bank_balance = Decimal(str(data.get("bank_balance") or data.get("allocated_amount") or "0"))
-        cash_available = Decimal(str(data.get("cash_available") or data.get("unallocated_amount") or "0"))
-        margin_used = Decimal(str(data.get("margin_used") or data.get("block_amount") or "0"))
+        # Parse balances into Decimal with exact Breeze keys and legacy fallbacks
+        bank_balance = Decimal(
+            str(
+                data.get("total_bank_balance")
+                or data.get("bank_balance")
+                or data.get("allocated_fno")
+                or data.get("allocated_amount")
+                or "0"
+            )
+        )
+        cash_available = Decimal(
+            str(
+                data.get("unallocated_balance")
+                or data.get("cash_available")
+                or data.get("unallocated_amount")
+                or "0"
+            )
+        )
+        margin_used = Decimal(
+            str(
+                data.get("block_by_trade_balance")
+                or data.get("margin_used")
+                or data.get("block_amount")
+                or "0"
+            )
+        )
 
-        # available_margin is cash_available or bank_balance
+        # available_margin is unallocated cash or total available
         avail_margin = cash_available if cash_available > 0 else bank_balance
 
         return FundsSnapshot(

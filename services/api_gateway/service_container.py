@@ -115,11 +115,16 @@ async def initialize_services(
         and app_settings.breeze_session_token
     ):
         try:
+            api_key_val = (
+                app_settings.breeze_api_key.get_secret_value()
+                if hasattr(app_settings.breeze_api_key, "get_secret_value")
+                else str(app_settings.breeze_api_key)
+            )
             tok_val = app_settings.breeze_session_token.get_secret_value()
             if tok_val and tok_val != "your_daily_session_token_here":
                 logger.info("Attempting auto-activation of broker session from configured token...")
                 await session_svc.activate_session(
-                    api_key=app_settings.breeze_api_key,
+                    api_key=api_key_val,
                     secret_key=app_settings.breeze_secret_key.get_secret_value(),
                     session_token=tok_val,
                 )
@@ -130,13 +135,15 @@ async def initialize_services(
     instrument_svc = InstrumentService(repository=instrument_repo)
     await instrument_svc.initialize()
 
-    market_svc = MarketDataService(event_bus=bus)
+    market_svc = MarketDataService(event_bus=bus, broker_gateway=gateway_svc)
     await market_svc.initialize()
     if app_settings.market_data_backend == MarketDataBackend.SIMULATED:
         await market_svc.start_simulated_feed(interval_sec=1.0)
+    elif app_settings.market_data_backend == MarketDataBackend.BREEZE:
+        await market_svc.sync_quotes_from_broker()
 
     historical_repo = HistoricalRepository(db_path=app_settings.historical_db_path)
-    historical_svc = HistoricalService(repository=historical_repo)
+    historical_svc = HistoricalService(repository=historical_repo, broker_gateway=gateway_svc)
     await historical_svc.initialize()
 
     option_chain_svc = OptionChainService(
