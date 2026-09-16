@@ -13,7 +13,7 @@ import {
   Wifi,
   WifiOff,
 } from "lucide-react";
-import { fetchPnLSummary, fetchQuotes, fetchSystemHealth } from "@/lib/api";
+import { fetchLoginUrl, fetchPnLSummary, fetchQuotes, fetchSystemHealth } from "@/lib/api";
 import { useTradingWebSocket } from "@/lib/useWebSocket";
 import { useTradingStore } from "@/stores/useTradingStore";
 
@@ -26,11 +26,37 @@ export function GlobalHeader() {
     setKillSwitchModalOpen,
   } = useTradingStore();
 
-  const { data: health } = useQuery({
+  const { data: health, refetch: refetchHealth } = useQuery({
     queryKey: ["system_health"],
     queryFn: fetchSystemHealth,
     refetchInterval: 5000,
   });
+
+  // Listen for OAuth completion message from popup window
+  React.useEffect(() => {
+    const handleMessage = (e: MessageEvent) => {
+      if (e.data?.type === "BREEZE_SESSION_SUCCESS") {
+        refetchHealth();
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [refetchHealth]);
+
+  const handleConnectBroker = async () => {
+    try {
+      const data = await fetchLoginUrl();
+      if (data.login_url) {
+        window.open(
+          data.login_url,
+          "ICICIBreezeLogin",
+          "width=600,height=750,menubar=no,toolbar=no,status=no,scrollbars=yes"
+        );
+      }
+    } catch (err) {
+      console.error("Failed to initiate ICICI Breeze login:", err);
+    }
+  };
 
   const { data: quotes } = useQuery({
     queryKey: ["quotes"],
@@ -98,17 +124,18 @@ export function GlobalHeader() {
       {/* Global Status Badges & Controls */}
       <div className="flex items-center space-x-3">
         {/* Broker Session */}
-        <div
-          className={`flex items-center space-x-1.5 px-2 py-1 rounded font-mono border ${
+        <button
+          onClick={brokerConnected ? undefined : handleConnectBroker}
+          className={`flex items-center space-x-1.5 px-2.5 py-1 rounded font-mono border transition ${
             brokerConnected
-              ? "bg-emerald-950/40 text-emerald-400 border-emerald-800/60"
-              : "bg-slate-900 text-slate-400 border-slate-800"
+              ? "bg-emerald-950/40 text-emerald-400 border-emerald-800/60 cursor-default"
+              : "bg-amber-950/40 text-amber-300 border-amber-800/60 hover:bg-amber-900/50 cursor-pointer animate-pulse hover:animate-none"
           }`}
-          title="Breeze Broker Session"
+          title={brokerConnected ? "Breeze Broker Connected" : "Click to Authenticate ICICI Breeze Session"}
         >
           <Lock className="w-3 h-3" />
-          <span>{brokerConnected ? "BROKER CONNECTED" : "BROKER READY"}</span>
-        </div>
+          <span>{brokerConnected ? "BROKER CONNECTED" : "CONNECT BROKER"}</span>
+        </button>
 
         {/* Market Feed Status */}
         <div

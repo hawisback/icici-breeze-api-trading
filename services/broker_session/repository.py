@@ -66,6 +66,14 @@ class BrokerSessionRepository:
         async with self.engine.connect() as conn:
             await conn.execute(
                 """
+                INSERT OR IGNORE INTO broker_accounts (
+                    account_id, broker_name, account_name, api_key, created_at
+                ) VALUES (?, 'ICICI_DIRECT', 'Primary Account', '', ?)
+                """,
+                (account_id, login_time.isoformat()),
+            )
+            await conn.execute(
+                """
                 INSERT INTO session_history (
                     session_id, account_id, session_token_masked, status,
                     login_time, expires_at, metadata

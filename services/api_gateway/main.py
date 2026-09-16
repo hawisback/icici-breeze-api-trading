@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from services.api_gateway.error_handlers import register_error_handlers
@@ -37,6 +38,7 @@ from libs.contracts.models import (
     utc_now,
 )
 from libs.events.bus import EventEnvelope, Topics
+from libs.config import get_platform_settings, update_env_variable
 from libs.observability.logger import setup_logging
 from services.api_gateway.dependencies import get_current_user, require_roles
 from services.api_gateway.service_container import (
@@ -260,6 +262,8 @@ class LogoutRequest(BaseModel):
 
 
 @app.get("/api/v1/system/health")
+@app.get("/api/v1/health")
+@app.get("/health")
 async def get_system_health():
     """Aggregated health check of all platform services."""
     services = get_services()
@@ -356,12 +360,29 @@ async def create_ws_ticket(current_user: UserPrincipal = Depends(get_current_use
 
 
 
+@app.get("/api/v1/broker/session/login-url")
+@app.get("/api/v1/session/login-url")
+async def get_session_login_url():
+    """Return the official ICICI Direct 2FA login URL for generating the daily session token."""
+    settings = get_platform_settings()
+    api_key = settings.breeze_api_key.get_secret_value() if settings.breeze_api_key else ""
+    login_url = f"https://api.icicidirect.com/apiuser/login?api_key={api_key}"
+    return {
+        "login_url": login_url,
+        "api_key": api_key,
+        "redirect_url_hint": "http://127.0.0.1:8000/api/v1/broker/session/callback",
+        "instructions": "Open this URL in your browser, log in with ICICI Direct credentials and 2FA. ICICI Direct will redirect back to this callback endpoint, automatically populating the session token into .env and activating your session.",
+    }
+
+
+@app.get("/api/v1/broker/session/status")
 @app.get("/api/v1/session/status")
 async def get_session_status():
     services = get_services()
     return await services.session_svc.get_session_status()
 
 
+@app.post("/api/v1/broker/session/login")
 @app.post("/api/v1/session/login")
 async def session_login(req: LoginRequest):
     services = get_services()
@@ -372,6 +393,197 @@ async def session_login(req: LoginRequest):
         account_id=req.account_id,
     )
     return result
+
+
+@app.get("/api/v1/broker/session/callback")
+@app.get("/api/v1/session/callback")
+@app.get("/callback")
+async def broker_session_callback(
+    request: Request,
+    apisession: Optional[str] = None,
+    session_token: Optional[str] = None,
+    token: Optional[str] = None,
+):
+    """OAuth callback endpoint handling ICICI Direct 2FA redirect.
+
+    Captures daily `apisession`, updates `.env` directly, synchronizes runtime configuration,
+    and activates running broker sessions across all services.
+    """
+    raw_token = apisession or session_token or token
+    if not raw_token:
+        # Check query parameters directly as fallback
+        raw_token = request.query_params.get("apisession") or request.query_params.get("session_token")
+
+    accept_header = request.headers.get("accept", "")
+    wants_json = "application/json" in accept_header
+
+    if not raw_token or not raw_token.strip():
+        msg = "Missing 'apisession' query parameter from ICICI Direct redirect."
+        if wants_json:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "ERROR", "message": msg},
+            )
+        return HTMLResponse(
+            status_code=400,
+            content=f"""<!DOCTYPE html>
+<html>
+<head><title>Authentication Failed</title>
+<style>
+body {{ background: #020617; color: #f8fafc; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+.card {{ background: #0f172a; border: 1px solid #ef4444; border-radius: 12px; padding: 32px; max-width: 480px; text-align: center; }}
+h1 {{ color: #f87171; margin-top: 0; }}
+p {{ color: #94a3b8; font-size: 14px; }}
+a {{ color: #38bdf8; text-decoration: none; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Authentication Incomplete</h1>
+  <p>{msg}</p>
+  <p>Please make sure you complete login from the official ICICI Direct link.</p>
+</div>
+</body>
+</html>""",
+        )
+
+    token_clean = raw_token.strip()
+    masked = token_clean[:4] + "..." + token_clean[-4:] if len(token_clean) > 8 else "***"
+
+    # 1. Update .env file directly and sync runtime PlatformSettings
+    env_updated = update_env_variable(key="BREEZE_SESSION_TOKEN", value=token_clean)
+
+    # 2. Activate in-memory session and broker gateway
+    services = get_services()
+    settings = get_platform_settings()
+    api_key = settings.breeze_api_key.get_secret_value() if settings.breeze_api_key else ""
+    secret_key = settings.breeze_secret_key.get_secret_value() if settings.breeze_secret_key else ""
+
+    session_result = {}
+    if api_key and secret_key:
+        try:
+            session_result = await services.session_svc.activate_session(
+                api_key=api_key,
+                secret_key=secret_key,
+                session_token=token_clean,
+                account_id="ICICI_PRIMARY",
+            )
+        except Exception as exc:
+            logger.warning("Session service activation produced warning: %s", exc)
+            session_result = {"status": "ACTIVATING_DEFERRED", "error": str(exc)}
+
+    if wants_json:
+        return JSONResponse(
+            content={
+                "status": "SUCCESS",
+                "message": "Breeze session token captured, persisted to .env, and activated.",
+                "token_masked": masked,
+                "env_updated": env_updated,
+                "session": session_result,
+            }
+        )
+
+    return HTMLResponse(
+        content=f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Breeze Session Authenticated</title>
+  <style>
+    body {{
+      background-color: #020617;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }}
+    .card {{
+      background-color: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      padding: 36px;
+      max-width: 480px;
+      text-align: center;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    }}
+    .icon {{
+      width: 56px;
+      height: 56px;
+      background-color: #064e3b;
+      color: #34d399;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      margin-bottom: 20px;
+    }}
+    h1 {{
+      font-size: 20px;
+      font-weight: 600;
+      margin: 0 0 8px 0;
+      color: #f1f5f9;
+    }}
+    p {{
+      color: #94a3b8;
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 0 0 20px 0;
+    }}
+    .badge {{
+      display: inline-block;
+      background-color: #022c22;
+      color: #6ee7b7;
+      border: 1px solid #065f46;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 13px;
+      margin-bottom: 24px;
+    }}
+    .btn {{
+      background-color: #0284c7;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-weight: 500;
+      cursor: pointer;
+      font-size: 14px;
+    }}
+    .btn:hover {{
+      background-color: #0369a1;
+    }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">&#10003;</div>
+    <h1>ICICI Breeze Session Authenticated</h1>
+    <p>Session token successfully captured, saved to <code>.env</code>, and activated across platform services.</p>
+    <div class="badge">TOKEN: {masked}</div>
+    <div>
+      <button class="btn" onclick="window.close()">Close Window</button>
+    </div>
+  </div>
+  <script>
+    if (window.opener) {{
+      window.opener.postMessage({{
+        type: 'BREEZE_SESSION_SUCCESS',
+        token: '{masked}',
+        status: 'CONNECTED'
+      }}, '*');
+      setTimeout(function() {{
+        window.close();
+      }}, 2200);
+    }}
+  </script>
+</body>
+</html>"""
+    )
 
 
 @app.get("/api/v1/account/funds")

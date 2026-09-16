@@ -106,6 +106,25 @@ async def initialize_services(
 
     gateway_svc = BrokerGatewayService()
     await gateway_svc.initialize()
+    session_svc.set_broker_gateway(gateway_svc)
+
+    # If credentials and session token are configured in environment, auto-activate
+    if (
+        app_settings.breeze_api_key
+        and app_settings.breeze_secret_key
+        and app_settings.breeze_session_token
+    ):
+        try:
+            tok_val = app_settings.breeze_session_token.get_secret_value()
+            if tok_val and tok_val != "your_daily_session_token_here":
+                logger.info("Attempting auto-activation of broker session from configured token...")
+                await session_svc.activate_session(
+                    api_key=app_settings.breeze_api_key,
+                    secret_key=app_settings.breeze_secret_key.get_secret_value(),
+                    session_token=tok_val,
+                )
+        except Exception as exc:
+            logger.warning("Startup auto-activation of broker session deferred: %s", exc)
 
     instrument_repo = InstrumentRepository(db_path=app_settings.instruments_db_path)
     instrument_svc = InstrumentService(repository=instrument_repo)

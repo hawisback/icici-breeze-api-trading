@@ -21,12 +21,30 @@ class BrokerSessionService:
         self,
         repository: Optional[BrokerSessionRepository] = None,
         event_bus: Optional[EventBus] = None,
+        broker_gateway: Optional[Any] = None,
     ) -> None:
         self.repo = repository or BrokerSessionRepository()
         self.bus = event_bus or get_event_bus()
+        self.broker_gateway = broker_gateway
         self._active_token: Optional[str] = None
         self._active_api_key: Optional[str] = None
         self._active_secret_key: Optional[str] = None
+
+    def set_broker_gateway(self, broker_gateway: Any) -> None:
+        """Inject broker gateway to wire live adapter session activation."""
+        self.broker_gateway = broker_gateway
+
+    def get_login_url(self, api_key: Optional[str] = None) -> str:
+        """Return the ICICI Direct 2FA login URL for daily session token generation."""
+        key = api_key or self._active_api_key
+        if not key:
+            try:
+                from libs.config import get_platform_settings
+                cfg = get_platform_settings()
+                key = cfg.breeze_api_key
+            except Exception:
+                key = ""
+        return f"https://api.icicidirect.com/apiuser/login?api_key={key or ''}"
 
     async def initialize(self) -> None:
         await self.repo.initialize()
@@ -77,12 +95,26 @@ class BrokerSessionService:
             )
         )
 
+        # Propagate credentials to live broker adapter if gateway is wired
+        gateway_synced = False
+        if self.broker_gateway and hasattr(self.broker_gateway, "breeze_adapter"):
+            try:
+                gateway_synced = await self.broker_gateway.breeze_adapter.authenticate(
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    session_token=session_token,
+                )
+                logger.info("Breeze live adapter authentication result: %s", gateway_synced)
+            except Exception as exc:
+                logger.warning("Breeze live adapter authentication error: %s", exc)
+
         logger.info("Broker session activated successfully: session_id=%s", session_id)
         return {
             "session_id": session_id,
             "status": "CONNECTED",
             "account_id": account_id,
             "expires_at": expires_at.isoformat(),
+            "gateway_synced": gateway_synced,
         }
 
     async def get_session_status(self) -> dict[str, Any]:
