@@ -6,12 +6,14 @@ import {
   Activity,
   AlertOctagon,
   CheckCircle2,
+  ExternalLink,
   Lock,
   Power,
   RefreshCw,
   ShieldAlert,
   Wifi,
   WifiOff,
+  X,
 } from "lucide-react";
 import { fetchLoginUrl, fetchPnLSummary, fetchQuotes, fetchSystemHealth } from "@/lib/api";
 import { useTradingWebSocket } from "@/lib/useWebSocket";
@@ -43,6 +45,12 @@ export function GlobalHeader() {
     return () => window.removeEventListener("message", handleMessage);
   }, [refetchHealth]);
 
+  const [showAuthModal, setShowAuthModal] = React.useState(false);
+  const [tokenInput, setTokenInput] = React.useState("");
+  const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [authError, setAuthError] = React.useState("");
+  const [authSuccess, setAuthSuccess] = React.useState("");
+
   const handleConnectBroker = async () => {
     try {
       const data = await fetchLoginUrl();
@@ -55,6 +63,43 @@ export function GlobalHeader() {
       }
     } catch (err) {
       console.error("Failed to initiate ICICI Breeze login:", err);
+    }
+  };
+
+  const handleManualActivate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    let raw = tokenInput.trim();
+    if (!raw) return;
+
+    if (raw.includes("apisession=")) {
+      const match = raw.match(/apisession=([a-zA-Z0-9_-]+)/);
+      if (match) raw = match[1];
+    }
+
+    setIsSubmitting(true);
+    setAuthError("");
+    setAuthSuccess("");
+
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/api/v1/broker/session/callback?apisession=${encodeURIComponent(raw)}`, {
+        headers: { Accept: "application/json" },
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS") {
+        setAuthSuccess("Broker successfully authenticated & session token saved to .env!");
+        await refetchHealth();
+        setTimeout(() => {
+          setShowAuthModal(false);
+          setTokenInput("");
+          setAuthSuccess("");
+        }, 1200);
+      } else {
+        setAuthError(data.message || "Failed to authenticate session.");
+      }
+    } catch (err: any) {
+      setAuthError(err.message || "Network error communicating with API Gateway.");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -125,13 +170,13 @@ export function GlobalHeader() {
       <div className="flex items-center space-x-3">
         {/* Broker Session */}
         <button
-          onClick={brokerConnected ? undefined : handleConnectBroker}
+          onClick={() => setShowAuthModal(true)}
           className={`flex items-center space-x-1.5 px-2.5 py-1 rounded font-mono border transition ${
             brokerConnected
-              ? "bg-emerald-950/40 text-emerald-400 border-emerald-800/60 cursor-default"
+              ? "bg-emerald-950/40 text-emerald-400 border-emerald-800/60 hover:bg-emerald-900/30 cursor-pointer"
               : "bg-amber-950/40 text-amber-300 border-amber-800/60 hover:bg-amber-900/50 cursor-pointer animate-pulse hover:animate-none"
           }`}
-          title={brokerConnected ? "Breeze Broker Connected" : "Click to Authenticate ICICI Breeze Session"}
+          title={brokerConnected ? "Broker Connected (Click to view or re-authenticate)" : "Click to Connect ICICI Breeze"}
         >
           <Lock className="w-3 h-3" />
           <span>{brokerConnected ? "BROKER CONNECTED" : "CONNECT BROKER"}</span>
@@ -190,6 +235,90 @@ export function GlobalHeader() {
           <span>KILL SWITCH</span>
         </button>
       </div>
+
+      {/* ICICI Breeze Connection Modal */}
+      {showAuthModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#0f172a] border border-slate-800 rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4 text-slate-200">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center space-x-2">
+                <Lock className="w-4 h-4 text-blue-400" />
+                <h3 className="text-sm font-bold text-slate-100 uppercase tracking-wider">
+                  Connect ICICI Breeze Session
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowAuthModal(false)}
+                className="text-slate-400 hover:text-slate-200 p-1 rounded transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs leading-relaxed text-slate-400">
+              <p>
+                To authenticate your daily broker session, log in on the official ICICI Direct 2FA portal.
+              </p>
+
+              {/* Step 1 */}
+              <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-2">
+                <div className="font-semibold text-slate-200 flex items-center space-x-1.5">
+                  <span className="w-4 h-4 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">1</span>
+                  <span>Launch ICICI 2FA Login</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleConnectBroker}
+                  className="w-full flex items-center justify-center space-x-2 py-2 px-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded text-xs transition"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Open ICICI Direct Portal</span>
+                </button>
+              </div>
+
+              {/* Step 2 */}
+              <form onSubmit={handleManualActivate} className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-2.5">
+                <div className="font-semibold text-slate-200 flex items-center space-x-1.5">
+                  <span className="w-4 h-4 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">2</span>
+                  <span>Paste Redirect URL or Session Token</span>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  If redirected to <em>&quot;This site can&apos;t be reached&quot;</em>, copy the URL from your browser address bar and paste it here:
+                </p>
+                <input
+                  type="text"
+                  value={tokenInput}
+                  onChange={(e) => setTokenInput(e.target.value)}
+                  placeholder="e.g. https://127.0.0.1/?apisession=57052722"
+                  className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-xs text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500"
+                />
+                {authError && (
+                  <div className="text-[11px] text-rose-400 bg-rose-950/40 border border-rose-800/60 p-2 rounded">
+                    {authError}
+                  </div>
+                )}
+                {authSuccess && (
+                  <div className="text-[11px] text-emerald-400 bg-emerald-950/40 border border-emerald-800/60 p-2 rounded">
+                    {authSuccess}
+                  </div>
+                )}
+                <button
+                  type="submit"
+                  disabled={!tokenInput.trim() || isSubmitting}
+                  className="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold rounded text-xs transition flex items-center justify-center space-x-1.5"
+                >
+                  {isSubmitting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5" />}
+                  <span>{isSubmitting ? "Activating Session..." : "Activate & Save to .env"}</span>
+                </button>
+              </form>
+
+              <div className="text-[10px] text-slate-500 leading-normal">
+                💡 <span className="font-medium text-slate-400">Zero-copy auto-redirect:</span> In your ICICI Direct Developer Console, set your Redirect URL to <code className="text-blue-400">http://127.0.0.1:8000/api/v1/broker/session/callback</code>.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   );
 }
