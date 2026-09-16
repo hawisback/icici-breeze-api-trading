@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    container_name: trading-redpanda
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --advertise-schema-registry-addr internal://redpanda:8081,external://localhost:18081
+      - --mode dev-container
+      - --smp 1
+      - --memory 1G
+    ports:
+      - "19092:19092"
+      - "18081:18081"
+      - "18082:18082"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: trading-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: trading-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - BREEZE_API_KEY=${BREEZE_API_KEY:-test_api_key}
+      - BREEZE_SECRET_KEY=${BREEZE_SECRET_KEY:-test_secret_key}
+      - BREEZE_SESSION_TOKEN=${BREEZE_SESSION_TOKEN:-test_session_token}
+      - TRADING_MODE=PAPER
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis
+
+  frontend:
+    build:
+      context: ./frontend/trading-ui
+      dockerfile: Dockerfile
+    container_name: trading-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws/live
+    depends_on:
+      - backend
+
+volumes:
+  redpanda-data:
+  redis-data:
+
