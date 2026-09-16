@@ -1,0 +1,32 @@
+# ==============================================================================
+# ICICI Direct Options Trading Platform v2 — Python Dependencies
+# ==============================================================================
+
+# Core API & ASGI Gateway
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.9
+
+# Data Modeling & Validation
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# Database & Migrations (SQLite WAL + Alembic)
+sqlalchemy>=2.0.36
+aiosqlite>=0.20.0
+alembic>=1.14.0
+
+# Networking, HTTP & WebSockets
+httpx>=0.28.0
+websockets>=13.1
+
+# Security & Authentication
+pyjwt>=2.14.0
+
+# Broker Connectivity
+breeze-connect==1.0.69
+
+# Testing & Code Quality
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+ruff>=0.8.0
