@@ -45,12 +45,13 @@ from services.api_gateway.service_container import initialize_services
 def test_registered_services_have_valid_migration_environments() -> None:
     """Every registered service must define an existing migrations directory with env.py and 0001 revision."""
     registered = get_registered_services()
-    assert len(registered) == 10
+    assert len(registered) == 11
     expected_services = {
         "oms", "risk", "portfolio", "instrument", "broker_session",
-        "historical", "audit", "strategy", "auth", "gateway"
+        "historical", "audit", "strategy", "auth", "gateway", "broker_gateway"
     }
     assert set(registered) == expected_services
+
 
     for svc in registered:
         info = get_service_info(svc)
@@ -238,7 +239,8 @@ def test_pragma_integrity_check_all_services(tmp_path: Path) -> None:
     )
 
     results = upgrade_all_services(backup=False, settings=settings)
-    assert len(results) == 10
+    assert len(results) == 11
+
     for svc, rev in results.items():
         assert rev == "0001", f"{svc} ended at unexpected revision {rev}"
         info = get_service_info(svc)
@@ -284,8 +286,9 @@ async def test_service_container_startup_with_auto_migrate(tmp_path: Path) -> No
 
     # Verify all service databases are at head revision 0001
     statuses = check_all_services(settings=settings)
-    assert len(statuses) == 10
+    assert len(statuses) == 11
     for svc, st in statuses.items():
+
         assert st["is_compatible"] is True
         assert st["current_revision"] == "0001"
 

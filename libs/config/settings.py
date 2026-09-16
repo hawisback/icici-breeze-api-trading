@@ -87,6 +87,11 @@ class PlatformSettings(BaseSettings):
     refresh_token_expire_days: int = Field(default=7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
     ws_ticket_expire_seconds: int = Field(default=60, alias="WS_TICKET_EXPIRE_SECONDS")
 
+    # ICICI Breeze Rate Limits (with operational safety headroom)
+    breeze_calls_per_minute: int = Field(default=90, alias="BREEZE_CALLS_PER_MINUTE")
+    breeze_calls_per_day: int = Field(default=4800, alias="BREEZE_CALLS_PER_DAY")
+    breeze_writes_per_second: int = Field(default=8, alias="BREEZE_WRITES_PER_SECOND")
+
     # Database Migrations & Safety
     auto_migrate_on_startup: bool = Field(default=True, alias="AUTO_MIGRATE_ON_STARTUP")
     migration_backup_dir: Path = Field(default=Path("data/backups"), alias="MIGRATION_BACKUP_DIR")
@@ -190,6 +195,10 @@ class PlatformSettings(BaseSettings):
         return self.get_service_db_path("gateway/gateway.db")
 
     @property
+    def broker_gateway_db_path(self) -> Path:
+        return self.get_service_db_path("broker-gateway/broker_gateway.db")
+
+    @property
     def backups_dir(self) -> Path:
         full_path = self.data_root / "backups"
         full_path.mkdir(parents=True, exist_ok=True)
@@ -240,3 +249,8 @@ def set_platform_settings(settings: PlatformSettings) -> None:
     """Explicitly set settings for testing or custom composition."""
     global _global_settings
     _global_settings = settings
+
+
+# Convenient alias
+get_settings = get_platform_settings
+

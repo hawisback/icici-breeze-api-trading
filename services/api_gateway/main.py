@@ -44,6 +44,8 @@ from services.api_gateway.service_container import (
     get_services,
     initialize_services,
 )
+from services.broker_gateway.presentation import internal_router, set_clean_broker_service
+
 
 setup_logging(level=logging.INFO)
 logger = logging.getLogger("api-gateway")
@@ -111,6 +113,7 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting up API Gateway & initializing services...")
     container = await initialize_services()
+    set_clean_broker_service(container.gateway_svc.clean_breeze_service)
 
     # Wire event bus to websocket broadcasting
     async def on_quote_event(env: EventEnvelope[Any]):
@@ -161,6 +164,9 @@ app = FastAPI(
 
 # Register structured exception handlers
 register_error_handlers(app)
+
+# Register internal broker gateway router
+app.include_router(internal_router)
 
 # Boundary protection middlewares (wrapping order: outermost wraps innermost)
 app.add_middleware(RateLimitMiddleware, rate_limiter=rate_limiter, settings=platform_settings)

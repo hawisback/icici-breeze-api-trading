@@ -1,15 +1,21 @@
-"""ICICI Breeze API Adapter implementing BrokerAdapter protocol.
+"""ICICI Breeze API Adapter implementing BrokerAdapter protocol backed by Clean Architecture.
+
+This adapter bridges the high-level BrokerAdapter protocol with the clean architecture
+domain, application, and infrastructure layers (BreezeClientManager, SdkRunner,
+BreezeTradingAdapter, BrokerRequestLedgerRepository, and ExecutionGuard).
 """
 
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from decimal import Decimal
 import logging
-import time
+from pathlib import Path
 from typing import Optional
+import uuid
 
-import httpx
+from pydantic import SecretStr
 
 from libs.broker_models.adapter import (
     BrokerAdapter,
@@ -19,72 +25,136 @@ from libs.broker_models.adapter import (
     BrokerPositionResponse,
     BrokerTradeResponse,
 )
+from libs.config.settings import get_settings
 from libs.contracts.models import utc_now
+from services.broker_gateway.application.execution_guard import ExecutionGuard
+from services.broker_gateway.application.services.broker_service import BrokerApplicationService
+from services.broker_gateway.domain.enums import (
+    BrokerWriteStatus,
+    Exchange,
+    OptionRight,
+    OrderSide,
+    OrderStyle,
+    OrderValidity,
+    ProductType,
+    SessionStatus,
+)
+from services.broker_gateway.domain.errors import (
+    BrokerOrderRejectedError,
+    BrokerSubmissionUnknownError,
+    BrokerTimeoutError,
+)
+from services.broker_gateway.domain.models.instrument import BrokerInstrumentRef
+from services.broker_gateway.domain.models.orders import (
+    BrokerOrderRequest as DomainOrderRequest,
+    CancelBrokerOrderRequest,
+    ModifyBrokerOrderRequest,
+)
+from services.broker_gateway.domain.models.session import SessionCredentials
+from services.broker_gateway.infrastructure.icici.adapters.account_adapter import BreezeAccountAdapter
+from services.broker_gateway.infrastructure.icici.adapters.market_data_adapter import BreezeMarketDataAdapter
+from services.broker_gateway.infrastructure.icici.adapters.session_adapter import BreezeSessionAdapter
+from services.broker_gateway.infrastructure.icici.adapters.trading_adapter import BreezeTradingAdapter
+from services.broker_gateway.infrastructure.icici.adapters.websocket_adapter import BreezeWebSocketAdapter
+from services.broker_gateway.infrastructure.icici.breeze_client import BreezeClientManager
+from services.broker_gateway.infrastructure.icici.sdk_runner import SdkRunner
+from services.broker_gateway.infrastructure.persistence.request_ledger_repository import (
+    BrokerRequestLedgerRepository,
+)
+from services.broker_gateway.infrastructure.rate_limit.policies import BrokerRateLimiter
 
 logger = logging.getLogger(__name__)
 
 
-class RateLimiter:
-    """Async token bucket rate limiter to prevent exceeding broker limits."""
-
-    def __init__(self, rate: float = 10.0, per: float = 1.0) -> None:
-        self.rate = rate
-        self.per = per
-        self.allowance = rate
-        self.last_check = time.monotonic()
-        self._lock = asyncio.Lock()
-
-    async def acquire(self) -> None:
-        async with self._lock:
-            current = time.monotonic()
-            time_passed = current - self.last_check
-            self.last_check = current
-            self.allowance += time_passed * (self.rate / self.per)
-            if self.allowance > self.rate:
-                self.allowance = self.rate
-            if self.allowance < 1.0:
-                sleep_time = (1.0 - self.allowance) * (self.per / self.rate)
-                await asyncio.sleep(sleep_time)
-                self.allowance = 0.0
-            else:
-                self.allowance -= 1.0
-
-
 class IciciBreezeAdapter(BrokerAdapter):
-    """Production ICICI Breeze adapter with rate-limiting, error mapping, and timeout protection."""
-
-    BASE_URL = "https://api.icicidirect.com/breezeapi/api/v1"
+    """Clean Architecture ICICI Breeze Adapter with durable idempotency, rate limiting, and thread isolation."""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         secret_key: Optional[str] = None,
         session_token: Optional[str] = None,
-        timeout: float = 5.0,
+        timeout: float = 8.0,
+        db_path: Optional[Path] = None,
+        custom_sdk_instance: Optional[object] = None,
     ) -> None:
         self.api_key = api_key or ""
         self.secret_key = secret_key or ""
         self.session_token = session_token or ""
         self.timeout = timeout
-        self.rate_limiter = RateLimiter(rate=10.0, per=1.0)
-        self._client: Optional[httpx.AsyncClient] = None
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
-        return self._client
+        # Clean Architecture Components
+        self.sdk_runner = SdkRunner()
+        self.client_manager = BreezeClientManager(
+            sdk_runner=self.sdk_runner,
+            custom_sdk_instance=custom_sdk_instance,
+        )
+        self.rate_limiter = BrokerRateLimiter(
+            calls_per_minute=get_settings().breeze_calls_per_minute,
+            calls_per_day=get_settings().breeze_calls_per_day,
+            writes_per_second=get_settings().breeze_writes_per_second,
+        )
+
+        self.account_adapter = BreezeAccountAdapter(
+            client_manager=self.client_manager,
+            rate_limiter=self.rate_limiter,
+        )
+        self.session_adapter = BreezeSessionAdapter(
+            client_manager=self.client_manager,
+            account_adapter=self.account_adapter,
+        )
+        self.market_adapter = BreezeMarketDataAdapter(
+            client_manager=self.client_manager,
+            rate_limiter=self.rate_limiter,
+        )
+        self.trading_adapter = BreezeTradingAdapter(
+            client_manager=self.client_manager,
+            rate_limiter=self.rate_limiter,
+        )
+        self.stream_adapter = BreezeWebSocketAdapter(
+            client_manager=self.client_manager,
+        )
+
+        self.ledger_repo = BrokerRequestLedgerRepository(db_path=db_path)
+        self.execution_guard = ExecutionGuard(
+            ledger=self.ledger_repo,
+            session_port=self.session_adapter,
+        )
+
+        self.clean_service = BrokerApplicationService(
+            session_port=self.session_adapter,
+            account_port=self.account_adapter,
+            market_data_port=self.market_adapter,
+            trading_port=self.trading_adapter,
+            stream_port=self.stream_adapter,
+            ledger=self.ledger_repo,
+            execution_guard=self.execution_guard,
+        )
+
+    async def initialize(self) -> None:
+        """Initialize database engine and dependencies."""
+        await self.ledger_repo.initialize()
 
     async def authenticate(self, api_key: str, secret_key: str, session_token: str) -> bool:
+        """Activate daily session using credentials."""
         self.api_key = api_key
         self.secret_key = secret_key
         self.session_token = session_token
-        # Verify credentials by fetching customer details
-        funds = await self.get_funds()
-        return funds.total_cash >= 0.0
+
+        try:
+            creds = SessionCredentials(
+                api_key=api_key,
+                secret_key=SecretStr(secret_key),
+                session_token=SecretStr(session_token),
+            )
+            snapshot = await self.session_adapter.activate(creds)
+            return snapshot.status == SessionStatus.ACTIVE
+        except Exception as exc:
+            logger.error("Authentication failed for Breeze adapter: %s", exc)
+            return False
 
     async def get_funds(self) -> BrokerFunds:
-        await self.rate_limiter.acquire()
-        # Fallback / mock response when Breeze credentials are test placeholders
+        """Query funds balance via Account Adapter or return mock for test keys."""
         if not self.api_key or self.api_key.startswith("test_"):
             return BrokerFunds(
                 available_margin=250_000.0,
@@ -92,26 +162,20 @@ class IciciBreezeAdapter(BrokerAdapter):
                 used_margin=50_000.0,
             )
 
-        client = await self._get_client()
-        headers = {"X-Session-Token": self.session_token, "apikey": self.api_key}
         try:
-            resp = await client.get(f"{self.BASE_URL}/funds", headers=headers)
-            if resp.status_code == 200:
-                data = resp.json().get("Success", {})
-                return BrokerFunds(
-                    available_margin=float(data.get("bank_balance", 0.0)),
-                    total_cash=float(data.get("cash_available", 0.0)),
-                    used_margin=float(data.get("margin_used", 0.0)),
-                )
-        except Exception as e:
-            logger.warning("Error fetching Breeze funds: %s", e)
-
-        return BrokerFunds(available_margin=0.0, total_cash=0.0, used_margin=0.0)
+            funds_snap = await self.account_adapter.get_funds()
+            return BrokerFunds(
+                available_margin=float(funds_snap.available_margin),
+                total_cash=float(funds_snap.total_cash),
+                used_margin=float(funds_snap.used_margin),
+            )
+        except Exception as exc:
+            logger.warning("Error fetching Breeze funds: %s", exc)
+            return BrokerFunds(available_margin=0.0, total_cash=0.0, used_margin=0.0)
 
     async def place_order(self, request: BrokerOrderRequest) -> BrokerOrderResponse:
-        await self.rate_limiter.acquire()
+        """Submit order via clean architecture ExecutionGuard with durable idempotency."""
         if not self.api_key or self.api_key.startswith("test_"):
-            # Sandbox simulated live response
             return BrokerOrderResponse(
                 success=True,
                 broker_order_id=f"BREEZE-{utc_now().strftime('%Y%m%d%H%M%S')}",
@@ -120,66 +184,73 @@ class IciciBreezeAdapter(BrokerAdapter):
                 message="Order placed in Breeze test harness",
             )
 
-        client = await self._get_client()
-        headers = {"X-Session-Token": self.session_token, "apikey": self.api_key}
-        payload = {
-            "stock_code": request.stock_code,
-            "exchange_code": request.exchange_code,
-            "order_type": request.order_type,
-            "action": request.action,
-            "quantity": str(request.quantity),
-            "price": str(request.price),
-            "validity": request.validity,
-            "product": request.product,
-            "strike_price": str(request.strike_price or 0),
-            "right": request.right or "",
-            "expiry_date": request.expiry_date or "",
-            "user_remark": request.user_remark or "TradingPlatform",
-        }
+        # Convert to Clean Architecture Domain Model
+        exch = Exchange.NFO if request.exchange_code.upper() == "NFO" else Exchange.NSE
+        side = OrderSide.BUY if request.action.lower() == "buy" else OrderSide.SELL
+        order_style = OrderStyle.STOP_LIMIT if request.order_type.lower() in ("stoploss", "stop_limit") else OrderStyle.LIMIT
+
+        right = None
+        if request.right:
+            right = OptionRight.CALL if "call" in request.right.lower() else OptionRight.PUT
+
+        inst = BrokerInstrumentRef(
+            internal_instrument_id=uuid.uuid4(),
+            exchange=exch,
+            stock_code=request.stock_code,
+            product_type=ProductType.OPTIONS if request.product.lower() == "options" else ProductType.CASH,
+            expiry=datetime.strptime(request.expiry_date, "%Y-%m-%d").date() if request.expiry_date else None,
+            strike=Decimal(str(request.strike_price)) if request.strike_price else None,
+            option_right=right,
+            stock_token=None,
+        )
+
+        domain_req = DomainOrderRequest(
+            request_id=request.client_order_id,
+            account_id=self.api_key[:8] if self.api_key else "DEFAULT",
+            instrument=inst,
+            side=side,
+            quantity=request.quantity,
+            order_style=order_style,
+            limit_price=Decimal(str(request.price)),
+            stop_price=Decimal(str(request.price)) if order_style == OrderStyle.STOP_LIMIT else None,
+            validity=OrderValidity.DAY if request.validity.lower() == "day" else OrderValidity.IOC,
+            client_reference=request.client_order_id,
+            user_remark=request.user_remark,
+        )
 
         try:
-            resp = await client.post(f"{self.BASE_URL}/order", json=payload, headers=headers)
-            if resp.status_code == 200:
-                res = resp.json()
-                success_data = res.get("Success", {})
-                if success_data:
-                    return BrokerOrderResponse(
-                        success=True,
-                        broker_order_id=success_data.get("order_id"),
-                        client_order_id=request.client_order_id,
-                        status="PLACED",
-                        message=success_data.get("message"),
-                    )
-                err = res.get("Error", "Unknown Breeze error")
-                return BrokerOrderResponse(
-                    success=False,
-                    client_order_id=request.client_order_id,
-                    status="REJECTED",
-                    message=str(err),
-                )
-        except httpx.TimeoutException:
-            logger.error("Breeze place_order timeout. Marking SUBMISSION_UNKNOWN.")
+            ack = await self.clean_service.place_order(domain_req)
+            return BrokerOrderResponse(
+                success=True,
+                broker_order_id=ack.broker_order_id,
+                client_order_id=request.client_order_id,
+                status="PLACED" if ack.status == BrokerWriteStatus.ACKNOWLEDGED else ack.status.value,
+                message=ack.message,
+            )
+        except BrokerSubmissionUnknownError as exc:
+            logger.error("Breeze place_order SUBMISSION_UNKNOWN for %s: %s", request.client_order_id, exc)
             return BrokerOrderResponse(
                 success=False,
                 client_order_id=request.client_order_id,
                 status="UNKNOWN",
-                message="Broker gateway timed out. Do not blind retry.",
+                message="Order submission outcome unknown due to timeout. Do not blind retry.",
             )
-        except Exception as e:
-            logger.error("Breeze order placement exception: %s", e)
+        except BrokerOrderRejectedError as exc:
+            logger.warning("Breeze place_order rejected for %s: %s", request.client_order_id, exc)
             return BrokerOrderResponse(
                 success=False,
                 client_order_id=request.client_order_id,
                 status="REJECTED",
-                message=str(e),
+                message=str(exc),
             )
-
-        return BrokerOrderResponse(
-            success=False,
-            client_order_id=request.client_order_id,
-            status="REJECTED",
-            message="Unexpected broker response",
-        )
+        except Exception as exc:
+            logger.error("Breeze place_order error for %s: %s", request.client_order_id, exc)
+            return BrokerOrderResponse(
+                success=False,
+                client_order_id=request.client_order_id,
+                status="REJECTED",
+                message=str(exc),
+            )
 
     async def modify_order(
         self,
@@ -187,34 +258,129 @@ class IciciBreezeAdapter(BrokerAdapter):
         quantity: Optional[int] = None,
         price: Optional[float] = None,
     ) -> BrokerOrderResponse:
-        await self.rate_limiter.acquire()
-        return BrokerOrderResponse(
-            success=True,
+        """Modify order via clean service."""
+        if not self.api_key or self.api_key.startswith("test_"):
+            return BrokerOrderResponse(
+                success=True,
+                broker_order_id=broker_order_id,
+                client_order_id="",
+                status="MODIFIED",
+                message="Breeze order modified",
+            )
+
+        req = ModifyBrokerOrderRequest(
+            request_id=f"MOD-{broker_order_id}-{int(datetime.now(timezone.utc).timestamp())}",
             broker_order_id=broker_order_id,
-            client_order_id="",
-            status="MODIFIED",
-            message="Breeze order modified",
+            quantity=quantity,
+            limit_price=Decimal(str(price)) if price is not None else None,
         )
+        try:
+            ack = await self.clean_service.modify_order(req)
+            return BrokerOrderResponse(
+                success=True,
+                broker_order_id=broker_order_id,
+                client_order_id="",
+                status="MODIFIED",
+                message=ack.message,
+            )
+        except Exception as exc:
+            return BrokerOrderResponse(
+                success=False,
+                broker_order_id=broker_order_id,
+                client_order_id="",
+                status="REJECTED",
+                message=str(exc),
+            )
 
     async def cancel_order(self, broker_order_id: str) -> BrokerOrderResponse:
-        await self.rate_limiter.acquire()
-        return BrokerOrderResponse(
-            success=True,
+        """Cancel order via clean service."""
+        if not self.api_key or self.api_key.startswith("test_"):
+            return BrokerOrderResponse(
+                success=True,
+                broker_order_id=broker_order_id,
+                client_order_id="",
+                status="CANCELLED",
+                message="Breeze order cancelled",
+            )
+
+        req = CancelBrokerOrderRequest(
+            request_id=f"CAN-{broker_order_id}-{int(datetime.now(timezone.utc).timestamp())}",
             broker_order_id=broker_order_id,
-            client_order_id="",
-            status="CANCELLED",
-            message="Breeze order cancelled",
         )
+        try:
+            ack = await self.clean_service.cancel_order(req)
+            return BrokerOrderResponse(
+                success=True,
+                broker_order_id=broker_order_id,
+                client_order_id="",
+                status="CANCELLED",
+                message=ack.message,
+            )
+        except Exception as exc:
+            return BrokerOrderResponse(
+                success=False,
+                broker_order_id=broker_order_id,
+                client_order_id="",
+                status="REJECTED",
+                message=str(exc),
+            )
 
     async def get_order_status(self, broker_order_id: str) -> Optional[BrokerOrderResponse]:
-        await self.rate_limiter.acquire()
-        return None
+        """Fetch order status detail."""
+        if not self.api_key or self.api_key.startswith("test_"):
+            return None
+
+        order = await self.clean_service.get_order_detail(broker_order_id)
+        if not order:
+            return None
+
+        return BrokerOrderResponse(
+            success=True,
+            broker_order_id=order.broker_order_id,
+            client_order_id=order.client_reference or "",
+            status=order.normalized_status,
+            message=order.raw_status,
+        )
 
     async def get_positions(self) -> list[BrokerPositionResponse]:
-        await self.rate_limiter.acquire()
-        return []
+        """Fetch positions list."""
+        if not self.api_key or self.api_key.startswith("test_"):
+            return []
+
+        positions = await self.clean_service.get_positions()
+        return [
+            BrokerPositionResponse(
+                symbol=pos.instrument.stock_code,
+                exchange=pos.instrument.exchange.value,
+                quantity=pos.quantity,
+                average_price=float(pos.average_price),
+                ltp=float(pos.ltp),
+                pnl=float(pos.total_pnl),
+            )
+            for pos in positions
+        ]
 
     async def get_trades(self) -> list[BrokerTradeResponse]:
-        await self.rate_limiter.acquire()
-        return []
+        """Fetch executed trade fills."""
+        if not self.api_key or self.api_key.startswith("test_"):
+            return []
+
+        trades = await self.clean_service.get_trades()
+        return [
+            BrokerTradeResponse(
+                trade_id=t.trade_id,
+                broker_order_id=t.broker_order_id,
+                symbol=t.instrument.stock_code,
+                exchange=t.instrument.exchange.value,
+                side=t.side.value,
+                quantity=t.quantity,
+                price=float(t.execution_price),
+                executed_at=t.trade_time,
+            )
+            for t in trades
+        ]
+
+
+# Backward-compatible alias
+RateLimiter = BrokerRateLimiter
 

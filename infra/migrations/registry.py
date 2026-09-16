@@ -93,6 +93,12 @@ SERVICES: dict[str, ServiceMigrationInfo] = {
         migrations_dir=BASE_DIR / "services" / "api_gateway" / "migrations",
         db_path_resolver=lambda s: s.gateway_db_path,
     ),
+    "broker_gateway": ServiceMigrationInfo(
+        name="broker_gateway",
+        description="Broker Gateway Service (broker write requests, call audit, subscriptions)",
+        migrations_dir=BASE_DIR / "services" / "broker_gateway" / "migrations",
+        db_path_resolver=lambda s: s.broker_gateway_db_path,
+    ),
 }
 
 

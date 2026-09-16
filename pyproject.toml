@@ -15,6 +15,7 @@ dependencies = [
     "websockets>=13.1",
     "pyjwt>=2.14.0",
     "alembic>=1.14.0",
+    "breeze-connect==1.0.69",
 ]
 
 [project.optional-dependencies]

@@ -15,6 +15,7 @@ from libs.broker_models.adapter import (
     BrokerTradeResponse,
 )
 from libs.contracts.models import TradingMode
+from services.broker_gateway.application.services.broker_service import BrokerApplicationService
 from services.broker_gateway.icici_breeze_adapter import IciciBreezeAdapter
 from services.broker_gateway.paper_adapter import PaperBrokerAdapter
 
@@ -31,6 +32,16 @@ class BrokerGatewayService:
     ) -> None:
         self.paper_adapter = paper_adapter or PaperBrokerAdapter()
         self.breeze_adapter = breeze_adapter or IciciBreezeAdapter()
+
+    async def initialize(self) -> None:
+        """Initialize underlying adapters and persistent state."""
+        if hasattr(self.breeze_adapter, "initialize"):
+            await self.breeze_adapter.initialize()
+
+    @property
+    def clean_breeze_service(self) -> BrokerApplicationService:
+        """Direct access to the Clean Architecture broker service."""
+        return self.breeze_adapter.clean_service
 
     def get_adapter(self, mode: TradingMode) -> BrokerAdapter:
         if mode == TradingMode.LIVE:
@@ -75,4 +86,3 @@ class BrokerGatewayService:
         mode: TradingMode = TradingMode.PAPER,
     ) -> list[BrokerTradeResponse]:
         return await self.get_adapter(mode).get_trades()
-

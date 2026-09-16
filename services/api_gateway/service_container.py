@@ -105,6 +105,7 @@ async def initialize_services(
     await session_svc.initialize()
 
     gateway_svc = BrokerGatewayService()
+    await gateway_svc.initialize()
 
     instrument_repo = InstrumentRepository(db_path=app_settings.instruments_db_path)
     instrument_svc = InstrumentService(repository=instrument_repo)
