@@ -149,6 +149,7 @@ async def initialize_services(
     option_chain_svc = OptionChainService(
         instrument_service=instrument_svc,
         market_data_service=market_svc,
+        broker_gateway=gateway_svc,
     )
 
     oms_repo = OMSRepository(db_path=app_settings.oms_db_path)

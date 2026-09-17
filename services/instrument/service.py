@@ -53,8 +53,8 @@ class InstrumentService:
             )
         )
 
-        # Seed NIFTY options across strikes 24000 to 25500 (step 100)
-        for strike in range(24000, 25600, 100):
+        # Seed NIFTY options centered around realistic spot (~23200) across strikes 22000 to 24400 (step 50)
+        for strike in range(22000, 24450, 50):
             for right, opt_str in [(OptionRight.CALL, "CE"), (OptionRight.PUT, "PE")]:
                 inst_id = f"INST-NIFTY-{expiry}-{strike}-{opt_str}"
                 symbol = f"NIFTY{strike}{opt_str}"
@@ -73,8 +73,8 @@ class InstrumentService:
                     )
                 )
 
-        # Seed BANKNIFTY options across strikes 51000 to 53500 (step 100)
-        for strike in range(51000, 53600, 100):
+        # Seed BANKNIFTY options centered around realistic spot (~56300) across strikes 54500 to 58000 (step 100)
+        for strike in range(54500, 58100, 100):
             for right, opt_str in [(OptionRight.CALL, "CE"), (OptionRight.PUT, "PE")]:
                 inst_id = f"INST-BANKNIFTY-{expiry}-{strike}-{opt_str}"
                 symbol = f"BANKNIFTY{strike}{opt_str}"
@@ -92,7 +92,7 @@ class InstrumentService:
                         tick_size=0.05,
                     )
                 )
-        logger.info("Successfully seeded default instruments.")
+        logger.info("Successfully seeded complete NIFTY & BANKNIFTY option strikes around spot.")
 
     async def get_instrument(self, instrument_id: str) -> Optional[Instrument]:
         return await self.repo.get_by_id(instrument_id)
@@ -108,4 +108,40 @@ class InstrumentService:
 
     async def get_option_chain_instruments(self, underlying: str, expiry: str) -> list[Instrument]:
         return await self.repo.get_option_chain_instruments(underlying=underlying, expiry=expiry)
+
+    async def seed_strikes_around_spot(
+        self,
+        underlying: str,
+        spot_price: float,
+        expiry: str,
+    ) -> list[Instrument]:
+        """Dynamically seed strikes centered around the actual spot price."""
+        is_banknifty = "BANK" in underlying.upper()
+        step = 100 if is_banknifty else 50
+        lot_size = 15 if is_banknifty else 25
+        atm = round(spot_price / step) * step
+        start_strike = int(atm - 15 * step)
+        end_strike = int(atm + 15 * step)
+
+        seeded: list[Instrument] = []
+        for strike in range(start_strike, end_strike + step, step):
+            for right, opt_str in [(OptionRight.CALL, "CE"), (OptionRight.PUT, "PE")]:
+                inst_id = f"INST-{underlying}-{expiry}-{strike}-{opt_str}"
+                symbol = f"{underlying}{strike}{opt_str}"
+                inst = Instrument(
+                    instrument_id=inst_id,
+                    exchange="NFO",
+                    segment="OPTIONS",
+                    underlying=underlying,
+                    stock_code=symbol,
+                    expiry=expiry,
+                    strike=float(strike),
+                    option_right=right,
+                    lot_size=lot_size,
+                    tick_size=0.05,
+                )
+                await self.repo.save_instrument(inst)
+                seeded.append(inst)
+        return seeded
+
 

@@ -39,6 +39,8 @@ export interface CandleData {
   low: number;
   close: number;
   volume: number;
+  source?: string;
+  isoTime?: string;
 }
 
 export interface OptionStrikeData {
@@ -72,6 +74,8 @@ export interface OptionChainResponse {
   spot_price: number;
   expiry: string;
   available_expiries: string[];
+  atm_strike?: number;
+  source?: string;
   strikes: OptionStrikeData[];
 }
 
@@ -154,6 +158,8 @@ export async function fetchCandles(instrumentId: string, interval: string = "5m"
     low: c.low,
     close: c.close,
     volume: c.volume,
+    source: c.source || "BREEZE",
+    isoTime: c.start_time,
   }));
 }
 

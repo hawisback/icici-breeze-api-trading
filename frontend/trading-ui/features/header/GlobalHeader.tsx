@@ -117,7 +117,9 @@ export function GlobalHeader() {
 
   const niftyQuote = quotes?.find((q) => q.symbol === "NIFTY 50" || q.instrument_id === "INST-NIFTY-INDEX");
 
-  const brokerConnected = health?.services?.broker_session === "CONNECTED";
+  const brokerSessionStatus = health?.services?.broker_session || "DISCONNECTED";
+  const isBrokerActive = brokerSessionStatus === "CONNECTED";
+  const isBrokerExpired = brokerSessionStatus === "EXPIRED";
   const marketFeedStatus = health?.services?.market_feed || "LIVE";
 
   return (
@@ -138,7 +140,7 @@ export function GlobalHeader() {
         <div className="hidden md:flex items-center space-x-3 px-3 py-1 bg-[#1e293b]/50 rounded border border-slate-800">
           <span className="text-slate-400 font-medium">NIFTY 50</span>
           <span className="font-mono font-semibold text-slate-100">
-            {niftyQuote ? niftyQuote.last_price.toFixed(2) : "24,850.50"}
+            {niftyQuote ? niftyQuote.last_price.toFixed(2) : "23,217.60"}
           </span>
           <span
             className={`font-mono text-[11px] font-medium ${
@@ -146,7 +148,7 @@ export function GlobalHeader() {
             }`}
           >
             {(niftyQuote?.change_pct || 0) >= 0 ? "+" : ""}
-            {niftyQuote ? niftyQuote.change_pct.toFixed(2) : "+0.20"}%
+            {niftyQuote ? niftyQuote.change_pct.toFixed(2) : "+0.00"}%
           </span>
         </div>
 
@@ -172,14 +174,28 @@ export function GlobalHeader() {
         <button
           onClick={() => setShowAuthModal(true)}
           className={`flex items-center space-x-1.5 px-2.5 py-1 rounded font-mono border transition ${
-            brokerConnected
+            isBrokerActive
               ? "bg-emerald-950/40 text-emerald-400 border-emerald-800/60 hover:bg-emerald-900/30 cursor-pointer"
-              : "bg-amber-950/40 text-amber-300 border-amber-800/60 hover:bg-amber-900/50 cursor-pointer animate-pulse hover:animate-none"
+              : isBrokerExpired
+              ? "bg-rose-950/40 text-rose-300 border-rose-800/60 hover:bg-rose-900/50 cursor-pointer animate-pulse"
+              : "bg-amber-950/40 text-amber-300 border-amber-800/60 hover:bg-amber-900/50 cursor-pointer"
           }`}
-          title={brokerConnected ? "Broker Connected (Click to view or re-authenticate)" : "Click to Connect ICICI Breeze"}
+          title={
+            isBrokerActive
+              ? "Broker Connected (Click to view session)"
+              : isBrokerExpired
+              ? "Daily Breeze Session Expired on ICICI. Click to authenticate today's token."
+              : "Click to Connect ICICI Breeze"
+          }
         >
           <Lock className="w-3 h-3" />
-          <span>{brokerConnected ? "BROKER CONNECTED" : "CONNECT BROKER"}</span>
+          <span>
+            {isBrokerActive
+              ? "BROKER CONNECTED"
+              : isBrokerExpired
+              ? "SESSION EXPIRED"
+              : "CONNECT BROKER"}
+          </span>
         </button>
 
         {/* Market Feed Status */}

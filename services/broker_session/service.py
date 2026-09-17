@@ -97,6 +97,7 @@ class BrokerSessionService:
 
         # Propagate credentials to live broker adapter if gateway is wired
         gateway_synced = False
+        auth_error: Optional[str] = None
         if self.broker_gateway and hasattr(self.broker_gateway, "breeze_adapter"):
             try:
                 gateway_synced = await self.broker_gateway.breeze_adapter.authenticate(
@@ -106,12 +107,26 @@ class BrokerSessionService:
                 )
                 logger.info("Breeze live adapter authentication result: %s", gateway_synced)
             except Exception as exc:
+                auth_error = str(exc)
                 logger.warning("Breeze live adapter authentication error: %s", exc)
+
+        if not gateway_synced and self.broker_gateway and hasattr(self.broker_gateway, "breeze_adapter"):
+            await self.repo.record_health_check("DISCONNECTED", latency_ms=0.0, message="Authentication failed")
+            return {
+                "session_id": session_id,
+                "status": "AUTHENTICATION_FAILED",
+                "connected": False,
+                "account_id": account_id,
+                "expires_at": expires_at.isoformat(),
+                "gateway_synced": False,
+                "message": f"Authentication rejected by ICICI Direct: {auth_error or 'Session key is expired or invalid.'}",
+            }
 
         logger.info("Broker session activated successfully: session_id=%s", session_id)
         return {
             "session_id": session_id,
             "status": "CONNECTED",
+            "connected": True,
             "account_id": account_id,
             "expires_at": expires_at.isoformat(),
             "gateway_synced": gateway_synced,
@@ -138,6 +153,22 @@ class BrokerSessionService:
                 "expires_at": active["expires_at"],
                 "message": "Broker session has expired",
             }
+
+        # Check if underlying Breeze SDK client is genuinely active
+        if self.broker_gateway and hasattr(self.broker_gateway, "breeze_adapter"):
+            adapter = self.broker_gateway.breeze_adapter
+            if hasattr(adapter, "client_manager"):
+                is_active = getattr(adapter.client_manager, "is_active", False)
+                if not is_active:
+                    return {
+                        "status": "EXPIRED",
+                        "connected": False,
+                        "session_id": active["session_id"],
+                        "account_id": active["account_id"],
+                        "expires_at": active["expires_at"],
+                        "token_masked": active["session_token_masked"],
+                        "message": "Daily Breeze session has expired on ICICI servers. Please reconnect broker with today's token.",
+                    }
 
         return {
             "status": "CONNECTED",

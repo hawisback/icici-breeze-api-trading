@@ -142,11 +142,44 @@ class HistoricalService:
                     )
                 )
 
+            if interval == "15m":
+                candles = self._resample_to_15m(candles, instrument_id)
+
             logger.info("Successfully fetched %d real candles from Breeze for %s", len(candles), instrument_id)
             return candles
         except Exception as exc:
             logger.warning("Failed to fetch Breeze historical candles for %s: %s", instrument_id, exc)
             return []
+
+    def _resample_to_15m(self, candles_5m: list[Candle], instrument_id: str) -> list[Candle]:
+        """Aggregate 5-minute candles into standard 15-minute bars."""
+        if not candles_5m:
+            return []
+        res: list[Candle] = []
+        buckets: dict[datetime, list[Candle]] = {}
+        for c in candles_5m:
+            minute = (c.start_time.minute // 15) * 15
+            bucket_dt = c.start_time.replace(minute=minute, second=0, microsecond=0)
+            buckets.setdefault(bucket_dt, []).append(c)
+
+        for b_start, b_candles in sorted(buckets.items()):
+            b_end = b_start + timedelta(minutes=15)
+            res.append(
+                Candle(
+                    instrument_id=instrument_id,
+                    interval="15m",
+                    start_time=b_start,
+                    end_time=b_end,
+                    open=b_candles[0].open,
+                    high=max(x.high for x in b_candles),
+                    low=min(x.low for x in b_candles),
+                    close=b_candles[-1].close,
+                    volume=sum(x.volume for x in b_candles),
+                    open_interest=b_candles[-1].open_interest,
+                    source="BREEZE",
+                )
+            )
+        return res
 
     async def get_candles(
         self,
@@ -156,6 +189,21 @@ class HistoricalService:
         end_time: Optional[datetime] = None,
         limit: int = 500,
     ) -> list[Candle]:
+        breeze_active = False
+        if self.broker_gateway:
+            breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
+            if breeze_adapter and hasattr(breeze_adapter, "client_manager"):
+                breeze_active = getattr(breeze_adapter.client_manager, "is_active", False)
+
+        latest_candle = await self.repo.get_latest_candle(instrument_id, interval)
+
+        # Proactively fetch from Breeze if session is active and cached candles are missing or simulated
+        if breeze_active and (not latest_candle or latest_candle.source == "SIMULATED"):
+            breeze_candles = await self.fetch_candles_from_breeze(instrument_id, interval)
+            if breeze_candles:
+                await self.repo.purge_simulated_candles(instrument_id, interval)
+                await self.repo.save_candles(breeze_candles)
+
         candles = await self.repo.get_candles(
             instrument_id=instrument_id,
             interval=interval,
@@ -163,17 +211,17 @@ class HistoricalService:
             end_time=end_time,
             limit=limit,
         )
-        # If no candles exist or if store contains legacy SIMULATED data while Breeze is connected:
+
         has_only_simulated = bool(candles and all(c.source == "SIMULATED" for c in candles))
-        if not candles or has_only_simulated:
-            # 1. First attempt to fetch real market candles from Breeze
+        if (not candles or has_only_simulated) and breeze_active:
             breeze_candles = await self.fetch_candles_from_breeze(instrument_id, interval)
             if breeze_candles:
+                await self.repo.purge_simulated_candles(instrument_id, interval)
                 await self.repo.save_candles(breeze_candles)
                 return breeze_candles[-limit:]
 
         if not candles:
-            # 2. Fall back to realistic synthetic candles if offline
+            # Fall back to realistic synthetic candles if offline
             candles = await self.generate_synthetic_candles(instrument_id, interval, count=min(limit, 100))
             await self.repo.save_candles(candles)
 

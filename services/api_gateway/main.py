@@ -472,6 +472,19 @@ a {{ color: #38bdf8; text-decoration: none; }}
             logger.warning("Session service activation produced warning: %s", exc)
             session_result = {"status": "ACTIVATING_DEFERRED", "error": str(exc)}
 
+    if session_result.get("status") == "AUTHENTICATION_FAILED":
+        err_msg = session_result.get("message", "Authentication rejected by ICICI Direct. Session key is expired or invalid.")
+        if wants_json:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "ERROR",
+                    "message": err_msg,
+                    "token_masked": masked,
+                    "session": session_result,
+                },
+            )
+
     if wants_json:
         return JSONResponse(
             content={

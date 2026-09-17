@@ -83,18 +83,24 @@ class HistoricalRepository:
         limit: int = 500,
     ) -> list[Candle]:
         async with self.engine.connect() as conn:
-            sql = """
-                SELECT * FROM historical_candles
-                WHERE instrument_id = ? AND interval = ?
-            """
+            where_clauses = ["instrument_id = ?", "interval = ?"]
             params: list[object] = [instrument_id, interval]
             if start_time:
-                sql += " AND start_time >= ?"
+                where_clauses.append("start_time >= ?")
                 params.append(start_time.isoformat())
             if end_time:
-                sql += " AND start_time <= ?"
+                where_clauses.append("start_time <= ?")
                 params.append(end_time.isoformat())
-            sql += " ORDER BY start_time ASC LIMIT ?"
+
+            where_str = " AND ".join(where_clauses)
+            sql = f"""
+                SELECT * FROM (
+                    SELECT * FROM historical_candles
+                    WHERE {where_str}
+                    ORDER BY start_time DESC
+                    LIMIT ?
+                ) ORDER BY start_time ASC
+            """
             params.append(limit)
 
             cursor = await conn.execute(sql, params)
@@ -115,4 +121,53 @@ class HistoricalRepository:
                 )
                 for r in rows
             ]
+
+    async def get_latest_candle(
+        self,
+        instrument_id: str,
+        interval: str,
+    ) -> Optional[Candle]:
+        """Return the most recent candle stored in the repository."""
+        async with self.engine.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT * FROM historical_candles
+                WHERE instrument_id = ? AND interval = ?
+                ORDER BY start_time DESC
+                LIMIT 1
+                """,
+                (instrument_id, interval),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            return Candle(
+                instrument_id=row["instrument_id"],
+                interval=row["interval"],
+                start_time=datetime.fromisoformat(row["start_time"]),
+                end_time=datetime.fromisoformat(row["end_time"]),
+                open=row["open"],
+                high=row["high"],
+                low=row["low"],
+                close=row["close"],
+                volume=row["volume"],
+                open_interest=row["open_interest"],
+                source=row["source"],
+            )
+
+    async def purge_simulated_candles(self, instrument_id: str, interval: Optional[str] = None) -> int:
+        """Remove synthetic candles when real broker candles are available."""
+        async with self.engine.connect() as conn:
+            if interval:
+                res = await conn.execute(
+                    "DELETE FROM historical_candles WHERE instrument_id = ? AND interval = ? AND source = 'SIMULATED'",
+                    (instrument_id, interval),
+                )
+            else:
+                res = await conn.execute(
+                    "DELETE FROM historical_candles WHERE instrument_id = ? AND source = 'SIMULATED'",
+                    (instrument_id,),
+                )
+            await conn.commit()
+            return res.rowcount
 

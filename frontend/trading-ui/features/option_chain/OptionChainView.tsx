@@ -8,11 +8,13 @@ import { useTradingStore } from "@/stores/useTradingStore";
 
 export function OptionChainView() {
   const [selectedExpiry, setSelectedExpiry] = useState<string | undefined>(undefined);
-  const { setOrderDraft } = useTradingStore();
+  const { selectedSymbol, setOrderDraft } = useTradingStore();
+
+  const underlying = selectedSymbol.includes("BANK") ? "BANKNIFTY" : "NIFTY";
 
   const { data: chain, isLoading } = useQuery({
-    queryKey: ["option_chain", "NIFTY", selectedExpiry],
-    queryFn: () => fetchOptionChain("NIFTY", selectedExpiry),
+    queryKey: ["option_chain", underlying, selectedExpiry],
+    queryFn: () => fetchOptionChain(underlying, selectedExpiry),
     refetchInterval: 3000,
   });
 
@@ -30,16 +32,30 @@ export function OptionChainView() {
     });
   };
 
+  const atmStrike = chain?.atm_strike || (chain?.spot_price ? Math.round(chain.spot_price / (underlying === "BANKNIFTY" ? 100 : 50)) * (underlying === "BANKNIFTY" ? 100 : 50) : 0);
+
   return (
     <div className="flex flex-col h-full bg-[#0b1120] border-l border-[#1e293b] select-none text-xs">
       {/* Option Chain Header */}
       <div className="p-2.5 border-b border-[#1e293b] flex items-center justify-between">
         <div>
-          <span className="font-semibold text-slate-200 uppercase tracking-wider text-[11px]">
-            Option Chain
-          </span>
-          <div className="text-[10px] text-slate-500 font-mono">
-            Spot: ₹{chain?.spot_price ? chain.spot_price.toFixed(2) : "24,850.50"}
+          <div className="flex items-center space-x-2">
+            <span className="font-semibold text-slate-200 uppercase tracking-wider text-[11px]">
+              {underlying} Option Chain
+            </span>
+            {chain?.source === "BREEZE" ? (
+              <span className="px-1.5 py-0.2 rounded bg-emerald-950 border border-emerald-800 text-emerald-300 font-mono text-[9px]">
+                BREEZE LIVE
+              </span>
+            ) : (
+              <span className="px-1.5 py-0.2 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px]">
+                SYNTHETIC (OFFLINE)
+              </span>
+            )}
+          </div>
+          <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+            Spot: <span className="text-slate-100 font-bold">₹{chain?.spot_price ? chain.spot_price.toFixed(2) : "--"}</span>
+            {atmStrike > 0 && <span className="text-amber-400 ml-2">ATM: ₹{atmStrike}</span>}
           </div>
         </div>
 
@@ -81,13 +97,13 @@ export function OptionChainView() {
           <div className="p-6 text-center text-slate-500">Loading option matrix...</div>
         ) : (
           chain?.strikes.map((s) => {
-            const isAtm = Math.abs(s.strike - (chain.spot_price || 24850)) < 50;
+            const isAtm = s.strike === atmStrike;
 
             return (
               <div
                 key={s.strike}
                 className={`grid grid-cols-7 py-1 px-2 items-center text-center transition ${
-                  isAtm ? "bg-blue-950/30 font-bold" : "hover:bg-slate-900/40"
+                  isAtm ? "bg-amber-950/30 border-y border-amber-500/40 font-bold" : "hover:bg-slate-900/40"
                 }`}
               >
                 {/* CALL DATA */}
@@ -98,20 +114,26 @@ export function OptionChainView() {
                     <div
                       onClick={() => handleSelectOption(s.call!, "BUY")}
                       className="cursor-pointer text-emerald-400 hover:bg-emerald-950/50 rounded px-1 py-0.5"
-                      title="Click to trade Call"
                     >
-                      ₹{s.call.ltp.toFixed(2)}
+                      {s.call.ltp.toFixed(2)}
                     </div>
                   </>
                 ) : (
                   <>
-                    <div className="col-span-3 text-slate-600">-</div>
+                    <div className="text-slate-700">-</div>
+                    <div className="text-slate-700">-</div>
+                    <div className="text-slate-700">-</div>
                   </>
                 )}
 
                 {/* STRIKE */}
-                <div className={`font-bold ${isAtm ? "text-amber-300" : "text-slate-200"}`}>
+                <div
+                  className={`py-0.5 rounded text-[11px] ${
+                    isAtm ? "bg-amber-500/20 text-amber-300 font-bold" : "text-slate-200"
+                  }`}
+                >
                   {s.strike}
+                  {isAtm && <span className="block text-[8px] text-amber-400">ATM</span>}
                 </div>
 
                 {/* PUT DATA */}
@@ -120,16 +142,17 @@ export function OptionChainView() {
                     <div
                       onClick={() => handleSelectOption(s.put!, "BUY")}
                       className="cursor-pointer text-rose-400 hover:bg-rose-950/50 rounded px-1 py-0.5"
-                      title="Click to trade Put"
                     >
-                      ₹{s.put.ltp.toFixed(2)}
+                      {s.put.ltp.toFixed(2)}
                     </div>
                     <div className="text-slate-500 text-[10px]">{(s.put.volume / 1000).toFixed(0)}k</div>
                     <div className="text-slate-500 text-[10px]">{(s.put.open_interest / 1000).toFixed(0)}k</div>
                   </>
                 ) : (
                   <>
-                    <div className="col-span-3 text-slate-600">-</div>
+                    <div className="text-slate-700">-</div>
+                    <div className="text-slate-700">-</div>
+                    <div className="text-slate-700">-</div>
                   </>
                 )}
               </div>
@@ -140,4 +163,3 @@ export function OptionChainView() {
     </div>
   );
 }
-
