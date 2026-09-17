@@ -143,10 +143,76 @@ async def lifespan(app: FastAPI):
     await container.event_bus.subscribe(Topics.PORTFOLIO_PNL, on_pnl_event)
     await container.event_bus.subscribe(Topics.AUDIT_EVENT, on_audit_event)
 
+    # Start optional port 80 listener for ICICI Direct default http://127.0.0.1/?apisession=... redirects
+    port80_server = None
+    try:
+        async def handle_port80(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            try:
+                line = await reader.readline()
+                req_line = line.decode("utf-8", errors="ignore")
+                import re
+                match = re.search(r"apisession=([a-zA-Z0-9_-]+)", req_line)
+                token = match.group(1) if match else None
+
+                body_msg = ""
+                if token:
+                    from libs.config.env_manager import update_env_variable
+                    update_env_variable("BREEZE_SESSION_TOKEN", token)
+                    settings = get_platform_settings()
+                    api_k = settings.breeze_api_key.get_secret_value() if settings.breeze_api_key else ""
+                    sec_k = settings.breeze_secret_key.get_secret_value() if settings.breeze_secret_key else ""
+                    if api_k and sec_k:
+                        await container.session_svc.activate_session(
+                            api_key=api_k,
+                            secret_key=sec_k,
+                            session_token=token,
+                            account_id="ICICI_PRIMARY",
+                        )
+                    body_msg = f"Session token ({token[:4]}...{token[-4:]}) captured, saved to .env, and activated!"
+                else:
+                    body_msg = "Redirect received, but no apisession token found in URL."
+
+                html_resp = f"""HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!DOCTYPE html>
+<html>
+<head><title>Breeze Authentication</title>
+<style>body {{ background: #020617; color: #f8fafc; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+.card {{ background: #0f172a; border: 1px solid #10b981; border-radius: 12px; padding: 32px; max-width: 480px; text-align: center; }}
+h1 {{ color: #34d399; margin-top: 0; }} p {{ color: #94a3b8; font-size: 14px; }}
+</style></head>
+<body>
+<div class="card">
+  <h1>Authentication Successful</h1>
+  <p>{body_msg}</p>
+  <p>You can close this tab and return to the Trading Terminal.</p>
+</div>
+<script>setTimeout(() => window.close(), 3000);</script>
+</body></html>"""
+                writer.write(html_resp.encode("utf-8"))
+                await writer.drain()
+            except Exception as e:
+                logger.warning("Error handling port 80 redirect: %s", e)
+            finally:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+
+        port80_server = await asyncio.start_server(handle_port80, "127.0.0.1", 80)
+        logger.info("ICICI Direct 2FA redirect listener active on http://127.0.0.1:80/")
+    except Exception as exc:
+        logger.info("Port 80 redirect listener not started (optional): %s", exc)
+
     yield
 
     # Shutdown
     logger.info("Shutting down API Gateway...")
+    if port80_server:
+        try:
+            port80_server.close()
+            await port80_server.wait_closed()
+        except Exception:
+            pass
     await container.market_svc.stop_simulated_feed()
     await container.oms_svc.stop_outbox_worker()
     await container.event_bus.stop()
