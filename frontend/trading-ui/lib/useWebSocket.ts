@@ -27,15 +27,41 @@ export function useTradingWebSocket() {
             const { type, data } = message;
 
             if (type === "QUOTE") {
-              // Invalidate or update quote query
-              queryClient.setQueryData(["quotes"], (old: any[]) => {
-                if (!old) return [data];
-                return old.map((q) => (q.instrument_id === data.instrument_id ? data : q));
+              // Invalidate or update quote query with upsert
+              queryClient.setQueryData(["quotes"], (old: any[] | undefined) => {
+                if (!old || !Array.isArray(old)) return [data];
+                const idx = old.findIndex(
+                  (q) => q.instrument_id === data.instrument_id || q.symbol === data.symbol
+                );
+                if (idx >= 0) {
+                  const updated = [...old];
+                  updated[idx] = { ...updated[idx], ...data };
+                  return updated;
+                }
+                return [...old, data];
               });
+            } else if (type === "CANDLE") {
+              queryClient.invalidateQueries({ queryKey: ["candles"] });
+            } else if (type === "STRATEGY") {
+              if (data?.event === "STATUS_UPDATE" && data?.data) {
+                queryClient.setQueryData(["strategy_status"], data.data);
+              } else if (data?.event === "DECISION_LOG" && data?.log) {
+                queryClient.setQueryData(["strategy_decision_log"], (old: any[] | undefined) => {
+                  if (!old || !Array.isArray(old)) return [data.log];
+                  if (old.some((item) => item.id === data.log.id)) return old;
+                  return [data.log, ...old.slice(0, 99)];
+                });
+                queryClient.invalidateQueries({ queryKey: ["strategy_decision_log"] });
+              } else {
+                queryClient.invalidateQueries({ queryKey: ["strategy_status"] });
+                queryClient.invalidateQueries({ queryKey: ["strategy_trades"] });
+              }
             } else if (type === "ORDER") {
               queryClient.invalidateQueries({ queryKey: ["orders"] });
+              queryClient.invalidateQueries({ queryKey: ["strategy_trades"] });
             } else if (type === "POSITION") {
               queryClient.invalidateQueries({ queryKey: ["positions"] });
+              queryClient.invalidateQueries({ queryKey: ["strategy_trades"] });
             } else if (type === "PNL") {
               queryClient.setQueryData(["pnl_summary"], data);
             } else if (type === "SYSTEM_HEALTH") {

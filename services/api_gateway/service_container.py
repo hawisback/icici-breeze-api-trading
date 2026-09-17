@@ -137,10 +137,7 @@ async def initialize_services(
 
     market_svc = MarketDataService(event_bus=bus, broker_gateway=gateway_svc)
     await market_svc.initialize()
-    if app_settings.market_data_backend == MarketDataBackend.SIMULATED:
-        await market_svc.start_simulated_feed(interval_sec=1.0)
-    elif app_settings.market_data_backend == MarketDataBackend.BREEZE:
-        await market_svc.sync_quotes_from_broker()
+    await market_svc.start_feed_loop(interval_sec=2.5)
 
     historical_repo = HistoricalRepository(db_path=app_settings.historical_db_path)
     historical_svc = HistoricalService(repository=historical_repo, broker_gateway=gateway_svc)
@@ -183,7 +180,14 @@ async def initialize_services(
     await portfolio_svc.initialize()
 
     strategy_repo = StrategyRepository(db_path=app_settings.strategy_db_path)
-    strategy_svc = StrategyService(repository=strategy_repo, oms_service=oms_svc, event_bus=bus)
+    strategy_svc = StrategyService(
+        repository=strategy_repo,
+        oms_service=oms_svc,
+        event_bus=bus,
+        option_chain_service=option_chain_svc,
+        market_data_service=market_svc,
+        historical_service=historical_svc,
+    )
     await strategy_svc.initialize()
 
     audit_repo = AuditRepository(db_path=app_settings.audit_db_path)

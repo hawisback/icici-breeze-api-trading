@@ -101,10 +101,14 @@ async def test_end_to_end_order_flow(platform):
     assert order.status == OrderState.VALIDATING
 
     # Allow event bus dispatch loop to process: Risk -> Approval -> Execution -> Fill -> Portfolio
-    await asyncio.sleep(0.3)
+    updated_order = None
+    for _ in range(20):
+        await asyncio.sleep(0.1)
+        updated_order = await oms_svc.get_order(order.order_id)
+        if updated_order and updated_order.status == OrderState.FILLED:
+            break
 
     # 2. Check updated order status
-    updated_order = await oms_svc.get_order(order.order_id)
     assert updated_order is not None
     assert updated_order.status == OrderState.FILLED
     assert updated_order.filled_quantity == 50

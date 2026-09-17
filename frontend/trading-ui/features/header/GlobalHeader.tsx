@@ -19,7 +19,12 @@ import { fetchLoginUrl, fetchPnLSummary, fetchQuotes, fetchSystemHealth } from "
 import { useTradingWebSocket } from "@/lib/useWebSocket";
 import { useTradingStore } from "@/stores/useTradingStore";
 
-export function GlobalHeader() {
+interface GlobalHeaderProps {
+  activeView?: "terminal" | "strategies";
+  onViewChange?: (view: "terminal" | "strategies") => void;
+}
+
+export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHeaderProps) {
   const { connected: wsConnected } = useTradingWebSocket();
   const {
     tradingMode,
@@ -112,10 +117,12 @@ export function GlobalHeader() {
   const { data: pnl } = useQuery({
     queryKey: ["pnl_summary"],
     queryFn: fetchPnLSummary,
-    refetchInterval: 2000,
+    refetchInterval: 1000,
   });
 
-  const niftyQuote = quotes?.find((q) => q.symbol === "NIFTY 50" || q.instrument_id === "INST-NIFTY-INDEX");
+  const niftyQuote = quotes?.find(
+    (q) => q.symbol === "NIFTY 50" || q.instrument_id === "INST-NIFTY-INDEX" || q.symbol === "NIFTY"
+  );
 
   const brokerSessionStatus = health?.services?.broker_session || "DISCONNECTED";
   const isBrokerActive = brokerSessionStatus === "CONNECTED";
@@ -136,11 +143,38 @@ export function GlobalHeader() {
           </span>
         </div>
 
+        {/* Workspace View Switcher */}
+        {onViewChange && (
+          <div className="flex items-center bg-slate-900 border border-slate-800 rounded p-0.5 ml-2">
+            <button
+              onClick={() => onViewChange("terminal")}
+              className={`px-3 py-1 rounded text-[11px] font-bold tracking-wider transition ${
+                activeView === "terminal"
+                  ? "bg-blue-600 text-white shadow"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              TERMINAL
+            </button>
+            <button
+              onClick={() => onViewChange("strategies")}
+              className={`px-3 py-1 rounded text-[11px] font-bold tracking-wider flex items-center gap-1.5 transition ${
+                activeView === "strategies"
+                  ? "bg-cyan-600 text-white shadow"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              <Activity className="w-3 h-3" />
+              AUTO-STRATEGIES
+            </button>
+          </div>
+        )}
+
         {/* NIFTY 50 Live Ticker */}
         <div className="hidden md:flex items-center space-x-3 px-3 py-1 bg-[#1e293b]/50 rounded border border-slate-800">
           <span className="text-slate-400 font-medium">NIFTY 50</span>
           <span className="font-mono font-semibold text-slate-100">
-            {niftyQuote ? niftyQuote.last_price.toFixed(2) : "23,217.60"}
+            {niftyQuote ? niftyQuote.last_price.toFixed(2) : "--"}
           </span>
           <span
             className={`font-mono text-[11px] font-medium ${

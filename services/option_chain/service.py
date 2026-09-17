@@ -42,11 +42,14 @@ class OptionChainService:
         else:
             clean_underlying = "NIFTY"
 
-        expiries = await self.inst_svc.get_expiries(clean_underlying)
-        if not expiries:
-            expiries = ["2026-09-24"]
+        if clean_underlying == "BANKNIFTY":
+            default_expiries = ["2026-09-29", "2026-10-27", "2026-11-23"]
+        else:
+            default_expiries = ["2026-09-22", "2026-09-29", "2026-10-06", "2026-10-13", "2026-10-27", "2026-11-23"]
 
-        selected_expiry = expiry if (expiry and expiry in expiries) else expiries[0]
+        expiries = await self.inst_svc.get_expiries(clean_underlying)
+        all_expiries = list(dict.fromkeys(default_expiries + (expiries or [])))
+        selected_expiry = expiry if (expiry and expiry in all_expiries) else all_expiries[0]
 
         # 1. Resolve realistic spot price
         inst_spot_id = f"INST-{clean_underlying}-INDEX"
@@ -114,7 +117,7 @@ class OptionChainService:
                         "underlying": clean_underlying,
                         "spot_price": live_spot,
                         "expiry": selected_expiry,
-                        "available_expiries": expiries,
+                        "available_expiries": all_expiries,
                         "atm_strike": round(live_spot / step) * step,
                         "source": "BREEZE",
                         "strikes": sorted_strikes,

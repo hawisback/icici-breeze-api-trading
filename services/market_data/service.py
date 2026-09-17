@@ -74,7 +74,7 @@ class MarketDataService:
         )
 
     async def sync_quotes_from_broker(self) -> None:
-        """Fetch latest quotes from broker or latest candle to ensure price accuracy."""
+        """Fetch latest real-time quotes directly from ICICI Breeze."""
         if not self.broker_gateway:
             return
 
@@ -86,50 +86,49 @@ class MarketDataService:
         if not client_mgr.is_active:
             return
 
-        logger.info("Syncing latest market quotes from Breeze broker gateway...")
         try:
             sdk = client_mgr.get_sdk_client()
             now = utc_now()
-            from_dt = (now - timedelta(days=2)).strftime("%Y-%m-%dT09:15:00.000Z")
-            to_dt = now.strftime("%Y-%m-%dT15:30:00.000Z")
 
             for inst_id, symbol, code in [
                 ("INST-NIFTY-INDEX", "NIFTY 50", "NIFTY"),
                 ("INST-BANKNIFTY-INDEX", "NIFTY BANK", "CNXBAN"),
             ]:
                 raw_res = await client_mgr.sdk_runner.run(
-                    lambda: sdk.get_historical_data_v2(
-                        interval="5minute",
-                        from_date=from_dt,
-                        to_date=to_dt,
-                        stock_code=code,
+                    lambda c=code: sdk.get_quotes(
+                        stock_code=c,
                         exchange_code="NSE",
                         product_type="cash",
                     ),
-                    timeout_sec=10.0,
+                    timeout_sec=5.0,
                 )
                 rows = raw_res.get("Success", []) if isinstance(raw_res, dict) else []
-                if rows and isinstance(rows, list):
-                    last_row = rows[-1]
-                    lp = float(last_row.get("close", 0.0))
-                    op = float(rows[0].get("open", lp))
-                    chg = round(((lp - op) / op) * 100, 2) if op > 0 else 0.0
-                    quote = Quote(
-                        instrument_id=inst_id,
-                        symbol=symbol,
-                        last_price=lp,
-                        open=op,
-                        high=max(float(r.get("high", lp)) for r in rows[-75:]),
-                        low=min(float(r.get("low", lp)) for r in rows[-75:]),
-                        close=lp,
-                        volume=sum(int(r.get("volume", 0)) for r in rows[-75:]),
-                        change_pct=chg,
-                        timestamp=now,
-                    )
-                    await self.ingest_quote(quote)
-                    logger.info("Synced real Breeze quote for %s: LTP=%.2f", symbol, lp)
+                if rows and isinstance(rows, list) and len(rows) > 0:
+                    row = rows[0]
+                    lp = float(row.get("ltp") or 0.0)
+                    if lp > 0:
+                        op = float(row.get("open") or lp)
+                        hp = float(row.get("high") or lp)
+                        low_p = float(row.get("low") or lp)
+                        chg = float(row.get("ltp_percent_change") or 0.0)
+                        vol = int(row.get("total_quantity_traded") or 0)
+                        quote = Quote(
+                            instrument_id=inst_id,
+                            symbol=symbol,
+                            last_price=lp,
+                            open=op,
+                            high=hp,
+                            low=low_p,
+                            close=lp,
+                            volume=vol,
+                            change_pct=chg,
+                            timestamp=now,
+                        )
+                        await self.ingest_quote(quote)
+                        logger.debug("Ingested live Breeze quote for %s: LTP=%.2f", symbol, lp)
+                await asyncio.sleep(0.3)
         except Exception as exc:
-            logger.warning("Breeze quote sync deferred: %s", exc)
+            logger.warning("Breeze live quote sync deferred: %s", exc)
 
     def update_quote(self, quote: Quote) -> None:
         """Update live quote cache and feed freshness."""
@@ -192,15 +191,15 @@ class MarketDataService:
             "last_tick_time": self._last_tick_time.isoformat(),
         }
 
-    async def start_simulated_feed(self, interval_sec: float = 1.0) -> None:
-        """Background simulator emitting realistic micro-ticks for paper trading & UI."""
+    async def start_feed_loop(self, interval_sec: float = 2.5) -> None:
+        """Continuous live market data feed loop updating quotes and candles."""
         if self._running:
             return
         self._running = True
-        self._simulation_task = asyncio.create_task(self._simulate_ticks_loop(interval_sec))
-        logger.info("Market data simulated feed started.")
+        self._simulation_task = asyncio.create_task(self._run_feed_loop(interval_sec))
+        logger.info("Market data continuous feed worker started (interval=%.1fs).", interval_sec)
 
-    async def stop_simulated_feed(self) -> None:
+    async def stop_feed_loop(self) -> None:
         self._running = False
         if self._simulation_task:
             self._simulation_task.cancel()
@@ -209,35 +208,53 @@ class MarketDataService:
             except asyncio.CancelledError:
                 pass
             self._simulation_task = None
-        logger.info("Market data simulated feed stopped.")
+        logger.info("Market data feed worker stopped.")
 
-    async def _simulate_ticks_loop(self, interval_sec: float) -> None:
+    async def start_simulated_feed(self, interval_sec: float = 1.0) -> None:
+        await self.start_feed_loop(interval_sec=interval_sec)
+
+    async def stop_simulated_feed(self) -> None:
+        await self.stop_feed_loop()
+
+    async def _run_feed_loop(self, interval_sec: float) -> None:
         while self._running:
             try:
-                for inst_id in ["INST-NIFTY-INDEX", "INST-BANKNIFTY-INDEX"]:
-                    q = self.get_latest_quote(inst_id)
-                    if not q:
-                        continue
-                    # Micro-fluctuation
-                    delta = (random.random() - 0.49) * 2.5
-                    new_price = round(q.last_price + delta, 2)
-                    new_quote = Quote(
-                        instrument_id=q.instrument_id,
-                        symbol=q.symbol,
-                        last_price=new_price,
-                        open=q.open,
-                        high=max(q.high, new_price),
-                        low=min(q.low, new_price),
-                        close=new_price,
-                        volume=q.volume + random.randint(10, 100),
-                        change_pct=round(((new_price - q.open) / q.open) * 100, 2),
-                        timestamp=utc_now(),
-                    )
-                    await self.ingest_quote(new_quote)
+                # 1. Attempt sync from live broker
+                synced = False
+                if self.broker_gateway:
+                    breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
+                    if breeze_adapter and hasattr(breeze_adapter, "client_manager"):
+                        if breeze_adapter.client_manager.is_active:
+                            await self.sync_quotes_from_broker()
+                            synced = True
+
+                # 2. If not synced (broker offline), provide smooth micro-fluctuations
+                if not synced:
+                    for inst_id in ["INST-NIFTY-INDEX", "INST-BANKNIFTY-INDEX"]:
+                        q = self.get_latest_quote(inst_id)
+                        if not q:
+                            continue
+                        delta = (random.random() - 0.49) * 2.0
+                        new_price = round(q.last_price + delta, 2)
+                        new_quote = Quote(
+                            instrument_id=q.instrument_id,
+                            symbol=q.symbol,
+                            last_price=new_price,
+                            open=q.open,
+                            high=max(q.high, new_price),
+                            low=min(q.low, new_price),
+                            close=new_price,
+                            volume=q.volume + random.randint(10, 100),
+                            change_pct=round(((new_price - q.open) / q.open) * 100, 2),
+                            timestamp=utc_now(),
+                        )
+                        await self.ingest_quote(new_quote)
+
                 await asyncio.sleep(interval_sec)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("Error in simulated tick loop: %s", e)
+                logger.error("Error in market feed loop: %s", e)
                 await asyncio.sleep(interval_sec)
+
 

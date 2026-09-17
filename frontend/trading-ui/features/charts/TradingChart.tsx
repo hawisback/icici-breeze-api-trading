@@ -55,7 +55,7 @@ export function TradingChart() {
   const { data: quotes } = useQuery({
     queryKey: ["quotes"],
     queryFn: fetchQuotes,
-    refetchInterval: 2000,
+    refetchInterval: 1000,
   });
 
   const lastCandle = useMemo(() => {

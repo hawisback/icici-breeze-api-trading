@@ -13,7 +13,7 @@ export function MarketWatch() {
   const { data: quotes, isLoading } = useQuery({
     queryKey: ["quotes"],
     queryFn: fetchQuotes,
-    refetchInterval: 2000,
+    refetchInterval: 1000,
   });
 
   const filteredQuotes = (quotes || []).filter((q) =>

@@ -169,19 +169,27 @@ class BreezeMarketDataAdapter(BrokerMarketDataPort):
         await self.rate_limiter.acquire_read()
         sdk = self.client_manager.get_sdk_client()
 
+        stock_code = "CNXBAN" if "BANK" in underlying.upper() else "NIFTY"
         expiry_iso = f"{to_breeze_date_str(expiry)}T06:00:00.000Z"
 
-        raw_resp = await self.client_manager.sdk_runner.run(
-            lambda: sdk.get_option_chain_quotes(
-                stock_code=underlying,
-                exchange_code=exchange,
-                expiry_date=expiry_iso,
-                product_type="options",
-            ),
-            timeout_sec=15.0,
-        )
-        data = BreezeResponseValidator.unwrap_success(raw_resp)
-        rows: list[dict[str, Any]] = data if isinstance(data, list) else []
+        rows: list[dict[str, Any]] = []
+        for opt_right in ["call", "put"]:
+            try:
+                raw_resp = await self.client_manager.sdk_runner.run(
+                    lambda r=opt_right: sdk.get_option_chain_quotes(
+                        stock_code=stock_code,
+                        exchange_code=exchange,
+                        expiry_date=expiry_iso,
+                        product_type="options",
+                        right=r,
+                    ),
+                    timeout_sec=15.0,
+                )
+                data = BreezeResponseValidator.unwrap_success(raw_resp)
+                if isinstance(data, list):
+                    rows.extend(data)
+            except Exception as exc:
+                logger.warning("Breeze %s option query for %s %s failed: %s", opt_right, stock_code, expiry, exc)
 
         contracts: list[OptionContractQuote] = []
         spot_price = Decimal("0")

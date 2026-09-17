@@ -103,6 +103,7 @@ node_modules/
 out/
 **/out/
 .turbo/
+*.tsbuildinfo
 
 # Logs
 npm-debug.log*

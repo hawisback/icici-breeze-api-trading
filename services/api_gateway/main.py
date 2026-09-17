@@ -40,6 +40,13 @@ from libs.contracts.models import (
 from libs.events.bus import EventEnvelope, Topics
 from libs.config import get_platform_settings, update_env_variable
 from libs.observability.logger import setup_logging
+from services.strategy.models import (
+    AutoTradingConfig,
+    OptionType,
+    StrategyName,
+    ThresholdOverrides,
+    TradeDirection,
+)
 from services.api_gateway.dependencies import get_current_user, require_roles
 from services.api_gateway.service_container import (
     ServiceContainer,
@@ -136,12 +143,16 @@ async def lifespan(app: FastAPI):
     async def on_audit_event(env: EventEnvelope[Any]):
         await ws_manager.broadcast("ALERT", env.payload)
 
+    async def on_strategy_event(env: EventEnvelope[Any]):
+        await ws_manager.broadcast("STRATEGY", env.payload)
+
     await container.event_bus.subscribe(Topics.MARKET_QUOTE, on_quote_event)
     await container.event_bus.subscribe(Topics.MARKET_CANDLE, on_candle_event)
     await container.event_bus.subscribe(Topics.ORDER_STATE, on_order_event)
     await container.event_bus.subscribe(Topics.PORTFOLIO_POSITION, on_position_event)
     await container.event_bus.subscribe(Topics.PORTFOLIO_PNL, on_pnl_event)
     await container.event_bus.subscribe(Topics.AUDIT_EVENT, on_audit_event)
+    await container.event_bus.subscribe(Topics.STRATEGY_SIGNAL, on_strategy_event)
 
     # Start optional port 80 listener for ICICI Direct default http://127.0.0.1/?apisession=... redirects
     port80_server = None
@@ -320,6 +331,40 @@ class TokenRefreshRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     refresh_token: str
+
+
+class StrategyArmRequest(BaseModel):
+    armed: bool
+
+
+class StrategyAutoTradeRequest(BaseModel):
+    enabled: bool
+
+
+class StrategyKillSwitchRequest(BaseModel):
+    active: bool
+
+
+class StrategyExitRequest(BaseModel):
+    reason: Optional[str] = "MANUAL_UI_EXIT"
+
+
+class StrategyOverridesRequest(BaseModel):
+    max_option_premium_cap: Optional[float] = None
+    min_option_premium_floor: Optional[float] = None
+    adx_threshold: Optional[float] = None
+    rvol_threshold: Optional[float] = None
+    bull_derivatives_score: Optional[float] = None
+    bear_derivatives_score: Optional[float] = None
+    bb_width_percentile: Optional[float] = None
+    bypass_entry_window: bool = False
+
+
+class StrategyForceEntryRequest(BaseModel):
+    strategy: StrategyName = StrategyName.TREND_PULLBACK
+    direction: TradeDirection = TradeDirection.BULLISH
+    option_type: Optional[OptionType] = None
+    override_premium_cap: Optional[float] = None
 
 
 # ==============================================================================
@@ -976,6 +1021,120 @@ async def revoke_live_gate(
 async def list_strategies():
     services = get_services()
     return await services.strategy_svc.list_instances()
+
+
+@app.get("/api/v1/strategies/status")
+async def get_strategy_status():
+    services = get_services()
+    return await services.strategy_svc.get_status()
+
+
+@app.get("/api/v1/strategies/config")
+async def get_strategy_config():
+    services = get_services()
+    cfg = await services.strategy_svc.get_config()
+    return cfg.model_dump(mode="json")
+
+
+@app.post("/api/v1/strategies/config")
+async def update_strategy_config(config_data: dict[str, Any]):
+    services = get_services()
+    try:
+        cfg = AutoTradingConfig.model_validate(config_data)
+        updated = await services.strategy_svc.update_config(cfg)
+        return {"status": "SUCCESS", "config": updated.model_dump(mode="json")}
+    except Exception as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+
+@app.post("/api/v1/strategies/arm")
+async def arm_strategy_system(req: StrategyArmRequest):
+    services = get_services()
+    updated = await services.strategy_svc.arm_system(req.armed)
+    return {"status": "SUCCESS", "config": updated.model_dump(mode="json")}
+
+
+@app.post("/api/v1/strategies/auto-trade")
+async def set_strategy_auto_trade(req: StrategyAutoTradeRequest):
+    services = get_services()
+    updated = await services.strategy_svc.set_auto_trade(req.enabled)
+    return {"status": "SUCCESS", "config": updated.model_dump(mode="json")}
+
+
+@app.post("/api/v1/strategies/kill-switch")
+async def toggle_strategy_kill_switch(req: StrategyKillSwitchRequest):
+    services = get_services()
+    updated = await services.strategy_svc.toggle_kill_switch(req.active)
+    return {"status": "SUCCESS", "config": updated.model_dump(mode="json")}
+
+
+@app.post("/api/v1/strategies/evaluate-now")
+async def evaluate_strategy_now():
+    services = get_services()
+    result = await services.strategy_svc.evaluate_cycle()
+    return {"status": "SUCCESS", "result": result}
+
+
+@app.get("/api/v1/strategies/decision-log")
+async def get_strategy_decision_log(limit: int = 100):
+    services = get_services()
+    return await services.strategy_svc.list_decision_logs(limit=limit)
+
+
+@app.get("/api/v1/strategies/trades")
+async def get_strategy_trades(limit: int = 50):
+    services = get_services()
+    return await services.strategy_svc.list_trades(limit=limit)
+
+
+@app.post("/api/v1/strategies/trades/{trade_id}/exit")
+async def exit_strategy_trade(trade_id: str, req: StrategyExitRequest = StrategyExitRequest()):
+    services = get_services()
+    exited = await services.strategy_svc.manual_exit_trade(trade_id, reason=req.reason or "MANUAL_UI_EXIT")
+    if not exited:
+        raise HTTPException(status_code=404, detail="Trade not found or already closed")
+    return {"status": "SUCCESS", "trade": exited.model_dump(mode="json")}
+
+
+@app.get("/api/v1/strategies/triggers/diagnostics")
+async def get_strategy_trigger_diagnostics():
+    services = get_services()
+    diag = await services.strategy_svc.get_trigger_diagnostics()
+    return diag.model_dump(mode="json")
+
+
+@app.get("/api/v1/strategies/overrides")
+async def get_strategy_overrides():
+    services = get_services()
+    overrides = services.strategy_svc.get_active_overrides()
+    return overrides.model_dump(mode="json")
+
+
+@app.post("/api/v1/strategies/overrides")
+async def update_strategy_overrides(req: StrategyOverridesRequest):
+    services = get_services()
+    overrides = ThresholdOverrides(**req.model_dump())
+    updated = await services.strategy_svc.update_overrides(overrides)
+    return {"status": "SUCCESS", "overrides": updated.model_dump(mode="json")}
+
+
+@app.post("/api/v1/strategies/overrides/reset")
+async def reset_strategy_overrides():
+    services = get_services()
+    reset = await services.strategy_svc.reset_overrides()
+    return {"status": "SUCCESS", "overrides": reset.model_dump(mode="json")}
+
+
+@app.post("/api/v1/strategies/force-entry")
+async def force_strategy_entry(req: StrategyForceEntryRequest):
+    services = get_services()
+    res = await services.strategy_svc.force_entry(
+        strategy=req.strategy,
+        direction=req.direction,
+        option_type=req.option_type,
+        override_premium_cap=req.override_premium_cap,
+    )
+    return res
 
 
 @app.get("/api/v1/audit/logs")
