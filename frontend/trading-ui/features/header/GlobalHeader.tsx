@@ -42,7 +42,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   // Listen for OAuth completion message from popup window
   React.useEffect(() => {
     const handleMessage = (e: MessageEvent) => {
-      if (e.data?.type === "BREEZE_SESSION_SUCCESS") {
+      if (e.data?.type === "BREEZE_SESSION_SUCCESS" || e.data?.type === "KITE_SESSION_SUCCESS") {
         refetchHealth();
       }
     };
@@ -55,6 +55,8 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [authError, setAuthError] = React.useState("");
   const [authSuccess, setAuthSuccess] = React.useState("");
+  const brokerBackend = health?.config?.broker_backend === "kite" ? "kite" : "breeze";
+  const brokerLabel = brokerBackend === "kite" ? "Kite" : "ICICI Breeze";
 
   const handleConnectBroker = async () => {
     try {
@@ -62,12 +64,12 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
       if (data.login_url) {
         window.open(
           data.login_url,
-          "ICICIBreezeLogin",
+          `${brokerLabel}Login`,
           "width=600,height=750,menubar=no,toolbar=no,status=no,scrollbars=yes"
         );
       }
     } catch (err) {
-      console.error("Failed to initiate ICICI Breeze login:", err);
+      console.error(`Failed to initiate ${brokerLabel} login:`, err);
     }
   };
 
@@ -76,8 +78,9 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
     let raw = tokenInput.trim();
     if (!raw) return;
 
-    if (raw.includes("apisession=")) {
-      const match = raw.match(/apisession=([a-zA-Z0-9_-]+)/);
+    const tokenParam = brokerBackend === "kite" ? "request_token" : "apisession";
+    if (raw.includes(`${tokenParam}=`)) {
+      const match = raw.match(new RegExp(`${tokenParam}=([a-zA-Z0-9_-]+)`));
       if (match) raw = match[1];
     }
 
@@ -86,12 +89,12 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
     setAuthSuccess("");
 
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/v1/broker/session/callback?apisession=${encodeURIComponent(raw)}`, {
+      const res = await fetch(`http://127.0.0.1:8000/api/v1/broker/session/callback?${tokenParam}=${encodeURIComponent(raw)}`, {
         headers: { Accept: "application/json" },
       });
       const data = await res.json();
       if (data.status === "SUCCESS") {
-        setAuthSuccess("Broker successfully authenticated & session token saved to .env!");
+        setAuthSuccess(`${brokerLabel} successfully authenticated and session saved to .env!`);
         await refetchHealth();
         setTimeout(() => {
           setShowAuthModal(false);
@@ -218,8 +221,8 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
             isBrokerActive
               ? "Broker Connected (Click to view session)"
               : isBrokerExpired
-              ? "Daily Breeze Session Expired on ICICI. Click to authenticate today's token."
-              : "Click to Connect ICICI Breeze"
+              ? `Daily ${brokerLabel} session expired. Click to authenticate today's token.`
+              : `Click to Connect ${brokerLabel}`
           }
         >
           <Lock className="w-3 h-3" />
@@ -286,7 +289,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
         </button>
       </div>
 
-      {/* ICICI Breeze Connection Modal */}
+      {/* Configured broker connection modal */}
       {showAuthModal && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-[#0f172a] border border-slate-800 rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4 text-slate-200">
@@ -294,7 +297,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
               <div className="flex items-center space-x-2">
                 <Lock className="w-4 h-4 text-blue-400" />
                 <h3 className="text-sm font-bold text-slate-100 uppercase tracking-wider">
-                  Connect ICICI Breeze Session
+                  Connect {brokerLabel} Session
                 </h3>
               </div>
               <button
@@ -307,14 +310,14 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
 
             <div className="space-y-3 text-xs leading-relaxed text-slate-400">
               <p>
-                To authenticate your daily broker session, log in on the official ICICI Direct 2FA portal.
+                To authenticate your daily broker session, log in on the official {brokerLabel} portal.
               </p>
 
               {/* Step 1 */}
               <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-2">
                 <div className="font-semibold text-slate-200 flex items-center space-x-1.5">
                   <span className="w-4 h-4 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">1</span>
-                  <span>Launch ICICI 2FA Login</span>
+                  <span>Launch {brokerLabel} Login</span>
                 </div>
                 <button
                   type="button"
@@ -322,7 +325,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
                   className="w-full flex items-center justify-center space-x-2 py-2 px-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded text-xs transition"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
-                  <span>Open ICICI Direct Portal</span>
+                  <span>Open {brokerLabel} Portal</span>
                 </button>
               </div>
 
@@ -330,7 +333,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
               <form onSubmit={handleManualActivate} className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-2.5">
                 <div className="font-semibold text-slate-200 flex items-center space-x-1.5">
                   <span className="w-4 h-4 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">2</span>
-                  <span>Paste Redirect URL or Session Token</span>
+                  <span>Paste Redirect URL or {brokerBackend === "kite" ? "Request Token" : "Session Token"}</span>
                 </div>
                 <p className="text-[11px] text-slate-500">
                   If redirected to <em>&quot;This site can&apos;t be reached&quot;</em>, copy the URL from your browser address bar and paste it here:
@@ -339,7 +342,9 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
                   type="text"
                   value={tokenInput}
                   onChange={(e) => setTokenInput(e.target.value)}
-                  placeholder="e.g. https://127.0.0.1/?apisession=57052722"
+                  placeholder={brokerBackend === "kite"
+                    ? "e.g. https://127.0.0.1/?request_token=..."
+                    : "e.g. https://127.0.0.1/?apisession=57052722"}
                   className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-xs text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500"
                 />
                 {authError && (
@@ -372,4 +377,3 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
     </header>
   );
 }
-

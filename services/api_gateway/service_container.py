@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import logging
 from typing import Optional
 
-from libs.config.settings import MarketDataBackend, PlatformSettings, get_platform_settings
+from libs.config.settings import BrokerBackend, MarketDataBackend, PlatformSettings, get_platform_settings
 from libs.events.bus import EventBus, InMemoryEventBus, get_event_bus
 from services.audit.repository import AuditRepository
 from services.audit.service import AuditService
@@ -104,12 +104,29 @@ async def initialize_services(
     session_svc = BrokerSessionService(repository=session_repo, event_bus=bus)
     await session_svc.initialize()
 
-    gateway_svc = BrokerGatewayService()
+    gateway_svc = BrokerGatewayService(settings=app_settings)
     await gateway_svc.initialize()
     session_svc.set_broker_gateway(gateway_svc)
 
     # If credentials and session token are configured in environment, auto-activate
-    if (
+    if app_settings.broker_backend == BrokerBackend.KITE:
+        kite_key = app_settings.kite_api_key.get_secret_value() if app_settings.kite_api_key else ""
+        kite_secret = app_settings.kite_api_secret.get_secret_value() if app_settings.kite_api_secret else ""
+        kite_request = app_settings.kite_request_token.get_secret_value() if app_settings.kite_request_token else ""
+        kite_access = app_settings.kite_access_token.get_secret_value() if app_settings.kite_access_token else ""
+        if kite_key and kite_secret and (kite_request or kite_access):
+            try:
+                logger.info("Attempting auto-activation of configured Kite session...")
+                await session_svc.activate_session(
+                    api_key=kite_key,
+                    secret_key=kite_secret,
+                    session_token=kite_request,
+                    access_token=kite_access or None,
+                    account_id="ZERODHA_PRIMARY",
+                )
+            except Exception as exc:
+                logger.warning("Startup Kite auto-activation deferred: %s", exc)
+    elif (
         app_settings.breeze_api_key
         and app_settings.breeze_secret_key
         and app_settings.breeze_session_token

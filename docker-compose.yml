@@ -43,6 +43,12 @@ services:
       - BREEZE_API_KEY=${BREEZE_API_KEY:-test_api_key}
       - BREEZE_SECRET_KEY=${BREEZE_SECRET_KEY:-test_secret_key}
       - BREEZE_SESSION_TOKEN=${BREEZE_SESSION_TOKEN:-test_session_token}
+      - BROKER_BACKEND=${BROKER_BACKEND:-breeze}
+      - KITE_API_KEY=${KITE_API_KEY:-}
+      - KITE_API_SECRET=${KITE_API_SECRET:-}
+      - KITE_REQUEST_TOKEN=${KITE_REQUEST_TOKEN:-}
+      - KITE_ACCESS_TOKEN=${KITE_ACCESS_TOKEN:-}
+      - KITE_PRODUCT=${KITE_PRODUCT:-NRML}
       - TRADING_MODE=PAPER
     volumes:
       - ./data:/app/data
@@ -65,4 +71,3 @@ services:
 volumes:
   redpanda-data:
   redis-data:
-

@@ -92,11 +92,11 @@ class SessionTimersConfig(BaseModel):
 
 class StrategyTunablesConfig(BaseModel):
     """Algorithmic tuning parameters."""
-    bb_width_percentile_threshold: float = Field(default=25.0, ge=20, le=35)
+    bb_width_percentile_threshold: float = Field(default=35.0, ge=15, le=50)
     compression_lookback_bars: int = Field(default=8, ge=6, le=10)
-    box_max_age_bars: int = Field(default=8, ge=1, le=20)
-    breakout_buffer_atr: float = Field(default=0.05, ge=0.05, le=0.10)
-    breakout_max_extension_atr: float = Field(default=0.75, ge=0.60, le=1.0)
+    box_max_age_bars: int = Field(default=12, ge=1, le=20)
+    breakout_buffer_atr: float = Field(default=0.03, ge=0.01, le=0.10)
+    breakout_max_extension_atr: float = Field(default=0.90, ge=0.60, le=1.5)
     evaluation_interval_sec: int = Field(default=2, ge=1, le=10, description="Scheduler loop interval in seconds")
     trend_pullback_enabled: bool = Field(default=True)
     volatility_breakout_enabled: bool = Field(default=True)
@@ -104,8 +104,8 @@ class StrategyTunablesConfig(BaseModel):
     rvol_threshold: float = Field(default=1.20, ge=1.0, le=3.0)
     ema_slope_threshold: float = Field(default=0.10, gt=0, le=1.0)
     min_confirmation_score: int = Field(default=2, ge=1, le=6, description="Minimum confirmation points for Strategy A")
-    strat_b_min_confirmation: int = Field(default=3, ge=1, le=6, description="Minimum confirmation points for Strategy B")
-    box_max_height_atr: float = Field(default=1.30, ge=1.0, le=2.0, description="Max compression box height in ATR")
+    strat_b_min_confirmation: int = Field(default=2, ge=1, le=6, description="Minimum confirmation points for Strategy B")
+    box_max_height_atr: float = Field(default=1.50, ge=1.0, le=2.5, description="Max compression box height in ATR")
     supertrend_period: int = Field(default=10)
     supertrend_multiplier: float = Field(default=3.0)
 
@@ -120,7 +120,7 @@ class CompressionBox(BaseModel):
     locked_at: datetime = Field(default_factory=utc_now)
     created_bar_time: str = ""
     bars_active: int = 0
-    max_bars: int = 8
+    max_bars: int = 12
     is_locked: bool = False
 
 
@@ -295,7 +295,7 @@ class TriggerCondition(BaseModel):
     current_value: str
     target_threshold: str
     unit: str = ""
-    status: str  # "PASSED" | "PENDING"
+    status: str  # "PASSED" | "PENDING" | "N/A"
     gap_description: str
 
 
@@ -340,6 +340,11 @@ class ThresholdOverrides(BaseModel):
     min_pullback_depth: Optional[float] = None
     max_pullback_depth: Optional[float] = None
     min_available_confirmations: Optional[int] = None
+    strat_b_max_extension_atr: Optional[float] = None
+    strat_b_breakout_buffer_atr: Optional[float] = None
+    strat_b_breakout_confirm_polls: Optional[int] = None
+    strat_b_box_max_age_bars: Optional[int] = None
+    strat_b_min_available_confirmations: Optional[int] = None
     bypass_entry_window: bool = False
     active: bool = False
 

@@ -100,7 +100,7 @@ class SimulationEngine:
                         SELECT DISTINCT substr(start_time, 1, 10) as day
                         FROM historical_candles
                         WHERE instrument_id = 'INST-NIFTY-INDEX' AND interval = '5m'
-                        AND source IN ('BREEZE', 'LIVE')
+                        AND source IN ('BREEZE', 'KITE', 'LIVE')
                         ORDER BY day DESC
                         LIMIT 30;
                     """)
@@ -145,7 +145,7 @@ class SimulationEngine:
                     limit=1000,
                 )
                 if candles:
-                    all_candles = sorted((c for c in candles if c.source in ("BREEZE", "LIVE") and c.end_time <= min(utc_now(), session_end_utc)), key=lambda c: c.start_time)
+                    all_candles = sorted((c for c in candles if c.source in ("BREEZE", "KITE", "LIVE") and c.end_time <= min(utc_now(), session_end_utc)), key=lambda c: c.start_time)
             except Exception as ex:
                 logger.warning("Historical service query error: %s", ex)
 

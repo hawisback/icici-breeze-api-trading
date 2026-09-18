@@ -63,17 +63,30 @@ export function TradingChart() {
   }, [candles]);
 
   const sessionInfo = useMemo(() => getMarketSessionInfo(), []);
-  const isBreeze = lastCandle?.source === "BREEZE";
+  const liveSource = lastCandle?.source;
+  const isLive = liveSource === "BREEZE" || liveSource === "KITE" || liveSource === "LIVE";
+  const liveLabel = liveSource === "KITE" ? "KITE" : "BREEZE";
   const formattedLastTime = lastCandle ? formatIST(lastCandle.isoTime || lastCandle.time) : "--";
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
+
+    const toIST = (timestamp: number) =>
+      new Date(timestamp * 1000).toLocaleString("en-IN", {
+        timeZone: "Asia/Kolkata",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
 
     const chart = createChart(chartContainerRef.current, {
       layout: {
         background: { type: ColorType.Solid, color: "#0a0e17" },
         textColor: "#94a3b8",
         fontSize: 11,
+      },
+      localization: {
+        timeFormatter: toIST,
       },
       grid: {
         vertLines: { color: "#1e293b" },
@@ -89,8 +102,10 @@ export function TradingChart() {
         borderColor: "#1e293b",
         timeVisible: true,
         secondsVisible: false,
+        tickMarkFormatter: toIST,
       },
     });
+
 
     const candleSeries = chart.addCandlestickSeries({
       upColor: "#10b981",
@@ -179,7 +194,7 @@ export function TradingChart() {
           <span className="font-bold text-slate-100">{selectedSymbol}</span>
 
           {/* Data Source Badge */}
-          {isBreeze ? (
+          {isLive ? (
             <span
               className={`px-1.5 py-0.5 rounded font-mono text-[9px] font-bold border ${
                 sessionInfo.isOpen
@@ -187,7 +202,7 @@ export function TradingChart() {
                   : "bg-cyan-950/80 border-cyan-700 text-cyan-300"
               }`}
             >
-              {sessionInfo.isOpen ? "BREEZE LIVE" : "BREEZE (LAST CLOSE)"}
+              {sessionInfo.isOpen ? `${liveLabel} LIVE` : `${liveLabel} (LAST CLOSE)`}
             </span>
           ) : (
             <span className="px-1.5 py-0.5 rounded font-mono text-[9px] font-bold bg-amber-950/80 border border-amber-700 text-amber-300">

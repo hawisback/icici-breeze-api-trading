@@ -278,7 +278,8 @@ app.add_middleware(SecurityHeadersMiddleware)
 class LoginRequest(BaseModel):
     api_key: str
     secret_key: str
-    session_token: str
+    session_token: str = ""
+    access_token: Optional[str] = None
     account_id: str = "ICICI_PRIMARY"
 
 
@@ -479,15 +480,17 @@ async def create_ws_ticket(current_user: UserPrincipal = Depends(get_current_use
 @app.get("/api/v1/broker/session/login-url")
 @app.get("/api/v1/session/login-url")
 async def get_session_login_url():
-    """Return the official ICICI Direct 2FA login URL for generating the daily session token."""
+    """Return the selected broker's official daily login URL."""
     settings = get_platform_settings()
-    api_key = settings.breeze_api_key.get_secret_value() if settings.breeze_api_key else ""
-    login_url = f"https://api.icicidirect.com/apiuser/login?api_key={api_key}"
+    login_url = get_services().session_svc.get_login_url()
+    api_key_secret = settings.kite_api_key if settings.broker_backend.value == "kite" else settings.breeze_api_key
+    api_key = api_key_secret.get_secret_value() if api_key_secret else ""
     return {
         "login_url": login_url,
         "api_key": api_key,
         "redirect_url_hint": "http://127.0.0.1:8000/api/v1/broker/session/callback",
-        "instructions": "Open this URL in your browser, log in with ICICI Direct credentials and 2FA. ICICI Direct will redirect back to this callback endpoint, automatically populating the session token into .env and activating your session.",
+        "broker": settings.broker_backend.value,
+        "instructions": "Open this URL in your broker's browser login flow. The callback will persist the daily token and activate the selected live adapter.",
     }
 
 
@@ -506,6 +509,7 @@ async def session_login(req: LoginRequest):
         api_key=req.api_key,
         secret_key=req.secret_key,
         session_token=req.session_token,
+        access_token=req.access_token,
         account_id=req.account_id,
     )
     return result
@@ -519,22 +523,31 @@ async def broker_session_callback(
     apisession: Optional[str] = None,
     session_token: Optional[str] = None,
     token: Optional[str] = None,
+    request_token: Optional[str] = None,
 ):
     """OAuth callback endpoint handling ICICI Direct 2FA redirect.
 
     Captures daily `apisession`, updates `.env` directly, synchronizes runtime configuration,
     and activates running broker sessions across all services.
     """
-    raw_token = apisession or session_token or token
+    settings = get_platform_settings()
+    is_kite = settings.broker_backend.value == "kite"
+    broker_display_name = "Kite" if is_kite else "ICICI Breeze"
+    success_event_type = "KITE_SESSION_SUCCESS" if is_kite else "BREEZE_SESSION_SUCCESS"
+    raw_token = request_token if is_kite else (apisession or session_token or token)
     if not raw_token:
         # Check query parameters directly as fallback
-        raw_token = request.query_params.get("apisession") or request.query_params.get("session_token")
+        raw_token = (
+            request.query_params.get("request_token")
+            if is_kite
+            else request.query_params.get("apisession") or request.query_params.get("session_token")
+        )
 
     accept_header = request.headers.get("accept", "")
     wants_json = "application/json" in accept_header
 
     if not raw_token or not raw_token.strip():
-        msg = "Missing 'apisession' query parameter from ICICI Direct redirect."
+        msg = "Missing broker session token in the callback query parameters."
         if wants_json:
             return JSONResponse(
                 status_code=400,
@@ -567,13 +580,19 @@ a {{ color: #38bdf8; text-decoration: none; }}
     masked = token_clean[:4] + "..." + token_clean[-4:] if len(token_clean) > 8 else "***"
 
     # 1. Update .env file directly and sync runtime PlatformSettings
-    env_updated = update_env_variable(key="BREEZE_SESSION_TOKEN", value=token_clean)
+    # Breeze can persist its callback token. Kite request tokens are one-time and
+    # short-lived, so the exchanged access token is persisted after activation.
+    env_updated = False if is_kite else update_env_variable(
+        key="BREEZE_SESSION_TOKEN",
+        value=token_clean,
+    )
 
     # 2. Activate in-memory session and broker gateway
     services = get_services()
-    settings = get_platform_settings()
-    api_key = settings.breeze_api_key.get_secret_value() if settings.breeze_api_key else ""
-    secret_key = settings.breeze_secret_key.get_secret_value() if settings.breeze_secret_key else ""
+    api_secret = settings.kite_api_key if is_kite else settings.breeze_api_key
+    secret_secret = settings.kite_api_secret if is_kite else settings.breeze_secret_key
+    api_key = api_secret.get_secret_value() if api_secret else ""
+    secret_key = secret_secret.get_secret_value() if secret_secret else ""
 
     session_result = {}
     if api_key and secret_key:
@@ -582,11 +601,19 @@ a {{ color: #38bdf8; text-decoration: none; }}
                 api_key=api_key,
                 secret_key=secret_key,
                 session_token=token_clean,
-                account_id="ICICI_PRIMARY",
+                account_id="ZERODHA_PRIMARY" if is_kite else "ICICI_PRIMARY",
             )
         except Exception as exc:
             logger.warning("Session service activation produced warning: %s", exc)
             session_result = {"status": "ACTIVATING_DEFERRED", "error": str(exc)}
+
+    if is_kite and session_result.get("connected"):
+        kite_access_token = getattr(services.gateway_svc.kite_adapter, "access_token", "")
+        if kite_access_token:
+            env_updated = update_env_variable(
+                key="KITE_ACCESS_TOKEN",
+                value=kite_access_token,
+            )
 
     if session_result.get("status") == "AUTHENTICATION_FAILED":
         err_msg = session_result.get("message", "Authentication rejected by ICICI Direct. Session key is expired or invalid.")
@@ -605,7 +632,7 @@ a {{ color: #38bdf8; text-decoration: none; }}
         return JSONResponse(
             content={
                 "status": "SUCCESS",
-                "message": "Breeze session token captured, persisted to .env, and activated.",
+                "message": f"{settings.broker_backend.value.title()} session token captured, persisted to .env, and activated.",
                 "token_masked": masked,
                 "env_updated": env_updated,
                 "session": session_result,
@@ -691,7 +718,7 @@ a {{ color: #38bdf8; text-decoration: none; }}
 <body>
   <div class="card">
     <div class="icon">&#10003;</div>
-    <h1>ICICI Breeze Session Authenticated</h1>
+    <h1>{broker_display_name} Session Authenticated</h1>
     <p>Session token successfully captured, saved to <code>.env</code>, and activated across platform services.</p>
     <div class="badge">TOKEN: {masked}</div>
     <div>
@@ -701,7 +728,7 @@ a {{ color: #38bdf8; text-decoration: none; }}
   <script>
     if (window.opener) {{
       window.opener.postMessage({{
-        type: 'BREEZE_SESSION_SUCCESS',
+        type: '{success_event_type}',
         token: '{masked}',
         status: 'CONNECTED'
       }}, '*');

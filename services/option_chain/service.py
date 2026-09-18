@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime
 import logging
+from time import monotonic
 from typing import Any, Optional
+import asyncio
 
 from libs.contracts.models import OptionRight
 from services.instrument.service import InstrumentService
@@ -26,6 +29,10 @@ class OptionChainService:
         self.inst_svc = instrument_service
         self.mkt_svc = market_data_service
         self.broker_gateway = broker_gateway
+        self._kite_chain_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+        self._kite_chain_cache_ttl = 10.0
+        self._kite_chain_retry_after = 0.0
+        self._kite_chain_lock = asyncio.Lock()
 
     def set_broker_gateway(self, broker_gateway: Any) -> None:
         self.broker_gateway = broker_gateway
@@ -130,6 +137,40 @@ class OptionChainService:
                     }
             except Exception as exc:
                 logger.warning("Live Breeze option chain query error: %s; falling back to complete synthetic strikes.", exc)
+
+        # Kite returns exchange-valid tradingsymbols, so route its live chain directly
+        # to the UI shape and avoid rebuilding contracts from synthetic local symbols.
+        if self.broker_gateway:
+            active_adapter = getattr(self.broker_gateway, "active_adapter", None)
+            if (
+                getattr(self.broker_gateway, "active_broker_name", None) == "kite"
+                and active_adapter
+                and callable(getattr(active_adapter, "get_option_chain_view", None))
+            ):
+                cache_key = (clean_underlying, selected_expiry)
+                cached = self._kite_chain_cache.get(cache_key)
+                if cached and monotonic() - cached[0] < self._kite_chain_cache_ttl:
+                    return deepcopy(cached[1])
+
+                async with self._kite_chain_lock:
+                    cached = self._kite_chain_cache.get(cache_key)
+                    if cached and monotonic() - cached[0] < self._kite_chain_cache_ttl:
+                        return deepcopy(cached[1])
+
+                    if monotonic() >= self._kite_chain_retry_after:
+                        try:
+                            kite_chain = await active_adapter.get_option_chain_view(
+                                underlying=clean_underlying,
+                                expiry=selected_expiry,
+                            )
+                            if kite_chain.get("strikes"):
+                                kite_chain["available_expiries"] = all_expiries or kite_chain.get("available_expiries", [])
+                                self._kite_chain_cache[cache_key] = (monotonic(), kite_chain)
+                                self._kite_chain_retry_after = 0.0
+                                return deepcopy(kite_chain)
+                        except Exception as exc:
+                            self._kite_chain_retry_after = monotonic() + 15.0
+                            logger.warning("Live Kite option chain query error: %s; falling back to local instruments.", exc)
 
         # 3. Fallback / Offline / Market Closed Complete Strike Matrix
         instruments = await self.inst_svc.get_option_chain_instruments(

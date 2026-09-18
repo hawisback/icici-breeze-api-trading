@@ -73,6 +73,25 @@ class HistoricalService:
         if not self.broker_gateway:
             return []
 
+        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
+        from services.broker_gateway.service import BrokerGatewayService
+
+        if (
+            isinstance(self.broker_gateway, BrokerGatewayService)
+            and active_adapter
+            and getattr(active_adapter, "is_active", False)
+            and callable(getattr(active_adapter, "fetch_historical_candles", None))
+        ):
+            try:
+                return await active_adapter.fetch_historical_candles(
+                    instrument_id=instrument_id,
+                    interval=interval,
+                    days_back=days_back,
+                )
+            except Exception as exc:
+                logger.warning("Configured broker historical fetch failed for %s: %s", instrument_id, exc)
+                return []
+
         breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
         if not breeze_adapter or not hasattr(breeze_adapter, "client_manager"):
             return []
@@ -205,14 +224,14 @@ class HistoricalService:
     ) -> list[Candle]:
         breeze_active = False
         if self.broker_gateway:
-            breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
-            if breeze_adapter and hasattr(breeze_adapter, "client_manager"):
-                breeze_active = getattr(breeze_adapter.client_manager, "is_active", False)
+            active_adapter = getattr(self.broker_gateway, "active_adapter", None)
+            if active_adapter and getattr(active_adapter, "is_active", False):
+                breeze_active = True
 
         latest_candle = await self.repo.get_latest_candle(instrument_id, interval)
 
         # Proactively fetch from Breeze if session is active and cached candles are missing or simulated
-        if breeze_active and (not latest_candle or latest_candle.source not in ("BREEZE", "LIVE")
+        if breeze_active and (not latest_candle or latest_candle.source not in ("BREEZE", "KITE", "LIVE")
                               or (utc_now() - latest_candle.end_time).total_seconds() >= (900 if interval == "15m" else 300)):
             breeze_candles = await self.fetch_candles_from_breeze(instrument_id, interval)
             if breeze_candles:
@@ -233,7 +252,7 @@ class HistoricalService:
             if breeze_candles:
                 await self.repo.purge_simulated_candles(instrument_id, interval)
                 await self.repo.save_candles(breeze_candles)
-                return breeze_candles[-limit:]
+                return sorted(breeze_candles, key=lambda candle: candle.start_time)[-limit:]
 
         if not candles:
             # Fall back to realistic synthetic candles if offline

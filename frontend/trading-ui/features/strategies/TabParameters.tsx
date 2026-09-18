@@ -21,10 +21,11 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
     try {
       setIsSaving(true);
       setSaveSuccess(false);
-      await updateStrategyConfig(form);
+      const response = await updateStrategyConfig(form);
+      if (response?.config) setForm(response.config);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
-      onRefresh();
+      await onRefresh();
     } catch (e: any) {
       alert(`Save failed: ${e.message}`);
     } finally {
@@ -339,13 +340,17 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
               <label className="text-xs text-slate-400 block mb-1">Max Trades Per Day</label>
               <input
                 type="number"
+                min="1"
+                max="20"
+                step="1"
+                required
                 value={form.risk.max_trades_per_day}
                 onChange={(e) =>
                   setForm({
                     ...form,
                     risk: {
                       ...form.risk,
-                      max_trades_per_day: parseInt(e.target.value, 10),
+                      max_trades_per_day: Number(e.target.value) || 1,
                     },
                   })
                 }
@@ -440,24 +445,43 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
           </p>
         </div>
 
-        {/* 4. Strategy Engine Tunables */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-3">
-          <label className="block text-xs text-slate-400">Account equity for position sizing
-            <input type="number" min="1" value={form.risk.account_equity ?? 500000}
-              onChange={e => setForm({...form, risk: {...form.risk, account_equity: Number(e.target.value)}})}
-              className="block bg-slate-950 border border-slate-800 rounded px-3 py-2" />
-          </label>
-          <label className="block text-xs text-slate-400">Strategy A normalized EMA slope threshold
-            <input type="number" min="0.01" max="1" step="0.01" value={form.tunables.ema_slope_threshold ?? 0.10}
-              onChange={e => setForm({...form, tunables: {...form.tunables, ema_slope_threshold: Number(e.target.value)}})}
-              className="block bg-slate-950 border border-slate-800 rounded px-3 py-2" />
-          </label>
-          <label className="block text-xs text-slate-400">Strategy A required confirmation points (default 2 of 6)
-            <input type="number" min="1" max="6" step="1" value={form.tunables.min_confirmation_score ?? 2}
-              onChange={e => setForm({...form, tunables: {...form.tunables, min_confirmation_score: Number(e.target.value)}})}
-              className="block bg-slate-950 border border-slate-800 rounded px-3 py-2" />
-          </label>
+        {/* 4. Strategy A — Trend Pullback Parameters */}
+        <div className="bg-slate-900/90 border border-cyan-800/40 rounded-xl p-5 shadow-lg space-y-4">
+          <div className="flex items-center gap-2 pb-2 border-b border-slate-800 text-cyan-400 text-sm font-bold uppercase tracking-wider">
+            <Sliders className="w-4 h-4" />
+            Strategy A — Trend Pullback Parameters
+          </div>
+          <p className="text-[11px] text-slate-500 -mt-1">
+            Controls impulse detection sensitivity, confirmation bar requirements, and position sizing equity base for Strategy A.
+          </p>
+
+          <div className="grid grid-cols-1 gap-4">
+            <label className="block">
+              <span className="text-xs text-slate-400 font-medium">Account equity for position sizing (₹)</span>
+              <span className="block text-[10px] text-slate-600 mb-1">Used to compute lot size relative to max capital per trade.</span>
+              <input type="number" min="1" value={form.risk.account_equity ?? 500000}
+                onChange={e => setForm({...form, risk: {...form.risk, account_equity: Number(e.target.value)}})}
+                className="block w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" />
+            </label>
+
+            <label className="block">
+              <span className="text-xs text-slate-400 font-medium">Normalized EMA slope threshold</span>
+              <span className="block text-[10px] text-slate-600 mb-1">Minimum EMA slope (0–1 normalised) to confirm bullish/bearish impulse. Lower = more signals. Default: 0.10.</span>
+              <input type="number" min="0.01" max="1" step="0.01" value={form.tunables.ema_slope_threshold ?? 0.10}
+                onChange={e => setForm({...form, tunables: {...form.tunables, ema_slope_threshold: Number(e.target.value)}})}
+                className="block w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" />
+            </label>
+
+            <label className="block">
+              <span className="text-xs text-slate-400 font-medium">Required confirmation score (of 6)</span>
+              <span className="block text-[10px] text-slate-600 mb-1">Minimum number of confirmation checklist items that must pass before entry. Lower = easier entry. Default: 2.</span>
+              <input type="number" min="1" max="6" step="1" value={form.tunables.min_confirmation_score ?? 2}
+                onChange={e => setForm({...form, tunables: {...form.tunables, min_confirmation_score: Number(e.target.value)}})}
+                className="block w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" />
+            </label>
+          </div>
         </div>
+
         <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
           <div className="flex items-center gap-2 pb-2 border-b border-slate-800 text-amber-400 text-sm font-bold uppercase tracking-wider">
             <ShieldAlert className="w-4 h-4" />

@@ -17,6 +17,10 @@ export interface SystemHealth {
     portfolio: string;
     system_mode: string;
   };
+  config?: {
+    broker_backend?: "breeze" | "kite";
+    [key: string]: unknown;
+  };
 }
 
 export interface QuoteData {
@@ -151,16 +155,22 @@ export async function fetchCandles(instrumentId: string, interval: string = "5m"
   const res = await fetch(`${API_BASE}/market/candles?instrument_id=${instrumentId}&interval=${interval}&limit=120`);
   if (!res.ok) throw new Error("Failed to fetch candles");
   const data = await res.json();
-  return data.map((c: any) => ({
-    time: Math.floor(new Date(c.start_time).getTime() / 1000),
-    open: c.open,
-    high: c.high,
-    low: c.low,
-    close: c.close,
-    volume: c.volume,
-    source: c.source || "BREEZE",
-    isoTime: c.start_time,
-  }));
+  const byTime = new Map<number, CandleData>();
+  for (const c of data) {
+    const time = Math.floor(new Date(c.start_time).getTime() / 1000);
+    if (!Number.isFinite(time)) continue;
+    byTime.set(time, {
+      time,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: c.volume,
+      source: c.source || "BREEZE",
+      isoTime: c.start_time,
+    });
+  }
+  return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
 }
 
 export async function fetchOptionChain(underlying: string = "NIFTY", expiry?: string): Promise<OptionChainResponse> {
@@ -236,7 +246,7 @@ export async function setSystemMode(mode: string): Promise<any> {
   return res.json();
 }
 
-export async function fetchLoginUrl(): Promise<{ login_url: string; api_key: string }> {
+export async function fetchLoginUrl(): Promise<{ login_url: string; api_key: string; broker?: "breeze" | "kite" }> {
   const res = await fetch(`${API_BASE}/broker/session/login-url`);
   if (!res.ok) throw new Error("Failed to fetch login URL");
   return res.json();
@@ -347,7 +357,7 @@ export interface TriggerConditionData {
   current_value: string;
   target_threshold: string;
   unit?: string;
-  status: "PASSED" | "PENDING" | "BLOCKED";
+  status: "PASSED" | "PENDING" | "BLOCKED" | "N/A";
   gap_description: string;
 }
 
@@ -359,8 +369,44 @@ export interface StrategyTriggerDiagnosticsData {
   overall_status: "READY_TO_TRIGGER" | "WAITING" | "BLOCKED";
   phase_state?: string;
   phase_summary?: {
-    regime?: { status: string; direction_score: string; adx: number };
-    impulse?: { found: boolean; height_atr: number };
+    regime?: {
+      status: string;
+      direction_score: string;
+      adx: number;
+      qualified?: boolean;
+      qualified_since?: string | null;
+      setup_cutoff?: string | null;
+      cutoff_event?: string;
+    };
+    impulse?: {
+      found: boolean;
+      height_atr: number;
+      source?: string;
+      impulse_start?: string | null;
+      impulse_end?: string | null;
+      impulse_direction?: string;
+      impulse_points?: number;
+      impulse_atr_multiple?: number;
+      impulse_crossed_setup_cutoff?: boolean;
+    };
+    impulse_search?: {
+      setup_cutoff_timestamp?: string | null;
+      search_start_timestamp?: string | null;
+      included_pre_cutoff?: boolean;
+      pre_cutoff_candles_included?: number;
+      post_cutoff_candles_searched?: number;
+      search_candle_count?: number;
+      max_pre_cutoff_candles?: number;
+      rejection_reasons?: { category: string; detail: string }[];
+    };
+    impulse_rejection_reason?: string | null;
+    setup_direction?: string;
+    macro_regime_qualified?: boolean;
+    regime_first_qualified_at?: string | null;
+    setup_cutoff?: string | null;
+    setup_cutoff_event?: string;
+    setup_age_seconds?: number | null;
+    completed_5m_candles_since_cutoff?: number;
     pullback?: { state: string; bars: number; depth_pct: number; retest: string };
     compression?: { bb_percentile: number; is_compressed: boolean };
     box?: { status: string; high: number; low: number; height_pts: number; height_atr: number; bars_active: number };
@@ -481,7 +527,13 @@ export async function updateStrategyConfig(config: any): Promise<any> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   });
-  if (!res.ok) throw new Error("Failed to update strategy config");
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    const detail = Array.isArray(error.detail)
+      ? error.detail.map((item: any) => item.msg || item).join(", ")
+      : error.detail;
+    throw new Error(detail || "Failed to update strategy config");
+  }
   return res.json();
 }
 

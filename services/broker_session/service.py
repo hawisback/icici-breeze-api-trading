@@ -35,15 +35,22 @@ class BrokerSessionService:
         self.broker_gateway = broker_gateway
 
     def get_login_url(self, api_key: Optional[str] = None) -> str:
-        """Return the ICICI Direct 2FA login URL for daily session token generation."""
+        """Return the selected broker's daily login URL."""
         key = api_key or self._active_api_key
         if not key:
             try:
                 from libs.config import get_platform_settings
                 cfg = get_platform_settings()
-                key = cfg.breeze_api_key
+                key_secret = cfg.kite_api_key if cfg.broker_backend.value == "kite" else cfg.breeze_api_key
+                key = key_secret.get_secret_value() if key_secret else ""
             except Exception:
                 key = ""
+        try:
+            from libs.config import get_platform_settings
+            if get_platform_settings().broker_backend.value == "kite":
+                return f"https://kite.zerodha.com/connect/login?v=3&api_key={key or ''}"
+        except Exception:
+            pass
         return f"https://api.icicidirect.com/apiuser/login?api_key={key or ''}"
 
     async def initialize(self) -> None:
@@ -56,6 +63,7 @@ class BrokerSessionService:
         session_token: str,
         account_id: str = "ICICI_PRIMARY",
         expiry_hours: int = 24,
+        access_token: Optional[str] = None,
     ) -> dict[str, Any]:
         """Activate daily broker session."""
         session_id = generate_id()
@@ -65,10 +73,11 @@ class BrokerSessionService:
         # Retain raw credentials in memory only
         self._active_api_key = api_key
         self._active_secret_key = secret_key
-        self._active_token = session_token
+        self._active_token = access_token or session_token
 
         # Mask token for persistence
-        masked = session_token[:4] + "..." + session_token[-4:] if len(session_token) > 8 else "***"
+        token_for_mask = access_token or session_token
+        masked = token_for_mask[:4] + "..." + token_for_mask[-4:] if len(token_for_mask) > 8 else "***"
 
         await self.repo.save_session(
             session_id=session_id,
@@ -98,19 +107,26 @@ class BrokerSessionService:
         # Propagate credentials to live broker adapter if gateway is wired
         gateway_synced = False
         auth_error: Optional[str] = None
-        if self.broker_gateway and hasattr(self.broker_gateway, "breeze_adapter"):
+        if self.broker_gateway and hasattr(self.broker_gateway, "active_adapter"):
             try:
-                gateway_synced = await self.broker_gateway.breeze_adapter.authenticate(
-                    api_key=api_key,
-                    secret_key=secret_key,
-                    session_token=session_token,
-                )
-                logger.info("Breeze live adapter authentication result: %s", gateway_synced)
+                adapter = self.broker_gateway.active_adapter
+                if access_token and hasattr(adapter, "authenticate_access_token"):
+                    gateway_synced = await adapter.authenticate_access_token(
+                        api_key=api_key,
+                        access_token=access_token,
+                    )
+                else:
+                    gateway_synced = await adapter.authenticate(
+                        api_key=api_key,
+                        secret_key=secret_key,
+                        session_token=session_token,
+                    )
+                logger.info("%s live adapter authentication result: %s", self.broker_gateway.active_broker_name, gateway_synced)
             except Exception as exc:
                 auth_error = str(exc)
                 logger.warning("Breeze live adapter authentication error: %s", exc)
 
-        if not gateway_synced and self.broker_gateway and hasattr(self.broker_gateway, "breeze_adapter"):
+        if not gateway_synced and self.broker_gateway and hasattr(self.broker_gateway, "active_adapter"):
             await self.repo.record_health_check("DISCONNECTED", latency_ms=0.0, message="Authentication failed")
             return {
                 "session_id": session_id,
@@ -154,21 +170,22 @@ class BrokerSessionService:
                 "message": "Broker session has expired",
             }
 
-        # Check if underlying Breeze SDK client is genuinely active
-        if self.broker_gateway and hasattr(self.broker_gateway, "breeze_adapter"):
-            adapter = self.broker_gateway.breeze_adapter
-            if hasattr(adapter, "client_manager"):
+        # Check if the selected live adapter is genuinely active.
+        if self.broker_gateway and hasattr(self.broker_gateway, "active_adapter"):
+            adapter = self.broker_gateway.active_adapter
+            is_active = getattr(adapter, "is_active", False)
+            if not is_active and hasattr(adapter, "client_manager"):
                 is_active = getattr(adapter.client_manager, "is_active", False)
-                if not is_active:
-                    return {
-                        "status": "EXPIRED",
-                        "connected": False,
-                        "session_id": active["session_id"],
-                        "account_id": active["account_id"],
-                        "expires_at": active["expires_at"],
-                        "token_masked": active["session_token_masked"],
-                        "message": "Daily Breeze session has expired on ICICI servers. Please reconnect broker with today's token.",
-                    }
+            if not is_active:
+                return {
+                    "status": "EXPIRED",
+                    "connected": False,
+                    "session_id": active["session_id"],
+                    "account_id": active["account_id"],
+                    "expires_at": active["expires_at"],
+                    "token_masked": active["session_token_masked"],
+                    "message": "The selected broker session is no longer active. Please reconnect with today's token.",
+                }
 
         return {
             "status": "CONNECTED",
@@ -188,4 +205,3 @@ class BrokerSessionService:
             "secret_key": self._active_secret_key or "",
             "session_token": self._active_token or "",
         }
-

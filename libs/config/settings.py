@@ -35,6 +35,13 @@ class MarketDataBackend(str, Enum):
     BREEZE = "breeze"
 
 
+class BrokerBackend(str, Enum):
+    """Live broker selected for order/session operations."""
+
+    BREEZE = "breeze"
+    KITE = "kite"
+
+
 class PlatformSettings(BaseSettings):
     """Central typed platform settings with fail-closed safety validation."""
 
@@ -75,11 +82,17 @@ class PlatformSettings(BaseSettings):
 
     # Market Data
     market_data_backend: MarketDataBackend = Field(default=MarketDataBackend.SIMULATED, alias="MARKET_DATA_BACKEND")
+    broker_backend: BrokerBackend = Field(default=BrokerBackend.BREEZE, alias="BROKER_BACKEND")
 
     # Secrets (strictly redacted by SecretStr)
     breeze_api_key: Optional[SecretStr] = Field(default=None, alias="BREEZE_API_KEY")
     breeze_secret_key: Optional[SecretStr] = Field(default=None, alias="BREEZE_SECRET_KEY")
     breeze_session_token: Optional[SecretStr] = Field(default=None, alias="BREEZE_SESSION_TOKEN")
+    kite_api_key: Optional[SecretStr] = Field(default=None, alias="KITE_API_KEY")
+    kite_api_secret: Optional[SecretStr] = Field(default=None, alias="KITE_API_SECRET")
+    kite_request_token: Optional[SecretStr] = Field(default=None, alias="KITE_REQUEST_TOKEN")
+    kite_access_token: Optional[SecretStr] = Field(default=None, alias="KITE_ACCESS_TOKEN")
+    kite_product: str = Field(default="NRML", alias="KITE_PRODUCT")
     auth_signing_key: Optional[SecretStr] = Field(default=None, alias="AUTH_SIGNING_KEY")
 
     # Auth & Tokens
@@ -144,6 +157,17 @@ class PlatformSettings(BaseSettings):
                 raise ValueError(
                     "BREEZE_API_KEY and BREEZE_SECRET_KEY are required when MARKET_DATA_BACKEND is 'breeze'."
                 )
+
+        # Kite credentials are required when Kite is selected for live trading.
+        if self.broker_backend == BrokerBackend.KITE and self.live_trading_enabled:
+            if not self.kite_api_key or not self.kite_api_secret:
+                raise ValueError(
+                    "KITE_API_KEY and KITE_API_SECRET are required when BROKER_BACKEND is 'kite' "
+                    "and live trading is enabled."
+                )
+
+        if self.kite_product.upper() not in {"MIS", "NRML", "CNC"}:
+            raise ValueError("KITE_PRODUCT must be one of MIS, NRML, or CNC.")
 
         return self
 
@@ -226,9 +250,15 @@ class PlatformSettings(BaseSettings):
             "live_allowed_accounts": self.live_allowed_accounts,
             "cors_allowed_origins": self.cors_allowed_origins,
             "market_data_backend": self.market_data_backend.value,
+            "broker_backend": self.broker_backend.value,
             "breeze_api_key": "[CONFIGURED]" if self.breeze_api_key else "[NOT CONFIGURED]",
             "breeze_secret_key": "[CONFIGURED]" if self.breeze_secret_key else "[NOT CONFIGURED]",
             "breeze_session_token": "[CONFIGURED]" if self.breeze_session_token else "[NOT CONFIGURED]",
+            "kite_api_key": "[CONFIGURED]" if self.kite_api_key else "[NOT CONFIGURED]",
+            "kite_api_secret": "[CONFIGURED]" if self.kite_api_secret else "[NOT CONFIGURED]",
+            "kite_request_token": "[CONFIGURED]" if self.kite_request_token else "[NOT CONFIGURED]",
+            "kite_access_token": "[CONFIGURED]" if self.kite_access_token else "[NOT CONFIGURED]",
+            "kite_product": self.kite_product,
             "auth_signing_key": "[CONFIGURED]" if self.auth_signing_key else "[NOT CONFIGURED]",
             "log_level": self.log_level,
         }
@@ -253,4 +283,3 @@ def set_platform_settings(settings: PlatformSettings) -> None:
 
 # Convenient alias
 get_settings = get_platform_settings
-

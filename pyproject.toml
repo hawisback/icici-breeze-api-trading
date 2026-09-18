@@ -16,6 +16,7 @@ dependencies = [
     "pyjwt>=2.14.0",
     "alembic>=1.14.0",
     "breeze-connect==1.0.69",
+    "kiteconnect>=5.0.1",
 ]
 
 [project.optional-dependencies]
@@ -33,4 +34,3 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 100
 target-version = "py314"
-

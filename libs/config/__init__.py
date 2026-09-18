@@ -3,6 +3,7 @@
 from libs.config.env_manager import update_env_variable
 from libs.config.settings import (
     AppEnv,
+    BrokerBackend,
     EventBusBackend,
     MarketDataBackend,
     PlatformSettings,
@@ -12,6 +13,7 @@ from libs.config.settings import (
 
 __all__ = [
     "AppEnv",
+    "BrokerBackend",
     "EventBusBackend",
     "MarketDataBackend",
     "PlatformSettings",
@@ -19,4 +21,3 @@ __all__ = [
     "set_platform_settings",
     "update_env_variable",
 ]
-

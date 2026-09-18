@@ -424,7 +424,10 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
                 <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">1. Regime</div>
                 <div className="font-bold">{currentStrategy.phase_summary.regime?.status || "WAITING"}</div>
                 <div className="text-[10px] text-slate-400 mt-1">
-                  {currentStrategy.phase_summary.regime?.direction_score} | ADX {currentStrategy.phase_summary.regime?.adx}
+                  {currentStrategy.phase_summary.regime?.qualified ? "Qualified" : "Not qualified"} | {currentStrategy.phase_summary.regime?.direction_score} | ADX {currentStrategy.phase_summary.regime?.adx}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-1 truncate" title={currentStrategy.phase_summary.regime?.qualified_since || ""}>
+                  {currentStrategy.phase_summary.setup_cutoff_event || "NONE"} cutoff · {currentStrategy.phase_summary.regime_first_qualified_at || "not established"}
                 </div>
               </div>
 
@@ -438,6 +441,27 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
                 <div className="font-bold">{currentStrategy.phase_summary.impulse?.found ? "FOUND (YES)" : "PENDING"}</div>
                 <div className="text-[10px] text-slate-400 mt-1">
                   {currentStrategy.phase_summary.impulse?.height_atr ? `${currentStrategy.phase_summary.impulse.height_atr} ATR` : "Waiting for swing"}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-1 space-y-0.5">
+                  <div>
+                    Search: {currentStrategy.phase_summary.impulse_search?.pre_cutoff_candles_included ?? 0} pre-cutoff / {currentStrategy.phase_summary.impulse_search?.post_cutoff_candles_searched ?? 0} post-cutoff candles
+                  </div>
+                  <div className="truncate">
+                    Cutoff: {currentStrategy.phase_summary.impulse_search?.setup_cutoff_timestamp || "none"} · Start: {currentStrategy.phase_summary.impulse_search?.search_start_timestamp || "none"}
+                  </div>
+                  <div>
+                    Age: {currentStrategy.phase_summary.setup_age_seconds != null ? `${Math.round(currentStrategy.phase_summary.setup_age_seconds / 60)}m` : "-"} · {currentStrategy.phase_summary.completed_5m_candles_since_cutoff ?? 0} completed 5m candles since cutoff
+                  </div>
+                  {currentStrategy.phase_summary.impulse?.impulse_start && (
+                    <div className="truncate">
+                      {currentStrategy.phase_summary.impulse.impulse_direction} {currentStrategy.phase_summary.impulse.impulse_points?.toFixed(1)} pts · {currentStrategy.phase_summary.impulse.impulse_start} → {currentStrategy.phase_summary.impulse.impulse_end} · {currentStrategy.phase_summary.impulse.impulse_crossed_setup_cutoff ? "crossed cutoff" : "after cutoff"}
+                    </div>
+                  )}
+                  {!currentStrategy.phase_summary.impulse?.found && currentStrategy.phase_summary.impulse_rejection_reason && (
+                    <div className="text-amber-400 truncate" title={currentStrategy.phase_summary.impulse_rejection_reason}>
+                      {currentStrategy.phase_summary.impulse_rejection_reason}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -512,6 +536,7 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
           <tbody className="divide-y divide-slate-800/40">
             {currentStrategy.conditions.map((cond) => {
               const isPassed = cond.status === "PASSED";
+              const isNotApplicable = cond.status === "N/A";
               return (
                 <tr key={cond.id} className="hover:bg-slate-800/30 transition">
                   <td className="py-2.5 pr-2 font-medium text-slate-200">
@@ -529,6 +554,10 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
                         <CheckCircle2 className="w-3 h-3" />
                         PASSED
                       </span>
+                    ) : isNotApplicable ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-slate-500/10 text-slate-400 border border-slate-500/20">
+                        N/A
+                      </span>
                     ) : (
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
                         <Clock className="w-3 h-3" />
@@ -537,7 +566,7 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
                     )}
                   </td>
                   <td className="py-2.5 pl-2 text-slate-400">
-                    <span className={isPassed ? "text-emerald-400/80" : "text-amber-300/90 font-medium"}>
+                    <span className={isPassed ? "text-emerald-400/80" : isNotApplicable ? "text-slate-500" : "text-amber-300/90 font-medium"}>
                       {cond.gap_description}
                     </span>
                   </td>
@@ -561,4 +590,3 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
     </div>
   );
 };
-

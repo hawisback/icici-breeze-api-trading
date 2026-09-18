@@ -187,7 +187,7 @@ class FeatureEngine:
         return (upper - lower) / mean
 
     @classmethod
-    def calculate_bb_percentile(cls, closes: list[float], history: int = 252) -> float:
+    def calculate_bb_percentile(cls, closes: list[float], history: int = 60) -> float:
         """Empirical rank against prior widths only; ties use mid-rank.
 
         Require at least 20 prior observations, never invent a squeeze on warm-up.
@@ -207,7 +207,7 @@ class FeatureEngine:
         a 90th-percentile rank and above-median OI (flat OI is not a wall).
         """
         bull, bear = int(buildup == "LONG_BUILDUP"), int(buildup == "SHORT_BUILDUP")
-        if not chain or chain.get("source") not in ("BREEZE", "LIVE"):
+        if not chain or chain.get("source") not in ("BREEZE", "KITE", "LIVE"):
             return bull, bear, False, False
         strikes = sorted(chain.get("strikes", []), key=lambda s:s["strike"])
         if not strikes:
@@ -284,7 +284,7 @@ class FeatureEngine:
         now = as_of or utc_now()
         def completed(bars, interval):
             return sorted({c.start_time: c for c in (bars or [])
-                           if c.source in ("BREEZE", "LIVE") and c.interval == interval
+                           if c.source in ("BREEZE", "KITE", "LIVE") and c.interval == interval
                            and c.end_time <= now and c.low > 0
                            and c.low <= min(c.open, c.close) <= max(c.open, c.close) <= c.high
                            and c.end_time - c.start_time == timedelta(minutes=int(interval[:-1]))
@@ -385,10 +385,9 @@ class FeatureEngine:
                  and 0 <= (now - candles_15m[-1].end_time).total_seconds() < 900
                  and atr_5m > 0 and atr_15m > 0 and fut_vwap > 0)
         return MarketFeatures(
-            breakout_data_ready=(len(candles_5m) >= 40 and len(futures_candles) >= 15
-                and candles_5m[-1].end_time == futures_candles[-1].end_time
+            breakout_data_ready=(len(candles_5m) >= 40 and atr_5m > 0
                 and 0 <= (now-candles_5m[-1].end_time).total_seconds() < 300
-                and atr_5m > 0 and fut_vwap > 0),
+                and (not futures_candles or (len(futures_candles) >= 15 and candles_5m[-1].end_time == futures_candles[-1].end_time))),
             breakout_bull_derivatives_score=b_bull,
             breakout_bear_derivatives_score=b_bear,
             bullish_oi_wall=bull_wall,

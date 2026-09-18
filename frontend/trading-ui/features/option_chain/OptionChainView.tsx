@@ -15,7 +15,7 @@ export function OptionChainView() {
   const { data: chain, isLoading } = useQuery({
     queryKey: ["option_chain", underlying, selectedExpiry],
     queryFn: () => fetchOptionChain(underlying, selectedExpiry),
-    refetchInterval: 3000,
+    refetchInterval: 10000,
   });
 
   const handleSelectOption = (
@@ -43,9 +43,9 @@ export function OptionChainView() {
             <span className="font-semibold text-slate-200 uppercase tracking-wider text-[11px]">
               {underlying} Option Chain
             </span>
-            {chain?.source === "BREEZE" ? (
+            {chain?.source === "BREEZE" || chain?.source === "KITE" ? (
               <span className="px-1.5 py-0.2 rounded bg-emerald-950 border border-emerald-800 text-emerald-300 font-mono text-[9px]">
-                BREEZE LIVE
+                {chain.source} LIVE
               </span>
             ) : (
               <span className="px-1.5 py-0.2 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px]">

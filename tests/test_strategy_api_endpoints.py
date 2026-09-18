@@ -101,13 +101,113 @@ async def test_strategy_api_endpoints():
         )
         assert res.status_code == 200
         force_res = res.json()
-        assert force_res["status"] in ("DATA_UNAVAILABLE", "CONTRACT_SELECTION_FAILED")
-        assert "trade" not in force_res
+        assert force_res["status"] in ("TRADE_OPENED", "DATA_UNAVAILABLE", "CONTRACT_SELECTION_FAILED")
+        if force_res["status"] == "TRADE_OPENED":
+            assert "trade" in force_res
+        else:
+            assert "trade" not in force_res
 
         # 12. POST /api/v1/strategies/overrides/reset
         res = await client.post("/api/v1/strategies/overrides/reset")
         assert res.status_code == 200
         assert res.json()["overrides"]["bypass_entry_window"] is False
+
+        # 13. Comprehensive diagnostics condition checklist validation
+        res = await client.get("/api/v1/strategies/triggers/diagnostics")
+        assert res.status_code == 200
+        diag = res.json()
+        assert len(diag["strategies"]) == 4
+        for s in diag["strategies"]:
+            assert len(s["conditions"]) > 0
+            for c in s["conditions"]:
+                assert c["id"]
+                assert c["name"]
+                assert c["status"] in ("PASSED", "PENDING")
+                assert c["current_value"] != ""
+                assert c["target_threshold"] != ""
+                assert c["gap_description"] != ""
+
+        # 14. Test manual trade exit via REST API — uses REAL stop values to verify zero-price guard
+        from datetime import datetime, timezone
+        from services.strategy.models import ActiveTrade, AutoTradingMode, TradeDirection, OptionType, StrategyName
+        from services.strategy.position_manager import PositionManager
+        from services.strategy.models import MarketFeatures, RiskConfig, SessionTimersConfig
+        fake_trade = ActiveTrade(
+            trade_id="TRD-TEST-EXIT-API",
+            mode=AutoTradingMode.PAPER,
+            strategy=StrategyName.TREND_PULLBACK,
+            direction=TradeDirection.BULLISH,
+            option_type=OptionType.CALL,
+            contract_symbol="NIFTY26SEP24500CE",
+            contract_instrument_id="INST-NIFTY-24500-CE",
+            expiry="2026-09-24",
+            strike=24500.0,
+            quantity=50,
+            lot_size=50,
+            lots=1,
+            entry_option_price=100.0,
+            entry_spot_price=24500.0,
+            entry_time=datetime.now(timezone.utc),
+            initial_structural_stop=24450.0,
+            initial_r_points=50.0,
+            current_option_price=100.0,
+            current_spot_price=24500.0,
+            current_trailing_stop=24450.0,   # realistic positive stop
+            option_hard_stop_price=75.0,     # realistic positive hard stop
+        )
+        await container.strategy_svc.repo.save_trade(fake_trade)
+
+        # Confirm trade is NOT auto-exited even with spot=0 (zero-price guard)
+        res = await client.get("/api/v1/strategies/status")
+        assert res.status_code == 200
+        status_data = res.json()
+        assert any(t["trade_id"] == "TRD-TEST-EXIT-API" for t in status_data["active_trades"]), \
+            "Trade was spuriously auto-exited by zero spot price — zero-price guard not working"
+
+        # Call manual exit
+        res = await client.post("/api/v1/strategies/trades/TRD-TEST-EXIT-API/exit", json={"reason": "TEST_MANUAL_EXIT"})
+        assert res.status_code == 200
+        exit_resp = res.json()
+        assert exit_resp["status"] == "SUCCESS"
+        assert exit_resp["trade"]["state"] == "CLOSED"
+        assert exit_resp["trade"]["exit_reason"] == "TEST_MANUAL_EXIT"
+
+        # Confirm trade is no longer active
+        res = await client.get("/api/v1/strategies/status")
+        assert res.status_code == 200
+        assert not any(t["trade_id"] == "TRD-TEST-EXIT-API" for t in res.json()["active_trades"])
+
+        # 15. Unit-level: PositionManager must not fire hard stop or structural stop when prices are zero
+        pm = PositionManager(RiskConfig(), SessionTimersConfig())
+        zero_features = MarketFeatures(spot_price=0.0, timestamp=datetime.now(timezone.utc))
+        bullish_trade = ActiveTrade(
+            trade_id="TRD-ZERO-GUARD-BULL",
+            mode=AutoTradingMode.PAPER,
+            strategy=StrategyName.TREND_PULLBACK,
+            direction=TradeDirection.BULLISH,
+            option_type=OptionType.CALL,
+            contract_symbol="NIFTY26SEP24500CE",
+            contract_instrument_id="INST-TEST",
+            expiry="2026-09-24",
+            strike=24500.0,
+            quantity=50,
+            lot_size=50,
+            lots=1,
+            entry_option_price=100.0,
+            entry_spot_price=24500.0,
+            entry_time=datetime.now(timezone.utc),
+            initial_structural_stop=24450.0,
+            initial_r_points=50.0,
+            current_option_price=100.0,
+            current_spot_price=24500.0,
+            current_trailing_stop=24450.0,
+            option_hard_stop_price=75.0,
+        )
+        _, reason = pm.update_position(bullish_trade, 0.0, zero_features)
+        assert reason != "OPTION_HARD_STOP_HIT (LTP 0.0 <= SL 75.0)", \
+            "Option hard stop fired on zero price — zero guard missing"
+        assert reason is None or "STRUCTURAL_SPOT_STOP" not in str(reason), \
+            "Structural stop fired on spot=0 — zero guard missing"
 
     # Teardown
     await container.strategy_svc.stop()

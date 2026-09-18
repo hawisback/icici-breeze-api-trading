@@ -90,10 +90,11 @@ def update_env_variable(
             settings.breeze_api_key = val_clean
         elif key_clean == "BREEZE_SECRET_KEY":
             settings.breeze_secret_key = SecretStr(val_clean)
+        elif key_clean in {"KITE_API_KEY", "KITE_API_SECRET", "KITE_REQUEST_TOKEN", "KITE_ACCESS_TOKEN"}:
+            setattr(settings, key_clean.lower(), SecretStr(val_clean))
         elif hasattr(settings, key_clean.lower()):
             setattr(settings, key_clean.lower(), val_clean)
     except Exception as exc:
         logger.warning("Could not synchronize runtime PlatformSettings for %s: %s", key_clean, exc)
 
     return True
-

@@ -75,22 +75,34 @@ class MarketDataService:
             )
         )
 
-    async def sync_quotes_from_broker(self) -> None:
-        """Fetch latest real-time quotes directly from ICICI Breeze."""
+    async def sync_quotes_from_broker(self) -> bool:
+        """Fetch latest real-time quotes from the configured live broker."""
         if not self.broker_gateway:
-            return
+            return False
+
+        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
+        if active_adapter and getattr(active_adapter, "is_active", False) and hasattr(active_adapter, "get_index_quotes"):
+            try:
+                quotes = await active_adapter.get_index_quotes()
+                for quote in quotes:
+                    await self.ingest_quote(quote)
+                return bool(quotes)
+            except Exception as exc:
+                logger.warning("%s live quote sync deferred: %s", getattr(self.broker_gateway, "active_broker_name", "broker"), exc)
+                return False
 
         breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
         if not breeze_adapter or not hasattr(breeze_adapter, "client_manager"):
-            return
+            return False
 
         client_mgr = breeze_adapter.client_manager
         if not client_mgr.is_active:
-            return
+            return False
 
         try:
             sdk = client_mgr.get_sdk_client()
             now = utc_now()
+            synced_any = False
 
             for inst_id, symbol, code in [
                 ("INST-NIFTY-INDEX", "NIFTY 50", "NIFTY"),
@@ -128,10 +140,13 @@ class MarketDataService:
                             timestamp=now,
                         )
                         await self.ingest_quote(quote)
+                        synced_any = True
                         logger.debug("Ingested live Breeze quote for %s: LTP=%.2f", symbol, lp)
                 await asyncio.sleep(0.3)
+            return synced_any
         except Exception as exc:
             logger.warning("Breeze live quote sync deferred: %s", exc)
+            return False
 
     def update_quote(self, quote: Quote) -> None:
         """Update live quote cache and feed freshness."""
@@ -225,11 +240,9 @@ class MarketDataService:
                 # 1. Attempt sync from live broker
                 synced = False
                 if self.broker_gateway:
-                    breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
-                    if breeze_adapter and hasattr(breeze_adapter, "client_manager"):
-                        if breeze_adapter.client_manager.is_active:
-                            await self.sync_quotes_from_broker()
-                            synced = True
+                    active_adapter = getattr(self.broker_gateway, "active_adapter", None)
+                    if active_adapter and getattr(active_adapter, "is_active", False):
+                        synced = await self.sync_quotes_from_broker()
 
                 # 2. If not synced (broker offline), provide smooth micro-fluctuations
                 if not synced:
@@ -260,4 +273,3 @@ class MarketDataService:
             except Exception as e:
                 logger.error("Error in market feed loop: %s", e)
                 await asyncio.sleep(interval_sec)
-

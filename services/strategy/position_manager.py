@@ -241,16 +241,16 @@ class PositionManager:
                 else:
                     trade.consecutive_inside_box_closes = 0
 
-        # 3. Check Emergency Option Hard Stop (-25% default)
-        if current_option_price <= trade.option_hard_stop_price:
+        # 3. Check Emergency Option Hard Stop (-25% default) — only when option price is valid
+        if current_option_price > 0 and current_option_price <= trade.option_hard_stop_price:
             return trade, f"OPTION_HARD_STOP_HIT (LTP {current_option_price} <= SL {trade.option_hard_stop_price})"
 
-        # 4. Check Structural Spot Stop
+        # 4. Check Structural Spot Stop — only when spot price is valid (not 0 / stale)
         if trade.direction == TradeDirection.BULLISH:
-            if spot <= trade.current_trailing_stop:
+            if spot > 0 and spot <= trade.current_trailing_stop:
                 return trade, f"STRUCTURAL_SPOT_STOP_BREACHED (Spot {spot} <= SL {trade.current_trailing_stop})"
         else:
-            if spot >= trade.current_trailing_stop:
+            if spot > 0 and spot >= trade.current_trailing_stop:
                 return trade, f"STRUCTURAL_SPOT_STOP_BREACHED (Spot {spot} >= SL {trade.current_trailing_stop})"
 
         # 5. Check Session Force Square-off (15:20 IST)

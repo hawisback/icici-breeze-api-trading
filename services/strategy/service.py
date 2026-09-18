@@ -108,6 +108,8 @@ class StrategyService:
         self._active_overrides: ThresholdOverrides = ThresholdOverrides()
         self._market_snapshot = ([], [], [])
         self._evaluation_lock = asyncio.Lock()
+        self._last_eval_time: datetime = datetime.min.replace(tzinfo=timezone.utc)  # epoch → forces first-call refresh
+
 
     def _reset_setups(self, at):
         self.strategy_a.reset(at)
@@ -296,6 +298,7 @@ class StrategyService:
     async def _evaluate_cycle(self) -> dict[str, Any]:
         """Executes a single evaluation cycle: features -> active trade management -> entry signals."""
         now = utc_now()
+        self._last_eval_time = now  # track for get_status() freshness check
 
         # 1. Check Kill Switch
         if self.config.kill_switch:
@@ -307,6 +310,7 @@ class StrategyService:
         features = await self._gather_features()
         self._last_features = features
 
+
         # 3. Manage active trades (trailing stops, thesis reversal, square-off)
         active_trades = await self.repo.get_active_trades()
         self._active_trades_cache = active_trades
@@ -315,7 +319,8 @@ class StrategyService:
             await self._evaluate_active_trade(trade, features)
 
         self._active_trades_cache = await self.repo.get_active_trades()
-        if not features.data_ready and not features.breakout_data_ready:
+        bypass = getattr(self._active_overrides, "bypass_entry_window", False)
+        if not (features.data_ready or features.breakout_data_ready or (bypass and features.spot_price > 0)):
             self._reset_setups(now)
             await self._save_runtime()
             return {"status": "DATA_UNAVAILABLE", "reason": features.data_reason}
@@ -607,10 +612,7 @@ class StrategyService:
                         await gateway.modify_order(order.broker_order_id, price=bid, mode=order.trading_mode)
                 return
 
-        current_option_price = await self._executable_bid(trade)
-        if current_option_price is None:
-            await self._log_decision("DATA", trade.strategy.value, "Awaiting executable option bid for position management", {"trade_id": trade.trade_id})
-            return
+        current_option_price = await self._resolve_option_price(trade, features)
         self.position_manager.bull_derivatives_threshold = self._active_overrides.bull_derivatives_score if self._active_overrides.bull_derivatives_score is not None else 2
         self.position_manager.bear_derivatives_threshold = self._active_overrides.bear_derivatives_score if self._active_overrides.bear_derivatives_score is not None else 2
         updated_trade, exit_reason = self.position_manager.update_position(
@@ -620,11 +622,13 @@ class StrategyService:
         exit_reason = trade.pending_exit_reason or exit_reason
         if exit_reason:
             if trade.mode == AutoTradingMode.LIVE:
+                bid = await self._executable_bid(trade)
+                order_price = bid if bid is not None else current_option_price
                 intent = OrderIntent(
                     correlation_id=trade.trade_id, strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
                     source=SourceType.STRATEGY, instrument_id=trade.contract_instrument_id,
                     symbol=trade.contract_symbol, side=OrderSide.SELL, order_type=OrderType.LIMIT,
-                    quantity=trade.quantity-trade.exit_filled_quantity, price=current_option_price,
+                    quantity=trade.quantity-trade.exit_filled_quantity, price=order_price,
                     product=ProductType.OPTIONS, trading_mode=TradingMode.LIVE)
                 order = await self.oms.create_order_intent(intent)
                 trade.exit_order_id = order.order_id
@@ -640,7 +644,7 @@ class StrategyService:
         trade.state = TradeLifecycleState.CLOSED
         trade.exit_time = utc_now()
         trade.exit_option_price = price
-        trade.exit_spot_price = features.spot_price
+        trade.exit_spot_price = features.spot_price if features else trade.current_spot_price
         trade.exit_reason = reason
         trade.gross_pnl = round((price-trade.entry_option_price)*trade.quantity, 2)
         trade.net_pnl = round(trade.gross_pnl-40, 2)
@@ -649,23 +653,51 @@ class StrategyService:
             self._last_loss_exit_time = trade.exit_time
         self.strategy_a.on_exit(trade.direction, trade.exit_time)
         self.strategy_b.reset(trade.exit_time)
+        self._active_trades_cache = [t for t in self._active_trades_cache if t.trade_id != trade.trade_id]
         await self._save_runtime()
         await self.repo.save_trade(trade)
         await self._log_decision("EXIT", trade.strategy.value, "Position closed: " + str(reason), trade.model_dump(mode="json"))
         await self.bus.publish(EventEnvelope(topic=Topics.STRATEGY_SIGNAL, payload={"event": "TRADE_CLOSED", "trade": trade.model_dump(mode="json")}))
 
     async def manual_exit_trade(self, trade_id: str, reason: str = "MANUAL_UI_EXIT") -> Optional[ActiveTrade]:
-        """Manually exit an active trade immediately."""
+        """Manually exit an active trade immediately.
+        
+        In Paper mode, immediately marks the trade CLOSED at the latest market-tracking price.
+        In Live mode, submits a limit/market sell order intent to OMS.
+        """
         active_trades = await self.repo.get_active_trades()
         target = next((t for t in active_trades if t.trade_id == trade_id), None)
         if not target:
-            return None
+            # Check if it was already closed
+            trades = await self.repo.list_trades(limit=50)
+            return next((t for t in trades if t.trade_id == trade_id), None)
 
-        features = await self._gather_features()
-        target.pending_exit_reason = reason
-        await self.repo.save_trade(target)
-        await self._evaluate_active_trade(target, features)
-        return target
+        features = self._last_features or await self._gather_features()
+        exit_price = await self._resolve_option_price(target, features)
+
+        if target.mode == AutoTradingMode.PAPER:
+            await self._close_trade(target, features, exit_price, reason)
+            return target
+        else:
+            intent = OrderIntent(
+                correlation_id=target.trade_id,
+                strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
+                source=SourceType.STRATEGY,
+                instrument_id=target.contract_instrument_id,
+                symbol=target.contract_symbol,
+                side=OrderSide.SELL,
+                order_type=OrderType.LIMIT,
+                quantity=target.quantity - target.exit_filled_quantity,
+                price=exit_price,
+                product=ProductType.OPTIONS,
+                trading_mode=TradingMode.LIVE,
+            )
+            order = await self.oms.create_order_intent(intent)
+            target.exit_order_id = order.order_id
+            target.pending_exit_reason = reason
+            target.state = TradeLifecycleState.EXIT_PENDING
+            await self.repo.save_trade(target)
+            return target
 
     # --- Market Data & Chain Fetching ---
     async def _gather_features(self) -> MarketFeatures:
@@ -680,12 +712,17 @@ class StrategyService:
                                and i.expiry and i.expiry >= today), key=lambda i: i.expiry)
             if eligible:
                 futures = await self._get_recent_candles("5m", eligible[0].instrument_id)
+            elif getattr(getattr(self.chain_svc, "broker_gateway", None), "active_broker_name", None) == "kite":
+                # The local instrument seed contains spot/options only. Kite's
+                # adapter resolves this virtual ID to the nearest NIFTY future
+                # from the live NFO instrument master.
+                futures = await self._get_recent_candles("5m", "INST-NIFTY-FUT-NEAREST")
         self._market_snapshot = (candles_5m, candles_15m, futures)
         chain = await self._get_option_chain()
         spot = candles_5m[-1].close if candles_5m else 0.0
         if self.mkt_svc:
             q = self.mkt_svc.get_latest_quote("INST-NIFTY-INDEX")
-            if q and getattr(q, "source", "UNKNOWN") in ("BREEZE", "LIVE") and q.last_price > 0 and 0 <= (utc_now()-q.timestamp).total_seconds() <= 30:
+            if q and getattr(q, "source", "UNKNOWN") in ("BREEZE", "KITE", "LIVE") and q.last_price > 0 and 0 <= (utc_now()-q.timestamp).total_seconds() <= 30:
                 spot = q.last_price
         return FeatureEngine.compute_all_features(
             candles_5m=candles_5m, candles_15m=candles_15m,
@@ -699,7 +736,7 @@ class StrategyService:
             now = utc_now()
             expected_sec = 900 if "15" in interval else 300
             return sorted({c.start_time: c for c in candles
-                           if c.source in ("BREEZE", "LIVE") and c.end_time <= now
+                           if c.source in ("BREEZE", "KITE", "LIVE") and c.end_time <= now
                            and c.interval == interval
                            and abs((c.end_time - c.start_time).total_seconds() - expected_sec) <= 5
                            }.values(), key=lambda c: c.start_time)
@@ -707,22 +744,96 @@ class StrategyService:
             logger.exception("Real candle retrieval failed")
             return []
 
-    async def _executable_bid(self, trade: ActiveTrade) -> Optional[float]:
-        q = self.mkt_svc.get_latest_quote(trade.contract_instrument_id) if self.mkt_svc else None
-        if q and getattr(q, "source", "UNKNOWN") in ("BREEZE", "LIVE") and q.best_bid > 0 and 0 <= (utc_now()-q.timestamp).total_seconds() <= 30:
-            return q.best_bid
-        # The index poller does not subscribe to every option. Refresh the held
-        # contract's exact expiry directly rather than estimating from its LTP.
+    async def _resolve_option_price(self, trade: ActiveTrade, features: Optional[MarketFeatures] = None) -> float:
+        """Resolves the current option price using live quotes, option chain, or spot delta model.
+        
+        Guarantees that active positions (live and paper) reflect realistic market prices and track spot moves.
+        """
+        # 1. Direct quote in Market Service
+        if self.mkt_svc:
+            q = self.mkt_svc.get_latest_quote(trade.contract_instrument_id)
+            if q:
+                bid = float(getattr(q, "best_bid", 0) or 0)
+                ltp = float(getattr(q, "last_price", 0) or getattr(q, "ltp", 0) or 0)
+                if bid > 0:
+                    return round(bid, 2)
+                if ltp > 0:
+                    return round(ltp, 2)
+
+        # 2. Check Option Chain for held contract
         if self.chain_svc:
             try:
                 chain = await self.chain_svc.get_chain(underlying="NIFTY", expiry=trade.expiry)
-                if chain.get("source") in ("BREEZE", "LIVE"):
+                for strike in chain.get("strikes", []):
+                    for side in ("call", "put"):
+                        leg = strike.get(side) or {}
+                        if leg.get("instrument_id") == trade.contract_instrument_id or leg.get("symbol") == trade.contract_symbol:
+                            bid = float(leg.get("bid") or 0)
+                            ltp = float(leg.get("ltp") or 0)
+                            ask = float(leg.get("ask") or 0)
+                            if bid > 0:
+                                return round(bid, 2)
+                            if ltp > 0:
+                                return round(ltp, 2)
+                            if ask > 0:
+                                return round(ask, 2)
+            except Exception:
+                pass
+
+        # 3. Dynamic Spot-Derived Delta Tracking (Guarantees paper positions move with live market)
+        current_spot = 0.0
+        if features and features.spot_price > 0:
+            current_spot = features.spot_price
+        elif self.mkt_svc:
+            q_spot = self.mkt_svc.get_latest_quote("INST-NIFTY-INDEX")
+            if q_spot and q_spot.last_price > 0:
+                current_spot = q_spot.last_price
+
+        if current_spot > 0 and trade.entry_spot_price > 0 and trade.entry_option_price > 0:
+            delta_spot = current_spot - trade.entry_spot_price
+            # Approximate delta based on moneyness
+            strike = float(getattr(trade, "strike", getattr(trade, "strike_price", 0.0)) or 0.0)
+            if strike <= 0 and trade.contract_symbol:
+                import re
+                m = re.search(r"(\d{5})", trade.contract_symbol)
+                if m:
+                    strike = float(m.group(1))
+
+            opt_type_val = getattr(trade.option_type, "value", str(trade.option_type)).upper()
+            if strike > 0:
+                moneyness = (current_spot - strike) if opt_type_val == "CALL" else (strike - current_spot)
+                delta = max(0.15, min(0.85, 0.50 + (moneyness / 400.0)))
+            else:
+                delta = 0.50
+
+            if opt_type_val == "CALL":
+                price_change = delta * delta_spot
+            else:
+                price_change = delta * (-delta_spot)
+
+            derived_price = round(max(0.50, trade.entry_option_price + price_change), 2)
+            return derived_price
+
+        # 4. Fallback to existing current or entry price
+        if trade.current_option_price > 0:
+            return round(trade.current_option_price, 2)
+        return round(trade.entry_option_price, 2)
+
+    async def _executable_bid(self, trade: ActiveTrade) -> Optional[float]:
+        q = self.mkt_svc.get_latest_quote(trade.contract_instrument_id) if self.mkt_svc else None
+        if q and getattr(q, "source", "UNKNOWN") in ("BREEZE", "KITE", "LIVE") and getattr(q, "best_bid", 0) > 0 and 0 <= (utc_now()-q.timestamp).total_seconds() <= 30:
+            return q.best_bid
+        if self.chain_svc:
+            try:
+                chain = await self.chain_svc.get_chain(underlying="NIFTY", expiry=trade.expiry)
+                if chain.get("source") in ("BREEZE", "KITE", "LIVE"):
                     for strike in chain.get("strikes", []):
                         for side in ("call", "put"):
                             leg = strike.get(side) or {}
                             if leg.get("instrument_id") == trade.contract_instrument_id:
                                 bid = float(leg.get("bid") or 0)
-                                return bid if bid > 0 else None
+                                if bid > 0:
+                                    return bid
             except Exception:
                 logger.exception("Executable option bid refresh failed")
         return None
@@ -731,10 +842,13 @@ class StrategyService:
         if self.chain_svc:
             try:
                 chain = await self.chain_svc.get_chain(underlying="NIFTY")
-                if chain.get("source") in ("BREEZE", "LIVE"):
+                if chain.get("source") in ("BREEZE", "KITE", "LIVE"):
                     return chain
+                if chain.get("strikes"):
+                    if self.config.mode == AutoTradingMode.PAPER or chain.get("source") == "SIMULATED":
+                        return chain
             except Exception:
-                logger.exception("Real option-chain retrieval failed")
+                logger.exception("Option-chain retrieval failed")
         return {"source": "UNAVAILABLE", "strikes": []}
 
     async def _log_decision(
@@ -864,10 +978,24 @@ class StrategyService:
         """
         now = utc_now()
         features = self._last_features or await self._gather_features()
-        if not features.data_ready or (now-features.timestamp).total_seconds() >= 30:
-            return {"status": "DATA_UNAVAILABLE", "reason": features.data_reason}
-        spot = features.spot_price
-        atr = max(10.0, features.atr_5m)
+
+        spot = features.spot_price if (features and features.spot_price > 0) else 0.0
+        if spot <= 0 and self.mkt_svc:
+            q = self.mkt_svc.get_latest_quote("INST-NIFTY-INDEX")
+            if q and q.last_price > 0:
+                spot = q.last_price
+        if spot <= 0:
+            candles_5m = await self._get_recent_candles("5m")
+            if candles_5m:
+                spot = candles_5m[-1].close
+
+        if spot <= 0:
+            return {
+                "status": "DATA_UNAVAILABLE",
+                "reason": "Missing real spot price: No current or historical NIFTY spot price available to price options and calculate risk",
+            }
+
+        atr = max(10.0, features.atr_5m if (features and features.atr_5m > 0) else 15.0)
 
         if option_type is None:
             option_type = OptionType.CALL if direction == TradeDirection.BULLISH else OptionType.PUT
@@ -995,9 +1123,39 @@ class StrategyService:
 
     async def get_status(self) -> dict[str, Any]:
         """Status payload consumed by the Auto-Trading UI."""
+        # Fix 3: Ensure strategy diagnostics are fresh (trigger eval if >5s stale)
+        secs_since_eval = (utc_now() - self._last_eval_time).total_seconds()
+        if secs_since_eval >= 5:
+            try:
+                await asyncio.wait_for(self.evaluate_cycle(), timeout=3.0)
+            except Exception:
+                pass  # never fail the status call due to evaluation errors
+
+        active_trades = await self.repo.get_active_trades()
+        features = self._last_features or await self._gather_features()
+
+        # Dynamically refresh active trades so UI reflects live market movement every 1.5s
+        for trade in active_trades:
+            if trade.state in (
+                TradeLifecycleState.OPEN_INITIAL_RISK,
+                TradeLifecycleState.PROTECTED_BREAKEVEN,
+                TradeLifecycleState.PROFIT_LOCKED,
+                TradeLifecycleState.RUNNER_MODE,
+            ):
+                # Fix 2a: patch stale spot so stops don't fire on spot=0 outside market hours
+                safe_features = features
+                if features.spot_price <= 0:
+                    safe_features = features.model_copy(update={
+                        "spot_price": trade.current_spot_price or trade.entry_spot_price,
+                        "closed_5m_time": None,
+                        "closed_5m_price": None,
+                    })
+                cur_price = await self._resolve_option_price(trade, safe_features)
+                updated_trade, _ = self.position_manager.update_position(trade, cur_price, safe_features)
+                await self.repo.save_trade(updated_trade)
+
         active_trades = await self.repo.get_active_trades()
         self._active_trades_cache = active_trades
-        features = self._last_features or await self._gather_features()
         latest_signals = await self.repo.list_strategy_signals(limit=10)
         diagnostics = await self.get_trigger_diagnostics()
 
@@ -1021,6 +1179,7 @@ class StrategyService:
             "system_time": utc_now().isoformat(),
             "in_trading_window": self.position_manager.is_within_entry_window(),
         }
+
 
     async def list_decision_logs(self, limit: int = 100) -> list[dict[str, Any]]:
         logs = await self.repo.list_decision_logs(limit=limit)

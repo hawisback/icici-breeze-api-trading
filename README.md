@@ -114,6 +114,24 @@ python run_platform.py
 - System Health Check: [http://localhost:8000/api/v1/system/health](http://localhost:8000/api/v1/system/health)
 - Live WebSocket Stream: `ws://localhost:8000/ws/live`
 
+### Broker selection
+
+Live execution is selected with `BROKER_BACKEND` while `PAPER` mode remains unchanged:
+
+```dotenv
+BROKER_BACKEND=kite       # kite or breeze
+KITE_API_KEY=...
+KITE_API_SECRET=...
+KITE_REQUEST_TOKEN=...    # one-time daily token from the Kite redirect
+KITE_PRODUCT=NRML
+```
+
+Use `BROKER_BACKEND=breeze` with the existing `BREEZE_*` settings to keep ICICI
+Direct. The session login endpoint (`/api/v1/broker/session/login-url`) and callback
+automatically use the selected broker. Kite order symbols must be valid Kite
+`tradingsymbol` values. Populate the instrument master with current Kite contract
+symbols before enabling live options orders.
+
 ### 3. Launch the Trading UI
 In a separate terminal, start the Next.js 16 / React 19 trading terminal:
 ```bash
@@ -140,4 +158,3 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 - [x] Strategy framework supporting `SHADOW`, `PAPER`, and `LIVE` modes
 - [x] Append-only audit trail logging
 - [x] End-to-end integration test suite passing (100% success rate)
-

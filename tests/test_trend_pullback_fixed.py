@@ -239,9 +239,17 @@ def test_pullback_age_boundaries(count, accepted):
                                  "end_time":start+timedelta(minutes=5*(i+1))}) for i,c in enumerate(raw)]
     futures = [c.model_copy(update={"instrument_id":"FUT", "volume":50}) for c in bars]
     f.timestamp = bars[-1].end_time
+
     f.spot_price = bars[-1].high + 1.0
     m = [m[0].model_copy(update={"end_time":f.timestamp, "start_time":f.timestamp-timedelta(minutes=15)})]
     strategy = TrendPullbackStrategy(breakout_confirm_polls=1)
+    cutoff = bars[3].end_time.isoformat()
+    strategy.state["BULLISH"].update({
+        "session": bars[-1].start_time.date().isoformat(),
+        "regime_qualified_since": cutoff,
+        "setup_cutoff": cutoff,
+        "after": cutoff,
+    })
     signal = strategy.evaluate(f,bars,m,futures)
     assert bool(signal) is accepted
     if count == 10:
@@ -301,6 +309,56 @@ def test_reset_before_first_evaluation_preserves_cutoff():
     strategy.reset(f.timestamp)
     assert strategy.evaluate(f,b,m,fu) is None
     assert strategy.state["BULLISH"]["after"] == f.timestamp.isoformat()
+
+
+def test_regime_cutoff_is_created_preserved_and_recreated_after_invalidation():
+    f, bars, macro, futures = setup()
+    strategy = TrendPullbackStrategy(breakout_confirm_polls=99)
+
+    # First qualifying evaluation creates the directional setup cutoff.
+    assert strategy.evaluate(f, bars, macro, futures) is None
+    first_cutoff = strategy.state["BULLISH"]["setup_cutoff"]
+    assert first_cutoff == macro[-1].start_time.isoformat()
+    assert strategy.state["BULLISH"]["regime_qualified_since"] == first_cutoff
+    first_diag = strategy.diagnose(f, bars, macro, futures_candles=futures)[0]
+    assert first_diag.phase_summary["setup_cutoff_event"] == "PRESERVED"
+    assert first_diag.phase_summary["setup_direction"] == "BULLISH"
+    assert first_diag.phase_summary["macro_regime_qualified"] is True
+
+    # Repeated polling of the same qualifying regime preserves it.
+    for _ in range(3):
+        assert strategy.evaluate(f, bars, macro, futures) is None
+        assert strategy.state["BULLISH"]["setup_cutoff"] == first_cutoff
+
+    # A failed bullish regime clears only the bullish setup cutoff.
+    f.ema20_15m = 130.0
+    f.ema50_15m = 140.0
+    macro[0] = macro[0].model_copy(update={"close": 118.0})
+    assert strategy.evaluate(f, bars, macro, futures) is None
+    assert strategy.state["BULLISH"].get("setup_cutoff") is None
+    assert strategy.state["BULLISH"].get("regime_qualified_since") is None
+    invalidated_diag = strategy.diagnose(f, bars, macro, futures_candles=futures)[0]
+    assert invalidated_diag.phase_summary["setup_cutoff_event"] == "INVALIDATED"
+
+    # Qualification after invalidation creates a fresh cutoff.
+    f.ema20_15m = 100.0
+    f.ema50_15m = 90.0
+    f.timestamp = bars[-1].end_time + timedelta(minutes=5)
+    next_bar = bars[-1].model_copy(update={
+        "start_time": bars[-1].start_time + timedelta(minutes=5),
+        "end_time": bars[-1].end_time + timedelta(minutes=5),
+    })
+    next_future = next_bar.model_copy(update={"instrument_id": "FUT"})
+    bars = bars + [next_bar]
+    futures = futures + [next_future]
+    macro = [macro[0].model_copy(update={
+        "start_time": next_bar.end_time - timedelta(minutes=15),
+        "end_time": next_bar.end_time,
+        "close": 118.0,
+    })]
+    assert strategy.evaluate(f, bars, macro, futures) is None
+    assert strategy.state["BULLISH"]["setup_cutoff"] == macro[0].start_time.isoformat()
+    assert strategy.state["BULLISH"]["setup_cutoff"] != first_cutoff
 
 
 @pytest.mark.asyncio
@@ -756,5 +814,3 @@ def test_strategy_candle_contiguity_gate():
     assert diag_fail.phase_summary["candle_interval_seconds"] == 306.0
     assert "incomplete candle sequence" in diag_fail.key_blocker
     assert diag_fail.phase_summary["primary_blocker"] == diag_fail.key_blocker
-
-
