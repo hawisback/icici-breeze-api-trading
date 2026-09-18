@@ -333,6 +333,13 @@ class ThresholdOverrides(BaseModel):
     bb_width_percentile: Optional[float] = None
     bull_derivatives_score: Optional[float] = None
     bear_derivatives_score: Optional[float] = None
+    breakout_confirm_polls: Optional[int] = None
+    breakout_buffer_atr: Optional[float] = None
+    min_impulse_atr: Optional[float] = None
+    retest_tolerance_atr: Optional[float] = None
+    min_pullback_depth: Optional[float] = None
+    max_pullback_depth: Optional[float] = None
+    min_available_confirmations: Optional[int] = None
     bypass_entry_window: bool = False
     active: bool = False
 

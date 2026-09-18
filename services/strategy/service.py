@@ -697,10 +697,11 @@ class StrategyService:
         try:
             candles = await self.hist_svc.get_candles(instrument_id=instrument_id, interval=interval)
             now = utc_now()
+            expected_sec = 900 if "15" in interval else 300
             return sorted({c.start_time: c for c in candles
                            if c.source in ("BREEZE", "LIVE") and c.end_time <= now
                            and c.interval == interval
-                           and c.end_time-c.start_time == timedelta(minutes=int(interval[:-1]))
+                           and abs((c.end_time - c.start_time).total_seconds() - expected_sec) <= 5
                            }.values(), key=lambda c: c.start_time)
         except Exception:
             logger.exception("Real candle retrieval failed")
