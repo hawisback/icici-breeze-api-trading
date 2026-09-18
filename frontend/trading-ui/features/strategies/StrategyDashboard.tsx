@@ -28,9 +28,10 @@ import { TabOverview } from "./TabOverview";
 import { TabParameters } from "./TabParameters";
 import { TabDecisionLog } from "./TabDecisionLog";
 import { TabHistory } from "./TabHistory";
+import { TabReplaySimulation } from "./TabReplaySimulation";
 
 export const StrategyDashboard: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<"overview" | "parameters" | "decision_log" | "history">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "parameters" | "decision_log" | "history" | "simulation">("overview");
   const queryClient = useQueryClient();
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
@@ -285,6 +286,18 @@ export const StrategyDashboard: React.FC = () => {
           <History className="w-4 h-4" />
           4. Performance & History
         </button>
+
+        <button
+          onClick={() => setActiveTab("simulation")}
+          className={`pb-3 text-xs font-bold uppercase tracking-wider flex items-center gap-2 border-b-2 transition-all ${
+            activeTab === "simulation"
+              ? "border-indigo-400 text-indigo-400"
+              : "border-transparent text-slate-400 hover:text-slate-200"
+          }`}
+        >
+          <Play className="w-4 h-4 fill-indigo-400" />
+          5. Day Replay & Simulation
+        </button>
       </div>
 
       {/* Main Tab Content */}
@@ -297,6 +310,7 @@ export const StrategyDashboard: React.FC = () => {
         )}
         {activeTab === "decision_log" && <TabDecisionLog />}
         {activeTab === "history" && <TabHistory />}
+        {activeTab === "simulation" && <TabReplaySimulation />}
       </div>
     </div>
   );

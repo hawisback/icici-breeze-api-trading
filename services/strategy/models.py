@@ -44,6 +44,8 @@ class OptionType(str, Enum):
 
 
 class TradeLifecycleState(str, Enum):
+    ENTRY_PENDING = "ENTRY_PENDING"
+    EXIT_PENDING = "EXIT_PENDING"
     OPEN_INITIAL_RISK = "OPEN_INITIAL_RISK"
     PROTECTED_BREAKEVEN = "PROTECTED_BREAKEVEN"
     PROFIT_LOCKED = "PROFIT_LOCKED"
@@ -64,33 +66,62 @@ class OptionSelectionConfig(BaseModel):
 
 class RiskConfig(BaseModel):
     """Risk management guardrails and sizing controls."""
+    max_lots_per_trade: int = Field(default=100, ge=1)
+    entry_order_timeout_sec: int = Field(default=10, ge=1, le=120)
+    breakeven_buffer_points: float = Field(default=2.0, ge=0)
+    max_trades_per_strategy_per_day: int = Field(default=5, ge=1, le=20)
     max_trade_capital: float = Field(default=50000.0, ge=5000.0, description="Maximum total capital per single trade")
     risk_per_trade_pct_of_account: float = Field(default=0.50, ge=0.1, le=5.0, description="Account % risk per trade")
     max_daily_loss_r: float = Field(default=2.0, ge=0.5, le=10.0, description="Daily loss limit in R multiples")
     max_daily_loss_pct: float = Field(default=1.5, ge=0.5, le=5.0, description="Daily loss limit as % of account")
-    max_failed_trades_per_strategy: int = Field(default=2, ge=1, le=5, description="Max consecutive failed trades before strategy pause")
+    max_failed_trades_per_strategy: int = Field(default=2, ge=1, le=5, description="Max losing trades per strategy per day")
     max_trades_per_day: int = Field(default=5, ge=1, le=20, description="Total allowed trades per session")
     max_concurrent_positions: int = Field(default=1, ge=1, le=3, description="Maximum simultaneous open positions")
     cooldown_after_loss_min: int = Field(default=10, ge=0, le=60, description="Cooldown wait in minutes after a losing exit")
     option_hard_stop_pct: float = Field(default=25.0, ge=10.0, le=50.0, description="Emergency option premium loss stop %")
+    account_equity: float = Field(default=500000.0, gt=0)
 
 
 class SessionTimersConfig(BaseModel):
     """Intraday trading window schedules in IST."""
-    no_new_trade_before: str = Field(default="09:30", description="No entries before HH:MM IST")
+    strategy_b_no_new_trade_before: str = Field(default="09:25", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    no_new_trade_before: str = Field(default="09:20", description="No entries before HH:MM IST")
     no_new_trade_after: str = Field(default="14:45", description="No new entries after HH:MM IST")
     force_exit_time: str = Field(default="15:20", description="Intraday square-off time HH:MM IST")
 
 
 class StrategyTunablesConfig(BaseModel):
     """Algorithmic tuning parameters."""
+    bb_width_percentile_threshold: float = Field(default=25.0, ge=20, le=35)
+    compression_lookback_bars: int = Field(default=8, ge=6, le=10)
+    box_max_age_bars: int = Field(default=8, ge=1, le=20)
+    breakout_buffer_atr: float = Field(default=0.05, ge=0.05, le=0.10)
+    breakout_max_extension_atr: float = Field(default=0.75, ge=0.60, le=1.0)
     evaluation_interval_sec: int = Field(default=2, ge=1, le=10, description="Scheduler loop interval in seconds")
     trend_pullback_enabled: bool = Field(default=True)
     volatility_breakout_enabled: bool = Field(default=True)
     adx_threshold: float = Field(default=20.0, ge=10.0, le=40.0)
-    rvol_threshold: float = Field(default=1.30, ge=1.0, le=3.0)
+    rvol_threshold: float = Field(default=1.20, ge=1.0, le=3.0)
+    ema_slope_threshold: float = Field(default=0.10, gt=0, le=1.0)
+    min_confirmation_score: int = Field(default=2, ge=1, le=6, description="Minimum confirmation points for Strategy A")
+    strat_b_min_confirmation: int = Field(default=3, ge=1, le=6, description="Minimum confirmation points for Strategy B")
+    box_max_height_atr: float = Field(default=1.30, ge=1.0, le=2.0, description="Max compression box height in ATR")
     supertrend_period: int = Field(default=10)
     supertrend_multiplier: float = Field(default=3.0)
+
+
+class CompressionBox(BaseModel):
+    """Consolidation box locked during volatility compression (Strategy B)."""
+    box_high: float
+    box_low: float
+    box_height: float
+    atr_at_lock: float
+    bb_width_at_lock: float
+    locked_at: datetime = Field(default_factory=utc_now)
+    created_bar_time: str = ""
+    bars_active: int = 0
+    max_bars: int = 8
+    is_locked: bool = False
 
 
 class AutoTradingConfig(BaseModel):
@@ -103,21 +134,38 @@ class AutoTradingConfig(BaseModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     session: SessionTimersConfig = Field(default_factory=SessionTimersConfig)
     tunables: StrategyTunablesConfig = Field(default_factory=StrategyTunablesConfig)
+    strategy_a_revision: int = 2
 
 
 class MarketFeatures(BaseModel):
     """Calculated technical, derivatives, and expected move feature vector."""
+    breakout_data_ready: bool = False
+    breakout_bull_derivatives_score: float = 0.0
+    breakout_bear_derivatives_score: float = 0.0
+    bullish_oi_wall: bool = False
+    bearish_oi_wall: bool = False
     timestamp: datetime = Field(default_factory=utc_now)
     spot_price: float
+    closed_5m_price: Optional[float] = None
+    closed_5m_time: Optional[datetime] = None
+    plus_di_5m: float = 0.0
+    minus_di_5m: float = 0.0
+    swing_low_5m: Optional[float] = None
+    swing_high_5m: Optional[float] = None
+    futures_atr_5m: float = 0.0
+    data_ready: bool = False
+    data_reason: str = "Awaiting real completed candles"
     spot_change_pct: float = 0.0
     # 15m Indicators
     ema9_15m: float = 0.0
     ema20_15m: float = 0.0
     ema50_15m: float = 0.0
     ema20_slope_15m: float = 0.0
+    ema20_slope_norm_15m: float = 0.0
     adx_15m: float = 0.0
     plus_di_15m: float = 0.0
     minus_di_15m: float = 0.0
+    atr_15m: float = 25.0
     # 5m Indicators
     ema9_5m: float = 0.0
     ema20_5m: float = 0.0
@@ -154,7 +202,7 @@ class SelectedContract(BaseModel):
     open_interest: int
     volume: int
     spread_pct: float
-    lot_size: int = 25
+    lot_size: int = Field(gt=0)
 
 
 class StrategySignal(BaseModel):
@@ -193,6 +241,21 @@ class ActiveTrade(BaseModel):
     entry_spot_price: float
     initial_structural_stop: float
     initial_r_points: float
+    pullback_swing_low: Optional[float] = None
+    pullback_swing_high: Optional[float] = None
+    box_high: Optional[float] = None
+    box_low: Optional[float] = None
+    atr_at_lock: Optional[float] = None
+    consecutive_inside_box_closes: int = 0
+    highest_close_since_entry: Optional[float] = None
+    lowest_close_since_entry: Optional[float] = None
+    last_managed_bar: Optional[datetime] = None
+    entry_order_id: Optional[str] = None
+    exit_order_id: Optional[str] = None
+    filled_quantity: int = 0
+    pending_exit_reason: Optional[str] = None
+    exit_filled_quantity: int = 0
+    exit_proceeds: float = 0.0
     # Dynamic live tracking
     current_option_price: float
     current_spot_price: float
@@ -250,6 +313,8 @@ class StrategyTriggerDiagnostics(BaseModel):
     target_entry_level: Optional[float] = None
     current_spot: float
     distance_pts: Optional[float] = None
+    phase_state: str = "SEARCH_REGIME"
+    phase_summary: dict[str, Any] = Field(default_factory=dict)
     conditions: list[TriggerCondition] = Field(default_factory=list)
 
 
@@ -261,6 +326,10 @@ class ThresholdOverrides(BaseModel):
     min_option_premium_floor: Optional[float] = None
     adx_threshold: Optional[float] = None
     rvol_threshold: Optional[float] = None
+    ema_slope_threshold: Optional[float] = Field(default=None, gt=0, le=1.0)
+    min_confirmation_score: Optional[int] = None
+    strat_b_min_confirmation: Optional[int] = Field(default=None, ge=1, le=6)
+    box_max_height_atr: Optional[float] = None
     bb_width_percentile: Optional[float] = None
     bull_derivatives_score: Optional[float] = None
     bear_derivatives_score: Optional[float] = None
@@ -323,3 +392,77 @@ class TriggerDiagnosticsResponse(BaseModel):
             self.diagnostics = self.strategies
 
 
+class SimulationRequest(BaseModel):
+    date: Optional[str] = None  # YYYY-MM-DD or None for today/latest
+    instrument_id: str = "INST-NIFTY-INDEX"
+    overrides: Optional[ThresholdOverrides] = None
+    capital: float = 500000.0
+    bypass_window: bool = False
+    max_trades_per_day: int = 5
+
+
+class SimulationBarSnapshot(BaseModel):
+    bar_index: int
+    timestamp: str
+    ist_time: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+    spot: float
+    ema9_5m: float
+    ema20_5m: float
+    supertrend: str
+    adx_15m: float
+    rvol_5m: float
+    bb_width_percentile: float
+    strategy_a_phase: str
+    strategy_b_phase: str
+    active_trade_id: Optional[str] = None
+    event: Optional[str] = None
+    event_details: Optional[str] = None
+
+
+class SimulatedTradeRecord(BaseModel):
+    trade_id: str
+    strategy: str
+    direction: str
+    option_type: str
+    strike: float
+    contract_symbol: str
+    entry_time: str
+    entry_spot: float
+    entry_premium: float
+    exit_time: Optional[str] = None
+    exit_spot: Optional[float] = None
+    exit_premium: Optional[float] = None
+    exit_reason: Optional[str] = None
+    initial_stop: float
+    initial_r_points: float
+    peak_r: float = 0.0
+    realized_r: float = 0.0
+    quantity: int
+    lots: int
+    gross_pnl: float = 0.0
+    net_pnl: float = 0.0
+    hold_duration_mins: float = 0.0
+
+
+class SimulationResult(BaseModel):
+    replay_mode: str = "SIGNALS_ONLY"
+    limitation: str = "Real completed spot/futures candles only. Historical executable option quotes are unavailable; trade/PnL metrics are not estimated."
+    session_date: str
+    total_bars_evaluated: int
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    win_rate_pct: float
+    total_pnl: float
+    net_pnl: float
+    total_realized_r: float
+    max_drawdown_pnl: float
+    profit_factor: float
+    trades: list[SimulatedTradeRecord] = Field(default_factory=list)
+    timeline: list[SimulationBarSnapshot] = Field(default_factory=list)
+    decision_logs: list[DecisionLogEntry] = Field(default_factory=list)

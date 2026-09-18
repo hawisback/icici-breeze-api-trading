@@ -127,7 +127,7 @@ class InstrumentRepository:
             cursor = await conn.execute(
                 """
                 SELECT DISTINCT expiry FROM instruments
-                WHERE underlying = ? AND expiry IS NOT NULL
+                WHERE underlying = ? AND expiry IS NOT NULL AND segment = 'OPTIONS' AND tradable = 1
                 ORDER BY expiry ASC
                 """,
                 (underlying,),
@@ -144,7 +144,7 @@ class InstrumentRepository:
             cursor = await conn.execute(
                 """
                 SELECT * FROM instruments
-                WHERE underlying = ? AND expiry = ?
+                WHERE underlying = ? AND expiry = ? AND segment = 'OPTIONS' AND tradable = 1
                 ORDER BY strike ASC, option_right ASC
                 """,
                 (underlying, expiry),
@@ -171,4 +171,3 @@ class InstrumentRepository:
             broker_token=row["broker_token"],
             tradable=bool(row["tradable"]),
         )
-

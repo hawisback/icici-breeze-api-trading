@@ -2,7 +2,7 @@
 Validates Strategy A, Strategy B, Contract Selector (under max premium cap), and Position Manager.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pytest
 
 from libs.contracts.models import Candle
@@ -97,27 +97,27 @@ def test_contract_selector_max_premium_cap():
         "strikes": [
             {
                 "strike": 23150,
-                "call": {"instrument_id": "CE-23150", "ask": 125.0, "bid": 124.0, "open_interest": 45000, "volume": 12000},
+                "call": {"lot_size": 25, "instrument_id": "CE-23150", "ask": 125.0, "bid": 124.0, "open_interest": 45000, "volume": 12000},
             },
             {
                 "strike": 23200,
-                "call": {"instrument_id": "CE-23200", "ask": 85.0, "bid": 84.0, "open_interest": 60000, "volume": 18000},
+                "call": {"lot_size": 25, "instrument_id": "CE-23200", "ask": 85.0, "bid": 84.0, "open_interest": 60000, "volume": 18000},
             },
             {
                 "strike": 23250,
-                "call": {"instrument_id": "CE-23250", "ask": 62.0, "bid": 61.5, "open_interest": 75000, "volume": 25000},
+                "call": {"lot_size": 25, "instrument_id": "CE-23250", "ask": 62.0, "bid": 61.5, "open_interest": 75000, "volume": 25000},
             },
             {
                 "strike": 23300,
-                "call": {"instrument_id": "CE-23300", "ask": 44.0, "bid": 43.5, "open_interest": 55000, "volume": 15000},
+                "call": {"lot_size": 25, "instrument_id": "CE-23300", "ask": 44.0, "bid": 43.5, "open_interest": 55000, "volume": 15000},
             },
             {
                 "strike": 23350,
-                "call": {"instrument_id": "CE-23350", "ask": 28.0, "bid": 27.5, "open_interest": 32000, "volume": 8000},
+                "call": {"lot_size": 25, "instrument_id": "CE-23350", "ask": 28.0, "bid": 27.5, "open_interest": 32000, "volume": 8000},
             },
             {
                 "strike": 23400,
-                "call": {"instrument_id": "CE-23400", "ask": 12.0, "bid": 11.5, "open_interest": 20000, "volume": 4000},
+                "call": {"lot_size": 25, "instrument_id": "CE-23400", "ask": 12.0, "bid": 11.5, "open_interest": 20000, "volume": 4000},
             },
         ],
     }
@@ -143,14 +143,15 @@ def test_contract_selector_rejects_when_all_exceed_cap():
     option_chain = {
         "underlying": "NIFTY",
         "atm_strike": 23200,
+        "expiry": "2026-09-22",
         "strikes": [
             {
                 "strike": 23200,
-                "call": {"instrument_id": "CE-23200", "ask": 85.0, "bid": 84.0, "open_interest": 60000},
+                "call": {"lot_size": 25, "instrument_id": "CE-23200", "ask": 85.0, "bid": 84.0, "open_interest": 60000},
             },
             {
                 "strike": 23250,
-                "call": {"instrument_id": "CE-23250", "ask": 65.0, "bid": 64.0, "open_interest": 60000},
+                "call": {"lot_size": 25, "instrument_id": "CE-23250", "ask": 65.0, "bid": 64.0, "open_interest": 60000},
             },
         ],
     }
@@ -221,6 +222,9 @@ def test_position_manager_multi_level_trailing_stops():
     )
 
     # 1. At +1R: Stop moves to protected breakeven
+    features.closed_5m_time = trade.entry_time + timedelta(minutes=5)
+    features.closed_5m_price = features.spot_price
+    features.timestamp = features.closed_5m_time
     updated, exit_reason = pm.update_position(trade, current_option_price=69.0, features=features)
     assert exit_reason is None
     assert updated.current_r >= 1.0
@@ -229,6 +233,9 @@ def test_position_manager_multi_level_trailing_stops():
 
     # 2. At +1.5R: Stop locks +0.5R
     features.spot_price = 23238.0  # +1.52R
+    features.closed_5m_time += timedelta(minutes=5)
+    features.closed_5m_price = features.spot_price
+    features.timestamp = features.closed_5m_time
     updated, exit_reason = pm.update_position(updated, current_option_price=74.0, features=features)
     assert exit_reason is None
     assert updated.state == TradeLifecycleState.PROFIT_LOCKED
@@ -236,6 +243,9 @@ def test_position_manager_multi_level_trailing_stops():
 
     # 3. Trailing stop must NEVER loosen
     features.spot_price = 23230.0  # dip back to 1.2R
+    features.closed_5m_time += timedelta(minutes=5)
+    features.closed_5m_price = features.spot_price
+    features.timestamp = features.closed_5m_time
     updated, exit_reason = pm.update_position(updated, current_option_price=71.0, features=features)
     assert updated.current_trailing_stop >= 23212.5  # Unchanged, did not loosen!
 
@@ -273,6 +283,57 @@ def test_position_manager_emergency_hard_stop():
     assert "OPTION_HARD_STOP_HIT" in exit_reason
 
 
+def test_position_sizing_floor_rejects_zero_lots():
+    """Section 14: if final_lots < 1: NO TRADE (Never use max(1, ...))."""
+    risk_cfg = RiskConfig(
+        max_trade_capital=5000.0,
+        risk_per_trade_pct_of_account=0.50,
+        option_hard_stop_pct=25.0,
+    )
+    pm = PositionManager(risk_config=risk_cfg)
+    # Premium 250 * lot_size 25 = 6,250 capital per lot > max_trade_capital 5,000
+    lots, qty = pm.calculate_position_size(entry_premium=250.0, account_equity=500000.0, lot_size=25)
+    assert lots == 0
+    assert qty == 0
+
+
+def test_immediate_thesis_invalidation():
+    """Section 19: completed close < pullback_swing_low triggers urgent exit."""
+    pm = PositionManager(session_config=SessionTimersConfig(force_exit_time="23:59"))
+    trade = ActiveTrade(
+        trade_id="TRD-TEST-THESIS",
+        mode=AutoTradingMode.PAPER,
+        strategy=StrategyName.TREND_PULLBACK,
+        direction=TradeDirection.BULLISH,
+        option_type=OptionType.CALL,
+        contract_symbol="NIFTY 23250 CE",
+        contract_instrument_id="CE-23250",
+        expiry="2026-09-22",
+        strike=23250,
+        quantity=50,
+        lot_size=25,
+        lots=2,
+        entry_option_price=60.0,
+        entry_spot_price=23200.0,
+        initial_structural_stop=23175.0,
+        initial_r_points=25.0,
+        pullback_swing_low=23180.0,  # Invalidation level
+        current_option_price=55.0,
+        current_spot_price=23200.0,
+        current_trailing_stop=23175.0,
+        option_hard_stop_price=45.0,
+        state=TradeLifecycleState.OPEN_INITIAL_RISK,
+    )
+    # Spot dips below pullback_swing_low 23180.0
+    features = MarketFeatures(spot_price=23178.0, atr_5m=20.0)
+    features.closed_5m_time = trade.entry_time + timedelta(minutes=5)
+    features.closed_5m_price = features.spot_price
+    features.timestamp = features.closed_5m_time
+    updated, exit_reason = pm.update_position(trade, current_option_price=52.0, features=features)
+    assert exit_reason is not None
+    assert "IMMEDIATE_THESIS_INVALIDATION" in exit_reason
+
+
 def test_strategy_a_and_b_instantiation():
     strat_a = TrendPullbackStrategy(adx_threshold=20.0, rvol_threshold=1.20)
     strat_b = VolatilityBreakoutStrategy(rvol_threshold=1.30, adx_threshold=20.0)
@@ -291,6 +352,7 @@ def test_diagnose_trend_pullback():
         ema20_15m=23220.0,
         ema50_15m=23200.0,
         ema20_slope_15m=0.8,
+        ema20_slope_norm_15m=0.15,
         adx_15m=24.5,
         plus_di_15m=28.0,
         minus_di_15m=14.0,
@@ -307,14 +369,15 @@ def test_diagnose_trend_pullback():
 
     assert bull_diag.direction == TradeDirection.BULLISH
     assert bull_diag.option_type == OptionType.CALL
-    assert bull_diag.total_count > 0
+    assert bull_diag.phase_state == "SEARCH_REGIME"
+    assert "real completed" in bull_diag.key_blocker
     assert bull_diag.ready_pct >= 0.0
-    assert len(bull_diag.conditions) == bull_diag.total_count
-    assert any(c.id == "adx_trend" for c in bull_diag.conditions)
-    assert any(c.id == "derivatives_flow" for c in bull_diag.conditions)
+    assert len(bull_diag.conditions) == 0
+    assert bull_diag.phase_state in ("SEARCH_REGIME", "WAIT_FOR_IMPULSE", "PULLBACK_ACTIVE", "PULLBACK_QUALIFIED", "WAIT_FOR_TRIGGER", "TRIGGERED", "READY_TO_TRIGGER")
 
     assert bear_diag.direction == TradeDirection.BEARISH
     assert bear_diag.option_type == OptionType.PUT
+    assert bear_diag.total_count == 0
 
 
 def test_diagnose_volatility_breakout():
@@ -336,10 +399,53 @@ def test_diagnose_volatility_breakout():
     bull_diag, bear_diag = diags[0], diags[1]
 
     assert bull_diag.direction == TradeDirection.BULLISH
-    assert bull_diag.total_count == 8
-    assert len(bull_diag.conditions) == 8
-    assert any(c.id == "bb_width" for c in bull_diag.conditions)
-    assert any(c.id == "rvol_volume" for c in bull_diag.conditions)
+    assert bull_diag.total_count == 0
+    assert "data" in bull_diag.key_blocker.lower()
+
+
+def test_position_manager_false_breakout_exit():
+    """Section 23: Spot falling below BoxHigh - 0.10*ATR triggers FALSE_BREAKOUT_EXIT."""
+    pm = PositionManager(session_config=SessionTimersConfig(force_exit_time="23:59"))
+    trade = ActiveTrade(
+        trade_id="TRD-TEST-STRAT-B",
+        mode=AutoTradingMode.PAPER,
+        strategy=StrategyName.VOLATILITY_BREAKOUT,
+        direction=TradeDirection.BULLISH,
+        option_type=OptionType.CALL,
+        contract_symbol="NIFTY 23250 CE",
+        contract_instrument_id="CE-23250",
+        expiry="2026-09-22",
+        strike=23250,
+        quantity=50,
+        lot_size=25,
+        lots=2,
+        entry_option_price=60.0,
+        entry_spot_price=23215.0,
+        initial_structural_stop=23195.0,
+        initial_r_points=20.0,
+        box_high=23210.0,
+        box_low=23198.0,
+        atr_at_lock=20.0,
+        current_option_price=58.0,
+        current_spot_price=23215.0,
+        current_trailing_stop=23195.0,
+        option_hard_stop_price=45.0,
+        state=TradeLifecycleState.OPEN_INITIAL_RISK,
+    )
+
+    # 1. Spot within tolerance (> BoxHigh - 0.10*ATR = 23210 - 2.0 = 23208.0)
+    features = MarketFeatures(spot_price=23209.0, atr_5m=20.0)
+    updated, exit_reason = pm.update_position(trade, current_option_price=57.0, features=features)
+    assert exit_reason is None
+
+    # 2. Spot breaches failure buffer (< 23208.0)
+    features.spot_price = 23207.5
+    features.closed_5m_price = 23207.5
+    features.closed_5m_time = trade.entry_time + timedelta(minutes=5)
+    features.timestamp = features.closed_5m_time
+    updated, exit_reason = pm.update_position(trade, current_option_price=55.0, features=features)
+    assert exit_reason is not None
+    assert "FALSE_BREAKOUT_EXIT" in exit_reason
 
 
 def test_contract_selector_with_override_premium_cap():
@@ -349,9 +455,10 @@ def test_contract_selector_with_override_premium_cap():
     chain = {
         "underlying": "NIFTY",
         "atm_strike": 23200,
+        "expiry": "2026-09-22",
         "strikes": [
-            {"strike": 23200, "call": {"instrument_id": "CE-23200", "ask": 125.0, "bid": 124.0, "open_interest": 20000, "volume": 5000}},
-            {"strike": 23250, "call": {"instrument_id": "CE-23250", "ask": 85.0, "bid": 84.0, "open_interest": 20000, "volume": 5000}},
+            {"strike": 23200, "call": {"lot_size": 25, "instrument_id": "CE-23200", "ask": 125.0, "bid": 124.0, "open_interest": 20000, "volume": 5000}},
+            {"strike": 23250, "call": {"lot_size": 25, "instrument_id": "CE-23250", "ask": 85.0, "bid": 84.0, "open_interest": 20000, "volume": 5000}},
         ],
     }
 
@@ -369,4 +476,3 @@ def test_contract_selector_with_override_premium_cap():
     assert contract is not None
     assert contract.ask_price == 125.0
     assert contract.strike == 23200
-

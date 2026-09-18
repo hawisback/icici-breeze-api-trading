@@ -47,6 +47,7 @@ class MarketDataService:
         self.update_quote(
             Quote(
                 instrument_id="INST-NIFTY-INDEX",
+                source="SIMULATED",
                 symbol="NIFTY 50",
                 last_price=23217.60,
                 open=23270.90,
@@ -61,6 +62,7 @@ class MarketDataService:
         self.update_quote(
             Quote(
                 instrument_id="INST-BANKNIFTY-INDEX",
+                source="SIMULATED",
                 symbol="NIFTY BANK",
                 last_price=56292.45,
                 open=55943.55,
@@ -113,6 +115,7 @@ class MarketDataService:
                         chg = float(row.get("ltp_percent_change") or 0.0)
                         vol = int(row.get("total_quantity_traded") or 0)
                         quote = Quote(
+                            source="BREEZE",
                             instrument_id=inst_id,
                             symbol=symbol,
                             last_price=lp,
@@ -237,6 +240,7 @@ class MarketDataService:
                         delta = (random.random() - 0.49) * 2.0
                         new_price = round(q.last_price + delta, 2)
                         new_quote = Quote(
+                            source="SIMULATED",
                             instrument_id=q.instrument_id,
                             symbol=q.symbol,
                             last_price=new_price,
@@ -256,5 +260,4 @@ class MarketDataService:
             except Exception as e:
                 logger.error("Error in market feed loop: %s", e)
                 await asyncio.sleep(interval_sec)
-
 

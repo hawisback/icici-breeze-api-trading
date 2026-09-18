@@ -1,627 +1,262 @@
-"""STRATEGY A — Trend Pullback Continuation.
-Implements Section 13 of NIFTY_INTRADAY_OPTIONS_AUTO_TRADING_STRATEGIES.md.
-"""
-
+"""Completed-bar Trend Pullback Continuation, specification revision 2."""
 from __future__ import annotations
 
-import logging
-from typing import Optional
-from libs.contracts.models import Candle
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+
+from services.strategy.features import FeatureEngine
 from services.strategy.models import (
-    MarketFeatures,
-    OptionType,
-    StrategyName,
-    StrategySignal,
-    StrategyTriggerDiagnostics,
-    ThresholdOverrides,
-    TradeDirection,
-    TriggerCondition,
-    utc_now,
+    OptionType, StrategyName, StrategySignal, StrategyTriggerDiagnostics,
+    TradeDirection, TriggerCondition,
 )
 
-logger = logging.getLogger(__name__)
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class TrendPullbackStrategy:
-    """Strategy A: Trend Pullback Continuation.
-    
-    Trades high-confidence pullback continuations in an established trend.
-    Bullish setup buys Call; Bearish setup buys Put.
-    """
+    """Shared execution/diagnostic decision path with serializable setup state."""
 
-    def __init__(self, adx_threshold: float = 20.0, rvol_threshold: float = 1.20) -> None:
+    def __init__(self, adx_threshold=20.0, rvol_threshold=1.20,
+                 min_confirmation_score=2, ema_slope_threshold=0.10):
         self.adx_threshold = adx_threshold
         self.rvol_threshold = rvol_threshold
+        self.min_confirmation_score = min_confirmation_score
+        self.ema_slope_threshold = ema_slope_threshold
+        self.state = {d.value: {} for d in TradeDirection}
 
-    def evaluate(
-        self,
-        features: MarketFeatures,
-        candles_5m: list[Candle],
-        candles_15m: list[Candle],
-        futures_candles: Optional[list[Candle]] = None,
-        overrides: Optional[ThresholdOverrides] = None,
-    ) -> Optional[StrategySignal]:
-        """Evaluates closed candles against Trend Pullback Continuation setup rules."""
-        if not candles_5m or len(candles_5m) < 6:
-            return None
+    def export_state(self):
+        return deepcopy(self.state)
 
-        # Check Bullish Setup
-        bull_signal = self._evaluate_bullish(features, candles_5m, candles_15m, overrides=overrides)
-        if bull_signal:
-            return bull_signal
+    def restore_state(self, state):
+        self.state = {d.value: dict(state.get(d.value, {})) for d in TradeDirection}
 
-        # Check Bearish Setup
-        bear_signal = self._evaluate_bearish(features, candles_5m, candles_15m, overrides=overrides)
-        if bear_signal:
-            return bear_signal
+    def reset(self, at=None):
+        for direction in TradeDirection:
+            old = self.state[direction.value]
+            self.state[direction.value] = {
+                "session": at.astimezone(IST).date().isoformat() if at else old.get("session"),
+                "after": at.isoformat() if at else old.get("after"),
+                "consumed": old.get("consumed"), "cooldown": old.get("cooldown"),
+            }
 
+    def on_exit(self, direction, at):
+        self.state[direction.value] = {
+            "session": at.astimezone(IST).date().isoformat(),
+            "after": at.isoformat(), "cooldown": at.isoformat()}
+
+    @staticmethod
+    def _impulse(bars, atr, bullish, after=None):
+        """Latest confirmed pivot pair, with extremes in chronological order."""
+        lows = [i for i in range(1, len(bars)-1)
+                if bars[i].low < bars[i-1].low and bars[i].low <= bars[i+1].low]
+        highs = [i for i in range(1, len(bars)-1)
+                 if bars[i].high > bars[i-1].high and bars[i].high >= bars[i+1].high]
+        starts, ends = (lows, highs) if bullish else (highs, lows)
+        for end in reversed(ends):
+            if after and bars[end].end_time <= datetime.fromisoformat(after):
+                continue
+            for start in reversed(starts):
+                if start >= end:
+                    continue
+                low = bars[start].low if bullish else bars[end].low
+                high = bars[end].high if bullish else bars[start].high
+                if high-low >= atr:
+                    leg = bars[start:end+1]
+                    if min(c.low for c in leg) < low or max(c.high for c in leg) > high:
+                        continue
+                    return {"start": bars[start].end_time.isoformat(),
+                            "end": bars[end].end_time.isoformat(),
+                            "low": low, "high": high, "height": high-low}
         return None
 
-    def _evaluate_bullish(
-        self,
-        features: MarketFeatures,
-        candles_5m: list[Candle],
-        candles_15m: list[Candle],
-        overrides: Optional[ThresholdOverrides] = None,
-    ) -> Optional[StrategySignal]:
-        spot = features.spot_price
-        atr = max(10.0, features.atr_5m)
-        latest_5m = candles_5m[-1]
-        prev_5m = candles_5m[-2]
+    def _decision(self, direction, features, bars, macro, futures, overrides):
+        bullish = direction == TradeDirection.BULLISH
+        sign = 1 if bullish else -1
+        opt = OptionType.CALL if bullish else OptionType.PUT
+        state = self.state[direction.value]
+        summary, conditions = {}, []
 
-        adx_target = overrides.adx_threshold if (overrides and overrides.adx_threshold is not None) else self.adx_threshold
-        deriv_target = overrides.bull_derivatives_score if (overrides and overrides.bull_derivatives_score is not None) else 2.0
+        def condition(id, name, passed, current, target):
+            conditions.append(TriggerCondition(id=id, name=name, status="PASSED" if passed else "PENDING",
+                              current_value=str(current), target_threshold=str(target), gap_description=name))
 
-        # 1. Bullish Regime Evaluation
-        c_ema_cross = features.ema20_15m > features.ema50_15m
-        c_ema_slope = features.ema20_slope_15m > 0
-        c_close_ema20 = spot > features.ema20_15m
-        c_adx = features.adx_15m >= adx_target
-        c_di = features.plus_di_15m > features.minus_di_15m
-        c_supertrend = features.supertrend_direction == "BULLISH"
-        c_fut_vwap = features.futures_price > features.futures_vwap
-        c_deriv_score = features.bull_derivatives_score >= deriv_target
+        def finish(phase, reason, signal=None):
+            passed = sum(c.status == "PASSED" for c in conditions)
+            state["phase"] = phase
+            diagnostic = StrategyTriggerDiagnostics(
+                strategy=StrategyName.TREND_PULLBACK, strategy_label=f"Trend Pullback ({opt.value})",
+                direction=direction, option_type=opt, phase_state=phase,
+                overall_status="READY_TO_TRIGGER" if signal else "WAITING",
+                passed_count=passed, total_count=len(conditions),
+                ready_pct=round(100*passed/len(conditions), 1) if conditions else 0,
+                key_blocker=reason, current_spot=features.spot_price,
+                phase_summary=summary, conditions=conditions,
+                target_entry_level=(bars[-2].high if bullish else bars[-2].low) if len(bars) > 1 else None)
+            return signal, diagnostic
 
-        regime_bullish = (
-            c_ema_cross
-            and c_ema_slope
-            and c_close_ema20
-            and c_adx
-            and c_di
-            and c_supertrend
-            and c_fut_vwap
-            and c_deriv_score
-        )
+        def setting(name, default):
+            value = getattr(overrides, name, None) if overrides else None
+            return default if value is None else value
 
-        # 2. Bullish Pullback Detection
-        # Identify local impulse high in the last 15 bars
-        lookback_bars = min(15, len(candles_5m) - 1)
-        recent_candles = candles_5m[-lookback_bars:-1]
-        highs = [c.high for c in recent_candles]
-        impulse_high = max(highs) if highs else latest_5m.high
-        impulse_idx = -1
-        for i, c in enumerate(reversed(recent_candles)):
-            if c.high == impulse_high:
-                impulse_idx = i + 1  # bars since impulse high
+        now = features.timestamp
+        valid = (features.data_ready and len(bars) >= 6 and bool(macro) and bool(futures)
+                 and features.atr_5m > 0 and features.futures_atr_5m > 0)
+        if valid:
+            valid = (all(c.source in ("BREEZE", "LIVE") and c.end_time <= now for c in bars + macro + futures)
+                     and 0 <= (now-bars[-1].end_time).total_seconds() < 300
+                     and 0 <= (now-macro[-1].end_time).total_seconds() < 900
+                     and futures[-1].end_time == bars[-1].end_time)
+        if not valid:
+            state.pop("impulse", None)
+            if bars:
+                state["after"] = bars[-1].end_time.isoformat()
+            return finish("SEARCH_REGIME", features.data_reason or "Awaiting complete real spot/futures data")
+        trigger, previous = bars[-1], bars[-2]
+        session = trigger.start_time.astimezone(IST).date().isoformat()
+        if state.get("session") != session:
+            state.clear()
+            state["session"] = session
+        if state.get("cooldown") and trigger.end_time <= datetime.fromisoformat(state["cooldown"]):
+            return finish("WAIT_FOR_IMPULSE", "Awaiting a completed candle after exit")
+        if state.get("consumed") == trigger.end_time.isoformat():
+            return finish("TRIGGERED", "Trigger candle already consumed")
+
+        atr = features.atr_5m
+        slope = setting("ema_slope_threshold", self.ema_slope_threshold)
+        score = sum((sign*(features.ema20_15m-features.ema50_15m) > 0,
+                     sign*features.ema20_slope_norm_15m >= slope,
+                     sign*(macro[-1].close-features.ema20_15m) > 0,
+                     sign*(features.plus_di_15m-features.minus_di_15m) > 0))
+        regime = features.adx_15m >= setting("adx_threshold", self.adx_threshold) and score >= 3
+        condition("macro_regime", "15m macro regime", regime, f"{score}/4; ADX {features.adx_15m}", "3/4 plus ADX threshold")
+        summary["regime"] = {"status": "QUALIFIED" if regime else "WAITING", "direction_score": f"{score}/4", "adx": features.adx_15m}
+        if not regime:
+            state.pop("impulse", None)
+            state["after"] = trigger.end_time.isoformat()
+            return finish("SEARCH_REGIME", "Macro regime is not qualified")
+
+        window = [c for c in bars[-15:] if c.start_time.astimezone(IST).date().isoformat() == session]
+        impulse = state.get("impulse")
+        if impulse is None:
+            impulse = self._impulse(window, atr, bullish, state.get("after"))
+            if impulse:
+                state["impulse"] = impulse
+        condition("chronological_impulse", "Chronological impulse", bool(impulse), impulse or "None", ">= 1 ATR")
+        summary["impulse"] = {"found": bool(impulse), "height_atr": impulse["height"]/atr if impulse else 0}
+        if not impulse:
+            return finish("WAIT_FOR_IMPULSE", "Waiting for a chronological impulse")
+        start, end = datetime.fromisoformat(impulse["start"]), datetime.fromisoformat(impulse["end"])
+        pb = [c for c in bars[:-1] if c.end_time > end]
+        age = len(pb)
+        summary["pullback"] = {"state": "ACTIVE", "bars": age, "depth_pct": 0, "retest": "None"}
+        if not pb:
+            return finish("PULLBACK_ACTIVE", "Waiting for at least two pullback bars")
+        extreme = min(c.low for c in pb) if bullish else max(c.high for c in pb)
+        depth = (impulse["high"]-extreme if bullish else extreme-impulse["low"])/impulse["height"]
+        summary["pullback"]["depth_pct"] = round(depth*100, 1)
+        invalid = (age > 9 or depth > .65 or
+                   (trigger.low < impulse["low"] if bullish else trigger.high > impulse["high"]))
+        if invalid:
+            state.pop("impulse", None)
+            state["after"] = trigger.end_time.isoformat()
+            return finish("WAIT_FOR_IMPULSE", "Setup reset: duration, depth or impulse structure invalid")
+        sequence = [c for c in bars if c.end_time >= end]
+        if any(b.start_time != a.end_time for a, b in zip(sequence, sequence[1:])):
+            state.pop("impulse", None)
+            state["after"] = trigger.end_time.isoformat()
+            return finish("WAIT_FOR_IMPULSE", "Setup reset: incomplete candle sequence")
+        retests = []
+        if abs(extreme-features.ema9_5m) <= .35*atr:
+            retests.append("EMA9")
+        if abs(extreme-features.ema20_5m) <= .35*atr:
+            retests.append("EMA20")
+        aligned = {c.end_time: c for c in futures}
+        leg = [c for c in bars if start <= c.end_time <= end]
+        if not leg or not all(c.end_time in aligned for c in leg + pb + [trigger]):
+            state.pop("impulse", None)
+            state["after"] = trigger.end_time.isoformat()
+            return finish("WAIT_FOR_IMPULSE", "Missing aligned futures bars for this setup")
+        for c in pb:
+            f = aligned[c.end_time]
+            history = [x for x in futures if x.end_time <= f.end_time]
+            vwap = FeatureEngine.calculate_futures_vwap(history)
+            fatr = FeatureEngine.calculate_atr(history)
+            distance = max(f.low-vwap, vwap-f.high, 0)
+            if vwap > 0 and fatr > 0 and distance <= .35*fatr:
+                retests.append("Futures VWAP")
                 break
+        prior = [c for c in bars if c.end_time <= start]
+        levels = [prior[i].high if bullish else prior[i].low for i in range(1, len(prior)-1)
+                  if (prior[i].high > prior[i-1].high and prior[i].high >= prior[i+1].high if bullish
+                      else prior[i].low < prior[i-1].low and prior[i].low <= prior[i+1].low)]
+        if any(impulse["low"] < level < impulse["high"] and abs(extreme-level) <= .35*atr for level in levels):
+            retests.append("Prior breakout level")
+        pb_ok = 2 <= age <= 9 and .10 <= depth <= .65 and bool(retests)
+        condition("pullback_depth_retest", "Pullback duration, depth and retest", pb_ok, f"{age} bars; {depth:.1%}; {retests}", "2-9 bars; 10-65%; retest")
+        summary["pullback"].update(state="QUALIFIED" if pb_ok else "ACTIVE", retest=", ".join(retests) or "None")
+        if not pb_ok:
+            return finish("PULLBACK_ACTIVE", "Waiting for controlled pullback and reference retest")
+        leg_volume = sum(aligned[c.end_time].volume for c in leg)/len(leg)
+        pb_volume = sum(aligned[c.end_time].volume for c in pb)/len(pb)
+        ratio = pb_volume/leg_volume if leg_volume > 0 else None
+        candle_range = trigger.high-trigger.low
+        price_trigger = trigger.close > previous.high if bullish else trigger.close < previous.low
+        momentum = (sign*(trigger.close-features.ema9_5m) > 0 or sign*(features.rsi_5m-50) > 0 or
+                    (candle_range > 0 and sign*(trigger.close-trigger.open) > 0 and
+                     abs(trigger.close-trigger.open)/candle_range >= .40 and
+                     (trigger.close-trigger.low if bullish else trigger.high-trigger.close)/candle_range >= .65))
+        exhaustion = 0 < candle_range <= 1.85*atr
+        condition("trigger_candle_breakout", "Completed close breaks previous high/low", price_trigger, trigger.close, previous.high if bullish else previous.low)
+        condition("momentum_confirmation", "Momentum and exhaustion safety", momentum and exhaustion, candle_range/atr, "1 of 3 momentum; range <=1.85 ATR")
+        summary["trigger"] = {"waiting_for": "Previous high" if bullish else "Previous low", "gap_pts": max(0, sign*((previous.high if bullish else previous.low)-trigger.close))}
+        if not (price_trigger and momentum and exhaustion):
+            return finish("WAIT_FOR_TRIGGER", "Waiting for resumption close" if exhaustion else "Trigger range exceeds 1.85 ATR")
+        deriv = features.bull_derivatives_score if bullish else features.bear_derivatives_score
+        deriv_target = setting("bull_derivatives_score" if bullish else "bear_derivatives_score", 2)
+        points = sum((features.supertrend_direction == direction.value,
+                      sign*(features.futures_price-features.futures_vwap) > 0,
+                      deriv >= deriv_target,
+                      features.futures_buildup in (("LONG_BUILDUP", "SHORT_COVERING") if bullish else ("SHORT_BUILDUP", "LONG_UNWINDING")),
+                      features.rvol_5m >= setting("rvol_threshold", self.rvol_threshold),
+                      ratio is not None and ratio < .80))
+        required = setting("min_confirmation_score", self.min_confirmation_score)
+        condition("confirmation_score", "Entry confirmations", points >= required, points, required)
+        summary["confirmation"] = {"score": points, "required": required}
+        raw_stop = extreme-sign*.15*atr
+        risk = max(sign*(trigger.close-raw_stop), .45*atr)
+        stop = trigger.close-sign*risk
+        risk_ok = risk <= 1.60*atr
+        condition("risk_r_band", "Structural initial R", risk_ok, risk/atr, ".45-1.60 ATR")
+        summary["risk"] = {"initial_r_atr": risk/atr, "stop": stop}
+        if points < required:
+            return finish("TRIGGERED", f"Confirmation score {points}/6 below {required}")
+        if not risk_ok:
+            return finish("RISK_AND_CONTRACT_CHECK", "Structural risk exceeds 1.60 ATR")
+        signal = StrategySignal(
+            signal_id=f"SIG-A-{direction.value}-{int(trigger.end_time.timestamp())}",
+            strategy=StrategyName.TREND_PULLBACK, direction=direction, option_type=opt,
+            timestamp=trigger.end_time, spot_reference_price=trigger.close,
+            structural_stop=stop, r_points=risk, derivatives_score=deriv,
+            features_snapshot={"entry_reference_spot": trigger.close,
+                               "pullback_low": extreme if bullish else None,
+                               "pullback_high": extreme if not bullish else None,
+                               "impulse_low": impulse["low"], "impulse_high": impulse["high"],
+                               "pullback_bars": age, "pullback_depth": depth,
+                               "pullback_vol_ratio": ratio, "confirmation_score": f"{points}/6",
+                               "direction_score": f"{score}/4", "atr": atr, "r_initial": risk})
+        return finish("READY_TO_TRIGGER", "Setup qualified; checking contract and risk limits", signal)
 
-        bars_since_impulse = impulse_idx if impulse_idx != -1 else 3
-        c_pullback_bars = 2 <= bars_since_impulse <= 8
+    def evaluate(self, features, candles_5m, candles_15m, futures_candles=None, overrides=None):
+        for direction in TradeDirection:
+            signal, _ = self._decision(direction, features, candles_5m, candles_15m, futures_candles or [], overrides)
+            if signal:
+                self.state[direction.value]["consumed"] = signal.timestamp.isoformat()
+                self.state[direction.value]["after"] = signal.timestamp.isoformat()
+                self.state[direction.value].pop("impulse", None)
+                return signal
+        return None
 
-        # Pullback swing low (lowest low between impulse and trigger)
-        pullback_candles = candles_5m[-bars_since_impulse:]
-        pullback_low = min(c.low for c in pullback_candles)
-        impulse_low = min(c.low for c in recent_candles)
-        impulse_height = max(1.0, impulse_high - impulse_low)
-        pullback_depth = (impulse_high - pullback_low) / impulse_height
-        c_pullback_depth = pullback_depth <= 0.65
-
-        # Proximity to 5m EMA20 or VWAP
-        c_support_retest = (
-            abs(pullback_low - features.ema20_5m) <= 1.2 * atr
-            or pullback_low >= (features.futures_vwap - 30.0)
-        )
-
-        pullback_detected = c_pullback_bars and c_pullback_depth and c_support_retest
-
-        # 3. Bullish Entry Trigger Candle
-        c_trigger_high = latest_5m.close > prev_5m.high
-        c_trigger_ema9 = latest_5m.close > features.ema9_5m
-        c_rsi = features.rsi_5m >= 50.0
-        c_candle_range = (latest_5m.high - latest_5m.low) <= (1.85 * atr)
-
-        trigger_fired = (
-            c_trigger_high
-            and c_trigger_ema9
-            and c_rsi
-            and c_candle_range
-        )
-
-        # 4. Structural Risk & R Calculation
-        candidate_stop = round(pullback_low - (0.15 * atr), 2)
-        r_points = round(spot - candidate_stop, 2)
-        c_risk_band = (0.45 * atr) <= r_points <= (1.60 * atr)
-
-        conditions = {
-            "regime_ema_cross": c_ema_cross,
-            "regime_ema_slope": c_ema_slope,
-            "regime_close_above_ema20": c_close_ema20,
-            "regime_adx_trend": c_adx,
-            "regime_plus_di_dom": c_di,
-            "regime_supertrend_bullish": c_supertrend,
-            "regime_futures_above_vwap": c_fut_vwap,
-            "derivatives_confirmation": c_deriv_score,
-            "pullback_bars_valid": c_pullback_bars,
-            "pullback_depth_healthy": c_pullback_depth,
-            "pullback_support_proximity": c_support_retest,
-            "trigger_close_above_prev_high": c_trigger_high,
-            "trigger_close_above_ema9": c_trigger_ema9,
-            "trigger_rsi_momentum": c_rsi,
-            "trigger_candle_range_normal": c_candle_range,
-            "risk_r_band_valid": c_risk_band,
-        }
-
-        all_passed = regime_bullish and pullback_detected and trigger_fired and c_risk_band
-
-        if not all_passed:
-            # We also record candidate state when trigger is close to firing
-            return None
-
-        return StrategySignal(
-            signal_id=f"SIG-A-BULL-{int(utc_now().timestamp())}",
-            strategy=StrategyName.TREND_PULLBACK,
-            direction=TradeDirection.BULLISH,
-            option_type=OptionType.CALL,
-            timestamp=utc_now(),
-            spot_reference_price=spot,
-            structural_stop=candidate_stop,
-            r_points=r_points,
-            derivatives_score=features.bull_derivatives_score,
-            features_snapshot={
-                "conditions": conditions,
-                "pullback_low": pullback_low,
-                "impulse_high": impulse_high,
-                "pullback_depth": round(pullback_depth, 2),
-                "r_points": r_points,
-                "atr": atr,
-            },
-            passed=True,
-        )
-
-    def _evaluate_bearish(
-        self,
-        features: MarketFeatures,
-        candles_5m: list[Candle],
-        candles_15m: list[Candle],
-        overrides: Optional[ThresholdOverrides] = None,
-    ) -> Optional[StrategySignal]:
-        spot = features.spot_price
-        atr = max(10.0, features.atr_5m)
-        latest_5m = candles_5m[-1]
-        prev_5m = candles_5m[-2]
-
-        adx_target = overrides.adx_threshold if (overrides and overrides.adx_threshold is not None) else self.adx_threshold
-        deriv_target = overrides.bear_derivatives_score if (overrides and overrides.bear_derivatives_score is not None) else 2.0
-
-        # 1. Bearish Regime Evaluation
-        c_ema_cross = features.ema20_15m < features.ema50_15m
-        c_ema_slope = features.ema20_slope_15m < 0
-        c_close_ema20 = spot < features.ema20_15m
-        c_adx = features.adx_15m >= adx_target
-        c_di = features.minus_di_15m > features.plus_di_15m
-        c_supertrend = features.supertrend_direction == "BEARISH"
-        c_fut_vwap = features.futures_price < features.futures_vwap
-        c_deriv_score = features.bear_derivatives_score >= deriv_target
-
-        regime_bearish = (
-            c_ema_cross
-            and c_ema_slope
-            and c_close_ema20
-            and c_adx
-            and c_di
-            and c_supertrend
-            and c_fut_vwap
-            and c_deriv_score
-        )
-
-        # 2. Bearish Pullback Detection
-        lookback_bars = min(15, len(candles_5m) - 1)
-        recent_candles = candles_5m[-lookback_bars:-1]
-        lows = [c.low for c in recent_candles]
-        impulse_low = min(lows) if lows else latest_5m.low
-        impulse_idx = -1
-        for i, c in enumerate(reversed(recent_candles)):
-            if c.low == impulse_low:
-                impulse_idx = i + 1
-                break
-
-        bars_since_impulse = impulse_idx if impulse_idx != -1 else 3
-        c_pullback_bars = 2 <= bars_since_impulse <= 8
-
-        # Pullback swing high (highest high between impulse and trigger)
-        pullback_candles = candles_5m[-bars_since_impulse:]
-        pullback_high = max(c.high for c in pullback_candles)
-        impulse_high = max(c.high for c in recent_candles)
-        impulse_height = max(1.0, impulse_high - impulse_low)
-        pullback_depth = (pullback_high - impulse_low) / impulse_height
-        c_pullback_depth = pullback_depth <= 0.65
-
-        # Proximity to 5m EMA20 or VWAP
-        c_support_retest = (
-            abs(pullback_high - features.ema20_5m) <= 1.2 * atr
-            or pullback_high <= (features.futures_vwap + 30.0)
-        )
-
-        pullback_detected = c_pullback_bars and c_pullback_depth and c_support_retest
-
-        # 3. Bearish Entry Trigger Candle
-        c_trigger_low = latest_5m.close < prev_5m.low
-        c_trigger_ema9 = latest_5m.close < features.ema9_5m
-        c_rsi = features.rsi_5m <= 50.0
-        c_candle_range = (latest_5m.high - latest_5m.low) <= (1.85 * atr)
-
-        trigger_fired = (
-            c_trigger_low
-            and c_trigger_ema9
-            and c_rsi
-            and c_candle_range
-        )
-
-        # 4. Structural Risk & R Calculation
-        candidate_stop = round(pullback_high + (0.15 * atr), 2)
-        r_points = round(candidate_stop - spot, 2)
-        c_risk_band = (0.45 * atr) <= r_points <= (1.60 * atr)
-
-        conditions = {
-            "regime_ema_cross": c_ema_cross,
-            "regime_ema_slope": c_ema_slope,
-            "regime_close_below_ema20": c_close_ema20,
-            "regime_adx_trend": c_adx,
-            "regime_minus_di_dom": c_di,
-            "regime_supertrend_bearish": c_supertrend,
-            "regime_futures_below_vwap": c_fut_vwap,
-            "derivatives_confirmation": c_deriv_score,
-            "pullback_bars_valid": c_pullback_bars,
-            "pullback_depth_healthy": c_pullback_depth,
-            "pullback_resistance_proximity": c_support_retest,
-            "trigger_close_below_prev_low": c_trigger_low,
-            "trigger_close_below_ema9": c_trigger_ema9,
-            "trigger_rsi_momentum": c_rsi,
-            "trigger_candle_range_normal": c_candle_range,
-            "risk_r_band_valid": c_risk_band,
-        }
-
-        all_passed = regime_bearish and pullback_detected and trigger_fired and c_risk_band
-
-        if not all_passed:
-            return None
-
-        return StrategySignal(
-            signal_id=f"SIG-A-BEAR-{int(utc_now().timestamp())}",
-            strategy=StrategyName.TREND_PULLBACK,
-            direction=TradeDirection.BEARISH,
-            option_type=OptionType.PUT,
-            timestamp=utc_now(),
-            spot_reference_price=spot,
-            structural_stop=candidate_stop,
-            r_points=r_points,
-            derivatives_score=features.bear_derivatives_score,
-            features_snapshot={
-                "conditions": conditions,
-                "pullback_high": pullback_high,
-                "impulse_low": impulse_low,
-                "pullback_depth": round(pullback_depth, 2),
-                "r_points": r_points,
-                "atr": atr,
-            },
-            passed=True,
-        )
-
-    def diagnose(
-        self,
-        features: MarketFeatures,
-        candles_5m: list[Candle],
-        candles_15m: list[Candle],
-        overrides: Optional[ThresholdOverrides] = None,
-    ) -> list[StrategyTriggerDiagnostics]:
-        """Provides condition-by-condition diagnostic breakdown of what Strategy A is waiting for."""
-        spot = features.spot_price
-        adx_target = overrides.adx_threshold if (overrides and overrides.adx_threshold is not None) else self.adx_threshold
-        bull_deriv_target = overrides.bull_derivatives_score if (overrides and overrides.bull_derivatives_score is not None) else 2.0
-        bear_deriv_target = overrides.bear_derivatives_score if (overrides and overrides.bear_derivatives_score is not None) else 2.0
-
-        if not candles_5m or len(candles_5m) < 2:
-            return [
-                StrategyTriggerDiagnostics(
-                    strategy=StrategyName.TREND_PULLBACK,
-                    strategy_label="Trend Pullback (CALL)",
-                    direction=TradeDirection.BULLISH,
-                    option_type=OptionType.CALL,
-                    overall_status="WAITING",
-                    passed_count=0,
-                    total_count=11,
-                    ready_pct=0.0,
-                    key_blocker="Awaiting 5-minute market candles",
-                    current_spot=spot,
-                ),
-                StrategyTriggerDiagnostics(
-                    strategy=StrategyName.TREND_PULLBACK,
-                    strategy_label="Trend Pullback (PUT)",
-                    direction=TradeDirection.BEARISH,
-                    option_type=OptionType.PUT,
-                    overall_status="WAITING",
-                    passed_count=0,
-                    total_count=11,
-                    ready_pct=0.0,
-                    key_blocker="Awaiting 5-minute market candles",
-                    current_spot=spot,
-                ),
-            ]
-
-        latest_5m = candles_5m[-1]
-        prev_5m = candles_5m[-2]
-
-        # --- Bullish Diagnostics ---
-        c_ema_cross = features.ema20_15m > features.ema50_15m
-        c_ema_slope = features.ema20_slope_15m > 0
-        c_close_ema20 = spot > features.ema20_15m
-        c_adx = features.adx_15m >= adx_target
-        c_di = features.plus_di_15m > features.minus_di_15m
-        c_supertrend = features.supertrend_direction == "BULLISH"
-        c_fut_vwap = features.futures_price > features.futures_vwap
-        c_deriv = features.bull_derivatives_score >= bull_deriv_target
-        c_trigger_high = latest_5m.close > prev_5m.high
-        c_trigger_ema9 = latest_5m.close > features.ema9_5m
-        c_rsi = features.rsi_5m >= 50.0
-
-        bull_conditions = [
-            TriggerCondition(
-                id="ema_trend",
-                name="15m Trend Alignment (EMA20 > EMA50)",
-                current_value=f"EMA20: {features.ema20_15m:.1f} | EMA50: {features.ema50_15m:.1f}",
-                target_threshold="EMA20 > EMA50",
-                status="PASSED" if c_ema_cross else "PENDING",
-                gap_description="Passed (Bullish trend)" if c_ema_cross else f"EMA20 is {abs(features.ema20_15m - features.ema50_15m):.1f} pts below EMA50",
-            ),
-            TriggerCondition(
-                id="ema_slope",
-                name="15m EMA20 Slope",
-                current_value=f"{features.ema20_slope_15m:+.2f}",
-                target_threshold="> 0.00",
-                status="PASSED" if c_ema_slope else "PENDING",
-                gap_description="Passed (Rising slope)" if c_ema_slope else "Slope is negative or flat",
-            ),
-            TriggerCondition(
-                id="spot_above_ema20",
-                name="Spot above 15m EMA20",
-                current_value=f"Spot: ₹{spot:.1f} | EMA20: {features.ema20_15m:.1f}",
-                target_threshold=f"> {features.ema20_15m:.1f}",
-                status="PASSED" if c_close_ema20 else "PENDING",
-                gap_description="Passed" if c_close_ema20 else f"Spot is {abs(features.ema20_15m - spot):.1f} pts below 15m EMA20",
-            ),
-            TriggerCondition(
-                id="adx_trend",
-                name="15m ADX Trend Strength",
-                current_value=f"{features.adx_15m:.1f}",
-                target_threshold=f">= {adx_target:.1f}",
-                unit="pts",
-                status="PASSED" if c_adx else "PENDING",
-                gap_description="Passed (Strong trend)" if c_adx else f"Need +{max(0.0, adx_target - features.adx_15m):.1f} pts ADX to qualify",
-            ),
-            TriggerCondition(
-                id="di_dominance",
-                name="Directional Dominance (+DI > -DI)",
-                current_value=f"+DI: {features.plus_di_15m:.1f} | -DI: {features.minus_di_15m:.1f}",
-                target_threshold="+DI > -DI",
-                status="PASSED" if c_di else "PENDING",
-                gap_description="Passed (+DI dominating)" if c_di else f"-DI leads by {(features.minus_di_15m - features.plus_di_15m):.1f} pts",
-            ),
-            TriggerCondition(
-                id="supertrend",
-                name="15m Supertrend Direction",
-                current_value=features.supertrend_direction,
-                target_threshold="BULLISH",
-                status="PASSED" if c_supertrend else "PENDING",
-                gap_description="Passed (Bullish)" if c_supertrend else f"Supertrend is currently {features.supertrend_direction}",
-            ),
-            TriggerCondition(
-                id="futures_vwap",
-                name="Futures vs Session VWAP",
-                current_value=f"Fut: ₹{features.futures_price:.1f} | VWAP: {features.futures_vwap:.1f}",
-                target_threshold=f"> {features.futures_vwap:.1f}",
-                status="PASSED" if c_fut_vwap else "PENDING",
-                gap_description="Passed (Above VWAP)" if c_fut_vwap else f"{(features.futures_vwap - features.futures_price):.1f} pts below VWAP",
-            ),
-            TriggerCondition(
-                id="derivatives_flow",
-                name="Derivatives Flow Bull Score",
-                current_value=f"+{features.bull_derivatives_score:.1f} / 5.0",
-                target_threshold=f">= +{bull_deriv_target:.1f}",
-                status="PASSED" if c_deriv else "PENDING",
-                gap_description="Passed (Bull flow confirmed)" if c_deriv else f"Score is +{features.bull_derivatives_score:.1f}, need +{max(0.0, bull_deriv_target - features.bull_derivatives_score):.1f} more",
-            ),
-            TriggerCondition(
-                id="trigger_candle",
-                name="5m Close > Previous Bar High",
-                current_value=f"Close: ₹{latest_5m.close:.2f} | Prev High: ₹{prev_5m.high:.2f}",
-                target_threshold=f"> ₹{prev_5m.high:.2f}",
-                status="PASSED" if c_trigger_high else "PENDING",
-                gap_description="Passed (Breakout of prior candle)" if c_trigger_high else f"Waiting for 5m close above ₹{prev_5m.high:.2f} (Gap: {max(0.0, prev_5m.high - latest_5m.close):.2f} pts)",
-            ),
-            TriggerCondition(
-                id="trigger_ema9",
-                name="5m Close > 5m EMA9",
-                current_value=f"Close: ₹{latest_5m.close:.1f} | EMA9: {features.ema9_5m:.1f}",
-                target_threshold=f"> {features.ema9_5m:.1f}",
-                status="PASSED" if c_trigger_ema9 else "PENDING",
-                gap_description="Passed" if c_trigger_ema9 else f"Need {max(0.0, features.ema9_5m - latest_5m.close):.1f} pts rise to reclaim 5m EMA9",
-            ),
-            TriggerCondition(
-                id="rsi_momentum",
-                name="5m RSI Momentum",
-                current_value=f"{features.rsi_5m:.1f}",
-                target_threshold=">= 50.0",
-                status="PASSED" if c_rsi else "PENDING",
-                gap_description="Passed" if c_rsi else f"RSI is {features.rsi_5m:.1f} (need >= 50.0)",
-            ),
-        ]
-
-        bull_passed = sum(1 for c in bull_conditions if c.status == "PASSED")
-        bull_total = len(bull_conditions)
-        bull_pct = round((bull_passed / bull_total) * 100, 1)
-
-        bull_blocker = "All conditions satisfied — ready to trigger entry"
-        for cond in bull_conditions:
-            if cond.status == "PENDING":
-                bull_blocker = cond.gap_description
-                break
-
-        bull_diag = StrategyTriggerDiagnostics(
-            strategy=StrategyName.TREND_PULLBACK,
-            strategy_label="Trend Pullback (CALL)",
-            direction=TradeDirection.BULLISH,
-            option_type=OptionType.CALL,
-            overall_status="READY_TO_TRIGGER" if bull_passed == bull_total else "WAITING",
-            passed_count=bull_passed,
-            total_count=bull_total,
-            ready_pct=bull_pct,
-            key_blocker=bull_blocker,
-            target_entry_level=round(prev_5m.high + 0.05, 2),
-            current_spot=spot,
-            distance_pts=max(0.0, round(prev_5m.high - spot, 2)),
-            conditions=bull_conditions,
-        )
-
-        # --- Bearish Diagnostics ---
-        c_ema_cross_bear = features.ema20_15m < features.ema50_15m
-        c_ema_slope_bear = features.ema20_slope_15m < 0
-        c_close_ema20_bear = spot < features.ema20_15m
-        c_adx_bear = features.adx_15m >= adx_target
-        c_di_bear = features.minus_di_15m > features.plus_di_15m
-        c_supertrend_bear = features.supertrend_direction == "BEARISH"
-        c_fut_vwap_bear = features.futures_price < features.futures_vwap
-        c_deriv_bear = features.bear_derivatives_score >= bear_deriv_target
-        c_trigger_low = latest_5m.close < prev_5m.low
-        c_trigger_ema9_bear = latest_5m.close < features.ema9_5m
-        c_rsi_bear = features.rsi_5m <= 50.0
-
-        bear_conditions = [
-            TriggerCondition(
-                id="ema_trend",
-                name="15m Trend Alignment (EMA20 < EMA50)",
-                current_value=f"EMA20: {features.ema20_15m:.1f} | EMA50: {features.ema50_15m:.1f}",
-                target_threshold="EMA20 < EMA50",
-                status="PASSED" if c_ema_cross_bear else "PENDING",
-                gap_description="Passed (Bearish trend)" if c_ema_cross_bear else f"EMA20 is {abs(features.ema50_15m - features.ema20_15m):.1f} pts above EMA50",
-            ),
-            TriggerCondition(
-                id="ema_slope",
-                name="15m EMA20 Slope",
-                current_value=f"{features.ema20_slope_15m:+.2f}",
-                target_threshold="< 0.00",
-                status="PASSED" if c_ema_slope_bear else "PENDING",
-                gap_description="Passed (Downward slope)" if c_ema_slope_bear else "Slope is positive or flat",
-            ),
-            TriggerCondition(
-                id="spot_below_ema20",
-                name="Spot below 15m EMA20",
-                current_value=f"Spot: ₹{spot:.1f} | EMA20: {features.ema20_15m:.1f}",
-                target_threshold=f"< {features.ema20_15m:.1f}",
-                status="PASSED" if c_close_ema20_bear else "PENDING",
-                gap_description="Passed" if c_close_ema20_bear else f"Spot is {abs(spot - features.ema20_15m):.1f} pts above 15m EMA20",
-            ),
-            TriggerCondition(
-                id="adx_trend",
-                name="15m ADX Trend Strength",
-                current_value=f"{features.adx_15m:.1f}",
-                target_threshold=f">= {adx_target:.1f}",
-                unit="pts",
-                status="PASSED" if c_adx_bear else "PENDING",
-                gap_description="Passed (Strong trend)" if c_adx_bear else f"Need +{max(0.0, adx_target - features.adx_15m):.1f} pts ADX to qualify",
-            ),
-            TriggerCondition(
-                id="di_dominance",
-                name="Directional Dominance (-DI > +DI)",
-                current_value=f"-DI: {features.minus_di_15m:.1f} | +DI: {features.plus_di_15m:.1f}",
-                target_threshold="-DI > +DI",
-                status="PASSED" if c_di_bear else "PENDING",
-                gap_description="Passed (-DI dominating)" if c_di_bear else f"+DI leads by {(features.plus_di_15m - features.minus_di_15m):.1f} pts",
-            ),
-            TriggerCondition(
-                id="supertrend",
-                name="15m Supertrend Direction",
-                current_value=features.supertrend_direction,
-                target_threshold="BEARISH",
-                status="PASSED" if c_supertrend_bear else "PENDING",
-                gap_description="Passed (Bearish)" if c_supertrend_bear else f"Supertrend is currently {features.supertrend_direction}",
-            ),
-            TriggerCondition(
-                id="futures_vwap",
-                name="Futures vs Session VWAP",
-                current_value=f"Fut: ₹{features.futures_price:.1f} | VWAP: {features.futures_vwap:.1f}",
-                target_threshold=f"< {features.futures_vwap:.1f}",
-                status="PASSED" if c_fut_vwap_bear else "PENDING",
-                gap_description="Passed (Below VWAP)" if c_fut_vwap_bear else f"{(features.futures_price - features.futures_vwap):.1f} pts above VWAP",
-            ),
-            TriggerCondition(
-                id="derivatives_flow",
-                name="Derivatives Flow Bear Score",
-                current_value=f"+{features.bear_derivatives_score:.1f} / 5.0",
-                target_threshold=f">= +{bear_deriv_target:.1f}",
-                status="PASSED" if c_deriv_bear else "PENDING",
-                gap_description="Passed (Bear flow confirmed)" if c_deriv_bear else f"Score is +{features.bear_derivatives_score:.1f}, need +{max(0.0, bear_deriv_target - features.bear_derivatives_score):.1f} more",
-            ),
-            TriggerCondition(
-                id="trigger_candle",
-                name="5m Close < Previous Bar Low",
-                current_value=f"Close: ₹{latest_5m.close:.2f} | Prev Low: ₹{prev_5m.low:.2f}",
-                target_threshold=f"< ₹{prev_5m.low:.2f}",
-                status="PASSED" if c_trigger_low else "PENDING",
-                gap_description="Passed (Breakdown of prior candle)" if c_trigger_low else f"Waiting for 5m close below ₹{prev_5m.low:.2f} (Gap: {max(0.0, latest_5m.close - prev_5m.low):.2f} pts)",
-            ),
-            TriggerCondition(
-                id="trigger_ema9",
-                name="5m Close < 5m EMA9",
-                current_value=f"Close: ₹{latest_5m.close:.1f} | EMA9: {features.ema9_5m:.1f}",
-                target_threshold=f"< {features.ema9_5m:.1f}",
-                status="PASSED" if c_trigger_ema9_bear else "PENDING",
-                gap_description="Passed" if c_trigger_ema9_bear else f"Need {max(0.0, latest_5m.close - features.ema9_5m):.1f} pts drop below 5m EMA9",
-            ),
-            TriggerCondition(
-                id="rsi_momentum",
-                name="5m RSI Momentum",
-                current_value=f"{features.rsi_5m:.1f}",
-                target_threshold="<= 50.0",
-                status="PASSED" if c_rsi_bear else "PENDING",
-                gap_description="Passed" if c_rsi_bear else f"RSI is {features.rsi_5m:.1f} (need <= 50.0)",
-            ),
-        ]
-
-        bear_passed = sum(1 for c in bear_conditions if c.status == "PASSED")
-        bear_total = len(bear_conditions)
-        bear_pct = round((bear_passed / bear_total) * 100, 1)
-
-        bear_blocker = "All conditions satisfied — ready to trigger entry"
-        for cond in bear_conditions:
-            if cond.status == "PENDING":
-                bear_blocker = cond.gap_description
-                break
-
-        bear_diag = StrategyTriggerDiagnostics(
-            strategy=StrategyName.TREND_PULLBACK,
-            strategy_label="Trend Pullback (PUT)",
-            direction=TradeDirection.BEARISH,
-            option_type=OptionType.PUT,
-            overall_status="READY_TO_TRIGGER" if bear_passed == bear_total else "WAITING",
-            passed_count=bear_passed,
-            total_count=bear_total,
-            ready_pct=bear_pct,
-            key_blocker=bear_blocker,
-            target_entry_level=round(prev_5m.low - 0.05, 2),
-            current_spot=spot,
-            distance_pts=max(0.0, round(spot - prev_5m.low, 2)),
-            conditions=bear_conditions,
-        )
-
-        return [bull_diag, bear_diag]
-
+    def diagnose(self, features, candles_5m, candles_15m, overrides=None, futures_candles=None):
+        preview = deepcopy(self)
+        return [preview._decision(d, features, candles_5m, candles_15m, futures_candles or [], overrides)[1]
+                for d in TradeDirection]

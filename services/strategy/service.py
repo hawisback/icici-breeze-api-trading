@@ -5,7 +5,7 @@ Based on implementation/NIFTY_INTRADAY_OPTIONS_AUTO_TRADING_STRATEGIES.md.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 from typing import Any, Optional
 
@@ -33,6 +33,8 @@ from services.strategy.models import (
     GateBlockers,
     MarketFeatures,
     OptionType,
+    SimulationRequest,
+    SimulationResult,
     StrategyName,
     StrategySignal,
     ThresholdOverrides,
@@ -42,6 +44,7 @@ from services.strategy.models import (
 )
 from services.strategy.position_manager import PositionManager
 from services.strategy.repository import StrategyRepository
+from services.strategy.simulation import SimulationEngine
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 
@@ -74,10 +77,27 @@ class StrategyService:
         self.strategy_a = TrendPullbackStrategy(
             adx_threshold=self.config.tunables.adx_threshold,
             rvol_threshold=self.config.tunables.rvol_threshold,
+            min_confirmation_score=self.config.tunables.min_confirmation_score,
+            ema_slope_threshold=self.config.tunables.ema_slope_threshold,
         )
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
             adx_threshold=self.config.tunables.adx_threshold,
+            min_confirmation_score=self.config.tunables.strat_b_min_confirmation,
+            box_max_height_atr=self.config.tunables.box_max_height_atr,
+            bb_width_percentile_threshold=self.config.tunables.bb_width_percentile_threshold,
+            lookback_bars=self.config.tunables.compression_lookback_bars,
+            max_age_bars=self.config.tunables.box_max_age_bars,
+            breakout_buffer_atr=self.config.tunables.breakout_buffer_atr,
+            max_extension_atr=self.config.tunables.breakout_max_extension_atr,
+            entry_start=self.config.session.strategy_b_no_new_trade_before,
+            entry_end=self.config.session.no_new_trade_after,
+        )
+        self.simulation_engine = SimulationEngine(
+            historical_service=self.hist_svc,
+            risk_config=self.config.risk,
+            session_config=self.config.session,
+            tunables=self.config.tunables,
         )
 
         self._loop_task: Optional[asyncio.Task] = None
@@ -86,11 +106,23 @@ class StrategyService:
         self._active_trades_cache: list[ActiveTrade] = []
         self._last_loss_exit_time: Optional[datetime] = None
         self._active_overrides: ThresholdOverrides = ThresholdOverrides()
+        self._market_snapshot = ([], [], [])
+        self._evaluation_lock = asyncio.Lock()
+
+    def _reset_setups(self, at):
+        self.strategy_a.reset(at)
+        self.strategy_b.reset(at)
+
+    async def _save_runtime(self):
+        await self.repo.save_runtime(self.strategy_a.export_state())
+        await self.repo.save_runtime(self.strategy_b.export_state(), "volatility_breakout")
 
     async def initialize(self) -> None:
         await self.repo.initialize()
         self.config = await self.repo.get_auto_config()
         self._sync_subcomponents()
+        self.strategy_a.restore_state(await self.repo.get_runtime())
+        self.strategy_b.restore_state(await self.repo.get_runtime("volatility_breakout"))
         self._active_trades_cache = await self.repo.get_active_trades()
         await self._seed_default_strategy()
 
@@ -105,10 +137,27 @@ class StrategyService:
         self.strategy_a = TrendPullbackStrategy(
             adx_threshold=self.config.tunables.adx_threshold,
             rvol_threshold=self.config.tunables.rvol_threshold,
+            min_confirmation_score=self.config.tunables.min_confirmation_score,
+            ema_slope_threshold=self.config.tunables.ema_slope_threshold,
         )
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
             adx_threshold=self.config.tunables.adx_threshold,
+            min_confirmation_score=self.config.tunables.strat_b_min_confirmation,
+            box_max_height_atr=self.config.tunables.box_max_height_atr,
+            bb_width_percentile_threshold=self.config.tunables.bb_width_percentile_threshold,
+            lookback_bars=self.config.tunables.compression_lookback_bars,
+            max_age_bars=self.config.tunables.box_max_age_bars,
+            breakout_buffer_atr=self.config.tunables.breakout_buffer_atr,
+            max_extension_atr=self.config.tunables.breakout_max_extension_atr,
+            entry_start=self.config.session.strategy_b_no_new_trade_before,
+            entry_end=self.config.session.no_new_trade_after,
+        )
+        self.simulation_engine = SimulationEngine(
+            historical_service=self.hist_svc,
+            risk_config=self.config.risk,
+            session_config=self.config.session,
+            tunables=self.config.tunables,
         )
 
     async def _seed_default_strategy(self) -> None:
@@ -157,8 +206,12 @@ class StrategyService:
         if self._active_trades_cache and new_config.mode != self.config.mode:
             raise ValueError("Cannot switch trading mode while positions are active.")
 
+        runtime = self.strategy_a.export_state()
         self.config = new_config
         self._sync_subcomponents()
+        self.strategy_a.restore_state(runtime)
+        self.strategy_b.reset(utc_now())
+        await self._save_runtime()
         await self.repo.save_auto_config(new_config)
 
         await self._log_decision(
@@ -237,11 +290,17 @@ class StrategyService:
 
     # --- Core Cycle Evaluation ---
     async def evaluate_cycle(self) -> dict[str, Any]:
+        async with self._evaluation_lock:
+            return await self._evaluate_cycle()
+
+    async def _evaluate_cycle(self) -> dict[str, Any]:
         """Executes a single evaluation cycle: features -> active trade management -> entry signals."""
         now = utc_now()
 
         # 1. Check Kill Switch
         if self.config.kill_switch:
+            self._reset_setups(now)
+            await self._save_runtime()
             return {"status": "HALTED_KILL_SWITCH"}
 
         # 2. Gather market features
@@ -255,48 +314,95 @@ class StrategyService:
         for trade in active_trades:
             await self._evaluate_active_trade(trade, features)
 
+        self._active_trades_cache = await self.repo.get_active_trades()
+        if not features.data_ready and not features.breakout_data_ready:
+            self._reset_setups(now)
+            await self._save_runtime()
+            return {"status": "DATA_UNAVAILABLE", "reason": features.data_reason}
+
         # 4. If active positions reached limit, do not seek new entries
         if len(self._active_trades_cache) >= self.config.risk.max_concurrent_positions:
+            self._reset_setups(now)
+            await self._save_runtime()
             return {"status": "MAX_CONCURRENT_POSITIONS_REACHED", "active_count": len(self._active_trades_cache)}
 
         # 5. Check if Auto Trade is enabled
-        if not self.config.auto_trade_enabled:
+        if not self.config.auto_trade_enabled or self.config.mode == AutoTradingMode.DISABLED:
+            self._reset_setups(now)
+            await self._save_runtime()
             return {"status": "AUTO_TRADE_DISABLED"}
 
         # 6. Check Session Entry Window (09:30 - 14:45 IST) or override
         if not (self.position_manager.is_within_entry_window() or self._active_overrides.bypass_entry_window):
+            self._reset_setups(now)
+            await self._save_runtime()
             return {"status": "OUTSIDE_ENTRY_WINDOW"}
 
         # 7. Check Cooldown after loss
         if self._last_loss_exit_time:
             mins_since_loss = (now - self._last_loss_exit_time).total_seconds() / 60.0
             if mins_since_loss < self.config.risk.cooldown_after_loss_min:
+                self._reset_setups(now)
+                await self._save_runtime()
                 return {
                     "status": "IN_LOSS_COOLDOWN",
                     "cooldown_remaining_min": round(self.config.risk.cooldown_after_loss_min - mins_since_loss, 1),
                 }
 
         # 8. Check Daily Trade Count Limit
-        today_trades = await self.repo.list_trades(limit=50)
-        today_str = now.strftime("%Y-%m-%d")
-        today_count = sum(1 for t in today_trades if t.entry_time.strftime("%Y-%m-%d") == today_str)
+        today_trades = await self.repo.list_trades(limit=1000)
+        ist = timezone(timedelta(hours=5, minutes=30))
+        today_str = now.astimezone(ist).date()
+        today_trades = [t for t in today_trades if t.entry_time.astimezone(ist).date() == today_str]
+        today_count = len(today_trades)
+        loss_r = sum(t.realized_r or 0 for t in today_trades)
+        pnl = sum(t.net_pnl or 0 for t in today_trades)
+        if loss_r <= -self.config.risk.max_daily_loss_r or pnl <= -self.config.risk.account_equity*self.config.risk.max_daily_loss_pct/100:
+            self._reset_setups(now)
+            await self._save_runtime()
+            return {"status": "DAILY_LOSS_LIMIT_REACHED"}
+        losses = [t for t in today_trades if t.exit_time and (t.net_pnl or 0) < 0]
+        if losses:
+            last_loss = max(t.exit_time for t in losses)
+            if (now-last_loss).total_seconds() < 60*self.config.risk.cooldown_after_loss_min:
+                self._reset_setups(now)
+                await self._save_runtime()
+                return {"status": "IN_LOSS_COOLDOWN"}
         if today_count >= self.config.risk.max_trades_per_day:
+            self._reset_setups(now)
+            await self._save_runtime()
             return {"status": "DAILY_TRADE_LIMIT_REACHED", "today_trades": today_count}
 
+        if self.config.mode == AutoTradingMode.LIVE and not self.config.system_armed:
+            self._reset_setups(now)
+            await self._save_runtime()
+            return {"status": "LIVE_SYSTEM_NOT_ARMED"}
+
         # 9. Evaluate Strategy Entry Signals
-        candles_5m = await self._get_recent_candles("5m")
-        candles_15m = await self._get_recent_candles("15m")
+        candles_5m, candles_15m, futures_candles = self._market_snapshot
 
         signal: Optional[StrategySignal] = None
 
         if self.config.tunables.trend_pullback_enabled:
-            signal = self.strategy_a.evaluate(features, candles_5m, candles_15m, overrides=self._active_overrides)
+            signal = self.strategy_a.evaluate(features, candles_5m, candles_15m, futures_candles=futures_candles, overrides=self._active_overrides)
+            await self._save_runtime()
 
         if not signal and self.config.tunables.volatility_breakout_enabled:
             signal = self.strategy_b.evaluate(features, candles_5m, candles_15m, overrides=self._active_overrides)
+            await self._save_runtime()
+        elif not self.config.tunables.volatility_breakout_enabled:
+            self.strategy_b.reset(now)
+            await self._save_runtime()
 
         if not signal:
             return {"status": "NO_SIGNAL", "features": features.model_dump(mode="json")}
+
+        if sum(t.strategy == signal.strategy for t in today_trades) >= self.config.risk.max_trades_per_strategy_per_day:
+            return {"status":"STRATEGY_DAILY_TRADE_LIMIT_REACHED"}
+
+        failures = sum(t.strategy == signal.strategy and t.exit_time is not None and (t.net_pnl or 0) < 0 for t in today_trades)
+        if failures >= self.config.risk.max_failed_trades_per_strategy:
+            return {"status": "STRATEGY_FAILURE_LIMIT_REACHED"}
 
         # Signal detected!
         await self.repo.save_strategy_signal(signal)
@@ -340,7 +446,7 @@ class StrategyService:
         # 11. Position Sizing
         lots, quantity = self.position_manager.calculate_position_size(
             entry_premium=selected_contract.ask_price,
-            account_equity=500000.0,
+            account_equity=self.config.risk.account_equity,
             lot_size=selected_contract.lot_size,
         )
 
@@ -385,16 +491,21 @@ class StrategyService:
             lots=lots,
             entry_time=now,
             entry_option_price=selected_contract.ask_price,
-            entry_spot_price=features.spot_price,
+            entry_spot_price=signal.spot_reference_price,
             initial_structural_stop=signal.structural_stop,
             initial_r_points=signal.r_points,
+            pullback_swing_low=signal.features_snapshot.get("pullback_low"),
+            pullback_swing_high=signal.features_snapshot.get("pullback_high"),
+            box_high=signal.features_snapshot.get("box_high"),
+            box_low=signal.features_snapshot.get("box_low"),
+            atr_at_lock=signal.features_snapshot.get("atr_at_lock"),
             current_option_price=selected_contract.ask_price,
             current_spot_price=features.spot_price,
             current_trailing_stop=signal.structural_stop,
             option_hard_stop_price=hard_stop_price,
             current_r=0.0,
             peak_r=0.0,
-            state=TradeLifecycleState.OPEN_INITIAL_RISK,
+            state=TradeLifecycleState.ENTRY_PENDING if self.config.mode == AutoTradingMode.LIVE else TradeLifecycleState.OPEN_INITIAL_RISK,
         )
 
         await self.repo.save_trade(new_trade)
@@ -423,7 +534,10 @@ class StrategyService:
                 product=ProductType.OPTIONS,
                 trading_mode=TradingMode.LIVE,
             )
-            await self.oms.create_order_intent(intent)
+            order = await self.oms.create_order_intent(intent)
+            new_trade.entry_order_id = order.order_id
+            new_trade.state = TradeLifecycleState.ENTRY_PENDING
+            await self.repo.save_trade(new_trade)
 
         # Broadcast update
         await self.bus.publish(
@@ -437,77 +551,108 @@ class StrategyService:
 
     async def _evaluate_active_trade(self, trade: ActiveTrade, features: MarketFeatures) -> None:
         """Evaluates active position stops, trailing updates, and thesis reversal score."""
-        # Estimate current option price
-        # In a full options feed, fetch live quote. If mock/simulated, calculate estimated delta move:
-        current_option_price = trade.current_option_price
-        if self.mkt_svc:
-            q = self.mkt_svc.get_latest_quote(trade.contract_instrument_id)
-            if q and q.last_price > 0:
-                current_option_price = q.last_price
-            else:
-                # Delta approximation: Delta ~ 0.35
-                spot_delta = features.spot_price - trade.entry_spot_price
-                if trade.direction == TradeDirection.BEARISH:
-                    spot_delta = -spot_delta
-                current_option_price = max(1.0, round(trade.entry_option_price + (spot_delta * 0.35), 2))
+        if trade.state == TradeLifecycleState.ENTRY_PENDING and not trade.entry_order_id:
+            await self._log_decision("ORDER", trade.strategy.value, "Entry submission requires reconciliation; no confirmed order reference", {"trade_id": trade.trade_id})
+            return
+        if features.spot_price <= 0:
+            features = features.model_copy(update={"spot_price": trade.current_spot_price, "closed_5m_time": None, "closed_5m_price": None})
+        if trade.entry_order_id:
+            order = await self.oms.get_order(trade.entry_order_id)
+            if not order:
+                return
+            terminal = order.status.value in ("FILLED", "CANCELLED", "REJECTED", "RISK_REJECTED", "EXPIRED", "FAILED_SAFE")
+            gateway = getattr(self.hist_svc, "broker_gateway", None)
+            if not terminal:
+                # Cancel the remainder of partial fills before managing a fixed quantity.
+                timed_out = (utc_now()-trade.entry_time).total_seconds() >= self.config.risk.entry_order_timeout_sec
+                if (order.filled_quantity > 0 or timed_out) and order.broker_order_id and gateway:
+                    await gateway.cancel_order(order.broker_order_id, mode=order.trading_mode)
+                return
+            if order.filled_quantity <= 0:
+                trade.state = TradeLifecycleState.CLOSED
+                trade.exit_time = utc_now()
+                trade.exit_reason = "ENTRY_UNFILLED_" + order.status.value
+                self.strategy_a.on_exit(trade.direction, trade.exit_time)
+                self.strategy_b.reset(trade.exit_time)
+                await self._save_runtime()
+                await self.repo.save_trade(trade)
+                return
+            if trade.filled_quantity != order.filled_quantity:
+                trade.filled_quantity = order.filled_quantity
+                trade.quantity = order.filled_quantity
+                trade.entry_option_price = order.average_price
+                trade.option_hard_stop_price = round(order.average_price * (1-self.config.risk.option_hard_stop_pct/100), 2)
+                trade.state = TradeLifecycleState.OPEN_INITIAL_RISK
+                await self.repo.save_trade(trade)
 
+        if trade.exit_order_id:
+            order = await self.oms.get_order(trade.exit_order_id)
+            if not order:
+                return
+            if order.status.value == "FILLED":
+                trade.exit_proceeds += order.average_price * order.filled_quantity
+                trade.exit_filled_quantity += order.filled_quantity
+                await self._close_trade(trade, features, trade.exit_proceeds/trade.quantity, trade.pending_exit_reason)
+                return
+            if order.status.value in ("CANCELLED", "REJECTED", "RISK_REJECTED", "EXPIRED", "FAILED_SAFE"):
+                trade.exit_proceeds += order.average_price * order.filled_quantity
+                trade.exit_filled_quantity += order.filled_quantity
+                trade.exit_order_id = None
+                await self.repo.save_trade(trade)
+            else:
+                bid = await self._executable_bid(trade)
+                gateway = getattr(self.hist_svc, "broker_gateway", None)
+                if gateway and bid and order.broker_order_id:
+                    if bid != order.price:
+                        await gateway.modify_order(order.broker_order_id, price=bid, mode=order.trading_mode)
+                return
+
+        current_option_price = await self._executable_bid(trade)
+        if current_option_price is None:
+            await self._log_decision("DATA", trade.strategy.value, "Awaiting executable option bid for position management", {"trade_id": trade.trade_id})
+            return
+        self.position_manager.bull_derivatives_threshold = self._active_overrides.bull_derivatives_score if self._active_overrides.bull_derivatives_score is not None else 2
+        self.position_manager.bear_derivatives_threshold = self._active_overrides.bear_derivatives_score if self._active_overrides.bear_derivatives_score is not None else 2
         updated_trade, exit_reason = self.position_manager.update_position(
             trade, current_option_price, features
         )
 
+        exit_reason = trade.pending_exit_reason or exit_reason
         if exit_reason:
-            # Position exited!
-            updated_trade.state = TradeLifecycleState.CLOSED
-            updated_trade.exit_time = utc_now()
-            updated_trade.exit_option_price = current_option_price
-            updated_trade.exit_spot_price = features.spot_price
-            updated_trade.exit_reason = exit_reason
-
-            gross_pnl = round((current_option_price - updated_trade.entry_option_price) * updated_trade.quantity, 2)
-            updated_trade.gross_pnl = gross_pnl
-            updated_trade.net_pnl = round(gross_pnl - 40.0, 2)  # brokerage/tax deduction
-            updated_trade.realized_r = updated_trade.current_r
-
-            if gross_pnl < 0:
-                self._last_loss_exit_time = utc_now()
-
-            await self.repo.save_trade(updated_trade)
-
-            await self._log_decision(
-                category="EXIT",
-                strategy=updated_trade.strategy.value,
-                message=f"POSITION CLOSED: {updated_trade.contract_symbol} | Reason: {exit_reason} | PnL: ₹{gross_pnl} ({updated_trade.realized_r}R)",
-                details=updated_trade.model_dump(mode="json"),
-            )
-
-            # In LIVE mode, dispatch square-off intent
-            if updated_trade.mode == AutoTradingMode.LIVE:
-                exit_intent = OrderIntent(
-                    intent_id=generate_id(),
-                    correlation_id=updated_trade.trade_id,
-                    strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
-                    source=SourceType.STRATEGY,
-                    instrument_id=updated_trade.contract_instrument_id,
-                    symbol=updated_trade.contract_symbol,
-                    side=OrderSide.SELL,
-                    order_type=OrderType.LIMIT,
-                    quantity=updated_trade.quantity,
-                    price=current_option_price,
-                    product=ProductType.OPTIONS,
-                    trading_mode=TradingMode.LIVE,
-                )
-                await self.oms.create_order_intent(exit_intent)
-
-            await self.bus.publish(
-                EventEnvelope(
-                    topic=Topics.STRATEGY_SIGNAL,
-                    payload={"event": "TRADE_CLOSED", "trade": updated_trade.model_dump(mode="json")},
-                )
-            )
-
+            if trade.mode == AutoTradingMode.LIVE:
+                intent = OrderIntent(
+                    correlation_id=trade.trade_id, strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
+                    source=SourceType.STRATEGY, instrument_id=trade.contract_instrument_id,
+                    symbol=trade.contract_symbol, side=OrderSide.SELL, order_type=OrderType.LIMIT,
+                    quantity=trade.quantity-trade.exit_filled_quantity, price=current_option_price,
+                    product=ProductType.OPTIONS, trading_mode=TradingMode.LIVE)
+                order = await self.oms.create_order_intent(intent)
+                trade.exit_order_id = order.order_id
+                trade.pending_exit_reason = exit_reason
+                trade.state = TradeLifecycleState.EXIT_PENDING
+                await self.repo.save_trade(trade)
+            else:
+                await self._close_trade(trade, features, current_option_price, exit_reason)
         else:
-            # Update active trade state
             await self.repo.save_trade(updated_trade)
+
+    async def _close_trade(self, trade, features, price, reason):
+        trade.state = TradeLifecycleState.CLOSED
+        trade.exit_time = utc_now()
+        trade.exit_option_price = price
+        trade.exit_spot_price = features.spot_price
+        trade.exit_reason = reason
+        trade.gross_pnl = round((price-trade.entry_option_price)*trade.quantity, 2)
+        trade.net_pnl = round(trade.gross_pnl-40, 2)
+        trade.realized_r = trade.current_r
+        if trade.gross_pnl < 0:
+            self._last_loss_exit_time = trade.exit_time
+        self.strategy_a.on_exit(trade.direction, trade.exit_time)
+        self.strategy_b.reset(trade.exit_time)
+        await self._save_runtime()
+        await self.repo.save_trade(trade)
+        await self._log_decision("EXIT", trade.strategy.value, "Position closed: " + str(reason), trade.model_dump(mode="json"))
+        await self.bus.publish(EventEnvelope(topic=Topics.STRATEGY_SIGNAL, payload={"event": "TRADE_CLOSED", "trade": trade.model_dump(mode="json")}))
 
     async def manual_exit_trade(self, trade_id: str, reason: str = "MANUAL_UI_EXIT") -> Optional[ActiveTrade]:
         """Manually exit an active trade immediately."""
@@ -516,116 +661,80 @@ class StrategyService:
         if not target:
             return None
 
-        features = self._last_features or await self._gather_features()
-        target.state = TradeLifecycleState.CLOSED
-        target.exit_time = utc_now()
-        target.exit_option_price = target.current_option_price
-        target.exit_spot_price = features.spot_price
-        target.exit_reason = reason
-        gross = round((target.current_option_price - target.entry_option_price) * target.quantity, 2)
-        target.gross_pnl = gross
-        target.net_pnl = round(gross - 40.0, 2)
-        target.realized_r = target.current_r
-
+        features = await self._gather_features()
+        target.pending_exit_reason = reason
         await self.repo.save_trade(target)
-        await self._log_decision(
-            category="EXIT",
-            strategy=target.strategy.value,
-            message=f"MANUAL EXIT: {target.contract_symbol} | Reason: {reason} | PnL: ₹{gross}",
-            details=target.model_dump(mode="json"),
-        )
+        await self._evaluate_active_trade(target, features)
         return target
 
     # --- Market Data & Chain Fetching ---
     async def _gather_features(self) -> MarketFeatures:
         candles_5m = await self._get_recent_candles("5m")
         candles_15m = await self._get_recent_candles("15m")
+        futures = []
+        inst_svc = getattr(self.chain_svc, "inst_svc", None)
+        if inst_svc:
+            instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
+            today = utc_now().astimezone(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
+            eligible = sorted((i for i in instruments if i.segment == "FUTURES" and i.tradable
+                               and i.expiry and i.expiry >= today), key=lambda i: i.expiry)
+            if eligible:
+                futures = await self._get_recent_candles("5m", eligible[0].instrument_id)
+        self._market_snapshot = (candles_5m, candles_15m, futures)
         chain = await self._get_option_chain()
-
-        spot = 23217.60
+        spot = candles_5m[-1].close if candles_5m else 0.0
         if self.mkt_svc:
             q = self.mkt_svc.get_latest_quote("INST-NIFTY-INDEX")
-            if q and q.last_price > 0:
+            if q and getattr(q, "source", "UNKNOWN") in ("BREEZE", "LIVE") and q.last_price > 0 and 0 <= (utc_now()-q.timestamp).total_seconds() <= 30:
                 spot = q.last_price
-        elif candles_5m:
-            spot = candles_5m[-1].close
-
         return FeatureEngine.compute_all_features(
-            candles_5m=candles_5m,
-            candles_15m=candles_15m,
-            option_chain=chain,
-            spot_price=spot,
-        )
+            candles_5m=candles_5m, candles_15m=candles_15m,
+            futures_candles=futures, option_chain=chain, spot_price=spot)
 
-    async def _get_recent_candles(self, interval: str) -> list[Candle]:
-        if self.hist_svc:
+    async def _get_recent_candles(self, interval: str, instrument_id="INST-NIFTY-INDEX") -> list[Candle]:
+        if not self.hist_svc:
+            return []
+        try:
+            candles = await self.hist_svc.get_candles(instrument_id=instrument_id, interval=interval)
+            now = utc_now()
+            return sorted({c.start_time: c for c in candles
+                           if c.source in ("BREEZE", "LIVE") and c.end_time <= now
+                           and c.interval == interval
+                           and c.end_time-c.start_time == timedelta(minutes=int(interval[:-1]))
+                           }.values(), key=lambda c: c.start_time)
+        except Exception:
+            logger.exception("Real candle retrieval failed")
+            return []
+
+    async def _executable_bid(self, trade: ActiveTrade) -> Optional[float]:
+        q = self.mkt_svc.get_latest_quote(trade.contract_instrument_id) if self.mkt_svc else None
+        if q and getattr(q, "source", "UNKNOWN") in ("BREEZE", "LIVE") and q.best_bid > 0 and 0 <= (utc_now()-q.timestamp).total_seconds() <= 30:
+            return q.best_bid
+        # The index poller does not subscribe to every option. Refresh the held
+        # contract's exact expiry directly rather than estimating from its LTP.
+        if self.chain_svc:
             try:
-                candles = await self.hist_svc.get_candles(
-                    instrument_id="INST-NIFTY-INDEX",
-                    interval=interval,
-                )
-                if candles and len(candles) >= 5:
-                    return candles
+                chain = await self.chain_svc.get_chain(underlying="NIFTY", expiry=trade.expiry)
+                if chain.get("source") in ("BREEZE", "LIVE"):
+                    for strike in chain.get("strikes", []):
+                        for side in ("call", "put"):
+                            leg = strike.get(side) or {}
+                            if leg.get("instrument_id") == trade.contract_instrument_id:
+                                bid = float(leg.get("bid") or 0)
+                                return bid if bid > 0 else None
             except Exception:
-                pass
-
-        # Robust synthetic fallback for testing / pre-market
-        spot = 23220.0
-        candles: list[Candle] = []
-        now = utc_now()
-        for i in range(30, 0, -1):
-            ts = datetime.fromtimestamp(now.timestamp() - (i * 300), tz=timezone.utc)
-            c = Candle(
-                instrument_id="INST-NIFTY-INDEX",
-                interval=interval,
-                start_time=ts,
-                end_time=datetime.fromtimestamp(ts.timestamp() + 300, tz=timezone.utc),
-                open=spot - 5.0 + (i * 0.5),
-                high=spot + 15.0 + (i * 0.5),
-                low=spot - 10.0 + (i * 0.5),
-                close=spot + (i * 0.5),
-                volume=150000,
-            )
-            candles.append(c)
-        return candles
+                logger.exception("Executable option bid refresh failed")
+        return None
 
     async def _get_option_chain(self) -> dict[str, Any]:
         if self.chain_svc:
             try:
-                return await self.chain_svc.get_chain(underlying="NIFTY")
+                chain = await self.chain_svc.get_chain(underlying="NIFTY")
+                if chain.get("source") in ("BREEZE", "LIVE"):
+                    return chain
             except Exception:
-                pass
-
-        # Fallback realistic NIFTY chain
-        spot = 23217.60
-        atm = 23200
-        strikes = []
-        for strike in range(atm - 300, atm + 350, 50):
-            dist = strike - spot
-            call_price = max(5.0, round(max(0.0, -dist) + 75.0 - (abs(dist) * 0.25), 1))
-            put_price = max(5.0, round(max(0.0, dist) + 75.0 - (abs(dist) * 0.25), 1))
-            strikes.append(
-                {
-                    "strike": strike,
-                    "call": {
-                        "instrument_id": f"NIFTY-2026-09-22-{strike}-CE",
-                        "ltp": call_price,
-                        "ask": call_price + 0.5,
-                        "bid": call_price - 0.5,
-                        "open_interest": 54000,
-                        "volume": 12000,
-                    },
-                    "put": {
-                        "instrument_id": f"NIFTY-2026-09-22-{strike}-PE",
-                        "ltp": put_price,
-                        "ask": put_price + 0.5,
-                        "bid": put_price - 0.5,
-                        "open_interest": 48000,
-                        "volume": 9800,
-                    },
-                }
-            )
-        return {"underlying": "NIFTY", "atm_strike": atm, "strikes": strikes}
+                logger.exception("Real option-chain retrieval failed")
+        return {"source": "UNAVAILABLE", "strikes": []}
 
     async def _log_decision(
         self,
@@ -653,6 +762,8 @@ class StrategyService:
 
     async def update_overrides(self, overrides: ThresholdOverrides) -> ThresholdOverrides:
         self._active_overrides = overrides
+        self.strategy_b.reset(utc_now())
+        await self._save_runtime()
         await self._log_decision(
             category="CONFIG",
             strategy="SYSTEM",
@@ -663,6 +774,8 @@ class StrategyService:
 
     async def reset_overrides(self) -> ThresholdOverrides:
         self._active_overrides = ThresholdOverrides()
+        self.strategy_b.reset(utc_now())
+        await self._save_runtime()
         await self._log_decision(
             category="CONFIG",
             strategy="SYSTEM",
@@ -673,11 +786,10 @@ class StrategyService:
 
     async def get_trigger_diagnostics(self) -> TriggerDiagnosticsResponse:
         """Gathers granular condition diagnostics across all strategies and session gates."""
-        features = self._last_features or await self._gather_features()
-        candles_5m = await self._get_recent_candles("5m")
-        candles_15m = await self._get_recent_candles("15m")
+        features = await self._gather_features()
+        candles_5m, candles_15m, futures_candles = self._market_snapshot
 
-        diag_a = self.strategy_a.diagnose(features, candles_5m, candles_15m, overrides=self._active_overrides)
+        diag_a = self.strategy_a.diagnose(features, candles_5m, candles_15m, overrides=self._active_overrides, futures_candles=futures_candles)
         diag_b = self.strategy_b.diagnose(features, candles_5m, overrides=self._active_overrides)
 
         now = utc_now()
@@ -751,6 +863,8 @@ class StrategyService:
         """
         now = utc_now()
         features = self._last_features or await self._gather_features()
+        if not features.data_ready or (now-features.timestamp).total_seconds() >= 30:
+            return {"status": "DATA_UNAVAILABLE", "reason": features.data_reason}
         spot = features.spot_price
         atr = max(10.0, features.atr_5m)
 
@@ -787,13 +901,12 @@ class StrategyService:
         # 3. Position Sizing
         lots, quantity = self.position_manager.calculate_position_size(
             entry_premium=selected_contract.ask_price,
-            account_equity=500000.0,
+            account_equity=self.config.risk.account_equity,
             lot_size=selected_contract.lot_size,
         )
 
         if lots < 1:
-            lots = 1
-            quantity = selected_contract.lot_size
+            return {"status": "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"}
 
         # 4. Check LIVE Arming Gate
         if self.config.mode == AutoTradingMode.LIVE and not self.config.system_armed:
@@ -836,7 +949,7 @@ class StrategyService:
             option_hard_stop_price=hard_stop_price,
             current_r=0.0,
             peak_r=0.0,
-            state=TradeLifecycleState.OPEN_INITIAL_RISK,
+            state=TradeLifecycleState.ENTRY_PENDING if self.config.mode == AutoTradingMode.LIVE else TradeLifecycleState.OPEN_INITIAL_RISK,
         )
 
         await self.repo.save_trade(new_trade)
@@ -865,7 +978,10 @@ class StrategyService:
                 product=ProductType.OPTIONS,
                 trading_mode=TradingMode.LIVE,
             )
-            await self.oms.create_order_intent(intent)
+            order = await self.oms.create_order_intent(intent)
+            new_trade.entry_order_id = order.order_id
+            new_trade.state = TradeLifecycleState.ENTRY_PENDING
+            await self.repo.save_trade(new_trade)
 
         await self.bus.publish(
             EventEnvelope(
@@ -912,6 +1028,14 @@ class StrategyService:
     async def list_trades(self, limit: int = 50) -> list[dict[str, Any]]:
         trades = await self.repo.list_trades(limit=limit)
         return [t.model_dump(mode="json") for t in trades]
+
+    async def run_simulation(self, request: SimulationRequest) -> SimulationResult:
+        """Runs a complete walk-forward intraday simulation against historical data."""
+        return await self.simulation_engine.run_day_simulation(request)
+
+    async def get_available_simulation_dates(self) -> list[str]:
+        """Returns dates available for historical simulation."""
+        return await self.simulation_engine.get_available_dates()
 
     async def list_instances(self) -> list[dict[str, Any]]:
         return await self.repo.list_instances()

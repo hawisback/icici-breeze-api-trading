@@ -21,9 +21,11 @@ class HistoricalService:
         self,
         repository: Optional[HistoricalRepository] = None,
         broker_gateway: Optional[Any] = None,
+        instrument_service: Optional[Any] = None,
     ) -> None:
         self.repo = repository or HistoricalRepository()
         self.broker_gateway = broker_gateway
+        self.instrument_service = instrument_service
 
     def set_broker_gateway(self, broker_gateway: Any) -> None:
         """Inject broker gateway for live candle retrieval."""
@@ -80,6 +82,14 @@ class HistoricalService:
             return []
 
         stock_code, exchange, product_type = self._map_instrument_to_breeze(instrument_id)
+        contract_args = {}
+        if self.instrument_service:
+            instrument = await self.instrument_service.get_instrument(instrument_id)
+            if instrument and instrument.segment == "FUTURES":
+                if not instrument.expiry:
+                    return []
+                stock_code, exchange, product_type = instrument.underlying, instrument.exchange, "futures"
+                contract_args = {"expiry_date": instrument.expiry + "T00:00:00.000Z", "right": "others", "strike_price": "0"}
         breeze_interval, step_min = self._map_interval_to_breeze(interval)
 
         now = utc_now()
@@ -104,6 +114,7 @@ class HistoricalService:
                     stock_code=stock_code,
                     exchange_code=exchange,
                     product_type=product_type,
+                    **contract_args,
                 ),
                 timeout_sec=15.0,
             )
@@ -124,12 +135,12 @@ class HistoricalService:
                 # Parse Breeze IST datetime string
                 dt_ist = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ist_tz)
                 c_start = dt_ist.astimezone(timezone.utc)
-                c_end = c_start + timedelta(minutes=step_min)
+                c_end = c_start + timedelta(minutes=5 if interval == "15m" else step_min)
 
                 candles.append(
                     Candle(
                         instrument_id=instrument_id,
-                        interval=interval,
+                        interval="5m" if interval == "15m" else interval,
                         start_time=c_start,
                         end_time=c_end,
                         open=float(row.get("open", 0.0)),
@@ -164,6 +175,9 @@ class HistoricalService:
 
         for b_start, b_candles in sorted(buckets.items()):
             b_end = b_start + timedelta(minutes=15)
+            b_candles.sort(key=lambda c: c.start_time)
+            if len(b_candles) != 3 or any(c.start_time != b_start + timedelta(minutes=5*i) for i, c in enumerate(b_candles)):
+                continue
             res.append(
                 Candle(
                     instrument_id=instrument_id,
@@ -198,7 +212,8 @@ class HistoricalService:
         latest_candle = await self.repo.get_latest_candle(instrument_id, interval)
 
         # Proactively fetch from Breeze if session is active and cached candles are missing or simulated
-        if breeze_active and (not latest_candle or latest_candle.source == "SIMULATED"):
+        if breeze_active and (not latest_candle or latest_candle.source not in ("BREEZE", "LIVE")
+                              or (utc_now() - latest_candle.end_time).total_seconds() >= (900 if interval == "15m" else 300)):
             breeze_candles = await self.fetch_candles_from_breeze(instrument_id, interval)
             if breeze_candles:
                 await self.repo.purge_simulated_candles(instrument_id, interval)
@@ -278,4 +293,3 @@ class HistoricalService:
             curr_close = c_close
 
         return candles
-

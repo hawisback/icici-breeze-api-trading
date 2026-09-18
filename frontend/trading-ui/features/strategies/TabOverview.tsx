@@ -444,7 +444,7 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
           </div>
 
           <p className="text-xs text-slate-400 mb-4">
-            Waits for a controlled 2-6 bar pullback inside an established 15m trend. Triggers on rejection bar closing back in trend direction with volume & derivatives confirmation.
+            Waits for a controlled 2-9 bar pullback inside a qualified 15m trend. Requires a completed resumption close, one momentum confirmation, and at least two of six entry confirmations.
           </p>
 
           <div className="space-y-2 text-xs">
@@ -563,4 +563,3 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
     </div>
   );
 };
-

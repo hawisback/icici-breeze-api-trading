@@ -43,6 +43,7 @@ from libs.observability.logger import setup_logging
 from services.strategy.models import (
     AutoTradingConfig,
     OptionType,
+    SimulationRequest,
     StrategyName,
     ThresholdOverrides,
     TradeDirection,
@@ -350,10 +351,14 @@ class StrategyExitRequest(BaseModel):
 
 
 class StrategyOverridesRequest(BaseModel):
+    ema_slope_threshold: Optional[float] = Field(default=None, gt=0, le=1.0)
     max_option_premium_cap: Optional[float] = None
     min_option_premium_floor: Optional[float] = None
     adx_threshold: Optional[float] = None
     rvol_threshold: Optional[float] = None
+    min_confirmation_score: Optional[int] = None
+    strat_b_min_confirmation: Optional[int] = Field(default=None, ge=1, le=6)
+    box_max_height_atr: Optional[float] = None
     bull_derivatives_score: Optional[float] = None
     bear_derivatives_score: Optional[float] = None
     bb_width_percentile: Optional[float] = None
@@ -1137,6 +1142,20 @@ async def force_strategy_entry(req: StrategyForceEntryRequest):
     return res
 
 
+@app.post("/api/v1/strategies/simulate")
+async def run_strategy_simulation(req: SimulationRequest):
+    services = get_services()
+    res = await services.strategy_svc.run_simulation(req)
+    return res.model_dump(mode="json")
+
+
+@app.get("/api/v1/strategies/simulate/available-dates")
+async def get_simulation_available_dates():
+    services = get_services()
+    dates = await services.strategy_svc.get_available_simulation_dates()
+    return {"dates": dates}
+
+
 @app.get("/api/v1/audit/logs")
 async def get_audit_logs(limit: int = 100):
     services = get_services()
@@ -1246,4 +1265,3 @@ async def websocket_live_endpoint(
     except Exception as e:
         logger.warning("WebSocket error: %s", e)
         await ws_manager.disconnect(websocket)
-

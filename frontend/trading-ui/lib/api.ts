@@ -262,6 +262,10 @@ export interface StrategyStatusData {
       use_current_expiry_on_0dte: boolean;
     };
     risk: {
+      max_lots_per_trade: number;
+      entry_order_timeout_sec: number;
+      max_trades_per_strategy_per_day: number;
+      breakeven_buffer_points: number;
       max_trade_capital: number;
       risk_per_trade_pct_of_account: number;
       max_daily_loss_r: number;
@@ -271,18 +275,29 @@ export interface StrategyStatusData {
       max_concurrent_positions: number;
       cooldown_after_loss_min: number;
       option_hard_stop_pct: number;
+      account_equity: number;
     };
     session: {
+      strategy_b_no_new_trade_before: string;
       no_new_trade_before: string;
       no_new_trade_after: string;
       force_exit_time: string;
     };
     tunables: {
+      strat_b_min_confirmation: number;
+      box_max_height_atr: number;
+      bb_width_percentile_threshold: number;
+      compression_lookback_bars: number;
+      box_max_age_bars: number;
+      breakout_buffer_atr: number;
+      breakout_max_extension_atr: number;
       evaluation_interval_sec: number;
       trend_pullback_enabled: boolean;
       volatility_breakout_enabled: boolean;
       adx_threshold: number;
       rvol_threshold: number;
+      ema_slope_threshold: number;
+      min_confirmation_score: number;
       supertrend_period: number;
       supertrend_multiplier: number;
     };
@@ -342,6 +357,18 @@ export interface StrategyTriggerDiagnosticsData {
   direction: "BULLISH" | "BEARISH";
   option_type: "CALL" | "PUT";
   overall_status: "READY_TO_TRIGGER" | "WAITING" | "BLOCKED";
+  phase_state?: string;
+  phase_summary?: {
+    regime?: { status: string; direction_score: string; adx: number };
+    impulse?: { found: boolean; height_atr: number };
+    pullback?: { state: string; bars: number; depth_pct: number; retest: string };
+    compression?: { bb_percentile: number; is_compressed: boolean };
+    box?: { status: string; high: number; low: number; height_pts: number; height_atr: number; bars_active: number };
+    trigger?: { waiting_for: string; gap_pts: number };
+    extension?: { status: string; extension_atr: number; max_allowed_atr: number };
+    confirmation?: { score: number; required: number; passed_factors?: string[] };
+    risk?: { initial_r_atr: number; stop: number };
+  };
   passed_count: number;
   total_count: number;
   ready_pct: number;
@@ -369,6 +396,10 @@ export interface ThresholdOverridesData {
   min_option_premium_floor?: number | null;
   adx_threshold?: number | null;
   rvol_threshold?: number | null;
+  ema_slope_threshold?: number | null;
+  min_confirmation_score?: number | null;
+  strat_b_min_confirmation?: number | null;
+  box_max_height_atr?: number | null;
   bull_derivatives_score?: number | null;
   bear_derivatives_score?: number | null;
   bb_width_percentile?: number | null;
@@ -400,6 +431,9 @@ export interface AutoTradeData {
   entry_spot_price: number;
   initial_structural_stop: number;
   initial_r_points: number;
+  box_high?: number | null;
+  box_low?: number | null;
+  atr_at_lock?: number | null;
   current_option_price: number;
   current_spot_price: number;
   current_trailing_stop: number;
@@ -560,5 +594,100 @@ export async function forceStrategyEntry(payload: {
 }
 
 
+// ==============================================================================
+// Day Replay & Historical Simulation
+// ==============================================================================
 
+export interface SimulationBarSnapshotData {
+  bar_index: number;
+  timestamp: string;
+  ist_time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  spot: number;
+  ema9_5m: number;
+  ema20_5m: number;
+  supertrend: string;
+  adx_15m: number;
+  rvol_5m: number;
+  bb_width_percentile: number;
+  strategy_a_phase: string;
+  strategy_b_phase: string;
+  active_trade_id?: string | null;
+  event?: string | null;
+  event_details?: string | null;
+}
 
+export interface SimulatedTradeRecordData {
+  trade_id: string;
+  strategy: string;
+  direction: string;
+  option_type: string;
+  strike: number;
+  contract_symbol: string;
+  entry_time: string;
+  entry_spot: number;
+  entry_premium: number;
+  exit_time?: string | null;
+  exit_spot?: number | null;
+  exit_premium?: number | null;
+  exit_reason?: string | null;
+  initial_stop: number;
+  initial_r_points: number;
+  peak_r: number;
+  realized_r: number;
+  quantity: number;
+  lots: number;
+  gross_pnl: number;
+  net_pnl: number;
+  hold_duration_mins: number;
+}
+
+export interface SimulationResultData {
+  session_date: string;
+  total_bars_evaluated: number;
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate_pct: number;
+  total_pnl: number;
+  net_pnl: number;
+  total_realized_r: number;
+  max_drawdown_pnl: number;
+  profit_factor: number;
+  trades: SimulatedTradeRecordData[];
+  timeline: SimulationBarSnapshotData[];
+  decision_logs: DecisionLogData[];
+}
+
+export interface SimulationRequestData {
+  date?: string | null;
+  instrument_id?: string;
+  overrides?: Partial<ThresholdOverridesData>;
+  capital?: number;
+  bypass_window?: boolean;
+  max_trades_per_day?: number;
+}
+
+export async function runStrategySimulation(req: SimulationRequestData = {}): Promise<SimulationResultData> {
+  const res = await fetch(`${API_BASE}/strategies/simulate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to run strategy simulation");
+  }
+  return res.json();
+}
+
+export async function fetchSimulationAvailableDates(): Promise<string[]> {
+  const res = await fetch(`${API_BASE}/strategies/simulate/available-dates`);
+  if (!res.ok) throw new Error("Failed to fetch available simulation dates");
+  const data = await res.json();
+  return data.dates || [];
+}

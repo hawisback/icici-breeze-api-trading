@@ -114,6 +114,10 @@ class StrategyRepository:
                 );
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_auto_trades_state ON auto_trades(state);")
+            columns = await (await conn.execute("PRAGMA table_info(auto_trades)")).fetchall()
+            if "management_json" not in {r["name"] for r in columns}:
+                await conn.execute("ALTER TABLE auto_trades ADD COLUMN management_json TEXT NOT NULL DEFAULT '{}'")
+            await conn.execute("CREATE TABLE IF NOT EXISTS strategy_runtime (id TEXT PRIMARY KEY, state_json TEXT NOT NULL)")
 
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS decision_logs (
@@ -236,7 +240,29 @@ class StrategyRepository:
                 default_cfg = AutoTradingConfig()
                 await self.save_auto_config(default_cfg)
                 return default_cfg
-            return AutoTradingConfig.model_validate_json(row["config_json"])
+            data = json.loads(row["config_json"])
+            # Migrate only previous defaults; preserve deliberate custom settings.
+            if data.get("strategy_a_revision", 1) < 2:
+                tunables = data.setdefault("tunables", {})
+                session = data.setdefault("session", {})
+                if tunables.get("rvol_threshold") == 1.30:
+                    tunables["rvol_threshold"] = 1.20
+                if session.get("no_new_trade_before") == "09:30":
+                    session["no_new_trade_before"] = "09:20"
+                data["strategy_a_revision"] = 2
+                await conn.execute("UPDATE auto_strategy_config SET config_json = ? WHERE id = 'active'", (json.dumps(data),))
+                await conn.commit()
+            return AutoTradingConfig.model_validate(data)
+
+    async def save_runtime(self, state: dict, strategy: str = "trend_pullback") -> None:
+        async with self.engine.connect() as conn:
+            await conn.execute("INSERT OR REPLACE INTO strategy_runtime VALUES (?, ?)", (strategy, json.dumps(state)))
+            await conn.commit()
+
+    async def get_runtime(self, strategy: str = "trend_pullback") -> dict:
+        async with self.engine.connect() as conn:
+            row = await (await conn.execute("SELECT state_json FROM strategy_runtime WHERE id = ?", (strategy,))).fetchone()
+            return json.loads(row["state_json"]) if row else {}
 
     async def save_auto_config(self, config: AutoTradingConfig) -> None:
         async with self.engine.connect() as conn:
@@ -301,6 +327,8 @@ class StrategyRepository:
                     trade.realized_r,
                 ),
             )
+            await conn.execute("UPDATE auto_trades SET management_json = ? WHERE trade_id = ?",
+                               (trade.model_dump_json(), trade.trade_id))
             await conn.commit()
 
     async def get_active_trades(self) -> list[ActiveTrade]:
@@ -321,6 +349,8 @@ class StrategyRepository:
             return [self._row_to_trade(r) for r in rows]
 
     def _row_to_trade(self, r: Any) -> ActiveTrade:
+        if "management_json" in r.keys() and r["management_json"] not in (None, "{}"):
+            return ActiveTrade.model_validate_json(r["management_json"])
         return ActiveTrade(
             trade_id=r["trade_id"],
             mode=r["mode"],
@@ -356,7 +386,7 @@ class StrategyRepository:
             exit_reason=r["exit_reason"],
             gross_pnl=r["gross_pnl"],
             net_pnl=r["net_pnl"],
-            realized_r=r["realized_r"],
+                    realized_r=r["realized_r"],
         )
 
     # --- Decision Logs ---

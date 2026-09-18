@@ -33,15 +33,19 @@ class PositionManager:
         self,
         risk_config: Optional[RiskConfig] = None,
         session_config: Optional[SessionTimersConfig] = None,
+        bull_derivatives_threshold: float = 2.0,
+        bear_derivatives_threshold: float = 2.0,
     ) -> None:
         self.risk_config = risk_config or RiskConfig()
         self.session_config = session_config or SessionTimersConfig()
+        self.bull_derivatives_threshold = bull_derivatives_threshold
+        self.bear_derivatives_threshold = bear_derivatives_threshold
 
     def calculate_position_size(
         self,
         entry_premium: float,
         account_equity: float = 500000.0,
-        lot_size: int = 25,
+        lot_size: int = 0,
     ) -> tuple[int, int]:
         """Calculates allowed lots and total quantity based on capital cap and risk limits.
         
@@ -63,8 +67,10 @@ class PositionManager:
 
         risk_lots = math.floor(risk_budget / premium_risk_per_lot) if premium_risk_per_lot > 0 else capital_lots
 
-        lots = min(capital_lots, risk_lots)
-        lots = max(1, lots)  # at least 1 lot if valid capital
+        lots = min(capital_lots, risk_lots, cfg.max_lots_per_trade)
+        if lots < 1:
+            # Critical rule Section 14: if final_lots < 1: NO TRADE. Never use max(1, ...)
+            return 0, 0
         quantity = lots * lot_size
         return lots, quantity
 
@@ -73,58 +79,80 @@ class PositionManager:
         trade: ActiveTrade,
         features: MarketFeatures,
     ) -> int:
-        """Shared Reversal / Trade-Health score (Section 15).
-        Returns integer 0-10 measuring signs of thesis failure.
+        """Explicit 8-Factor Adverse-Health / Reversal Score (Section 18).
+        Returns integer 0-8 measuring signs of thesis failure.
         """
         score = 0
-        spot = features.spot_price
+        spot = features.closed_5m_price
+        if spot is None:
+            return 0
 
         if trade.direction == TradeDirection.BULLISH:
+            # 1. completed 5m close < EMA9_5m
             if spot < features.ema9_5m:
                 score += 1
+            # 2. completed 5m close < EMA20_5m
+            if spot < features.ema20_5m:
+                score += 1
+            # 3. NIFTY futures < futures VWAP
             if features.futures_price < features.futures_vwap:
                 score += 1
-            if features.supertrend_direction == "BEARISH":
-                score += 1
+            # 4. RSI5m < 48
             if features.rsi_5m < 48.0:
                 score += 1
-            if features.minus_di_15m > features.plus_di_15m:
+            # 5. -DI > +DI
+            if features.minus_di_5m > features.plus_di_5m:
                 score += 1
-            if features.futures_buildup in ("SHORT_BUILDUP", "LONG_UNWINDING"):
+            # 6. 5m Supertrend becomes bearish
+            if features.supertrend_direction == "BEARISH":
                 score += 1
-            if features.bear_derivatives_score >= 2.0:
+            # 7. Bearish derivatives score reaches threshold
+            adverse_derivatives = features.breakout_bear_derivatives_score if trade.strategy == StrategyName.VOLATILITY_BREAKOUT else features.bear_derivatives_score
+            if adverse_derivatives >= self.bear_derivatives_threshold:
                 score += 1
-            if spot < trade.entry_spot_price:
+            # 8. completed 5m close breaks pullback swing low / structural level
+            if (features.futures_buildup in ("SHORT_BUILDUP", "LONG_UNWINDING") if trade.strategy == StrategyName.VOLATILITY_BREAKOUT
+                    else features.swing_low_5m is not None and spot < features.swing_low_5m):
                 score += 1
         else:
             # Bearish trade
+            # 1. completed 5m close > EMA9_5m
             if spot > features.ema9_5m:
                 score += 1
+            # 2. completed 5m close > EMA20_5m
+            if spot > features.ema20_5m:
+                score += 1
+            # 3. NIFTY futures > futures VWAP
             if features.futures_price > features.futures_vwap:
                 score += 1
-            if features.supertrend_direction == "BULLISH":
-                score += 1
+            # 4. RSI5m > 52
             if features.rsi_5m > 52.0:
                 score += 1
-            if features.plus_di_15m > features.minus_di_15m:
+            # 5. +DI > -DI
+            if features.plus_di_5m > features.minus_di_5m:
                 score += 1
-            if features.futures_buildup in ("LONG_BUILDUP", "SHORT_COVERING"):
+            # 6. 5m Supertrend becomes bullish
+            if features.supertrend_direction == "BULLISH":
                 score += 1
-            if features.bull_derivatives_score >= 2.0:
+            # 7. Bullish derivatives score reaches threshold
+            adverse_derivatives = features.breakout_bull_derivatives_score if trade.strategy == StrategyName.VOLATILITY_BREAKOUT else features.bull_derivatives_score
+            if adverse_derivatives >= self.bull_derivatives_threshold:
                 score += 1
-            if spot > trade.entry_spot_price:
+            # 8. completed 5m close breaks pullback swing high / structural level
+            if (features.futures_buildup in ("LONG_BUILDUP", "SHORT_COVERING") if trade.strategy == StrategyName.VOLATILITY_BREAKOUT
+                    else features.swing_high_5m is not None and spot > features.swing_high_5m):
                 score += 1
 
-        return min(10, score)
+        return min(8, score)
 
-    def is_force_exit_time(self) -> bool:
+    def is_force_exit_time(self, as_of=None) -> bool:
         """Checks if current IST time is past force_exit_time (e.g. 15:20)."""
-        now_ist = datetime.now(IST)
+        now_ist = as_of.astimezone(IST) if as_of else datetime.now(IST)
         exit_hour, exit_min = map(int, self.session_config.force_exit_time.split(":"))
         return (now_ist.hour > exit_hour) or (now_ist.hour == exit_hour and now_ist.minute >= exit_min)
 
     def is_within_entry_window(self) -> bool:
-        """Checks if current IST time allows new trade entries (09:30 - 14:45)."""
+        """Checks if current IST time allows new trade entries (09:20/09:30 - 14:45)."""
         now_ist = datetime.now(IST)
         start_h, start_m = map(int, self.session_config.no_new_trade_before.split(":"))
         end_h, end_m = map(int, self.session_config.no_new_trade_after.split(":"))
@@ -140,6 +168,7 @@ class PositionManager:
         trade: ActiveTrade,
         current_option_price: float,
         features: MarketFeatures,
+        as_of=None,
     ) -> tuple[ActiveTrade, Optional[str]]:
         """Evaluates active trade against stops, trailing transitions, reversal scores, and time square-off.
         
@@ -155,7 +184,9 @@ class PositionManager:
         trade.unrealized_pnl = round(unrealized, 2)
 
         # 1. R Multiple tracking
-        r_points = max(1.0, trade.initial_r_points)
+        r_points = trade.initial_r_points
+        if r_points <= 0:
+            return trade, "INVALID_INITIAL_R"
         if trade.direction == TradeDirection.BULLISH:
             current_r = round((spot - trade.entry_spot_price) / r_points, 2)
             mfe = round(max(trade.mfe_points, spot - trade.entry_spot_price), 2)
@@ -170,9 +201,45 @@ class PositionManager:
         trade.mfe_points = mfe
         trade.mae_points = mae
 
-        # 2. Reversal Health Score
-        reversal_score = self.calculate_reversal_score(trade, features)
-        trade.reversal_score = reversal_score
+        new_bar = (features.closed_5m_time is not None and features.closed_5m_price is not None
+                   and 0 <= (features.timestamp-features.closed_5m_time).total_seconds() < 300
+                   and features.closed_5m_time > trade.entry_time
+                   and (trade.last_managed_bar is None or features.closed_5m_time > trade.last_managed_bar))
+        closed = features.closed_5m_price
+        if new_bar:
+            trade.last_managed_bar = features.closed_5m_time
+            trade.highest_close_since_entry = max(trade.highest_close_since_entry or trade.entry_spot_price, closed)
+            trade.lowest_close_since_entry = min(trade.lowest_close_since_entry or trade.entry_spot_price, closed)
+
+        # 2. Invalidation requires a completed 5m close, never an intrabar quote.
+        if trade.direction == TradeDirection.BULLISH and trade.pullback_swing_low is not None:
+            if new_bar and closed < trade.pullback_swing_low:
+                return trade, f"IMMEDIATE_THESIS_INVALIDATION (Spot {spot} < Pullback Low {trade.pullback_swing_low})"
+        elif trade.direction == TradeDirection.BEARISH and trade.pullback_swing_high is not None:
+            if new_bar and closed > trade.pullback_swing_high:
+                return trade, f"IMMEDIATE_THESIS_INVALIDATION (Spot {spot} > Pullback High {trade.pullback_swing_high})"
+
+        # 2b. Check False Breakout for Strategy B (Section 23)
+        if trade.strategy == StrategyName.VOLATILITY_BREAKOUT and new_bar:
+            atr_ref = trade.atr_at_lock if trade.atr_at_lock is not None else features.atr_5m
+            if trade.direction == TradeDirection.BULLISH and trade.box_high is not None:
+                if closed < (trade.box_high - 0.10 * atr_ref):
+                    return trade, f"FALSE_BREAKOUT_EXIT (Spot {spot} < BoxHigh {trade.box_high} - 0.10*ATR {round(0.10 * atr_ref, 2)})"
+                if closed < trade.box_high:
+                    trade.consecutive_inside_box_closes += 1
+                    if trade.consecutive_inside_box_closes >= 2:
+                        return trade, f"FALSE_BREAKOUT_EXIT (2 consecutive closes inside box < {trade.box_high})"
+                else:
+                    trade.consecutive_inside_box_closes = 0
+            elif trade.direction == TradeDirection.BEARISH and trade.box_low is not None:
+                if closed > (trade.box_low + 0.10 * atr_ref):
+                    return trade, f"FALSE_BREAKOUT_EXIT (Spot {spot} > BoxLow {trade.box_low} + 0.10*ATR {round(0.10 * atr_ref, 2)})"
+                if closed > trade.box_low:
+                    trade.consecutive_inside_box_closes += 1
+                    if trade.consecutive_inside_box_closes >= 2:
+                        return trade, f"FALSE_BREAKOUT_EXIT (2 consecutive closes inside box > {trade.box_low})"
+                else:
+                    trade.consecutive_inside_box_closes = 0
 
         # 3. Check Emergency Option Hard Stop (-25% default)
         if current_option_price <= trade.option_hard_stop_price:
@@ -187,58 +254,79 @@ class PositionManager:
                 return trade, f"STRUCTURAL_SPOT_STOP_BREACHED (Spot {spot} >= SL {trade.current_trailing_stop})"
 
         # 5. Check Session Force Square-off (15:20 IST)
-        if self.is_force_exit_time():
+        if self.is_force_exit_time(as_of):
             return trade, "SESSION_FORCE_SQUARE_OFF_1520"
 
-        # 6. Check Thesis Reversal Action Matrix
-        if reversal_score >= 4:
-            return trade, f"THESIS_REVERSAL_CRITICAL (Score {reversal_score}/10 >= 4)"
-        if reversal_score == 3 and current_r < 1.0:
-            return trade, f"THESIS_REVERSAL_EXIT (Score 3/10 with R {current_r} < 1.0R)"
+        if not new_bar:
+            return trade, None
 
-        # 7. Multi-Level Trailing Stop Transitions
-        # Bullish Trail Logic
+        # 6. Reversal Health Score Actions (Section 18.3)
+        reversal_score = self.calculate_reversal_score(trade, features)
+        trade.reversal_score = reversal_score
+
+        if reversal_score >= 4:
+            return trade, f"ADVERSE_HEALTH_SCORE_CRITICAL (Score {reversal_score}/8 >= 4)"
+        if reversal_score >= 3 and current_r < 1.0:
+            return trade, f"ADVERSE_HEALTH_SCORE_EARLY_EXIT (Score {reversal_score}/8 with R {current_r} < 1.0R)"
+        if reversal_score == 2:
+            # Tighten only to a valid stop on the protective side of the close.
+            if trade.direction == TradeDirection.BULLISH:
+                tightened = min(features.ema9_5m - .25*features.atr_5m, closed - .15*features.atr_5m)
+                trade.current_trailing_stop = round(max(trade.current_trailing_stop, tightened), 2)
+            else:
+                tightened = max(features.ema9_5m + .25*features.atr_5m, closed + .15*features.atr_5m)
+                trade.current_trailing_stop = round(min(trade.current_trailing_stop, tightened), 2)
+
+        if reversal_score == 3 and current_r >= 1:
+            if trade.direction == TradeDirection.BULLISH:
+                candidates = [features.ema9_5m - .25*features.atr_5m, features.swing_low_5m]
+                valid = [x for x in candidates if x is not None and x < closed]
+                trade.current_trailing_stop = max([trade.current_trailing_stop] + valid)
+            else:
+                candidates = [features.ema9_5m + .25*features.atr_5m, features.swing_high_5m]
+                valid = [x for x in candidates if x is not None and x > closed]
+                trade.current_trailing_stop = min([trade.current_trailing_stop] + valid)
+
+        # 7. Multi-Level Trailing Stop Ladder (Section 17)
+        atr = features.atr_5m
         if trade.direction == TradeDirection.BULLISH:
-            if current_r >= 2.0:
+            if trade.peak_r >= 2.0:
                 # Runner mode
                 trade.state = TradeLifecycleState.RUNNER_MODE
-                # Trail stop: EMA9 - 0.25*ATR or highest close - 1.0*ATR
-                atr = features.atr_5m
                 runner_stop = max(
                     trade.current_trailing_stop,
                     features.ema9_5m - (0.25 * atr),
-                    spot - (1.0 * atr),
+                    trade.highest_close_since_entry - atr,
+                    features.swing_low_5m if features.swing_low_5m is not None else trade.current_trailing_stop,
                 )
                 trade.current_trailing_stop = round(max(trade.current_trailing_stop, runner_stop), 2)
-            elif current_r >= 1.5:
+            elif trade.peak_r >= 1.5:
                 # Lock +0.5R
                 trade.state = TradeLifecycleState.PROFIT_LOCKED
                 lock_stop = trade.entry_spot_price + (0.50 * r_points)
                 trade.current_trailing_stop = round(max(trade.current_trailing_stop, lock_stop), 2)
-            elif current_r >= 1.0:
-                # Protected Breakeven
+            elif trade.peak_r >= 1.0:
+                # Protected Breakeven: entry + 2.0
                 trade.state = TradeLifecycleState.PROTECTED_BREAKEVEN
-                breakeven_stop = trade.entry_spot_price + 2.0  # cost buffer
+                breakeven_stop = trade.entry_spot_price + self.risk_config.breakeven_buffer_points
                 trade.current_trailing_stop = round(max(trade.current_trailing_stop, breakeven_stop), 2)
-
         else:
-            # Bearish Trail Logic
-            if current_r >= 2.0:
+            if trade.peak_r >= 2.0:
                 trade.state = TradeLifecycleState.RUNNER_MODE
-                atr = features.atr_5m
                 runner_stop = min(
                     trade.current_trailing_stop,
                     features.ema9_5m + (0.25 * atr),
-                    spot + (1.0 * atr),
+                    trade.lowest_close_since_entry + atr,
+                    features.swing_high_5m if features.swing_high_5m is not None else trade.current_trailing_stop,
                 )
                 trade.current_trailing_stop = round(min(trade.current_trailing_stop, runner_stop), 2)
-            elif current_r >= 1.5:
+            elif trade.peak_r >= 1.5:
                 trade.state = TradeLifecycleState.PROFIT_LOCKED
                 lock_stop = trade.entry_spot_price - (0.50 * r_points)
                 trade.current_trailing_stop = round(min(trade.current_trailing_stop, lock_stop), 2)
-            elif current_r >= 1.0:
+            elif trade.peak_r >= 1.0:
                 trade.state = TradeLifecycleState.PROTECTED_BREAKEVEN
-                breakeven_stop = trade.entry_spot_price - 2.0
+                breakeven_stop = trade.entry_spot_price - self.risk_config.breakeven_buffer_points
                 trade.current_trailing_stop = round(min(trade.current_trailing_stop, breakeven_stop), 2)
 
         return trade, None

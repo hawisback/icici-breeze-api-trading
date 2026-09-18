@@ -1,0 +1,719 @@
+"use client";
+
+import React, { useState, useEffect } from "react";
+import {
+  Activity,
+  AlertCircle,
+  AlertTriangle,
+  ArrowDownRight,
+  ArrowRight,
+  ArrowUpRight,
+  Calendar,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  ExternalLink,
+  Flame,
+  Layers,
+  Play,
+  RefreshCw,
+  Sliders,
+  TrendingDown,
+  TrendingUp,
+  XCircle,
+  Zap,
+} from "lucide-react";
+import {
+  SimulatedTradeRecordData,
+  SimulationBarSnapshotData,
+  SimulationResultData,
+  fetchSimulationAvailableDates,
+  runStrategySimulation,
+} from "../../lib/api";
+
+export const TabReplaySimulation: React.FC = () => {
+  const [availableDates, setAvailableDates] = useState<string[]>([]);
+  const [selectedDate, setSelectedDate] = useState<string>("");
+  const [isRunning, setIsRunning] = useState<boolean>(false);
+  const [result, setResult] = useState<SimulationResultData | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Timeline scrubber state
+  const [selectedBarIndex, setSelectedBarIndex] = useState<number>(0);
+
+  // Overrides panel state
+  const [showOverrides, setShowOverrides] = useState<boolean>(false);
+  const [adxThreshold, setAdxThreshold] = useState<number>(20.0);
+  const [rvolThreshold, setRvolThreshold] = useState<number>(1.20);
+  const [stratAMinConf, setStratAMinConf] = useState<number>(2);
+  const [stratBMinConf, setStratBMinConf] = useState<number>(3);
+  const [boxMaxHeightAtr, setBoxMaxHeightAtr] = useState<number>(1.30);
+  const [premiumCap, setPremiumCap] = useState<number>(70.0);
+  const [bypassWindow, setBypassWindow] = useState<boolean>(false);
+
+  useEffect(() => {
+    loadDates();
+  }, []);
+
+  const loadDates = async () => {
+    try {
+      const dates = await fetchSimulationAvailableDates();
+      if (dates && dates.length > 0) {
+        setAvailableDates(dates);
+        setSelectedDate(dates[0]);
+      }
+    } catch (err: any) {
+      console.error("Failed to load available dates", err);
+    }
+  };
+
+  const handleRunSimulation = async (dateOverride?: string) => {
+    const targetDate = dateOverride || selectedDate;
+    if (!targetDate) return;
+    setIsRunning(true);
+    setErrorMsg(null);
+    try {
+      const res = await runStrategySimulation({
+        date: targetDate,
+        overrides: {
+          adx_threshold: Number(adxThreshold),
+          rvol_threshold: Number(rvolThreshold),
+          min_confirmation_score: Number(stratAMinConf),
+          strat_b_min_confirmation: Number(stratBMinConf),
+          box_max_height_atr: Number(boxMaxHeightAtr),
+          max_option_premium_cap: Number(premiumCap),
+        },
+        bypass_window: bypassWindow,
+      });
+      setResult(res);
+      setSelectedBarIndex(0);
+    } catch (err: any) {
+      setErrorMsg(err.message || "Simulation failed to run.");
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const currentBar: SimulationBarSnapshotData | null =
+    result?.timeline && result.timeline.length > 0
+      ? result.timeline[Math.min(selectedBarIndex, result.timeline.length - 1)]
+      : null;
+
+  const jumpToNextEvent = () => {
+    if (!result?.timeline) return;
+    for (let i = selectedBarIndex + 1; i < result.timeline.length; i++) {
+      if (result.timeline[i].event) {
+        setSelectedBarIndex(i);
+        return;
+      }
+    }
+    // Loop back
+    for (let i = 0; i <= selectedBarIndex; i++) {
+      if (result.timeline[i].event) {
+        setSelectedBarIndex(i);
+        return;
+      }
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <p className="text-sm text-amber-300">Signal replay uses real completed spot and futures candles. Historical option bid/ask quotes are unavailable, so trades and P&amp;L are not estimated. Missing market history produces no signals.</p>
+      {/* 1. Simulation Control & Session Selector */}
+      <div className="bg-slate-900/95 border border-slate-800 rounded-xl p-5 shadow-xl">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 flex items-center justify-center">
+                <Play className="w-4 h-4 fill-indigo-400" />
+              </div>
+              <div>
+                <h2 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                  Intraday Replay & Historical Simulation
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-semibold border border-indigo-500/30">
+                    WHAT-IF ENGINE
+                  </span>
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Walk forward bar-by-bar through any historical trading session to test if your strategy updates would have triggered trades.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setShowOverrides(!showOverrides)}
+              className={`px-3 py-2 rounded-lg text-xs font-semibold border transition flex items-center gap-1.5 ${
+                showOverrides
+                  ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
+                  : "bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-750"
+              }`}
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span>{showOverrides ? "Hide What-If Overrides" : "Tune What-If Overrides"}</span>
+            </button>
+
+            <button
+              onClick={() => handleRunSimulation()}
+              disabled={isRunning || !selectedDate}
+              className="px-5 py-2 rounded-lg text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 disabled:opacity-50 transition flex items-center gap-2 shadow-lg shadow-indigo-600/20"
+            >
+              {isRunning ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Replaying Session...</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-3.5 h-3.5 fill-white" />
+                  <span>Run Full-Day Simulation</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Date Selection Chips */}
+        <div className="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap items-center gap-2">
+          <span className="text-xs text-slate-400 flex items-center gap-1 mr-1">
+            <Calendar className="w-3.5 h-3.5 text-slate-500" />
+            Session Date:
+          </span>
+          {availableDates.map((d) => (
+            <button
+              key={d}
+              onClick={() => {
+                setSelectedDate(d);
+                handleRunSimulation(d);
+              }}
+              className={`px-2.5 py-1 rounded-md text-xs font-mono font-medium transition border ${
+                selectedDate === d
+                  ? "bg-indigo-500/20 border-indigo-500/50 text-indigo-300 font-bold"
+                  : "bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
+              }`}
+            >
+              {d}
+            </button>
+          ))}
+          {/* Custom Date Input */}
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={(e) => setSelectedDate(e.target.value)}
+            className="bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded-md px-2 py-1 font-mono focus:outline-none focus:border-indigo-500"
+          />
+        </div>
+
+        {/* Expandable What-If Overrides Panel */}
+        {showOverrides && (
+          <div className="mt-4 pt-4 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 bg-slate-950/60 p-4 rounded-lg border border-slate-800/80">
+            {/* ADX Threshold */}
+            <div>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-slate-300 font-medium">ADX Target (Trend Strength)</span>
+                <span className="font-bold text-indigo-400">{adxThreshold} pts</span>
+              </div>
+              <input
+                type="range"
+                min="10"
+                max="35"
+                step="1"
+                value={adxThreshold}
+                onChange={(e) => setAdxThreshold(Number(e.target.value))}
+                className="w-full h-1.5 bg-slate-800 rounded-lg cursor-pointer accent-indigo-400"
+              />
+            </div>
+
+            {/* RVOL Threshold */}
+            <div>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-slate-300 font-medium">RVOL Threshold</span>
+                <span className="font-bold text-amber-400">{rvolThreshold}x</span>
+              </div>
+              <input
+                type="range"
+                min="0.8"
+                max="2.5"
+                step="0.05"
+                value={rvolThreshold}
+                onChange={(e) => setRvolThreshold(Number(e.target.value))}
+                className="w-full h-1.5 bg-slate-800 rounded-lg cursor-pointer accent-amber-400"
+              />
+            </div>
+
+            {/* Strategy A Confirmation */}
+            <div>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-slate-300 font-medium">Strat A Required Confirmation</span>
+                <span className="font-bold text-cyan-400">{stratAMinConf} / 6 pts</span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="5"
+                step="1"
+                value={stratAMinConf}
+                onChange={(e) => setStratAMinConf(Number(e.target.value))}
+                className="w-full h-1.5 bg-slate-800 rounded-lg cursor-pointer accent-cyan-400"
+              />
+            </div>
+
+            {/* Strategy B Confirmation */}
+            <div>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-slate-300 font-medium">Strat B Required Confirmation</span>
+                <span className="font-bold text-emerald-400">{stratBMinConf} / 6 pts</span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="5"
+                step="1"
+                value={stratBMinConf}
+                onChange={(e) => setStratBMinConf(Number(e.target.value))}
+                className="w-full h-1.5 bg-slate-800 rounded-lg cursor-pointer accent-emerald-400"
+              />
+            </div>
+
+            {/* Box Max Height */}
+            <div>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-slate-300 font-medium">Strat B Box Max Height</span>
+                <span className="font-bold text-rose-400">{boxMaxHeightAtr} ATR</span>
+              </div>
+              <input
+                type="range"
+                min="0.8"
+                max="2.5"
+                step="0.1"
+                value={boxMaxHeightAtr}
+                onChange={(e) => setBoxMaxHeightAtr(Number(e.target.value))}
+                className="w-full h-1.5 bg-slate-800 rounded-lg cursor-pointer accent-rose-400"
+              />
+            </div>
+
+            {/* Max Option Premium Cap */}
+            <div>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-slate-300 font-medium">Option Premium Cap</span>
+                <span className="font-bold text-amber-400">₹{premiumCap}</span>
+              </div>
+              <input
+                type="range"
+                min="30"
+                max="200"
+                step="5"
+                value={premiumCap}
+                onChange={(e) => setPremiumCap(Number(e.target.value))}
+                className="w-full h-1.5 bg-slate-800 rounded-lg cursor-pointer accent-amber-400"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {errorMsg && (
+        <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
+          <span>{errorMsg}</span>
+        </div>
+      )}
+
+      {/* 2. Simulation Results Cockpit */}
+      {result && (
+        <>
+          {/* Performance Summary Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            {/* Total Trades */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
+                Total Trades
+              </div>
+              <div className="text-xl font-mono font-bold text-slate-100">
+                {result.total_trades}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-1">
+                {result.winning_trades}W - {result.losing_trades}L
+              </div>
+            </div>
+
+            {/* Win Rate */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
+                Win Rate
+              </div>
+              <div
+                className={`text-xl font-mono font-bold ${
+                  result.win_rate_pct >= 50.0 ? "text-emerald-400" : "text-amber-400"
+                }`}
+              >
+                {result.win_rate_pct}%
+              </div>
+              <div className="text-[10px] text-slate-400 mt-1">
+                Profit Factor: <span className="font-bold text-slate-200">{result.profit_factor}</span>
+              </div>
+            </div>
+
+            {/* Total PnL */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
+                Simulated Net PnL
+              </div>
+              <div
+                className={`text-xl font-mono font-bold ${
+                  result.net_pnl >= 0 ? "text-emerald-400" : "text-rose-400"
+                }`}
+              >
+                {result.net_pnl >= 0 ? "+" : ""}₹{result.net_pnl.toLocaleString()}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-1">
+                Gross: ₹{result.total_pnl.toLocaleString()}
+              </div>
+            </div>
+
+            {/* Realized R */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
+                Total Realized R
+              </div>
+              <div
+                className={`text-xl font-mono font-bold ${
+                  result.total_realized_r >= 0 ? "text-cyan-400" : "text-rose-400"
+                }`}
+              >
+                {result.total_realized_r >= 0 ? "+" : ""}
+                {result.total_realized_r}R
+              </div>
+              <div className="text-[10px] text-slate-400 mt-1">
+                Avg: {result.total_trades > 0 ? (result.total_realized_r / result.total_trades).toFixed(2) : "0.00"}R / trade
+              </div>
+            </div>
+
+            {/* Max Drawdown */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
+                Max Drawdown
+              </div>
+              <div className="text-xl font-mono font-bold text-rose-400">
+                ₹{result.max_drawdown_pnl.toLocaleString()}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-1">
+                Intraday peak-to-trough
+              </div>
+            </div>
+
+            {/* Bars Evaluated */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
+                Session Bars
+              </div>
+              <div className="text-xl font-mono font-bold text-slate-300">
+                {result.total_bars_evaluated}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-1">
+                09:15 to 15:30 IST
+              </div>
+            </div>
+          </div>
+
+          {/* 3. Simulated Trades Table */}
+          <div className="bg-slate-900/95 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
+            <div className="bg-slate-950 px-5 py-3.5 border-b border-slate-800 flex items-center justify-between">
+              <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                Simulated Trades ({result.trades.length})
+              </h3>
+              <span className="text-[11px] text-slate-400">
+                Executed under production position sizing & trailing stop ladder
+              </span>
+            </div>
+
+            {result.trades.length === 0 ? (
+              <div className="p-8 text-center text-slate-400 text-xs">
+                <AlertCircle className="w-6 h-6 text-amber-400 mx-auto mb-2" />
+                <span>No trades were triggered during this session under the active rules & thresholds.</span>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Try lowering the required confirmation score or ADX/RVOL thresholds in the What-If panel to test different setups.
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/40">
+                      <th className="py-2.5 px-4 font-medium">Trade ID</th>
+                      <th className="py-2.5 px-3 font-medium">Strategy</th>
+                      <th className="py-2.5 px-3 font-medium">Contract</th>
+                      <th className="py-2.5 px-3 font-medium">Entry</th>
+                      <th className="py-2.5 px-3 font-medium">Exit</th>
+                      <th className="py-2.5 px-3 font-medium">Exit Reason</th>
+                      <th className="py-2.5 px-3 font-medium text-right">Realized R</th>
+                      <th className="py-2.5 px-4 font-medium text-right">Net PnL</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/50 font-mono">
+                    {result.trades.map((t) => {
+                      const isWin = t.net_pnl > 0;
+                      return (
+                        <tr key={t.trade_id} className="hover:bg-slate-800/30 transition">
+                          <td className="py-3 px-4 text-slate-400 text-[11px]">
+                            {t.trade_id}
+                          </td>
+                          <td className="py-3 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-sans font-bold ${
+                                t.strategy === "TREND_PULLBACK"
+                                  ? "bg-blue-500/10 text-blue-300 border border-blue-500/30"
+                                  : "bg-purple-500/10 text-purple-300 border border-purple-500/30"
+                              }`}
+                            >
+                              {t.strategy === "TREND_PULLBACK" ? "STRAT A" : "STRAT B"}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3">
+                            <div className="flex items-center gap-1.5 font-bold text-slate-200">
+                              <span
+                                className={`px-1.5 py-0.2 rounded text-[10px] ${
+                                  t.direction === "BULLISH"
+                                    ? "bg-emerald-500/20 text-emerald-300"
+                                    : "bg-rose-500/20 text-rose-300"
+                                }`}
+                              >
+                                {t.option_type}
+                              </span>
+                              <span>{t.contract_symbol}</span>
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-sans">
+                              {t.lots} lots ({t.quantity} qty)
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 text-slate-300">
+                            <div>{t.entry_time}</div>
+                            <div className="text-[10px] text-slate-400">
+                              ₹{t.entry_premium} (Spot ₹{t.entry_spot})
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 text-slate-300">
+                            <div>{t.exit_time || "-"}</div>
+                            <div className="text-[10px] text-slate-400">
+                              ₹{t.exit_premium ?? "-"} (Spot ₹{t.exit_spot ?? "-"})
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 font-sans text-slate-300 text-[11px]">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                                t.exit_reason?.includes("PROFIT") || t.exit_reason?.includes("RUNNER")
+                                  ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/30"
+                                  : t.exit_reason?.includes("FALSE_BREAKOUT")
+                                  ? "bg-amber-500/10 text-amber-300 border border-amber-500/30"
+                                  : "bg-rose-500/10 text-rose-300 border border-rose-500/30"
+                              }`}
+                            >
+                              {t.exit_reason || "SESSION_CLOSE"}
+                            </span>
+                            <div className="text-[10px] text-slate-400 mt-0.5">
+                              Held: {t.hold_duration_mins}m | Peak: {t.peak_r}R
+                            </div>
+                          </td>
+                          <td
+                            className={`py-3 px-3 text-right font-bold ${
+                              t.realized_r >= 0 ? "text-cyan-400" : "text-rose-400"
+                            }`}
+                          >
+                            {t.realized_r >= 0 ? "+" : ""}
+                            {t.realized_r}R
+                          </td>
+                          <td
+                            className={`py-3 px-4 text-right font-bold text-sm ${
+                              isWin ? "text-emerald-400" : "text-rose-400"
+                            }`}
+                          >
+                            {isWin ? "+" : ""}₹{t.net_pnl.toLocaleString()}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* 4. Interactive Bar-by-Bar Day Replay Stepper */}
+          {result.timeline.length > 0 && currentBar && (
+            <div className="bg-slate-900/95 border border-slate-800 rounded-xl p-5 shadow-xl space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+                <div>
+                  <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-cyan-400" />
+                    Interactive Bar-by-Bar Timeline Stepper
+                  </h3>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Scrub through the 75 completed 5-minute candles to inspect strategy diagnostic states at every bar.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setSelectedBarIndex(Math.max(0, selectedBarIndex - 1))}
+                    disabled={selectedBarIndex === 0}
+                    className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-30 text-slate-200 border border-slate-700 transition"
+                    title="Previous candle"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+
+                  <span className="text-xs font-mono font-bold text-slate-300 px-2">
+                    Bar {selectedBarIndex + 1} / {result.timeline.length} ({currentBar.ist_time} IST)
+                  </span>
+
+                  <button
+                    onClick={() =>
+                      setSelectedBarIndex(Math.min(result.timeline.length - 1, selectedBarIndex + 1))
+                    }
+                    disabled={selectedBarIndex === result.timeline.length - 1}
+                    className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-30 text-slate-200 border border-slate-700 transition"
+                    title="Next candle"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+
+                  <button
+                    onClick={jumpToNextEvent}
+                    className="px-2.5 py-1.5 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-semibold transition flex items-center gap-1"
+                    title="Jump to next entry or exit event"
+                  >
+                    <Zap className="w-3 h-3" />
+                    <span>Jump to Trade</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Slider Scrubber */}
+              <div>
+                <input
+                  type="range"
+                  min="0"
+                  max={result.timeline.length - 1}
+                  value={selectedBarIndex}
+                  onChange={(e) => setSelectedBarIndex(Number(e.target.value))}
+                  className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-400"
+                />
+                <div className="flex justify-between text-[10px] font-mono text-slate-500 mt-1">
+                  <span>09:15 IST (Market Open)</span>
+                  <span>12:00 IST (Mid-Day)</span>
+                  <span>15:30 IST (Market Close)</span>
+                </div>
+              </div>
+
+              {/* Selected Bar Diagnostic Snapshot Card */}
+              <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+                {/* Candlestick OHLC & Spot */}
+                <div>
+                  <div className="text-[10px] text-slate-400 uppercase font-bold mb-1">
+                    Candle ({currentBar.ist_time} IST)
+                  </div>
+                  <div className="text-base font-mono font-bold text-slate-100">
+                    Spot: ₹{currentBar.spot.toFixed(2)}
+                  </div>
+                  <div className="text-[11px] font-mono text-slate-400 mt-1">
+                    O: {currentBar.open} | H: {currentBar.high} | L: {currentBar.low} | C: {currentBar.close}
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">
+                    Volume: {currentBar.volume.toLocaleString()}
+                  </div>
+                </div>
+
+                {/* Technical Indicators */}
+                <div>
+                  <div className="text-[10px] text-slate-400 uppercase font-bold mb-1">
+                    Indicators at this Bar
+                  </div>
+                  <div className="space-y-0.5 font-mono text-[11px]">
+                    <div>
+                      EMA 9/20: <span className="text-cyan-300">{currentBar.ema9_5m}</span> /{" "}
+                      <span className="text-slate-300">{currentBar.ema20_5m}</span>
+                    </div>
+                    <div>
+                      Supertrend:{" "}
+                      <span
+                        className={`font-bold ${
+                          currentBar.supertrend === "BULLISH" ? "text-emerald-400" : "text-rose-400"
+                        }`}
+                      >
+                        {currentBar.supertrend}
+                      </span>
+                    </div>
+                    <div>
+                      ADX: <span className="text-indigo-300">{currentBar.adx_15m}</span> | RVOL:{" "}
+                      <span className="text-amber-300">{currentBar.rvol_5m}x</span>
+                    </div>
+                    <div>
+                      BB Width %ile: <span className="text-purple-300">{currentBar.bb_width_percentile}%</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Strategy Phase States */}
+                <div>
+                  <div className="text-[10px] text-slate-400 uppercase font-bold mb-1">
+                    Strategy Phase States
+                  </div>
+                  <div className="space-y-1.5 font-sans">
+                    <div>
+                      <span className="text-[10px] text-slate-400 block">Strat A (Trend Pullback):</span>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/30">
+                        {currentBar.strategy_a_phase}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-400 block">Strat B (Vol Breakout):</span>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/10 text-purple-300 border border-purple-500/30">
+                        {currentBar.strategy_b_phase}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Event & Trade Status */}
+                <div>
+                  <div className="text-[10px] text-slate-400 uppercase font-bold mb-1">
+                    Trade Lifecycle at this Bar
+                  </div>
+                  {currentBar.event ? (
+                    <div className="p-2.5 rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-300">
+                      <div className="font-bold flex items-center gap-1.5">
+                        <Flame className="w-3.5 h-3.5 text-amber-400" />
+                        <span>{currentBar.event}</span>
+                      </div>
+                      <div className="text-[10px] text-slate-300 mt-1">
+                        {currentBar.event_details}
+                      </div>
+                    </div>
+                  ) : currentBar.active_trade_id ? (
+                    <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300">
+                      <div className="font-bold">IN ACTIVE POSITION</div>
+                      <div className="text-[10px] text-slate-300 mt-0.5">
+                        Trade: {currentBar.active_trade_id}
+                      </div>
+                      {currentBar.event_details && (
+                        <div className="text-[10px] text-cyan-300 mt-0.5">
+                          {currentBar.event_details}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-slate-500 italic">
+                      No active trade. Monitoring conditions for entry.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+};

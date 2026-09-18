@@ -115,7 +115,12 @@ async def test_end_to_end_order_flow(platform):
     assert updated_order.average_price == 125.0
 
     # 3. Check portfolio position
-    pos = await platform["portfolio"].repo.get_position("INST-NIFTY-24800-CE")
+    pos = None
+    for _ in range(20):
+        pos = await platform["portfolio"].repo.get_position("INST-NIFTY-24800-CE")
+        if pos is not None:
+            break
+        await asyncio.sleep(0.1)
     assert pos is not None
     assert pos.quantity == 50
     assert pos.average_price == 125.0

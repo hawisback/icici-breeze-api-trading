@@ -48,7 +48,9 @@ class OptionChainService:
             default_expiries = ["2026-09-22", "2026-09-29", "2026-10-06", "2026-10-13", "2026-10-27", "2026-11-23"]
 
         expiries = await self.inst_svc.get_expiries(clean_underlying)
-        all_expiries = list(dict.fromkeys(default_expiries + (expiries or [])))
+        all_expiries = sorted(e for e in (expiries or []) if e >= date.today().isoformat())
+        if not all_expiries:
+            return {"underlying": clean_underlying, "source": "UNAVAILABLE", "strikes": []}
         selected_expiry = expiry if (expiry and expiry in all_expiries) else all_expiries[0]
 
         # 1. Resolve realistic spot price
@@ -97,6 +99,9 @@ class OptionChainService:
                         right_key = "call" if c.right == OptionRight.CALL else "put"
                         opt_code = f"{clean_underlying}{int(s)}{'CE' if c.right == OptionRight.CALL else 'PE'}"
                         inst_id = f"INST-{clean_underlying}-{selected_expiry}-{int(s)}-{'CE' if c.right == OptionRight.CALL else 'PE'}"
+                        metadata = await self.inst_svc.get_instrument(inst_id)
+                        if not metadata or not metadata.tradable or metadata.lot_size <= 0:
+                            continue
 
                         strikes_map[s][right_key] = {
                             "instrument_id": inst_id,
@@ -105,9 +110,10 @@ class OptionChainService:
                             "change_pct": 0.0,
                             "volume": c.volume or 0,
                             "open_interest": c.open_interest or 0,
-                            "bid": float(c.bid) if c.bid else round(max(0.05, float(c.ltp) - 0.25), 2),
-                            "ask": float(c.ask) if c.ask else round(float(c.ltp) + 0.25, 2),
-                            "lot_size": 15 if clean_underlying == "BANKNIFTY" else 25,
+                            "oi_change": c.oi_change,
+                            "bid": float(c.bid or 0),
+                            "ask": float(c.ask or 0),
+                            "lot_size": metadata.lot_size,
                         }
 
                     sorted_strikes = [strikes_map[k] for k in sorted(strikes_map.keys())]

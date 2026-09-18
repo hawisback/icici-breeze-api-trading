@@ -5,9 +5,13 @@ Implements Sections 7, 9, 10, 11, 12 of NIFTY_INTRADAY_OPTIONS_AUTO_TRADING_STRA
 from __future__ import annotations
 
 import math
+from datetime import timedelta, timezone
+from statistics import median
 from typing import Any, Optional
 from libs.contracts.models import Candle
 from services.strategy.models import MarketFeatures, utc_now
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class FeatureEngine:
@@ -147,18 +151,25 @@ class FeatureEngine:
     @staticmethod
     def calculate_supertrend(candles: list[Candle], period: int = 10, multiplier: float = 3.0) -> str:
         """Determines Supertrend direction ('BULLISH' or 'BEARISH')."""
-        if len(candles) < period:
-            return "BULLISH"
-        atr = FeatureEngine.calculate_atr(candles, period=period)
-        latest = candles[-1]
-        hl2 = (latest.high + latest.low) / 2.0
-        upper_band = hl2 + (multiplier * atr)
-        lower_band = hl2 - (multiplier * atr)
-        if latest.close > upper_band:
-            return "BULLISH"
-        if latest.close < lower_band:
-            return "BEARISH"
-        return "BULLISH" if latest.close >= hl2 else "BEARISH"
+        if len(candles) < period+1:
+            return "NEUTRAL"
+        trs = [max(c.high-c.low, abs(c.high-candles[i-1].close), abs(c.low-candles[i-1].close))
+               for i, c in enumerate(candles) if i > 0]
+        atr = sum(trs[:period])/period
+        first = candles[period]
+        upper = (first.high+first.low)/2+multiplier*atr
+        lower = (first.high+first.low)/2-multiplier*atr
+        bullish = first.close >= (first.high+first.low)/2
+        for i in range(period+1, len(candles)):
+            c, previous = candles[i], candles[i-1]
+            atr = (atr*(period-1)+trs[i-1])/period
+            basic_upper = (c.high+c.low)/2+multiplier*atr
+            basic_lower = (c.high+c.low)/2-multiplier*atr
+            new_upper = basic_upper if basic_upper < upper or previous.close > upper else upper
+            new_lower = basic_lower if basic_lower > lower or previous.close < lower else lower
+            bullish = c.close >= new_lower if bullish else c.close > new_upper
+            upper, lower = new_upper, new_lower
+        return "BULLISH" if bullish else "BEARISH"
 
     @staticmethod
     def calculate_bollinger_bandwidth(closes: list[float], period: int = 20, num_std: float = 2.0) -> float:
@@ -173,7 +184,56 @@ class FeatureEngine:
         lower = mean - (num_std * std)
         if mean == 0:
             return 0.015
-        return round((upper - lower) / mean, 4)
+        return (upper - lower) / mean
+
+    @classmethod
+    def calculate_bb_percentile(cls, closes: list[float], history: int = 252) -> float:
+        """Empirical rank against prior widths only; ties use mid-rank.
+
+        Require at least 20 prior observations, never invent a squeeze on warm-up.
+        """
+        if len(closes) < 40:
+            return 100.0
+        widths = [cls.calculate_bollinger_bandwidth(closes[i-20:i])
+                  for i in range(max(20, len(closes)-history), len(closes))]
+        current = cls.calculate_bollinger_bandwidth(closes)
+        return 100 * (sum(w < current for w in widths) + .5*sum(w == current for w in widths))/len(widths)
+
+    @staticmethod
+    def breakout_oi_features(chain, price, buildup):
+        """Five independent evidence factors; missing OI changes earn no point.
+
+        Walls use the nearest strike ahead within ATM +/- five listed strikes,
+        a 90th-percentile rank and above-median OI (flat OI is not a wall).
+        """
+        bull, bear = int(buildup == "LONG_BUILDUP"), int(buildup == "SHORT_BUILDUP")
+        if not chain or chain.get("source") not in ("BREEZE", "LIVE"):
+            return bull, bear, False, False
+        strikes = sorted(chain.get("strikes", []), key=lambda s:s["strike"])
+        if not strikes:
+            return bull, bear, False, False
+        atm = min(range(len(strikes)), key=lambda i:abs(strikes[i]["strike"]-price))
+        near = strikes[max(0,atm-5):atm+6]
+        def value(s, side, key):
+            return float((s.get(side) or {}).get(key) or 0)
+        below, above = [s for s in near if s["strike"] <= price], [s for s in near if s["strike"] >= price]
+        bull += int(any(value(s,"put","oi_change") > 0 for s in below))
+        bear += int(any(value(s,"call","oi_change") > 0 for s in above))
+        bull += int(any(value(s,"call","oi_change") < 0 for s in above))
+        bear += int(any(value(s,"put","oi_change") < 0 for s in below))
+        balance = sum(value(s,"put","oi_change")-value(s,"call","oi_change") for s in near)
+        bull += int(balance > 0)
+        bear += int(balance < 0)
+        velocity = sum(value(s,"put","oi_velocity")-value(s,"call","oi_velocity") for s in near)
+        bull += int(velocity > 0)
+        bear += int(velocity < 0)
+        def wall(side, ahead):
+            oi = [value(s,side,"open_interest") for s in near]
+            if not ahead or len(oi) < 3 or median(oi) <= 0:
+                return False
+            target = value(ahead[0],side,"open_interest")
+            return target > median(oi) and sum(x <= target for x in oi)/len(oi) >= .90
+        return bull,bear,wall("call",above),wall("put",list(reversed(below)))
 
     @staticmethod
     def calculate_futures_vwap(futures_candles: list[Candle]) -> float:
@@ -182,29 +242,33 @@ class FeatureEngine:
             return 0.0
         total_vol = 0
         total_pv = 0.0
+        session = futures_candles[-1].start_time.astimezone(IST).date()
         for c in futures_candles:
+            if c.start_time.astimezone(IST).date() != session:
+                continue
             tp = (c.high + c.low + c.close) / 3.0
-            vol = max(1, c.volume)
+            vol = max(0, c.volume)
             total_vol += vol
             total_pv += (tp * vol)
         if total_vol == 0:
-            return futures_candles[-1].close
+            return 0.0
         return round(total_pv / total_vol, 2)
 
     @staticmethod
     def calculate_rvol(futures_candles: list[Candle]) -> float:
         """Relative volume of latest 5m candle vs median volume of preceding bars."""
         if len(futures_candles) < 2:
-            return 1.2
-        volumes = [max(1, c.volume) for c in futures_candles[:-1]]
+            return 0.0
+        latest = futures_candles[-1]
+        slot = latest.start_time.astimezone(IST)
+        volumes = [c.volume for c in futures_candles[:-1]
+                   if c.start_time.astimezone(IST).date() < slot.date()
+                   and c.start_time.astimezone(IST).time() == slot.time()]
         if not volumes:
-            return 1.2
-        sorted_vols = sorted(volumes)
-        median_vol = sorted_vols[len(sorted_vols) // 2]
-        latest_vol = max(1, futures_candles[-1].volume)
-        if median_vol == 0:
-            return 1.2
-        return round(latest_vol / median_vol, 2)
+            volumes = [c.volume for c in futures_candles[:-1]
+                       if c.start_time.astimezone(IST).date() == slot.date()]
+        base = median(volumes) if volumes else 0
+        return round(latest.volume / base, 2) if base > 0 else 0.0
 
     @classmethod
     def compute_all_features(
@@ -214,9 +278,20 @@ class FeatureEngine:
         futures_candles: Optional[list[Candle]] = None,
         option_chain: Optional[dict[str, Any]] = None,
         spot_price: float = 23217.60,
+        as_of=None,
     ) -> MarketFeatures:
         """Synthesize all technical, derivatives, and contextual indicators."""
-        now = utc_now()
+        now = as_of or utc_now()
+        def completed(bars, interval):
+            return sorted({c.start_time: c for c in (bars or [])
+                           if c.source in ("BREEZE", "LIVE") and c.interval == interval
+                           and c.end_time <= now and c.low > 0
+                           and c.low <= min(c.open, c.close) <= max(c.open, c.close) <= c.high
+                           and c.end_time - c.start_time == timedelta(minutes=int(interval[:-1]))
+                           }.values(), key=lambda c: c.start_time)
+        candles_5m = completed(candles_5m, "5m")
+        candles_15m = completed(candles_15m, "15m")
+        futures_candles = completed(futures_candles, "5m")
         closes_5m = [c.close for c in candles_5m] if candles_5m else [spot_price]
         closes_15m = [c.close for c in candles_15m] if candles_15m else [spot_price]
 
@@ -225,18 +300,21 @@ class FeatureEngine:
         ema20_15m = cls.calculate_ema(closes_15m, 20)
         ema50_15m = cls.calculate_ema(closes_15m, 50)
         ema20_series = cls.calculate_ema_series(closes_15m, 20)
-        slope = (ema20_series[-1] - ema20_series[-3]) if len(ema20_series) >= 3 else 1.0
+        raw_slope = (ema20_series[-1] - ema20_series[-3]) if len(ema20_series) >= 3 else 0.0
+        atr_15m = cls.calculate_atr(candles_15m, 14) if candles_15m else 0.0
+        slope_norm = raw_slope / atr_15m if atr_15m > 0 else 0.0
 
-        adx_15m, plus_di, minus_di = cls.calculate_adx(candles_15m, 14) if candles_15m else (24.0, 26.0, 18.0)
+        adx_15m, plus_di, minus_di = cls.calculate_adx(candles_15m, 14) if len(candles_15m) >= 29 else (0.0, 0.0, 0.0)
+        _, plus_di_5m, minus_di_5m = cls.calculate_adx(candles_5m, 14) if len(candles_5m) >= 29 else (0.0, 0.0, 0.0)
 
         # 5m Indicators
         ema9_5m = cls.calculate_ema(closes_5m, 9)
         ema20_5m = cls.calculate_ema(closes_5m, 20)
         rsi_5m = cls.calculate_rsi(closes_5m, 14)
-        atr_5m = cls.calculate_atr(candles_5m, 14) if candles_5m else 28.0
+        atr_5m = cls.calculate_atr(candles_5m, 14) if candles_5m else 0.0
         supertrend = cls.calculate_supertrend(candles_5m, 10, 3.0) if candles_5m else "BULLISH"
         bb_width = cls.calculate_bollinger_bandwidth(closes_5m, 20, 2.0)
-        bb_percentile = round(min(100.0, max(5.0, (bb_width / 0.02) * 50.0)), 1)
+        bb_percentile = cls.calculate_bb_percentile(closes_5m)
 
         # Futures & VWAP
         if futures_candles and len(futures_candles) > 0:
@@ -244,31 +322,27 @@ class FeatureEngine:
             fut_vwap = cls.calculate_futures_vwap(futures_candles)
             rvol = cls.calculate_rvol(futures_candles)
         else:
-            # Fallback estimation based on cash index
-            fut_price = spot_price + 35.0  # standard premium
-            fut_vwap = spot_price + 20.0
-            rvol = 1.35
+            fut_price = fut_vwap = rvol = 0.0
 
         # Futures OI Buildup
-        if fut_price > fut_vwap:
-            fut_buildup = "LONG_BUILDUP"
-        else:
-            fut_buildup = "SHORT_BUILDUP"
+        fut_buildup = "NEUTRAL"
+        if len(futures_candles) >= 2:
+            previous, current = futures_candles[-2:]
+            if previous.open_interest and current.open_interest:
+                price_change = current.close - previous.close
+                oi_change = current.open_interest - previous.open_interest
+                if price_change > 0 and oi_change > 0:
+                    fut_buildup = "LONG_BUILDUP"
+                elif price_change < 0 and oi_change > 0:
+                    fut_buildup = "SHORT_BUILDUP"
+                elif price_change > 0 and oi_change < 0:
+                    fut_buildup = "SHORT_COVERING"
+                elif price_change < 0 and oi_change < 0:
+                    fut_buildup = "LONG_UNWINDING"
 
         # Option Chain Derivatives Confirmation Score
         bull_score = 0.0
         bear_score = 0.0
-
-        if fut_price > fut_vwap:
-            bull_score += 1.0
-        else:
-            bear_score += 1.0
-
-        if rvol >= 1.30:
-            if fut_price > fut_vwap:
-                bull_score += 1.0
-            else:
-                bear_score += 1.0
 
         # Process Option Chain OI flow if available
         if option_chain and "strikes" in option_chain:
@@ -279,9 +353,9 @@ class FeatureEngine:
             total_call_oi = sum(s.get("call", {}).get("open_interest", 0) for s in strikes if s.get("call"))
 
             # If put OI is higher or growing near/below ATM -> support
-            if total_put_oi >= total_call_oi:
+            if total_put_oi > total_call_oi:
                 bull_score += 1.0
-            else:
+            elif total_call_oi > total_put_oi:
                 bear_score += 1.0
 
             # Inspect strikes immediately above ATM for call writing walls
@@ -291,25 +365,55 @@ class FeatureEngine:
                 bull_score -= 1.0
                 bear_score += 1.0
 
+        b_bull, b_bear, bull_wall, bear_wall = cls.breakout_oi_features(option_chain, candles_5m[-1].close if candles_5m else spot_price, fut_buildup)
+
         # Baseline trend regime
-        if ema20_15m > ema50_15m and spot_price > ema20_15m and slope > 0:
+        if ema20_15m > ema50_15m and spot_price > ema20_15m and slope_norm >= 0.10:
             regime = "BULLISH"
-        elif ema20_15m < ema50_15m and spot_price < ema20_15m and slope < 0:
+        elif ema20_15m < ema50_15m and spot_price < ema20_15m and slope_norm <= -0.10:
             regime = "BEARISH"
         else:
             regime = "NEUTRAL"
 
+        swing_lows = [candles_5m[i].low for i in range(1, len(candles_5m)-1)
+                      if candles_5m[i].low < candles_5m[i-1].low and candles_5m[i].low <= candles_5m[i+1].low]
+        swing_highs = [candles_5m[i].high for i in range(1, len(candles_5m)-1)
+                       if candles_5m[i].high > candles_5m[i-1].high and candles_5m[i].high >= candles_5m[i+1].high]
+        ready = (len(candles_5m) >= 29 and len(candles_15m) >= 50 and len(futures_candles) >= 15
+                 and candles_5m[-1].end_time == futures_candles[-1].end_time
+                 and 0 <= (now - candles_5m[-1].end_time).total_seconds() < 300
+                 and 0 <= (now - candles_15m[-1].end_time).total_seconds() < 900
+                 and atr_5m > 0 and atr_15m > 0 and fut_vwap > 0)
         return MarketFeatures(
+            breakout_data_ready=(len(candles_5m) >= 40 and len(futures_candles) >= 15
+                and candles_5m[-1].end_time == futures_candles[-1].end_time
+                and 0 <= (now-candles_5m[-1].end_time).total_seconds() < 300
+                and atr_5m > 0 and fut_vwap > 0),
+            breakout_bull_derivatives_score=b_bull,
+            breakout_bear_derivatives_score=b_bear,
+            bullish_oi_wall=bull_wall,
+            bearish_oi_wall=bear_wall,
             timestamp=now,
+            closed_5m_price=candles_5m[-1].close if candles_5m else None,
+            closed_5m_time=candles_5m[-1].end_time if candles_5m else None,
+            plus_di_5m=plus_di_5m,
+            minus_di_5m=minus_di_5m,
+            swing_low_5m=swing_lows[-1] if swing_lows else None,
+            swing_high_5m=swing_highs[-1] if swing_highs else None,
+            futures_atr_5m=cls.calculate_atr(futures_candles) if len(futures_candles) >= 15 else 0,
+            data_ready=ready,
+            data_reason="" if ready else "Missing, stale, unaligned or insufficient real spot/futures candles",
             spot_price=spot_price,
             spot_change_pct=0.0,
             ema9_15m=ema9_15m,
             ema20_15m=ema20_15m,
             ema50_15m=ema50_15m,
-            ema20_slope_15m=round(slope, 2),
+            ema20_slope_15m=round(raw_slope, 2),
+            ema20_slope_norm_15m=round(slope_norm, 4),
             adx_15m=adx_15m,
             plus_di_15m=plus_di,
             minus_di_15m=minus_di,
+            atr_15m=atr_15m,
             ema9_5m=ema9_5m,
             ema20_5m=ema20_5m,
             rsi_5m=rsi_5m,
@@ -328,4 +432,3 @@ class FeatureEngine:
             atm_straddle_price=215.0,
             trend_regime=regime,
         )
-

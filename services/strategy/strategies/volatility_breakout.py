@@ -1,508 +1,202 @@
-"""STRATEGY B — Volatility Compression Breakout.
-Implements Section 14 of NIFTY_INTRADAY_OPTIONS_AUTO_TRADING_STRATEGIES.md.
-"""
-
-from __future__ import annotations
-
-import logging
-from typing import Optional
-from libs.contracts.models import Candle
+"""Strategy B: immutable compression box and completed-bar breakout decisions."""
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from services.strategy.models import (
-    MarketFeatures,
-    OptionType,
-    StrategyName,
-    StrategySignal,
-    StrategyTriggerDiagnostics,
-    ThresholdOverrides,
-    TradeDirection,
-    TriggerCondition,
-    utc_now,
+    CompressionBox, OptionType, StrategyName, StrategySignal,
+    StrategyTriggerDiagnostics, TradeDirection, TriggerCondition,
 )
-
-logger = logging.getLogger(__name__)
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class VolatilityBreakoutStrategy:
-    """Strategy B: Volatility Compression Breakout.
-    
-    Identifies tight consolidation ranges (low BBWidth, contracted ATR)
-    and enters on explosive volume-backed directional breakouts.
-    Bullish breakout buys Call; Bearish breakout buys Put.
-    """
-
-    def __init__(self, rvol_threshold: float = 1.30, adx_threshold: float = 20.0) -> None:
+    def __init__(self, rvol_threshold=1.20, adx_threshold=20.0,
+                 min_confirmation_score=3, bb_width_percentile_threshold=25.0,
+                 box_max_height_atr=1.30, lookback_bars=8, max_age_bars=8,
+                 breakout_buffer_atr=0.05, max_extension_atr=0.75,
+                 entry_start="09:25", entry_end="14:45"):
         self.rvol_threshold = rvol_threshold
-        self.adx_threshold = adx_threshold
+        self.adx_threshold = adx_threshold  # compatibility; not a B gate
+        self.min_confirmation_score = min_confirmation_score
+        self.bb_width_threshold = bb_width_percentile_threshold
+        self.box_max_height_atr = box_max_height_atr
+        self.lookback_bars = lookback_bars
+        self.max_age_bars = max_age_bars
+        self.breakout_buffer_atr = breakout_buffer_atr
+        self.max_extension_atr = max_extension_atr
+        self.entry_start, self.entry_end = entry_start, entry_end
+        self.locked_box = None
+        self.last_bar = self.after = self.session = self.fingerprint = self.consumed = None
 
-    def evaluate(
-        self,
-        features: MarketFeatures,
-        candles_5m: list[Candle],
-        candles_15m: list[Candle],
-        futures_candles: Optional[list[Candle]] = None,
-        overrides: Optional[ThresholdOverrides] = None,
-    ) -> Optional[StrategySignal]:
-        """Evaluates closed candles against Volatility Breakout setup rules."""
-        if not candles_5m or len(candles_5m) < 8:
-            return None
+    def export_state(self):
+        return {"box": self.locked_box.model_dump(mode="json") if self.locked_box else None,
+                **{k:getattr(self,k) for k in ("last_bar","after","session","fingerprint","consumed")}}
 
-        # Check Bullish Breakout
-        bull_signal = self._evaluate_bullish(features, candles_5m, overrides=overrides)
-        if bull_signal:
-            return bull_signal
+    def restore_state(self, state):
+        self.locked_box = CompressionBox.model_validate(state["box"]) if state.get("box") else None
+        for name in ("last_bar","after","session","fingerprint","consumed"):
+            setattr(self, name, state.get(name))
 
-        # Check Bearish Breakout
-        bear_signal = self._evaluate_bearish(features, candles_5m, overrides=overrides)
-        if bear_signal:
-            return bear_signal
+    def reset(self, at=None):
+        self.locked_box = None
+        if at is not None:
+            self.after = at.isoformat()
 
-        return None
+    def _decision(self, features, bars, overrides=None):
+        def setting(key, default):
+            value = getattr(overrides, key, None)
+            return default if value is None else value
+        bb_target = setting("bb_width_percentile", self.bb_width_threshold)
+        height_target = setting("box_max_height_atr", self.box_max_height_atr)
+        required = setting("strat_b_min_confirmation", self.min_confirmation_score)
+        rvol_target = setting("rvol_threshold", self.rvol_threshold)
+        conditions, summary = [], {}
 
-    def _evaluate_bullish(
-        self,
-        features: MarketFeatures,
-        candles_5m: list[Candle],
-        overrides: Optional[ThresholdOverrides] = None,
-    ) -> Optional[StrategySignal]:
-        spot = features.spot_price
-        atr = max(10.0, features.atr_5m)
-        latest_5m = candles_5m[-1]
+        def condition(key, name, passed, current, target):
+            conditions.append(TriggerCondition(id=key,name=name,status="PASSED" if passed else "PENDING",
+                current_value=str(current),target_threshold=str(target),gap_description=""))
 
-        bb_target = overrides.bb_width_percentile if (overrides and overrides.bb_width_percentile is not None) else 35.0
-        rvol_target = overrides.rvol_threshold if (overrides and overrides.rvol_threshold is not None) else self.rvol_threshold
-        deriv_target = overrides.bull_derivatives_score if (overrides and overrides.bull_derivatives_score is not None) else 2.0
-
-        # 1. Compression Detection (preceding 4 to 10 bars)
-        consolidation_bars = candles_5m[-7:-1]
-        if len(consolidation_bars) < 4:
-            return None
-
-        comp_high = max(c.high for c in consolidation_bars)
-        comp_low = min(c.low for c in consolidation_bars)
-        comp_height = comp_high - comp_low
-
-        c_bb_contracted = features.bb_width_percentile <= bb_target
-        c_range_height = comp_height <= (1.85 * atr)
-        c_compression = c_bb_contracted and c_range_height
-
-        # 2. Bullish Breakout Trigger on Latest Closed 5m Bar
-        breakout_level = comp_high + (0.10 * atr)
-        c_breakout_close = latest_5m.close > breakout_level
-        c_fut_vwap = features.futures_price > features.futures_vwap
-        c_rvol = features.rvol_5m >= rvol_target
-
-        candle_range = max(1.0, latest_5m.high - latest_5m.low)
-        candle_body = abs(latest_5m.close - latest_5m.open)
-        c_candle_body = (candle_body / candle_range) >= 0.55
-
-        c_deriv_score = features.bull_derivatives_score >= deriv_target
-        c_extension = (latest_5m.close - comp_high) <= (0.85 * atr)
-
-        # 3. Structural Risk & R Calculation
-        candidate_stop = round(comp_high - (0.25 * atr), 2)
-        r_points = round(spot - candidate_stop, 2)
-        c_risk_band = (0.35 * atr) <= r_points <= (1.35 * atr)
-
-        conditions = {
-            "compression_bb_contracted": c_bb_contracted,
-            "compression_range_height_valid": c_range_height,
-            "breakout_close_above_level": c_breakout_close,
-            "futures_above_vwap": c_fut_vwap,
-            "volume_rvol_elevated": c_rvol,
-            "candle_body_ratio_strong": c_candle_body,
-            "derivatives_confirmation": c_deriv_score,
-            "extension_chase_controlled": c_extension,
-            "risk_r_band_valid": c_risk_band,
-        }
-
-        all_passed = (
-            c_compression
-            and c_breakout_close
-            and c_fut_vwap
-            and c_rvol
-            and c_candle_body
-            and c_deriv_score
-            and c_extension
-            and c_risk_band
-        )
-
-        if not all_passed:
-            return None
-
-        return StrategySignal(
-            signal_id=f"SIG-B-BULL-{int(utc_now().timestamp())}",
-            strategy=StrategyName.VOLATILITY_BREAKOUT,
-            direction=TradeDirection.BULLISH,
-            option_type=OptionType.CALL,
-            timestamp=utc_now(),
-            spot_reference_price=spot,
-            structural_stop=candidate_stop,
-            r_points=r_points,
-            derivatives_score=features.bull_derivatives_score,
-            features_snapshot={
-                "conditions": conditions,
-                "comp_high": comp_high,
-                "comp_low": comp_low,
-                "comp_height": comp_height,
-                "r_points": r_points,
-                "atr": atr,
-            },
-            passed=True,
-        )
-
-    def _evaluate_bearish(
-        self,
-        features: MarketFeatures,
-        candles_5m: list[Candle],
-        overrides: Optional[ThresholdOverrides] = None,
-    ) -> Optional[StrategySignal]:
-        spot = features.spot_price
-        atr = max(10.0, features.atr_5m)
-        latest_5m = candles_5m[-1]
-
-        bb_target = overrides.bb_width_percentile if (overrides and overrides.bb_width_percentile is not None) else 35.0
-        rvol_target = overrides.rvol_threshold if (overrides and overrides.rvol_threshold is not None) else self.rvol_threshold
-        deriv_target = overrides.bear_derivatives_score if (overrides and overrides.bear_derivatives_score is not None) else 2.0
-
-        # 1. Compression Detection
-        consolidation_bars = candles_5m[-7:-1]
-        if len(consolidation_bars) < 4:
-            return None
-
-        comp_high = max(c.high for c in consolidation_bars)
-        comp_low = min(c.low for c in consolidation_bars)
-        comp_height = comp_high - comp_low
-
-        c_bb_contracted = features.bb_width_percentile <= bb_target
-        c_range_height = comp_height <= (1.85 * atr)
-        c_compression = c_bb_contracted and c_range_height
-
-        # 2. Bearish Breakout Trigger
-        breakout_level = comp_low - (0.10 * atr)
-        c_breakout_close = latest_5m.close < breakout_level
-        c_fut_vwap = features.futures_price < features.futures_vwap
-        c_rvol = features.rvol_5m >= rvol_target
-
-        candle_range = max(1.0, latest_5m.high - latest_5m.low)
-        candle_body = abs(latest_5m.close - latest_5m.open)
-        c_candle_body = (candle_body / candle_range) >= 0.55
-
-        c_deriv_score = features.bear_derivatives_score >= deriv_target
-        c_extension = (comp_low - latest_5m.close) <= (0.85 * atr)
-
-        # 3. Structural Risk & R Calculation
-        candidate_stop = round(comp_low + (0.25 * atr), 2)
-        r_points = round(candidate_stop - spot, 2)
-        c_risk_band = (0.35 * atr) <= r_points <= (1.35 * atr)
-
-        conditions = {
-            "compression_bb_contracted": c_bb_contracted,
-            "compression_range_height_valid": c_range_height,
-            "breakout_close_below_level": c_breakout_close,
-            "futures_below_vwap": c_fut_vwap,
-            "volume_rvol_elevated": c_rvol,
-            "candle_body_ratio_strong": c_candle_body,
-            "derivatives_confirmation": c_deriv_score,
-            "extension_chase_controlled": c_extension,
-            "risk_r_band_valid": c_risk_band,
-        }
-
-        all_passed = (
-            c_compression
-            and c_breakout_close
-            and c_fut_vwap
-            and c_rvol
-            and c_candle_body
-            and c_deriv_score
-            and c_extension
-            and c_risk_band
-        )
-
-        if not all_passed:
-            return None
-
-        return StrategySignal(
-            signal_id=f"SIG-B-BEAR-{int(utc_now().timestamp())}",
-            strategy=StrategyName.VOLATILITY_BREAKOUT,
-            direction=TradeDirection.BEARISH,
-            option_type=OptionType.PUT,
-            timestamp=utc_now(),
-            spot_reference_price=spot,
-            structural_stop=candidate_stop,
-            r_points=r_points,
-            derivatives_score=features.bear_derivatives_score,
-            features_snapshot={
-                "conditions": conditions,
-                "comp_high": comp_high,
-                "comp_low": comp_low,
-                "comp_height": comp_height,
-                "r_points": r_points,
-                "atr": atr,
-            },
-            passed=True,
-        )
-
-    def diagnose(
-        self,
-        features: MarketFeatures,
-        candles_5m: list[Candle],
-        overrides: Optional[ThresholdOverrides] = None,
-    ) -> list[StrategyTriggerDiagnostics]:
-        """Provides condition-by-condition diagnostic breakdown of what Strategy B is waiting for."""
-        spot = features.spot_price
-        atr = max(10.0, features.atr_5m)
-        bb_target = overrides.bb_width_percentile if (overrides and overrides.bb_width_percentile is not None) else 35.0
-        rvol_target = overrides.rvol_threshold if (overrides and overrides.rvol_threshold is not None) else self.rvol_threshold
-        bull_deriv_target = overrides.bull_derivatives_score if (overrides and overrides.bull_derivatives_score is not None) else 2.0
-        bear_deriv_target = overrides.bear_derivatives_score if (overrides and overrides.bear_derivatives_score is not None) else 2.0
-
-        if not candles_5m or len(candles_5m) < 8:
-            return [
-                StrategyTriggerDiagnostics(
+        def finish(phase, reason, signal=None, direction=None):
+            if self.locked_box and "box" not in summary:
+                box = self.locked_box
+                summary["box"] = {"state":"LOCKED","high":box.box_high,"low":box.box_low,
+                                  "height":box.box_height,"bars":box.bars_active,"max_bars":box.max_bars}
+                summary["compression"] = {"status":"PASSED","bb_width":box.bb_width_at_lock,
+                                          "height_atr":box.box_height/box.atr_at_lock}
+            diags = []
+            for d in TradeDirection:
+                visible = conditions if direction in (None,d) else []
+                passed = sum(c.status == "PASSED" for c in visible)
+                ready = signal is not None and signal.direction == d
+                diags.append(StrategyTriggerDiagnostics(
                     strategy=StrategyName.VOLATILITY_BREAKOUT,
-                    strategy_label="Volatility Breakout (CALL)",
-                    direction=TradeDirection.BULLISH,
-                    option_type=OptionType.CALL,
-                    overall_status="WAITING",
-                    passed_count=0,
-                    total_count=8,
-                    ready_pct=0.0,
-                    key_blocker="Awaiting sufficient 5m candles (min 8 bars)",
-                    current_spot=spot,
-                ),
-                StrategyTriggerDiagnostics(
-                    strategy=StrategyName.VOLATILITY_BREAKOUT,
-                    strategy_label="Volatility Breakout (PUT)",
-                    direction=TradeDirection.BEARISH,
-                    option_type=OptionType.PUT,
-                    overall_status="WAITING",
-                    passed_count=0,
-                    total_count=8,
-                    ready_pct=0.0,
-                    key_blocker="Awaiting sufficient 5m candles (min 8 bars)",
-                    current_spot=spot,
-                ),
-            ]
+                    strategy_label=f"Volatility Breakout ({'CALL' if d == TradeDirection.BULLISH else 'PUT'})",
+                    direction=d,option_type=OptionType.CALL if d == TradeDirection.BULLISH else OptionType.PUT,
+                    overall_status="READY_TO_TRIGGER" if ready else "WAITING",
+                    phase_state=phase if direction in (None,d) else "WAITING_FOR_BREAKOUT",
+                    key_blocker=reason if direction in (None,d) else "Waiting for breakout in this direction",
+                    current_spot=features.spot_price,passed_count=passed,total_count=len(visible),
+                    ready_pct=100*passed/len(visible) if visible else 0,
+                    conditions=deepcopy(visible),phase_summary=deepcopy(summary)))
+            return signal, diags
 
-        latest_5m = candles_5m[-1]
-        consolidation_bars = candles_5m[-7:-1]
-        comp_high = max(c.high for c in consolidation_bars)
-        comp_low = min(c.low for c in consolidation_bars)
-        comp_height = comp_high - comp_low
+        now = features.timestamp
+        if (not features.breakout_data_ready or not bars or features.atr_5m <= 0
+                or any(c.source not in ("BREEZE","LIVE") or c.interval != "5m"
+                       or c.end_time > now or c.end_time-c.start_time != timedelta(minutes=5)
+                       or not 0 < c.low <= min(c.open,c.close) <= max(c.open,c.close) <= c.high for c in bars)
+                or any(b.start_time <= a.start_time for a,b in zip(bars,bars[1:]))
+                or not 0 <= (now-bars[-1].end_time).total_seconds() < 300):
+            self.reset(now)
+            return finish("RESET","Missing, stale or invalid real completed spot/futures data")
+        trigger = bars[-1]
+        clock = trigger.end_time.astimezone(IST)
+        session = clock.date().isoformat()
+        if self.session != session:
+            self.locked_box = None
+            self.last_bar = None
+            self.session = session
+        fingerprint = repr((bb_target,height_target,required,rvol_target,self.lookback_bars,
+            self.max_age_bars,self.breakout_buffer_atr,self.max_extension_atr,self.entry_start,self.entry_end,
+            setting("bull_derivatives_score",2),setting("bear_derivatives_score",2)))
+        if self.fingerprint is not None and self.fingerprint != fingerprint:
+            self.reset(trigger.end_time)
+        self.fingerprint = fingerprint
+        if not setting("bypass_entry_window",False) and not self.entry_start <= clock.strftime("%H:%M") <= self.entry_end:
+            self.reset(trigger.end_time)
+            return finish("RESET","Outside Strategy B entry window")
+        stamp = trigger.end_time.isoformat()
+        if self.last_bar and trigger.end_time <= datetime.fromisoformat(self.last_bar):
+            return finish("WAITING_FOR_BREAKOUT","Completed candle already evaluated")
+        self.last_bar = stamp
+        window = [c for c in bars if c.start_time.astimezone(IST).date().isoformat() == session
+                  and (not self.after or c.end_time > datetime.fromisoformat(self.after))][-self.lookback_bars:]
+        if self.locked_box:
+            box = self.locked_box
+            anchor = datetime.fromisoformat(box.created_bar_time)
+            active = [c for c in bars if c.end_time > anchor]
+            if (not active or active[0].start_time != anchor
+                    or any(b.start_time != a.end_time for a,b in zip(active,active[1:]))):
+                self.reset(trigger.end_time)
+                return finish("RESET","Missing completed bars since box lock")
+            box.bars_active = len(active)
+            if box.bars_active > box.max_bars:
+                self.reset(trigger.end_time)
+                return finish("RESET","Box expired after maximum completed-bar age")
+        else:
+            if len(window) < self.lookback_bars or any(b.start_time != a.end_time for a,b in zip(window,window[1:])):
+                return finish("SEARCHING_COMPRESSION","Waiting for a fresh contiguous compression window")
+            atr = features.atr_5m
+            high, low = max(c.high for c in window), min(c.low for c in window)
+            condition("compression_bb","Historical BB width percentile",features.bb_width_percentile <= bb_target,features.bb_width_percentile,bb_target)
+            condition("compression_height","Compression height in ATR",0 < high-low <= height_target*atr,(high-low)/atr,height_target)
+            if any(c.high-c.low > 4*atr for c in window):
+                return finish("SEARCHING_COMPRESSION","Suspicious candle cannot define box")
+            if not all(c.status == "PASSED" for c in conditions):
+                return finish("SEARCHING_COMPRESSION","Compression width or height not qualified")
+            self.locked_box = CompressionBox(box_high=high,box_low=low,box_height=high-low,
+                atr_at_lock=atr,bb_width_at_lock=features.bb_width_percentile,locked_at=trigger.end_time,
+                created_bar_time=stamp,bars_active=0,max_bars=self.max_age_bars,is_locked=True)
+            summary["box"] = {"state":"LOCKED","high":high,"low":low,"height":high-low,"bars":0,"max_bars":self.max_age_bars}
+            return finish("BOX_LOCKED","Box frozen; waiting for a subsequent completed breakout candle")
 
-        c_bb_contracted = features.bb_width_percentile <= bb_target
-        c_range_height = comp_height <= (1.85 * atr)
+        box, atr = self.locked_box, self.locked_box.atr_at_lock
+        summary["box"] = {"state":"LOCKED","high":box.box_high,"low":box.box_low,
+                          "height":box.box_height,"bars":box.bars_active,"max_bars":box.max_bars}
+        summary["compression"] = {"status":"PASSED","bb_width":box.bb_width_at_lock,"height_atr":box.box_height/atr}
+        bullish = trigger.close > box.box_high+self.breakout_buffer_atr*atr
+        bearish = trigger.close < box.box_low-self.breakout_buffer_atr*atr
+        if not (bullish or bearish):
+            if trigger.high-trigger.low > 4*atr:
+                self.reset(trigger.end_time)
+                return finish("RESET","Structural expansion invalidated box")
+            return finish("WAITING_FOR_BREAKOUT","Waiting for completed close beyond frozen box and buffer")
+        direction = TradeDirection.BULLISH if bullish else TradeDirection.BEARISH
+        sign = 1 if bullish else -1
+        edge = box.box_high if bullish else box.box_low
+        extension = sign*(trigger.close-edge)
+        condition("breakout_trigger","Completed buffered breakout",True,trigger.close,edge+sign*self.breakout_buffer_atr*atr)
+        condition("anti_chase_extension","Anti-chase extension",extension <= self.max_extension_atr*atr,extension/atr,self.max_extension_atr)
+        if extension > self.max_extension_atr*atr or trigger.high-trigger.low > 4*atr:
+            self.reset(trigger.end_time)
+            return finish("RESET","BREAKOUT_OVEREXTENDED or suspicious expansion",direction=direction)
+        spread = max(trigger.high-trigger.low,1e-12)
+        deriv = features.breakout_bull_derivatives_score if bullish else features.breakout_bear_derivatives_score
+        factors = {
+            "rvol":features.rvol_5m >= rvol_target,
+            "body":sign*(trigger.close-trigger.open) > 0 and abs(trigger.close-trigger.open)/spread >= .45,
+            "close_location":(trigger.close-trigger.low if bullish else trigger.high-trigger.close)/spread >= .70,
+            "vwap":features.futures_vwap > 0 and sign*(features.futures_price-features.futures_vwap) > 0,
+            "derivatives":deriv >= setting("bull_derivatives_score" if bullish else "bear_derivatives_score",2),
+            "futures_oi":features.futures_buildup in (("LONG_BUILDUP","SHORT_COVERING") if bullish else ("SHORT_BUILDUP","LONG_UNWINDING"))}
+        wall = features.bullish_oi_wall if bullish else features.bearish_oi_wall
+        points = sum(factors.values()) - int(wall)
+        condition("confirmation_score","Combined confirmations (wall penalty included)",points >= required,points,required)
+        summary["confirmation"] = {"score":points,"required":required,"factors":factors,"wall_penalty":int(wall)}
+        stop = edge-sign*.25*atr
+        risk = sign*(trigger.close-stop)
+        condition("risk_band","Frozen structural R",0 < risk <= 1.20*atr,risk,1.20*atr)
+        summary["risk"] = {"initial_r":risk,"stop":stop,"max_r":1.20*atr}
+        # A completed breakout attempt consumes this box even if rejected.
+        self.reset(trigger.end_time)
+        if points < required:
+            return finish("CONFIRMATION_FAILED","Breakout confirmation insufficient; box abandoned",direction=direction)
+        if not 0 < risk <= 1.20*atr:
+            return finish("RISK_REJECTED","Initial R outside allowed band",direction=direction)
+        key = f"SIG-B-{direction.value}-{int(datetime.fromisoformat(box.created_bar_time).timestamp())}-{int(trigger.end_time.timestamp())}"
+        if self.consumed == key:
+            return finish("RESET","Signal already consumed",direction=direction)
+        self.consumed = key
+        signal = StrategySignal(signal_id=key,strategy=StrategyName.VOLATILITY_BREAKOUT,
+            direction=direction,option_type=OptionType.CALL if bullish else OptionType.PUT,
+            timestamp=trigger.end_time,spot_reference_price=trigger.close,structural_stop=stop,
+            r_points=risk,derivatives_score=deriv,features_snapshot={
+                "box_high":box.box_high,"box_low":box.box_low,"atr_at_lock":atr,
+                "box_created_time":box.created_bar_time,"confirmation_score":points,
+                "confirmation_factors":factors,"wall_penalty":int(wall),"entry_reference_spot":trigger.close})
+        return finish("READY_TO_TRIGGER","Breakout qualified; checking contract and execution risk",signal,direction)
 
-        candle_range = max(1.0, latest_5m.high - latest_5m.low)
-        candle_body = abs(latest_5m.close - latest_5m.open)
-        c_candle_body = (candle_body / candle_range) >= 0.55
-        c_rvol = features.rvol_5m >= rvol_target
+    def evaluate(self, features, candles_5m, candles_15m=None, futures_candles=None, overrides=None):
+        return self._decision(features,candles_5m,overrides)[0]
 
-        # --- Bullish Diagnostics ---
-        bull_breakout_lvl = round(comp_high + (0.10 * atr), 2)
-        c_bull_breakout = latest_5m.close > bull_breakout_lvl
-        c_bull_vwap = features.futures_price > features.futures_vwap
-        c_bull_deriv = features.bull_derivatives_score >= bull_deriv_target
-        c_bull_ext = (latest_5m.close - comp_high) <= (0.85 * atr)
-
-        bull_conditions = [
-            TriggerCondition(
-                id="bb_width",
-                name="Bollinger Band Compression",
-                current_value=f"{features.bb_width_percentile:.1f}%",
-                target_threshold=f"<= {bb_target:.1f}%",
-                unit="%",
-                status="PASSED" if c_bb_contracted else "PENDING",
-                gap_description="Passed (Bands squeezed)" if c_bb_contracted else f"BB width at {features.bb_width_percentile:.1f}% (need squeeze <= {bb_target:.1f}%)",
-            ),
-            TriggerCondition(
-                id="range_height",
-                name="Consolidation Range Height",
-                current_value=f"{comp_height:.1f} pts",
-                target_threshold=f"<= {(1.85 * atr):.1f} pts (1.85 ATR)",
-                unit="pts",
-                status="PASSED" if c_range_height else "PENDING",
-                gap_description="Passed (Range tight)" if c_range_height else f"Range is {comp_height:.1f} pts (exceeds max {(1.85 * atr):.1f})",
-            ),
-            TriggerCondition(
-                id="breakout_level",
-                name="5m Close > Consolidation High (+0.1 ATR)",
-                current_value=f"Close: ₹{latest_5m.close:.2f} | Target: ₹{bull_breakout_lvl:.2f}",
-                target_threshold=f"> ₹{bull_breakout_lvl:.2f}",
-                status="PASSED" if c_bull_breakout else "PENDING",
-                gap_description="Passed (Breakout confirmed)" if c_bull_breakout else f"Needs 5m close above ₹{bull_breakout_lvl:.2f} (Gap: {max(0.0, bull_breakout_lvl - latest_5m.close):.2f} pts)",
-            ),
-            TriggerCondition(
-                id="futures_vwap",
-                name="Futures vs VWAP",
-                current_value=f"Fut: ₹{features.futures_price:.1f} | VWAP: {features.futures_vwap:.1f}",
-                target_threshold=f"> {features.futures_vwap:.1f}",
-                status="PASSED" if c_bull_vwap else "PENDING",
-                gap_description="Passed (Above VWAP)" if c_bull_vwap else f"{(features.futures_vwap - features.futures_price):.1f} pts below VWAP",
-            ),
-            TriggerCondition(
-                id="rvol_volume",
-                name="5m Relative Volume (RVOL)",
-                current_value=f"{features.rvol_5m:.2f}x",
-                target_threshold=f">= {rvol_target:.2f}x",
-                status="PASSED" if c_rvol else "PENDING",
-                gap_description="Passed (High volume breakout)" if c_rvol else f"Volume RVOL is {features.rvol_5m:.2f}x (need >= {rvol_target:.2f}x)",
-            ),
-            TriggerCondition(
-                id="candle_body",
-                name="Trigger Candle Body Ratio",
-                current_value=f"{(candle_body / candle_range * 100):.1f}%",
-                target_threshold=">= 55.0%",
-                unit="%",
-                status="PASSED" if c_candle_body else "PENDING",
-                gap_description="Passed (Decisive body)" if c_candle_body else f"Body ratio {(candle_body / candle_range * 100):.1f}% (need >= 55% for conviction)",
-            ),
-            TriggerCondition(
-                id="derivatives_flow",
-                name="Derivatives Flow Confirmation",
-                current_value=f"+{features.bull_derivatives_score:.1f} / 5.0",
-                target_threshold=f">= +{bull_deriv_target:.1f}",
-                status="PASSED" if c_bull_deriv else "PENDING",
-                gap_description="Passed (Bullish flow confirmed)" if c_bull_deriv else f"Score is +{features.bull_derivatives_score:.1f}, need +{max(0.0, bull_deriv_target - features.bull_derivatives_score):.1f} more",
-            ),
-            TriggerCondition(
-                id="extension_control",
-                name="Chase Extension Limit",
-                current_value=f"{max(0.0, latest_5m.close - comp_high):.1f} pts from range",
-                target_threshold=f"<= {(0.85 * atr):.1f} pts (0.85 ATR)",
-                status="PASSED" if c_bull_ext else "PENDING",
-                gap_description="Passed (Not over-extended)" if c_bull_ext else "Price over-extended beyond 0.85 ATR (risk too wide)",
-            ),
-        ]
-
-        bull_passed = sum(1 for c in bull_conditions if c.status == "PASSED")
-        bull_total = len(bull_conditions)
-        bull_pct = round((bull_passed / bull_total) * 100, 1)
-
-        bull_blocker = "All conditions satisfied — ready to trigger entry"
-        for cond in bull_conditions:
-            if cond.status == "PENDING":
-                bull_blocker = cond.gap_description
-                break
-
-        bull_diag = StrategyTriggerDiagnostics(
-            strategy=StrategyName.VOLATILITY_BREAKOUT,
-            strategy_label="Volatility Breakout (CALL)",
-            direction=TradeDirection.BULLISH,
-            option_type=OptionType.CALL,
-            overall_status="READY_TO_TRIGGER" if bull_passed == bull_total else "WAITING",
-            passed_count=bull_passed,
-            total_count=bull_total,
-            ready_pct=bull_pct,
-            key_blocker=bull_blocker,
-            target_entry_level=bull_breakout_lvl,
-            current_spot=spot,
-            distance_pts=max(0.0, round(bull_breakout_lvl - spot, 2)),
-            conditions=bull_conditions,
-        )
-
-        # --- Bearish Diagnostics ---
-        bear_breakout_lvl = round(comp_low - (0.10 * atr), 2)
-        c_bear_breakout = latest_5m.close < bear_breakout_lvl
-        c_bear_vwap = features.futures_price < features.futures_vwap
-        c_bear_deriv = features.bear_derivatives_score >= bear_deriv_target
-        c_bear_ext = (comp_low - latest_5m.close) <= (0.85 * atr)
-
-        bear_conditions = [
-            TriggerCondition(
-                id="bb_width",
-                name="Bollinger Band Compression",
-                current_value=f"{features.bb_width_percentile:.1f}%",
-                target_threshold=f"<= {bb_target:.1f}%",
-                unit="%",
-                status="PASSED" if c_bb_contracted else "PENDING",
-                gap_description="Passed (Bands squeezed)" if c_bb_contracted else f"BB width at {features.bb_width_percentile:.1f}% (need squeeze <= {bb_target:.1f}%)",
-            ),
-            TriggerCondition(
-                id="range_height",
-                name="Consolidation Range Height",
-                current_value=f"{comp_height:.1f} pts",
-                target_threshold=f"<= {(1.85 * atr):.1f} pts (1.85 ATR)",
-                unit="pts",
-                status="PASSED" if c_range_height else "PENDING",
-                gap_description="Passed (Range tight)" if c_range_height else f"Range is {comp_height:.1f} pts (exceeds max {(1.85 * atr):.1f})",
-            ),
-            TriggerCondition(
-                id="breakout_level",
-                name="5m Close < Consolidation Low (-0.1 ATR)",
-                current_value=f"Close: ₹{latest_5m.close:.2f} | Target: ₹{bear_breakout_lvl:.2f}",
-                target_threshold=f"< ₹{bear_breakout_lvl:.2f}",
-                status="PASSED" if c_bear_breakout else "PENDING",
-                gap_description="Passed (Breakdown confirmed)" if c_bear_breakout else f"Needs 5m close below ₹{bear_breakout_lvl:.2f} (Gap: {max(0.0, latest_5m.close - bear_breakout_lvl):.2f} pts)",
-            ),
-            TriggerCondition(
-                id="futures_vwap",
-                name="Futures vs VWAP",
-                current_value=f"Fut: ₹{features.futures_price:.1f} | VWAP: {features.futures_vwap:.1f}",
-                target_threshold=f"< {features.futures_vwap:.1f}",
-                status="PASSED" if c_bear_vwap else "PENDING",
-                gap_description="Passed (Below VWAP)" if c_bear_vwap else f"{(features.futures_price - features.futures_vwap):.1f} pts above VWAP",
-            ),
-            TriggerCondition(
-                id="rvol_volume",
-                name="5m Relative Volume (RVOL)",
-                current_value=f"{features.rvol_5m:.2f}x",
-                target_threshold=f">= {rvol_target:.2f}x",
-                status="PASSED" if c_rvol else "PENDING",
-                gap_description="Passed (High volume breakdown)" if c_rvol else f"Volume RVOL is {features.rvol_5m:.2f}x (need >= {rvol_target:.2f}x)",
-            ),
-            TriggerCondition(
-                id="candle_body",
-                name="Trigger Candle Body Ratio",
-                current_value=f"{(candle_body / candle_range * 100):.1f}%",
-                target_threshold=">= 55.0%",
-                unit="%",
-                status="PASSED" if c_candle_body else "PENDING",
-                gap_description="Passed (Decisive body)" if c_candle_body else f"Body ratio {(candle_body / candle_range * 100):.1f}% (need >= 55% for conviction)",
-            ),
-            TriggerCondition(
-                id="derivatives_flow",
-                name="Derivatives Flow Confirmation",
-                current_value=f"+{features.bear_derivatives_score:.1f} / 5.0",
-                target_threshold=f">= +{bear_deriv_target:.1f}",
-                status="PASSED" if c_bear_deriv else "PENDING",
-                gap_description="Passed (Bearish flow confirmed)" if c_bear_deriv else f"Score is +{features.bear_derivatives_score:.1f}, need +{max(0.0, bear_deriv_target - features.bear_derivatives_score):.1f} more",
-            ),
-            TriggerCondition(
-                id="extension_control",
-                name="Chase Extension Limit",
-                current_value=f"{max(0.0, comp_low - latest_5m.close):.1f} pts from range",
-                target_threshold=f"<= {(0.85 * atr):.1f} pts (0.85 ATR)",
-                status="PASSED" if c_bear_ext else "PENDING",
-                gap_description="Passed (Not over-extended)" if c_bear_ext else "Price over-extended beyond 0.85 ATR (risk too wide)",
-            ),
-        ]
-
-        bear_passed = sum(1 for c in bear_conditions if c.status == "PASSED")
-        bear_total = len(bear_conditions)
-        bear_pct = round((bear_passed / bear_total) * 100, 1)
-
-        bear_blocker = "All conditions satisfied — ready to trigger entry"
-        for cond in bear_conditions:
-            if cond.status == "PENDING":
-                bear_blocker = cond.gap_description
-                break
-
-        bear_diag = StrategyTriggerDiagnostics(
-            strategy=StrategyName.VOLATILITY_BREAKOUT,
-            strategy_label="Volatility Breakout (PUT)",
-            direction=TradeDirection.BEARISH,
-            option_type=OptionType.PUT,
-            overall_status="READY_TO_TRIGGER" if bear_passed == bear_total else "WAITING",
-            passed_count=bear_passed,
-            total_count=bear_total,
-            ready_pct=bear_pct,
-            key_blocker=bear_blocker,
-            target_entry_level=bear_breakout_lvl,
-            current_spot=spot,
-            distance_pts=max(0.0, round(spot - bear_breakout_lvl, 2)),
-            conditions=bear_conditions,
-        )
-
-        return [bull_diag, bear_diag]
-
+    def diagnose(self, features, candles_5m, overrides=None):
+        return deepcopy(self)._decision(features,candles_5m,overrides)[1]

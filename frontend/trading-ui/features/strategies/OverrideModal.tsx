@@ -15,6 +15,7 @@ import {
 import {
   ThresholdOverridesData,
   fetchThresholdOverrides,
+  fetchStrategyConfig,
   forceStrategyEntry,
   resetThresholdOverrides,
   updateThresholdOverrides,
@@ -39,10 +40,13 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
   // Overrides form state
   const [premiumCap, setPremiumCap] = useState<number>(defaultCap);
   const [adxThreshold, setAdxThreshold] = useState<number>(20.0);
-  const [rvolThreshold, setRvolThreshold] = useState<number>(1.30);
+  const [rvolThreshold, setRvolThreshold] = useState<number>(1.20);
+  const [minConfirmationScore, setMinConfirmationScore] = useState<number>(2);
+  const [stratBMinConfirmation, setStratBMinConfirmation] = useState<number>(3);
+  const [boxMaxHeightAtr, setBoxMaxHeightAtr] = useState<number>(1.30);
   const [bullDerivScore, setBullDerivScore] = useState<number>(2.0);
   const [bearDerivScore, setBearDerivScore] = useState<number>(2.0);
-  const [bbWidthPercentile, setBbWidthPercentile] = useState<number>(35.0);
+  const [bbWidthPercentile, setBbWidthPercentile] = useState<number>(25.0);
   const [bypassWindow, setBypassWindow] = useState<boolean>(false);
 
   // Force trigger setup state
@@ -60,7 +64,16 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
   const loadCurrentOverrides = async () => {
     try {
       setLoading(true);
-      const data = await fetchThresholdOverrides();
+      const [data, config] = await Promise.all([fetchThresholdOverrides(), fetchStrategyConfig()]);
+      setPremiumCap(config.option_selection.max_option_premium);
+      setAdxThreshold(config.tunables.adx_threshold);
+      setRvolThreshold(config.tunables.rvol_threshold);
+      setMinConfirmationScore(config.tunables.min_confirmation_score);
+      setStratBMinConfirmation(config.tunables.strat_b_min_confirmation);
+      setBoxMaxHeightAtr(config.tunables.box_max_height_atr);
+      setBbWidthPercentile(config.tunables.bb_width_percentile_threshold);
+      setBullDerivScore(2);
+      setBearDerivScore(2);
       if (data) {
         if (data.max_option_premium_cap !== null && data.max_option_premium_cap !== undefined) {
           setPremiumCap(data.max_option_premium_cap);
@@ -70,6 +83,15 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
         }
         if (data.rvol_threshold !== null && data.rvol_threshold !== undefined) {
           setRvolThreshold(data.rvol_threshold);
+        }
+        if (data.min_confirmation_score !== null && data.min_confirmation_score !== undefined) {
+          setMinConfirmationScore(data.min_confirmation_score);
+        }
+        if (data.strat_b_min_confirmation !== null && data.strat_b_min_confirmation !== undefined) {
+          setStratBMinConfirmation(data.strat_b_min_confirmation);
+        }
+        if (data.box_max_height_atr !== null && data.box_max_height_atr !== undefined) {
+          setBoxMaxHeightAtr(data.box_max_height_atr);
         }
         if (data.bull_derivatives_score !== null && data.bull_derivatives_score !== undefined) {
           setBullDerivScore(data.bull_derivatives_score);
@@ -97,6 +119,9 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
         max_option_premium_cap: Number(premiumCap),
         adx_threshold: Number(adxThreshold),
         rvol_threshold: Number(rvolThreshold),
+        min_confirmation_score: Number(minConfirmationScore),
+        strat_b_min_confirmation: Number(stratBMinConfirmation),
+        box_max_height_atr: Number(boxMaxHeightAtr),
         bull_derivatives_score: Number(bullDerivScore),
         bear_derivatives_score: Number(bearDerivScore),
         bb_width_percentile: Number(bbWidthPercentile),
@@ -116,14 +141,8 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
       setLoading(true);
       setActionMessage(null);
       await resetThresholdOverrides();
-      setPremiumCap(defaultCap);
-      setAdxThreshold(20.0);
-      setRvolThreshold(1.30);
-      setBullDerivScore(2.0);
-      setBearDerivScore(2.0);
-      setBbWidthPercentile(35.0);
-      setBypassWindow(false);
-      setActionMessage({ type: "success", text: "Overrides reset back to strategy factory defaults." });
+      await loadCurrentOverrides();
+      setActionMessage({ type: "success", text: "Overrides cleared; saved strategy settings restored." });
       onSuccess();
     } catch (err: any) {
       setActionMessage({ type: "error", text: `Reset failed: ${err.message}` });
@@ -284,7 +303,27 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
                   className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-400"
                 />
                 <p className="text-[10px] text-slate-400 mt-1">
-                  Default 1.30x. Lower to 1.0x to trigger on average volume breakout bars.
+                  Default 1.20x. Adds a confirmation point when futures volume meets this threshold.
+                </p>
+              </div>
+
+              {/* Min Confirmation Score */}
+              <div className="bg-slate-950/80 p-3.5 rounded-lg border border-slate-800">
+                <div className="flex justify-between items-center mb-1.5">
+                  <label className="text-xs font-semibold text-slate-200">Required Confirmation Points</label>
+                  <span className="text-xs font-bold text-cyan-400">{minConfirmationScore} / 6 pts</span>
+                </div>
+                <input
+                  type="range"
+                  min="1"
+                  max="6"
+                  step="1"
+                  value={minConfirmationScore}
+                  onChange={(e) => setMinConfirmationScore(Number(e.target.value))}
+                  className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Default 2 of 6 points: Supertrend, VWAP, option flow, futures OI buildup, RVOL, and pullback volume.
                 </p>
               </div>
 
@@ -311,13 +350,73 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
                   Default +2.0. Lower to +1.0 if PCR / futures buildup confirmation is moderate.
                 </p>
               </div>
+
+              {/* BB Width Percentile (Strategy B) */}
+              <div className="bg-slate-950/80 p-3.5 rounded-lg border border-slate-800">
+                <div className="flex justify-between items-center mb-1.5">
+                  <label className="text-xs font-semibold text-slate-200">BB Width Percentile (Strat B)</label>
+                  <span className="text-xs font-bold text-purple-400">{bbWidthPercentile}th %ile</span>
+                </div>
+                <input
+                  type="range"
+                  min="20"
+                  max="35"
+                  step="5"
+                  value={bbWidthPercentile}
+                  onChange={(e) => setBbWidthPercentile(Number(e.target.value))}
+                  className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-purple-400"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Default 25.0%. Squeeze detected when BB width is below this historical percentile.
+                </p>
+              </div>
+
+              {/* Strategy B Required Confirmation Points */}
+              <div className="bg-slate-950/80 p-3.5 rounded-lg border border-slate-800">
+                <div className="flex justify-between items-center mb-1.5">
+                  <label className="text-xs font-semibold text-slate-200">Strat B Min Confirmation</label>
+                  <span className="text-xs font-bold text-amber-400">{stratBMinConfirmation} / 6 pts</span>
+                </div>
+                <input
+                  type="range"
+                  min="1"
+                  max="6"
+                  step="1"
+                  value={stratBMinConfirmation}
+                  onChange={(e) => setStratBMinConfirmation(Number(e.target.value))}
+                  className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-400"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Default 3 pts. Scores RVOL, body, close location, VWAP, derivatives and futures OI; a nearby OI wall subtracts one point.
+                </p>
+              </div>
+
+              {/* Strategy B Max Box Height (ATR) */}
+              <div className="bg-slate-950/80 p-3.5 rounded-lg border border-slate-800">
+                <div className="flex justify-between items-center mb-1.5">
+                  <label className="text-xs font-semibold text-slate-200">Strat B Max Box Height</label>
+                  <span className="text-xs font-bold text-rose-400">{boxMaxHeightAtr} ATR</span>
+                </div>
+                <input
+                  type="range"
+                  min="1.10"
+                  max="1.60"
+                  step="0.10"
+                  value={boxMaxHeightAtr}
+                  onChange={(e) => setBoxMaxHeightAtr(Number(e.target.value))}
+                  className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-rose-400"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Default 1.30 ATR. Rejects wide non-compact candle ranges as invalid consolidation boxes.
+                </p>
+              </div>
             </div>
 
             {/* Bypass Entry Window Toggle */}
             <div className="mt-3 bg-slate-950/80 p-3.5 rounded-lg border border-slate-800 flex items-center justify-between">
               <div>
                 <span className="text-xs font-semibold text-slate-200 block">
-                  Bypass Session Window (09:30 - 14:45 IST)
+                  Bypass Configured Session Windows
                 </span>
                 <span className="text-[10px] text-slate-400">
                   Allow live testing / trigger evaluation outside regular intraday trading hours.
@@ -442,4 +541,3 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
     </div>
   );
 };
-

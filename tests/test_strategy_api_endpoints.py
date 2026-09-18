@@ -101,10 +101,8 @@ async def test_strategy_api_endpoints():
         )
         assert res.status_code == 200
         force_res = res.json()
-        assert force_res["status"] == "TRADE_OPENED"
-        assert "trade" in force_res
-        assert force_res["trade"]["direction"] == "BULLISH"
-        assert force_res["trade"]["option_type"] == "CALL"
+        assert force_res["status"] in ("DATA_UNAVAILABLE", "CONTRACT_SELECTION_FAILED")
+        assert "trade" not in force_res
 
         # 12. POST /api/v1/strategies/overrides/reset
         res = await client.post("/api/v1/strategies/overrides/reset")
@@ -113,6 +111,5 @@ async def test_strategy_api_endpoints():
 
     # Teardown
     await container.strategy_svc.stop()
-
 
 

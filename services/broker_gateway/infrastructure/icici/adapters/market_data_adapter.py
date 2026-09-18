@@ -228,4 +228,3 @@ class BreezeMarketDataAdapter(BrokerMarketDataPort):
             contracts=contracts,
             timestamp=datetime.now(timezone.utc),
         )
-

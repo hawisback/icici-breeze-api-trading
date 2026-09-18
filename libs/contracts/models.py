@@ -250,6 +250,7 @@ class PnLSnapshot(BaseDomainModel):
 
 class Quote(BaseDomainModel):
     """Normalized live market quote."""
+    source: str = "UNKNOWN"
     instrument_id: str
     symbol: str
     last_price: float
@@ -301,4 +302,3 @@ class UserPrincipal(BaseDomainModel):
     username: str
     role: UserRole
     is_active: bool = True
-

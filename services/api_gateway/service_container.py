@@ -140,7 +140,7 @@ async def initialize_services(
     await market_svc.start_feed_loop(interval_sec=2.5)
 
     historical_repo = HistoricalRepository(db_path=app_settings.historical_db_path)
-    historical_svc = HistoricalService(repository=historical_repo, broker_gateway=gateway_svc)
+    historical_svc = HistoricalService(repository=historical_repo, broker_gateway=gateway_svc, instrument_service=instrument_svc)
     await historical_svc.initialize()
 
     option_chain_svc = OptionChainService(

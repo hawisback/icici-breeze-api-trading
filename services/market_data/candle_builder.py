@@ -18,6 +18,7 @@ class CandleBuilder:
     def __init__(self, interval_minutes: int = 1) -> None:
         self.interval_minutes = interval_minutes
         self._current_candles: dict[str, dict] = {}
+        self._last_quotes: dict[str, Quote] = {}
 
     def _get_bar_start(self, dt: datetime) -> datetime:
         minute = (dt.minute // self.interval_minutes) * self.interval_minutes
@@ -28,6 +29,15 @@ class CandleBuilder:
         bar_start = self._get_bar_start(quote.timestamp)
         inst_id = quote.instrument_id
         active = self._current_candles.get(inst_id)
+        previous = self._last_quotes.get(inst_id)
+        if previous and quote.timestamp <= previous.timestamp:
+            return None
+        same_feed = previous is not None and previous.source == quote.source
+        same_day = previous is not None and previous.timestamp.astimezone(timezone(timedelta(hours=5, minutes=30))).date() == quote.timestamp.astimezone(timezone(timedelta(hours=5, minutes=30))).date()
+        volume_delta = max(0, quote.volume - previous.volume) if same_feed and same_day else 0
+        self._last_quotes[inst_id] = quote
+        if active and active["source"] != quote.source:
+            active = None
 
         completed_candle: Optional[Candle] = None
 
@@ -43,8 +53,8 @@ class CandleBuilder:
                 low=active["low"],
                 close=active["close"],
                 volume=active["volume"],
-                open_interest=quote.open_interest,
-                source="REALTIME",
+                open_interest=active["open_interest"],
+                source=active["source"],
             )
             active = None
 
@@ -55,13 +65,15 @@ class CandleBuilder:
                 "high": quote.last_price,
                 "low": quote.last_price,
                 "close": quote.last_price,
-                "volume": quote.volume,
+                "volume": volume_delta,
+                "open_interest": quote.open_interest,
+                "source": quote.source,
             }
         else:
             active["high"] = max(active["high"], quote.last_price)
             active["low"] = min(active["low"], quote.last_price)
             active["close"] = quote.last_price
-            active["volume"] += quote.volume
+            active["volume"] += volume_delta
+            active["open_interest"] = quote.open_interest
 
         return completed_candle
-

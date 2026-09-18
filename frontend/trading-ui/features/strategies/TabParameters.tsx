@@ -38,6 +38,43 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
 
   return (
     <form onSubmit={handleSave} className="space-y-6">
+      <fieldset className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
+        <legend className="text-sm font-semibold text-cyan-300">Strategy B — Compression Breakout</legend>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          {([
+            ["strat_b_min_confirmation", "Required confirmations / 6", 1, 6, 1],
+            ["bb_width_percentile_threshold", "BB width percentile ceiling", 20, 35, 1],
+            ["box_max_height_atr", "Maximum box height (ATR)", 1.1, 1.6, 0.05],
+            ["compression_lookback_bars", "Compression window (bars)", 6, 10, 1],
+            ["box_max_age_bars", "Maximum box age (bars)", 1, 20, 1],
+            ["breakout_buffer_atr", "Breakout buffer (ATR)", 0.05, 0.1, 0.01],
+            ["breakout_max_extension_atr", "Anti-chase limit (ATR)", 0.6, 1, 0.05],
+          ] as const).map(([key, label, min, max, step]) => (
+            <label key={key} className="text-xs text-slate-400">{label}
+              <input type="number" min={min} max={max} step={step} value={form.tunables[key]}
+                onChange={e => setForm({...form, tunables: {...form.tunables, [key]: Number(e.target.value)}})}
+                className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-100" />
+            </label>
+          ))}
+          <label className="text-xs text-slate-400">Strategy B entry start (IST)
+            <input type="time" value={form.session.strategy_b_no_new_trade_before}
+              onChange={e => setForm({...form, session: {...form.session, strategy_b_no_new_trade_before: e.target.value}})}
+              className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2" />
+          </label>
+          {([ ["max_lots_per_trade", "Max lots / trade", 1, 1],
+               ["entry_order_timeout_sec", "Entry cancel timeout (seconds)", 1, 1],
+               ["breakeven_buffer_points", "Breakeven buffer (points)", 0, 0.5],
+               ["max_failed_trades_per_strategy", "Max failed trades / strategy / day", 1, 1],
+               ["max_trades_per_strategy_per_day", "Max trades / strategy / day", 1, 1] ] as const).map(([key,label,min,step]) => (
+            <label key={key} className="text-xs text-slate-400">{label}
+              <input type="number" min={min} step={step} value={form.risk[key]}
+                onChange={e => setForm({...form, risk: {...form.risk, [key]: Number(e.target.value)}})}
+                className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-100" />
+            </label>
+          ))}
+        </div>
+        <p className="text-xs text-slate-400">Changing settings resets the locked box. Body, RVOL, VWAP and OI are scored confirmations, not individual entry gates.</p>
+      </fieldset>
       <div className="flex items-center justify-between pb-2 border-b border-slate-800">
         <div>
           <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
@@ -404,6 +441,23 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
         </div>
 
         {/* 4. Strategy Engine Tunables */}
+        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-3">
+          <label className="block text-xs text-slate-400">Account equity for position sizing
+            <input type="number" min="1" value={form.risk.account_equity ?? 500000}
+              onChange={e => setForm({...form, risk: {...form.risk, account_equity: Number(e.target.value)}})}
+              className="block bg-slate-950 border border-slate-800 rounded px-3 py-2" />
+          </label>
+          <label className="block text-xs text-slate-400">Strategy A normalized EMA slope threshold
+            <input type="number" min="0.01" max="1" step="0.01" value={form.tunables.ema_slope_threshold ?? 0.10}
+              onChange={e => setForm({...form, tunables: {...form.tunables, ema_slope_threshold: Number(e.target.value)}})}
+              className="block bg-slate-950 border border-slate-800 rounded px-3 py-2" />
+          </label>
+          <label className="block text-xs text-slate-400">Strategy A required confirmation points (default 2 of 6)
+            <input type="number" min="1" max="6" step="1" value={form.tunables.min_confirmation_score ?? 2}
+              onChange={e => setForm({...form, tunables: {...form.tunables, min_confirmation_score: Number(e.target.value)}})}
+              className="block bg-slate-950 border border-slate-800 rounded px-3 py-2" />
+          </label>
+        </div>
         <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
           <div className="flex items-center gap-2 pb-2 border-b border-slate-800 text-amber-400 text-sm font-bold uppercase tracking-wider">
             <ShieldAlert className="w-4 h-4" />
@@ -511,4 +565,3 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
     </form>
   );
 };
-
