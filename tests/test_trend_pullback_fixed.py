@@ -230,10 +230,14 @@ def test_contract_uses_metadata_and_rejects_missing_lot():
     assert ContractSelector().select_contract(TradeDirection.BULLISH,100,chain)[0] is None
 
 
-@pytest.mark.parametrize("count,accepted", [(1,False),(2,True),(9,True),(10,False)])
+@pytest.mark.parametrize("count,accepted", [(1,True),(2,True),(9,True),(10,False)])
 def test_pullback_age_boundaries(count, accepted):
     f,b,m,fu = setup()
-    raw = b[:4] + [b[5]]*count
+    prehistory = b[0].model_copy(update={
+        "start_time": b[0].start_time - timedelta(minutes=5),
+        "end_time": b[0].end_time - timedelta(minutes=5),
+    })
+    raw = [prehistory] + b[:4] + [b[5]]*count
     start = b[0].start_time
     bars = [c.model_copy(update={"start_time":start+timedelta(minutes=5*i),
                                  "end_time":start+timedelta(minutes=5*(i+1))}) for i,c in enumerate(raw)]
@@ -243,7 +247,7 @@ def test_pullback_age_boundaries(count, accepted):
     f.spot_price = bars[-1].high + 1.0
     m = [m[0].model_copy(update={"end_time":f.timestamp, "start_time":f.timestamp-timedelta(minutes=15)})]
     strategy = TrendPullbackStrategy(breakout_confirm_polls=1)
-    cutoff = bars[3].end_time.isoformat()
+    cutoff = bars[4].end_time.isoformat()
     strategy.state["BULLISH"].update({
         "session": bars[-1].start_time.date().isoformat(),
         "regime_qualified_since": cutoff,
@@ -305,7 +309,7 @@ def test_quote_provenance_cumulative_volume_and_closed_bar_oi():
 
 def test_reset_before_first_evaluation_preserves_cutoff():
     f,b,m,fu = setup()
-    strategy = TrendPullbackStrategy()
+    strategy = TrendPullbackStrategy(breakout_confirm_polls=2)
     strategy.reset(f.timestamp)
     assert strategy.evaluate(f,b,m,fu) is None
     assert strategy.state["BULLISH"]["after"] == f.timestamp.isoformat()
@@ -522,24 +526,24 @@ def test_new_setup_resets_confirmation_counter():
 # ==============================================================================
 
 def test_impulse_thresholds():
-    # 0.79 ATR impulse -> reject; 0.80 ATR impulse -> accept
+    # 0.69 ATR impulse -> reject; 0.70 ATR impulse -> accept
     f, b, m, fu = setup(bear=False)
     def make_bars(height):
         start = datetime(2026, 9, 17, 4, 0, tzinfo=timezone.utc); h = 100.0 + height
         raw = [(102, 104, 101, 103), (103, 104, 100.0, 102), (102, 100 + height*0.5, 101, 100 + height*0.5), (100 + height*0.5, h, 100 + height*0.4, h - 0.2), (h - 0.5, h - 1.0, h - 2.5, h - 2.0), (h - 2.0, h - 1.5, h - 3.5, h - 3.0), (h - 3.0, h - 1.2, h - 2.8, h - 1.5)]
         return [Candle(instrument_id='INDEX', interval='5m', start_time=start+timedelta(minutes=5*i), end_time=start+timedelta(minutes=5*(i+1)), open=o, high=hi, low=l, close=c, volume=0) for i, (o, hi, l, c) in enumerate(raw)]
 
-    b_79 = make_bars(7.9); b_80 = make_bars(8.0)
-    f.timestamp = b_79[-1].end_time; f.ema9_5m = 105.0; f.ema20_5m = 105.0; f.spot_price = 109.0
-    fu_79 = [c.model_copy(update={'instrument_id':'FUT', 'volume':100}) for c in b_79]
-    fu_80 = [c.model_copy(update={'instrument_id':'FUT', 'volume':100}) for c in b_80]
-    m_79 = [b_79[-1].model_copy(update={'interval':'15m', 'start_time':b_79[-1].end_time-timedelta(minutes=15)})]
-    m_80 = [b_80[-1].model_copy(update={'interval':'15m', 'start_time':b_80[-1].end_time-timedelta(minutes=15)})]
+    b_69 = make_bars(6.9); b_70 = make_bars(7.0)
+    f.timestamp = b_69[-1].end_time; f.ema9_5m = 105.0; f.ema20_5m = 105.0; f.spot_price = 109.0
+    fu_69 = [c.model_copy(update={'instrument_id':'FUT', 'volume':100}) for c in b_69]
+    fu_70 = [c.model_copy(update={'instrument_id':'FUT', 'volume':100}) for c in b_70]
+    m_69 = [b_69[-1].model_copy(update={'interval':'15m', 'start_time':b_69[-1].end_time-timedelta(minutes=15)})]
+    m_70 = [b_70[-1].model_copy(update={'interval':'15m', 'start_time':b_70[-1].end_time-timedelta(minutes=15)})]
 
-    s1 = TrendPullbackStrategy(min_impulse_atr=0.80, breakout_confirm_polls=1)
-    s2 = TrendPullbackStrategy(min_impulse_atr=0.80, breakout_confirm_polls=1)
-    assert s1.evaluate(f, b_79, m_79, fu_79) is None
-    assert s2.evaluate(f, b_80, m_80, fu_80) is not None
+    s1 = TrendPullbackStrategy(breakout_confirm_polls=1)
+    s2 = TrendPullbackStrategy(breakout_confirm_polls=1)
+    assert s1.evaluate(f, b_69, m_69, fu_69) is None
+    assert s2.evaluate(f, b_70, m_70, fu_70) is not None
 
 
 def test_pullback_depth_thresholds():
@@ -613,23 +617,29 @@ def test_ternary_confirmation_handling():
     f.futures_buildup = None  # None
     assert TrendPullbackStrategy(breakout_confirm_polls=1).evaluate(f, b, m, fu_no_vol) is not None
 
-    # Case 2: 2 PASS / 4 available -> passes
-    f.bull_derivatives_score = 1.0  # Fail (< 2.0) -> now available: 4 (2 pass, 2 fail)
+    # Case 2: 3 PASS / 3 available -> passes with the natural >= 1.0 derivative threshold
+    f.bull_derivatives_score = 1.0  # Pass (>= 1.0)
     assert TrendPullbackStrategy(breakout_confirm_polls=1).evaluate(f, b, m, fu_no_vol) is not None
 
-    # Case 3: 1 PASS / 4 available -> fails
+    # Case 3: 1 PASS / 3 available -> fails
     f.supertrend_direction = "BEARISH"  # Now only vwap passes
+    f.bull_derivatives_score = 0.0
     assert TrendPullbackStrategy(breakout_confirm_polls=1).evaluate(f, b, m, fu_no_vol) is None
 
-    # Case 4: 2 PASS / 2 available -> fails because minimum 3 available is required
+    # Case 4: 2 PASS / 2 available -> passes with the minimum 2 available requirement
     f.supertrend_direction = "BULLISH"  # Pass
     f.bull_derivatives_score = None  # None
     f.rvol_5m = None  # None -> only supertrend and vwap available (2 available)
+    assert TrendPullbackStrategy(breakout_confirm_polls=1).evaluate(f, b, m, fu_no_vol) is not None
+
+    # Case 5: 1 PASS / 2 available -> fails because two passes are still required
+    f.futures_price = 130.0  # Futures VWAP confirmation now fails
     assert TrendPullbackStrategy(breakout_confirm_polls=1).evaluate(f, b, m, fu_no_vol) is None
 
-    # Case 5: UNKNOWN confirmations excluded rather than counted as failures
+    # Case 6: UNKNOWN confirmations excluded rather than counted as failures
+    f.futures_price = 148.0
     f.futures_buildup = "UNKNOWN"
-    assert TrendPullbackStrategy(breakout_confirm_polls=1).evaluate(f, b, m, fu_no_vol) is None
+    assert TrendPullbackStrategy(breakout_confirm_polls=1).evaluate(f, b, m, fu_no_vol) is not None
 
 
 def test_risk_boundary_no_lower_floor():
@@ -662,26 +672,26 @@ def test_impulse_detection_fallback():
     t0 = datetime(2026, 9, 17, 4, 0, tzinfo=timezone.utc)
     atr = 10.0
 
-    # 1. CALL: lowest low before highest high, impulse = 0.80 ATR (8.0 pts) -> PASS
+    # 1. CALL: lowest low before highest high, impulse = 0.70 ATR (7.0 pts) -> PASS
     call_bars_pass = [
         Candle(instrument_id="INDEX", interval="5m",
                start_time=t0 + timedelta(minutes=5*i), end_time=t0 + timedelta(minutes=5*(i+1)),
-               open=100.0 + i, high=101.0 + (7.0 if i == 5 else i), low=100.0 if i == 0 else 100.0 + i,
+               open=100.0 + i, high=101.0 + (6.0 if i == 5 else i), low=100.0 if i == 0 else 100.0 + i,
                close=100.5 + i, volume=100)
         for i in range(6)
     ]
     fb_call = TrendPullbackStrategy._fallback_impulse(call_bars_pass, atr=atr, bullish=True)
     assert fb_call is not None
     assert fb_call["source"] == "FALLBACK"
-    assert fb_call["height"] == pytest.approx(8.0)
+    assert fb_call["height"] == pytest.approx(7.0)
     assert fb_call["low"] == 100.0
-    assert fb_call["high"] == 108.0
+    assert fb_call["high"] == 107.0
 
-    # CALL: lowest low before highest high, impulse = 0.79 ATR (7.9 pts) -> FAIL
+    # CALL: lowest low before highest high, impulse = 0.69 ATR (6.9 pts) -> FAIL
     call_bars_fail_size = [
         Candle(instrument_id="INDEX", interval="5m",
                start_time=t0 + timedelta(minutes=5*i), end_time=t0 + timedelta(minutes=5*(i+1)),
-               open=100.0 + i, high=100.0 + (7.9 if i == 5 else i), low=100.0 if i == 0 else 100.0 + i,
+               open=100.0 + i, high=100.0 + (6.9 if i == 5 else i), low=100.0 if i == 0 else 100.0 + i,
                close=100.5 + i, volume=100)
         for i in range(6)
     ]
@@ -697,7 +707,7 @@ def test_impulse_detection_fallback():
     ]
     assert TrendPullbackStrategy._fallback_impulse(call_bars_inverted, atr=atr, bullish=True) is None
 
-    # 2. PUT: highest high before lowest low, impulse >= 0.80 ATR -> PASS
+    # 2. PUT: highest high before lowest low, impulse >= 0.70 ATR -> PASS
     put_bars_pass = [
         Candle(instrument_id="INDEX", interval="5m",
                start_time=t0 + timedelta(minutes=5*i), end_time=t0 + timedelta(minutes=5*(i+1)),

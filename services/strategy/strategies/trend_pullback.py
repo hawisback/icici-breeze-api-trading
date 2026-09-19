@@ -45,12 +45,12 @@ class TrendPullbackStrategy:
         min_confirmation_score: int = 2,
         ema_slope_threshold: float = 0.10,
         breakout_buffer_atr: float = 0.02,
-        breakout_confirm_polls: int = 2,
-        min_impulse_atr: float = 0.80,
+        breakout_confirm_polls: int = 1,
+        min_impulse_atr: float = 0.70,
         min_pullback_depth: float = 0.08,
         max_pullback_depth: float = 0.70,
         retest_tolerance_atr: float = 0.45,
-        min_available_confirmations: int = 3,
+        min_available_confirmations: int = 2,
     ) -> None:
         self.adx_threshold = adx_threshold
         self.rvol_threshold = rvol_threshold
@@ -107,7 +107,7 @@ class TrendPullbackStrategy:
         }
 
     @staticmethod
-    def _impulse(bars, atr, bullish, after=None, min_impulse_atr=0.80, rejection_reasons=None):
+    def _impulse(bars, atr, bullish, after=None, min_impulse_atr=0.70, rejection_reasons=None):
         """Latest confirmed pivot pair, with extremes in chronological order."""
         def reject(category, detail):
             if rejection_reasons is not None:
@@ -152,7 +152,7 @@ class TrendPullbackStrategy:
         return None
 
     @staticmethod
-    def _fallback_impulse(bars, atr, bullish, after=None, min_impulse_atr=0.80, rejection_reasons=None):
+    def _fallback_impulse(bars, atr, bullish, after=None, min_impulse_atr=0.70, rejection_reasons=None):
         """Chronological swing fallback from the latest 6 completed 5-minute bars."""
         def reject(category, detail):
             if rejection_reasons is not None:
@@ -203,20 +203,31 @@ class TrendPullbackStrategy:
             "source": "FALLBACK",
         }
 
-    def _decision(self, direction, features, bars, macro, futures, overrides, is_diagnose: bool = False):
+    def _decision(
+        self,
+        direction,
+        features,
+        bars,
+        macro,
+        futures,
+        overrides,
+        is_diagnose: bool = False,
+        replay_context: Optional[dict[str, Any]] = None,
+    ):
         bullish = direction == TradeDirection.BULLISH
         sign = 1 if bullish else -1
         opt = OptionType.CALL if bullish else OptionType.PUT
         state = self.state[direction.value]
         summary, conditions = {}, []
-        live_price = features.spot_price
+        replay_context = replay_context or {}
+        live_price = replay_context.get("live_price", features.spot_price)
         first_failure: Optional[tuple[str, str, Optional[float]]] = None
 
-        def condition(id, name, passed, current, target, gap=None, applicable=True):
+        def condition(id, name, passed, current, target, gap=None, applicable=True, status_override=None):
             conditions.append(TriggerCondition(
                 id=id,
                 name=name,
-                status="PASSED" if passed else ("PENDING" if applicable else "N/A"),
+                status=status_override or ("PASSED" if passed else ("PENDING" if applicable else "N/A")),
                 current_value=str(current),
                 target_threshold=str(target),
                 gap_description=str(gap) if gap is not None else str(name),
@@ -224,7 +235,7 @@ class TrendPullbackStrategy:
 
         def finish(phase, reason, signal=None, trigger_level=None):
             applicable_conditions = [c for c in conditions if c.status != "N/A"]
-            passed = sum(c.status == "PASSED" for c in applicable_conditions)
+            passed = sum(c.status in ("PASSED", "PASS") for c in applicable_conditions)
             state["phase"] = phase
             entry_level = trigger_level
             if entry_level is None and bars:
@@ -252,18 +263,95 @@ class TrendPullbackStrategy:
             value = getattr(overrides, name, None) if overrides else None
             return default if value is None else value
 
+        def factor_status(value):
+            if value is True:
+                return "PASS"
+            if value is False:
+                return "FAIL"
+            return "UNAVAILABLE"
+
+        def add_confirmation_conditions(confirmations, deriv_score=None, deriv_target=1.0):
+            labels = {
+                "supertrend": ("Supertrend confirmation", "Directional 5m Supertrend"),
+                "vwap": ("Futures VWAP confirmation", "Futures price on directional side of VWAP"),
+                "derivatives": ("Derivatives confirmation", "Directional derivatives score threshold"),
+                "futures_oi": ("Futures OI/buildup confirmation", "Directional futures price/OI buildup"),
+                "rvol": ("Futures RVOL confirmation", "RVOL threshold"),
+                "volume_dryup": ("Pullback volume dry-up confirmation", "Pullback/impulse volume ratio"),
+            }
+            for key, value in confirmations.items():
+                status = factor_status(value)
+                name, target = labels[key]
+                current = status
+                if key == "derivatives":
+                    current = "UNAVAILABLE" if deriv_score is None else f"{deriv_score:+.1f}"
+                    target = f">= {deriv_target:+.1f}"
+                condition(
+                    f"confirmation_{key}",
+                    name,
+                    value is True,
+                    current,
+                    target,
+                    "Futures data unavailable for this factor" if status == "UNAVAILABLE" else status,
+                    status_override=status,
+                )
+
         now = features.timestamp
+        allowed_sources = ("BREEZE", "KITE", "LIVE")
+        valid_futures = sorted(
+            [
+                c for c in futures
+                if c.source in allowed_sources
+                and bool(c.instrument_id)
+                and c.interval == "5m"
+                and c.start_time < c.end_time
+                and c.end_time <= now
+            ],
+            key=lambda c: c.end_time,
+        )
+        latest_underlying = bars[-1].end_time if bars else None
+        latest_futures = valid_futures[-1].end_time if valid_futures else None
+        futures_fresh = bool(
+            latest_futures
+            and 0 <= (now - latest_futures).total_seconds() < EXPECTED_5M_SECONDS
+        )
+        summary["futures"] = {
+            "candles_requested": 0,
+            "candles_available": len(valid_futures),
+            "candles_aligned": 0,
+            "alignment_coverage": 0.0,
+            "latest_completed_futures_timestamp": latest_futures.isoformat() if latest_futures else None,
+            "latest_underlying_timestamp": latest_underlying.isoformat() if latest_underlying else None,
+            "fresh": futures_fresh,
+            "confirmation_factors_unavailable": [
+                "futures_vwap_confirmation",
+                "futures_oi",
+                "futures_rvol",
+                "pullback_volume_dryup",
+                "pullback_futures_vwap_retest",
+            ],
+            "factor_statuses": {
+                "futures_vwap_confirmation": "UNAVAILABLE",
+                "futures_oi": "UNAVAILABLE",
+                "futures_rvol": "UNAVAILABLE",
+                "pullback_volume_dryup": "UNAVAILABLE",
+                "pullback_futures_vwap_retest": "UNAVAILABLE",
+            },
+        }
         valid = (features.data_ready and len(bars) >= 6 and bool(macro) and bool(futures)
                  and features.atr_5m > 0 and features.futures_atr_5m > 0)
         if valid:
-            valid = (all(c.source in ("BREEZE", "KITE", "LIVE") and c.end_time <= now for c in bars + macro + futures)
+            valid = (all(c.source in allowed_sources and c.end_time <= now for c in bars + macro)
+                     and bool(valid_futures)
                      and 0 <= (now - bars[-1].end_time).total_seconds() < 300
                      and 0 <= (now - macro[-1].end_time).total_seconds() < 900
-                     and futures[-1].end_time == bars[-1].end_time)
+                     and futures_fresh)
         if not valid and not is_diagnose:
             state.pop("impulse", None)
             state.pop("active_setup_key", None)
             state["confirm_count"] = 0
+            return finish("SEARCH_REGIME", features.data_reason or "Awaiting complete real spot/futures data")
+        if not valid and is_diagnose:
             return finish("SEARCH_REGIME", features.data_reason or "Awaiting complete real spot/futures data")
 
         if not bars:
@@ -492,10 +580,13 @@ class TrendPullbackStrategy:
         )
         summary["impulse"] = {
             "found": bool(impulse),
+            "status": "PASS" if impulse else "FAIL",
             "source": imp_src,
             "impulse_source": imp_src,
             "impulse_size": imp_size,
+            "atr": atr,
             "impulse_atr_ratio": imp_atr_ratio,
+            "required_atr_multiple": min_impulse_val,
             "impulse_start": imp_start,
             "impulse_end": imp_end,
             "height_atr": imp_atr_ratio,
@@ -543,14 +634,14 @@ class TrendPullbackStrategy:
 
             st = features.supertrend_direction
             supertrend_val = (st == direction.value) if st in ("BULLISH", "BEARISH") else None
-            if features.futures_vwap > 0 and features.futures_price > 0:
+            if futures_fresh and features.futures_vwap > 0 and features.futures_price > 0:
                 vwap_val = sign * (features.futures_price - features.futures_vwap) > 0
             else:
                 vwap_val = None
             deriv = features.bull_derivatives_score if bullish else features.bear_derivatives_score
-            deriv_target = setting("bull_derivatives_score" if bullish else "bear_derivatives_score", 2)
+            deriv_target = setting("bull_derivatives_score" if bullish else "bear_derivatives_score", 1.0)
             deriv_val = None if deriv is None else deriv >= deriv_target
-            buildup = features.futures_buildup
+            buildup = features.futures_buildup if futures_fresh and len(valid_futures) >= 2 else None
             if buildup is None or buildup in ("UNKNOWN", "UNAVAILABLE", "NONE", ""):
                 futures_oi_val = None
             elif buildup in ("LONG_BUILDUP", "SHORT_COVERING"):
@@ -560,7 +651,7 @@ class TrendPullbackStrategy:
             else:
                 futures_oi_val = False
             rvol_val = (
-                None if features.rvol_5m is None or features.rvol_5m <= 0
+                None if not futures_fresh or features.rvol_5m is None or features.rvol_5m <= 0
                 else features.rvol_5m >= setting("rvol_threshold", self.rvol_threshold)
             )
             pre_impulse_confirmations = {
@@ -579,13 +670,34 @@ class TrendPullbackStrategy:
                 "required_passes": required_passes,
                 "min_available": 2,
                 "confirmations": pre_impulse_confirmations,
+                "statuses": {key: factor_status(value) for key, value in pre_impulse_confirmations.items()},
             }
+            add_confirmation_conditions(pre_impulse_confirmations, deriv, deriv_target)
+            summary["derivatives"] = {
+                "bull_score": features.bull_derivatives_score,
+                "bear_score": features.bear_derivatives_score,
+                "active_score": deriv,
+                "required_threshold": deriv_target,
+                "status": factor_status(deriv_val),
+                "components": features.derivatives_score_components,
+            }
+            summary["futures"]["factor_statuses"] = {
+                "futures_vwap_confirmation": factor_status(vwap_val),
+                "futures_oi": factor_status(futures_oi_val),
+                "futures_rvol": factor_status(rvol_val),
+                "pullback_volume_dryup": "UNAVAILABLE",
+                "pullback_futures_vwap_retest": "UNAVAILABLE",
+            }
+            summary["futures"]["confirmation_factors_unavailable"] = [
+                key for key, value in summary["futures"]["factor_statuses"].items()
+                if value == "UNAVAILABLE"
+            ]
             condition(
                 "pullback_depth_retest",
                 "Pullback duration, depth and retest",
                 False,
                 "No impulse",
-                "2-9 bars; 30%-80%; retest within 0.35 ATR",
+                "1-9 bars; 30%-80%; retest within 0.35 ATR",
                 "Waiting for valid impulse to measure pullback",
             )
             condition(
@@ -629,9 +741,23 @@ class TrendPullbackStrategy:
         start, end = datetime.fromisoformat(impulse["start"]), datetime.fromisoformat(impulse["end"])
         pb = [c for c in bars if c.end_time > end]
         age = len(pb)
-        summary["pullback"] = {"state": "ACTIVE", "bars": age, "depth_pct": 0, "retest": "None", "retest_distance_atr": {}}
+        duration_status = "WAITING" if age == 0 else ("PASS" if age <= 9 else "INVALID")
+        summary["pullback"] = {
+            "state": "ACTIVE",
+            "bars": age,
+            "required_bars": "1-9",
+            "duration_status": duration_status,
+            "depth_pct": 0,
+            "depth_status": "WAITING",
+            "retest": "None",
+            "retest_status": "WAITING",
+            "structure_preservation_status": "WAITING",
+            "retest_distance_atr": {},
+        }
         if not pb:
-            return finish("PULLBACK_ACTIVE", "Waiting for at least two pullback bars")
+            if is_diagnose and first_failure:
+                return finish(first_failure[0], first_failure[1])
+            return finish("PULLBACK_ACTIVE", "Waiting for at least one pullback bar")
 
         extreme = min(c.low for c in pb) if bullish else max(c.high for c in pb)
         depth = (impulse["high"] - extreme if bullish else extreme - impulse["low"]) / impulse["height"]
@@ -639,11 +765,19 @@ class TrendPullbackStrategy:
 
         min_depth = setting("min_pullback_depth", self.min_pullback_depth)
         max_depth = setting("max_pullback_depth", self.max_pullback_depth)
+        structure_preserved = not (
+            trigger_bar.low < impulse["low"] if bullish else trigger_bar.high > impulse["high"]
+        )
+        summary["pullback"].update(
+            depth_status=("INVALID" if depth > (max_depth + 1e-6) else
+                          "PASS" if depth >= (min_depth - 1e-6) else "WAITING"),
+            structure_preservation_status="PASS" if structure_preserved else "INVALID",
+        )
 
         invalid = (
             age > 9
             or depth > (max_depth + 1e-6)
-            or (trigger_bar.low < impulse["low"] if bullish else trigger_bar.high > impulse["high"])
+            or not structure_preserved
         )
         if invalid:
             state.pop("impulse", None)
@@ -704,17 +838,25 @@ class TrendPullbackStrategy:
             retests.append("EMA20")
             retest_distances["EMA20"] = round(abs(extreme - features.ema20_5m) / atr, 3)
 
-        aligned = {c.end_time: c for c in futures}
+        aligned = {c.end_time: c for c in valid_futures}
         leg = [c for c in bars if start <= c.end_time <= end]
-        if not leg or not all(c.end_time in aligned for c in leg + pb):
-            state.pop("impulse", None)
-            state.pop("active_setup_key", None)
-            state["confirm_count"] = 0
-            return finish("WAIT_FOR_IMPULSE", "Missing aligned futures bars for this setup")
+        required_underlying = leg + pb
+        aligned_required = [c for c in required_underlying if c.end_time in aligned]
+        summary["futures"].update(
+            {
+                "candles_requested": len(required_underlying),
+                "candles_aligned": len(aligned_required),
+                "alignment_coverage": round(
+                    len(aligned_required) / len(required_underlying), 3
+                ) if required_underlying else 0.0,
+            }
+        )
 
         for c in pb:
-            f = aligned[c.end_time]
-            history = [x for x in futures if x.end_time <= f.end_time]
+            f = aligned.get(c.end_time)
+            if f is None:
+                continue
+            history = [x for x in valid_futures if x.end_time <= f.end_time]
             vwap = FeatureEngine.calculate_futures_vwap(history)
             fatr = FeatureEngine.calculate_atr(history)
             distance = max(f.low - vwap, vwap - f.high, 0)
@@ -733,7 +875,9 @@ class TrendPullbackStrategy:
                 retest_distances["Prior breakout level"] = round(abs(extreme - level) / atr, 3)
                 break
 
-        pb_ok = (2 <= age <= 9 and (min_depth - 1e-6) <= depth <= (max_depth + 1e-6) and bool(retests))
+        futures_vwap_retest = any(name == "Futures VWAP" for name in retests)
+        futures_vwap_retest_available = any(c.end_time in aligned for c in pb)
+        pb_ok = (1 <= age <= 9 and (min_depth - 1e-6) <= depth <= (max_depth + 1e-6) and bool(retests))
         pb_gap = (
             f"Pullback qualified ({age} bars, {depth:.1%}, retest: {', '.join(retests)})"
             if pb_ok
@@ -744,13 +888,21 @@ class TrendPullbackStrategy:
             "Pullback duration, depth and retest",
             pb_ok,
             f"{age} bars; {depth:.1%}; {retests}",
-            f"2-9 bars; {min_depth:.0%}-{max_depth:.0%}; retest within {retest_tol:.2f} ATR",
+            f"1-9 bars; {min_depth:.0%}-{max_depth:.0%}; retest within {retest_tol:.2f} ATR",
             pb_gap,
         )
         summary["pullback"].update(
             state="QUALIFIED" if pb_ok else "ACTIVE",
+            duration_status="PASS" if 1 <= age <= 9 else "INVALID",
+            depth_status=("INVALID" if depth > (max_depth + 1e-6) else
+                          "PASS" if depth >= (min_depth - 1e-6) else "WAITING"),
             retest=", ".join(retests) or "None",
+            retest_status="PASS" if retests else "WAITING",
+            structure_preservation_status="PASS" if structure_preserved else "INVALID",
             retest_distance_atr=retest_distances,
+        )
+        summary["futures"]["factor_statuses"]["pullback_futures_vwap_retest"] = factor_status(
+            futures_vwap_retest if futures_vwap_retest_available else None
         )
         if not pb_ok:
             state["confirm_count"] = 0
@@ -763,7 +915,12 @@ class TrendPullbackStrategy:
         buffer_atr = setting("breakout_buffer_atr", self.breakout_buffer_atr)
         required_polls = setting("breakout_confirm_polls", self.breakout_confirm_polls)
 
-        if bullish:
+        replay_triggered = bool(replay_context.get("triggered"))
+        replay_trigger_price = replay_context.get("trigger_price")
+        if replay_triggered and replay_trigger_price is not None:
+            trigger_price = float(replay_trigger_price)
+            breakout_condition = True
+        elif bullish:
             trigger_price = round(previous_completed_bar.high + (buffer_atr * atr), 2)
             breakout_condition = (live_price > trigger_price)
         else:
@@ -771,7 +928,9 @@ class TrendPullbackStrategy:
             breakout_condition = (live_price < trigger_price)
 
         confirm_count = state.get("confirm_count", 0)
-        if breakout_condition:
+        if replay_triggered:
+            confirm_count = required_polls
+        elif breakout_condition:
             confirm_count += 1
         else:
             confirm_count = 0
@@ -793,14 +952,34 @@ class TrendPullbackStrategy:
             trig_gap,
         )
         summary["trigger"] = {
+            "direction": "CALL" if bullish else "PUT",
+            "breakout_reference_level": previous_completed_bar.high if bullish else previous_completed_bar.low,
+            "atr_buffer_multiple": buffer_atr,
+            "atr_buffer_points": round(buffer_atr * atr, 2),
             "breakout_trigger_price": trigger_price,
             "live_price": live_price,
             "breakout_condition": breakout_condition,
             "breakout_confirm_count": confirm_count,
+            "current_polls_satisfied": confirm_count,
             "required_polls": required_polls,
             "confirmed": breakout_confirmed,
+            "status": "PASS" if breakout_confirmed else "WAITING",
+            "trigger_timestamp": (
+                replay_context.get("trigger_timestamp")
+                if replay_triggered and breakout_confirmed
+                else features.timestamp.isoformat() if breakout_confirmed else None
+            ),
             "previous_completed_bar_end": previous_completed_bar.end_time.isoformat(),
         }
+        if replay_triggered:
+            summary["trigger"].update(
+                {
+                    "replay_trigger": True,
+                    "trigger_source_candle_timestamp": replay_context.get("source_candle_timestamp"),
+                    "historical_candle_timestamp": replay_context.get("historical_candle_timestamp"),
+                    "simulated_trigger_price": trigger_price,
+                }
+            )
 
         if not breakout_confirmed:
             reason = (
@@ -813,8 +992,11 @@ class TrendPullbackStrategy:
             first_failure = first_failure or ("WAIT_FOR_TRIGGER", reason, trigger_price)
 
         # Iteration 3 Part A — Ternary Confirmation Handling (True / False / None)
-        leg_volume = sum(aligned[c.end_time].volume for c in leg) / len(leg) if leg else 0
-        pb_volume = sum(aligned[c.end_time].volume for c in pb) / len(pb) if pb else 0
+        leg_futures = [aligned[c.end_time] for c in leg if c.end_time in aligned]
+        pb_futures = [aligned[c.end_time] for c in pb if c.end_time in aligned]
+        futures_volume_complete = len(leg_futures) == len(leg) and len(pb_futures) == len(pb)
+        leg_volume = sum(c.volume for c in leg_futures) / len(leg_futures) if futures_volume_complete and leg_futures else 0
+        pb_volume = sum(c.volume for c in pb_futures) / len(pb_futures) if futures_volume_complete and pb_futures else 0
         ratio = pb_volume / leg_volume if leg_volume > 0 else None
 
         # Supertrend
@@ -825,21 +1007,21 @@ class TrendPullbackStrategy:
             supertrend_val = None
 
         # Futures VWAP
-        if features.futures_vwap > 0 and features.futures_price > 0:
+        if futures_fresh and features.futures_vwap > 0 and features.futures_price > 0:
             vwap_val = (sign * (features.futures_price - features.futures_vwap) > 0)
         else:
             vwap_val = None
 
         # Derivatives score
         deriv = features.bull_derivatives_score if bullish else features.bear_derivatives_score
-        deriv_target = setting("bull_derivatives_score" if bullish else "bear_derivatives_score", 2)
+        deriv_target = setting("bull_derivatives_score" if bullish else "bear_derivatives_score", 1.0)
         if deriv is None:
             deriv_val = None
         else:
             deriv_val = (deriv >= deriv_target)
 
         # Futures OI buildup
-        buildup = features.futures_buildup
+        buildup = features.futures_buildup if futures_fresh and len(valid_futures) >= 2 else None
         if buildup is None or buildup in ("UNKNOWN", "UNAVAILABLE", "NONE", ""):
             futures_oi_val = None
         elif buildup in ("LONG_BUILDUP", "SHORT_COVERING"):
@@ -850,7 +1032,7 @@ class TrendPullbackStrategy:
             futures_oi_val = False
 
         # RVOL
-        if features.rvol_5m is None or features.rvol_5m <= 0:
+        if not futures_fresh or features.rvol_5m is None or features.rvol_5m <= 0:
             rvol_val = None
         else:
             rvol_val = (features.rvol_5m >= setting("rvol_threshold", self.rvol_threshold))
@@ -870,6 +1052,20 @@ class TrendPullbackStrategy:
             "volume_dryup": volume_dryup_val,
         }
 
+        summary["futures"]["factor_statuses"].update(
+            {
+                "futures_vwap_confirmation": factor_status(vwap_val),
+                "futures_oi": factor_status(futures_oi_val),
+                "futures_rvol": factor_status(rvol_val),
+                "pullback_volume_dryup": factor_status(volume_dryup_val),
+            }
+        )
+        summary["futures"]["confirmation_factors_unavailable"] = [
+            key for key, value in summary["futures"]["factor_statuses"].items()
+            if value == "UNAVAILABLE"
+        ]
+        add_confirmation_conditions(confirmations, deriv, deriv_target)
+
         available_confirmations = [v for v in confirmations.values() if v is not None]
         passed_confirmations = [v for v in available_confirmations if v is True]
 
@@ -879,9 +1075,14 @@ class TrendPullbackStrategy:
         conf_ok = (len(available_confirmations) >= min_available and len(passed_confirmations) >= required_passes)
 
         conf_gap = (
-            f"Confirmations passed ({len(passed_confirmations)}/{len(available_confirmations)} >= {required_passes})"
+            f"Confirmation PASS: {len(passed_confirmations)} of {len(available_confirmations)} available confirmations passed."
             if conf_ok
-            else f"Need {max(0, required_passes - len(passed_confirmations))} more passed factors (currently {len(passed_confirmations)}/{len(available_confirmations)})"
+            else (
+                f"Confirmation FAIL: {len(available_confirmations)} available confirmations; "
+                f"{min_available} required and {required_passes} passed required."
+                if len(available_confirmations) < min_available
+                else f"Confirmation FAIL: {len(passed_confirmations)} of {len(available_confirmations)} available confirmations passed; {required_passes} required."
+            )
         )
         condition(
             "confirmation_score",
@@ -896,7 +1097,19 @@ class TrendPullbackStrategy:
             "available_confirmation_count": len(available_confirmations),
             "required_passes": required_passes,
             "min_available": min_available,
+            "required_available": min_available,
+            "required_passed": required_passes,
             "confirmations": confirmations,
+            "statuses": {key: factor_status(value) for key, value in confirmations.items()},
+            "reason": conf_gap,
+        }
+        summary["derivatives"] = {
+            "bull_score": features.bull_derivatives_score,
+            "bear_score": features.bear_derivatives_score,
+            "active_score": deriv,
+            "required_threshold": deriv_target,
+            "status": factor_status(deriv_val),
+            "components": features.derivatives_score_components,
         }
 
         # Iteration 3 Part B — Remove Minimum 0.45 ATR Risk Rejection Floor
@@ -928,7 +1141,7 @@ class TrendPullbackStrategy:
         }
 
         if not conf_ok:
-            reason = f"Confirmation score {len(passed_confirmations)}/{len(available_confirmations)} below required {required_passes} (min {min_available} available)"
+            reason = conf_gap
             if not is_diagnose:
                 return finish("TRIGGERED", reason, trigger_level=trigger_price)
             first_failure = first_failure or ("TRIGGERED", reason, trigger_price)
@@ -985,6 +1198,45 @@ class TrendPullbackStrategy:
                 self.state[direction.value]["confirm_count"] = 0
                 return signal
         return None
+
+    def evaluate_replay_trigger(
+        self,
+        direction,
+        features,
+        candles_5m,
+        candles_15m,
+        futures_candles=None,
+        overrides=None,
+        *,
+        trigger_price: float,
+        trigger_timestamp: str,
+        source_candle_timestamp: str,
+        historical_candle_timestamp: str,
+    ):
+        """Evaluate a historical intrabar trigger without changing live evaluation."""
+        replay_features = features.model_copy(update={"spot_price": trigger_price})
+        signal, diagnostic = self._decision(
+            direction,
+            replay_features,
+            candles_5m,
+            candles_15m,
+            futures_candles or [],
+            overrides,
+            replay_context={
+                "triggered": True,
+                "trigger_price": trigger_price,
+                "live_price": trigger_price,
+                "trigger_timestamp": trigger_timestamp,
+                "source_candle_timestamp": source_candle_timestamp,
+                "historical_candle_timestamp": historical_candle_timestamp,
+            },
+        )
+        if signal:
+            self.state[direction.value]["consumed"] = signal.timestamp.isoformat()
+            self.state[direction.value].pop("impulse", None)
+            self.state[direction.value].pop("active_setup_key", None)
+            self.state[direction.value]["confirm_count"] = 0
+        return signal, diagnostic
 
     def diagnose(self, features, candles_5m, candles_15m, overrides=None, futures_candles=None):
         preview = deepcopy(self)

@@ -193,6 +193,8 @@ class SimulationEngine:
                                              entry_start=self.session_config.strategy_b_no_new_trade_before,
                                              entry_end=self.session_config.no_new_trade_after)
         timeline, logs = [], []
+        replay_trigger_states: dict[str, dict[str, Any]] = {}
+        replay_trigger_diagnostics: list[dict[str, Any]] = []
         running = list(warmup)
         start_h, start_m = map(int, self.session_config.no_new_trade_before.split(":"))
         end_h, end_m = map(int, self.session_config.no_new_trade_after.split(":"))
@@ -208,8 +210,151 @@ class SimulationEngine:
             minutes = clock.hour*60+clock.minute
             in_window = request.bypass_window or start_h*60+start_m <= minutes <= end_h*60+end_m
             event, details = None, None
+            effective_diags_a = diags_a
             if (features.data_ready or features.breakout_data_ready) and in_window:
-                sig_a = strat_a.evaluate(features, running, macro, futures, overrides) if cfg.trend_pullback_enabled else None
+                sig_a = None
+                replay_trigger_handled = False
+                if cfg.trend_pullback_enabled and features.data_ready:
+                    for diag in diags_a:
+                        direction = diag.direction.value
+                        direction_label = "CALL" if direction == "BULLISH" else "PUT"
+                        phase_summary = diag.phase_summary or {}
+                        impulse = phase_summary.get("impulse") or {}
+                        trigger = phase_summary.get("trigger") or {}
+                        stored = replay_trigger_states.get(direction)
+
+                        if diag.phase_state != "WAIT_FOR_TRIGGER" or not impulse.get("found") or not trigger:
+                            if stored:
+                                replay_trigger_states.pop(direction, None)
+                            continue
+
+                        setup_id = (
+                            f"{direction_label}:{impulse.get('impulse_start')}"
+                            f"->{impulse.get('impulse_end')}"
+                        )
+                        if stored is None or stored["setup_id"] != setup_id:
+                            replay_trigger_states[direction] = stored = {
+                                "setup_id": setup_id,
+                                "direction": direction_label,
+                                "wait_timestamp": bar.end_time.isoformat(),
+                                "trigger_price": float(trigger["breakout_trigger_price"]),
+                                "buffer_atr": trigger.get("atr_buffer_multiple"),
+                                "buffer_points": trigger.get("atr_buffer_points"),
+                                "source_candle_timestamp": bar.end_time.isoformat(),
+                                "attempt_number": 0,
+                            }
+                            # The candle that establishes the trigger is not itself
+                            # evaluated as a later crossing candle.
+                            continue
+
+                        # A replay crossing is a one-time event for this locked
+                        # setup.  Keep the setup record after the crossing so a
+                        # later candle cannot recreate the trigger or require a
+                        # second crossing.  The state is cleared only when the
+                        # underlying strategy no longer reports this setup as
+                        # WAIT_FOR_TRIGGER (for example, on invalidation).
+                        if stored.get("processed"):
+                            replay_trigger_handled = True
+                            continue
+
+                        stored["attempt_number"] += 1
+                        trigger_price = stored["trigger_price"]
+                        crossed = (
+                            bar.high >= trigger_price
+                            if direction_label == "CALL"
+                            else bar.low <= trigger_price
+                        )
+                        crossing_amount = (
+                            bar.high - trigger_price
+                            if direction_label == "CALL"
+                            else trigger_price - bar.low
+                        ) if crossed else 0.0
+
+                        replay_record = {
+                            "direction": direction_label,
+                            "setup_id": stored["setup_id"],
+                            "wait_for_trigger_timestamp": stored["wait_timestamp"],
+                            "stored_trigger_level": trigger_price,
+                            "atr_buffer_multiple": stored["buffer_atr"],
+                            "atr_buffer_points": stored["buffer_points"],
+                            "trigger_source_candle_timestamp": stored["source_candle_timestamp"],
+                            "historical_candle_timestamp": bar.end_time.isoformat(),
+                            "historical_candle_ohlc": {
+                                "open": bar.open,
+                                "high": bar.high,
+                                "low": bar.low,
+                                "close": bar.close,
+                            },
+                            "intrabar_crossing": "YES" if crossed else "NO",
+                            "crossing_amount": round(crossing_amount, 2) if crossed else 0.0,
+                            "simulated_trigger_timestamp": bar.end_time.isoformat() if crossed else None,
+                            "simulated_trigger_price": trigger_price if crossed else None,
+                            "replay_price_used": "candle_high" if direction_label == "CALL" else "candle_low",
+                        }
+
+                        if crossed:
+                            sig_a, replay_diag = strat_a.evaluate_replay_trigger(
+                                diag.direction,
+                                features,
+                                running,
+                                macro,
+                                futures,
+                                overrides,
+                                trigger_price=trigger_price,
+                                trigger_timestamp=bar.end_time.isoformat(),
+                                source_candle_timestamp=stored["source_candle_timestamp"],
+                                historical_candle_timestamp=bar.end_time.isoformat(),
+                            )
+                            replay_trigger_handled = True
+                            stored["processed"] = True
+                            stored["processed_timestamp"] = bar.end_time.isoformat()
+                            if replay_diag:
+                                effective_diags_a = [
+                                    replay_diag if item.direction == diag.direction else item
+                                    for item in diags_a
+                                ]
+                                replay_summary = replay_diag.phase_summary or {}
+                                replay_confirmation = replay_summary.get("confirmation") or {}
+                                replay_risk = replay_summary.get("risk") or {}
+                                risk_condition = next(
+                                    (item for item in replay_diag.conditions if item.id == "risk_r_band"),
+                                    None,
+                                )
+                                replay_record.update(
+                                    {
+                                        "confirmation_available": replay_confirmation.get("available_confirmation_count"),
+                                        "confirmation_passed": replay_confirmation.get("passed_confirmation_count"),
+                                        "confirmation_result": replay_confirmation.get("reason"),
+                                        "structural_r_atr": replay_risk.get("initial_risk_atr"),
+                                        "structural_r_result": (
+                                            "PASS"
+                                            if risk_condition and risk_condition.status in ("PASSED", "PASS")
+                                            else "FAIL"
+                                        ),
+                                        "signal_generated": bool(sig_a),
+                                        "entry_ready": bool(sig_a),
+                                        "final_state": replay_diag.phase_state,
+                                        "final_blocker": replay_diag.key_blocker,
+                                    }
+                                )
+                            replay_trigger_diagnostics.append(replay_record)
+                            break
+
+                        replay_record.update(
+                            {
+                                "confirmation_available": None,
+                                "confirmation_passed": None,
+                                "confirmation_result": None,
+                                "structural_r_atr": None,
+                                "structural_r_result": None,
+                                "final_state": "WAIT_FOR_TRIGGER",
+                                "final_blocker": diag.key_blocker,
+                            }
+                        )
+                        replay_trigger_diagnostics.append(replay_record)
+
+                if not replay_trigger_handled and cfg.trend_pullback_enabled:
+                    sig_a = strat_a.evaluate(features, running, macro, futures, overrides)
                 sig_b = strat_b.evaluate(features, running, overrides=overrides) if cfg.volatility_breakout_enabled else None
                 signal = sig_a or sig_b
                 if signal:
@@ -217,9 +362,22 @@ class SimulationEngine:
                     logs.append(DecisionLogEntry(id=f"SIM-{idx}", timestamp=bar.end_time, category="SETUP",
                                                  strategy=signal.strategy.value, message=details,
                                                  details=signal.model_dump(mode="json")))
+                elif replay_trigger_handled:
+                    replay_event = replay_trigger_diagnostics[-1]
+                    event = "TRIGGER_CROSSED"
+                    details = replay_event.get("final_blocker") or "Intrabar trigger crossed"
+                    logs.append(DecisionLogEntry(
+                        id=f"SIM-TRIGGER-{idx}",
+                        timestamp=bar.end_time,
+                        category="TRIGGER",
+                        strategy=StrategyName.TREND_PULLBACK.value,
+                        message=details,
+                        details=replay_event,
+                    ))
             else:
                 strat_a.reset(bar.end_time)
                 strat_b.reset(bar.end_time)
+                replay_trigger_states.clear()
                 details = features.data_reason if not features.data_ready else "Outside entry window"
             timeline.append(SimulationBarSnapshot(
                 bar_index=idx, timestamp=bar.end_time.isoformat(), ist_time=clock.strftime("%H:%M"),
@@ -227,10 +385,11 @@ class SimulationEngine:
                 ema9_5m=features.ema9_5m, ema20_5m=features.ema20_5m,
                 supertrend=features.supertrend_direction, adx_15m=features.adx_15m,
                 rvol_5m=features.rvol_5m, bb_width_percentile=features.bb_width_percentile,
-                strategy_a_phase=max(diags_a, key=lambda d: d.passed_count).phase_state,
+                strategy_a_phase=max(effective_diags_a, key=lambda d: d.passed_count).phase_state,
                 strategy_b_phase=max(diags_b, key=lambda d: d.passed_count).phase_state,
                 event=event, event_details=details))
         return SimulationResult(
             session_date=date_str, total_bars_evaluated=len(session), total_trades=0, winning_trades=0,
             losing_trades=0, win_rate_pct=0, total_pnl=0, net_pnl=0, total_realized_r=0,
-            max_drawdown_pnl=0, profit_factor=0, timeline=timeline, decision_logs=logs)
+            max_drawdown_pnl=0, profit_factor=0, timeline=timeline, decision_logs=logs,
+            replay_trigger_diagnostics=replay_trigger_diagnostics)

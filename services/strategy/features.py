@@ -343,6 +343,16 @@ class FeatureEngine:
         # Option Chain Derivatives Confirmation Score
         bull_score = 0.0
         bear_score = 0.0
+        derivatives_score_components = {
+            "bull": {
+                "put_oi_support": 0.0,
+                "call_oi_wall_penalty": 0.0,
+            },
+            "bear": {
+                "call_oi_pressure": 0.0,
+                "call_oi_wall_bonus": 0.0,
+            },
+        }
 
         # Process Option Chain OI flow if available
         if option_chain and "strikes" in option_chain:
@@ -355,8 +365,10 @@ class FeatureEngine:
             # If put OI is higher or growing near/below ATM -> support
             if total_put_oi > total_call_oi:
                 bull_score += 1.0
+                derivatives_score_components["bull"]["put_oi_support"] = 1.0
             elif total_call_oi > total_put_oi:
                 bear_score += 1.0
+                derivatives_score_components["bear"]["call_oi_pressure"] = 1.0
 
             # Inspect strikes immediately above ATM for call writing walls
             strikes_above = [s for s in strikes if s["strike"] > atm_strike][:3]
@@ -364,6 +376,8 @@ class FeatureEngine:
             if call_oi_above > 500000:
                 bull_score -= 1.0
                 bear_score += 1.0
+                derivatives_score_components["bull"]["call_oi_wall_penalty"] = -1.0
+                derivatives_score_components["bear"]["call_oi_wall_bonus"] = 1.0
 
         b_bull, b_bear, bull_wall, bear_wall = cls.breakout_oi_features(option_chain, candles_5m[-1].close if candles_5m else spot_price, fut_buildup)
 
@@ -426,6 +440,7 @@ class FeatureEngine:
             futures_buildup=fut_buildup,
             bull_derivatives_score=max(0.0, bull_score),
             bear_derivatives_score=max(0.0, bear_score),
+            derivatives_score_components=derivatives_score_components,
             expected_daily_points=165.0,
             remaining_session_points=95.0,
             atm_straddle_price=215.0,

@@ -171,3 +171,28 @@ class HistoricalRepository:
             await conn.commit()
             return res.rowcount
 
+    async def delete_candles(self, candles: list[Candle], source: Optional[str] = None) -> int:
+        """Delete exact candle keys, optionally restricted to one source.
+
+        Used by historical-data quality cleanup after a broker returns rows
+        outside the requested exchange-session window.  The operation is
+        key-scoped and does not affect other instruments or sources.
+        """
+        if not candles:
+            return 0
+        async with self.engine.connect() as conn:
+            deleted = 0
+            for candle in candles:
+                if source is None:
+                    result = await conn.execute(
+                        "DELETE FROM historical_candles WHERE instrument_id = ? AND interval = ? AND start_time = ?",
+                        (candle.instrument_id, candle.interval, candle.start_time.isoformat()),
+                    )
+                else:
+                    result = await conn.execute(
+                        "DELETE FROM historical_candles WHERE instrument_id = ? AND interval = ? AND start_time = ? AND source = ?",
+                        (candle.instrument_id, candle.interval, candle.start_time.isoformat(), source),
+                    )
+                deleted += max(0, result.rowcount or 0)
+            await conn.commit()
+            return deleted

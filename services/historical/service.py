@@ -181,6 +181,114 @@ class HistoricalService:
             logger.warning("Failed to fetch Breeze historical candles for %s: %s", instrument_id, exc)
             return []
 
+    async def fetch_candles_from_breeze_window(
+        self,
+        instrument_id: str,
+        *,
+        interval: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[Candle]:
+        """Fetch and persist one targeted Breeze historical window.
+
+        This method is intended for replay-resolution data, not live polling.
+        The caller supplies the already-identified ambiguous window; no
+        strategy features or signals are calculated here.  Breeze expects the
+        exchange-session wall-clock values in its ISO-shaped arguments, while
+        returned timestamps are normalized to UTC before persistence.
+        """
+        if interval not in {"1m", "5m"}:
+            raise ValueError("targeted Breeze windows support only 1m and 5m intervals")
+        if end_time < start_time:
+            raise ValueError("end_time must not precede start_time")
+        if not self.broker_gateway:
+            return []
+
+        breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
+        if not breeze_adapter or not hasattr(breeze_adapter, "client_manager"):
+            return []
+        client_mgr = breeze_adapter.client_manager
+        if not client_mgr.is_active:
+            return []
+
+        stock_code, exchange, product_type = self._map_instrument_to_breeze(instrument_id)
+        breeze_interval, step_min = self._map_interval_to_breeze(interval)
+        ist_tz = timezone(timedelta(hours=5, minutes=30))
+
+        start_ist = start_time.astimezone(ist_tz)
+        end_ist = end_time.astimezone(ist_tz)
+        from_dt = start_ist.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        to_dt = end_ist.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        try:
+            rate_limiter = getattr(breeze_adapter, "rate_limiter", None)
+            if rate_limiter is not None and hasattr(rate_limiter, "acquire_read"):
+                await rate_limiter.acquire_read()
+            sdk = client_mgr.get_sdk_client()
+            raw_res = await client_mgr.sdk_runner.run(
+                lambda: sdk.get_historical_data_v2(
+                    interval=breeze_interval,
+                    from_date=from_dt,
+                    to_date=to_dt,
+                    stock_code=stock_code,
+                    exchange_code=exchange,
+                    product_type=product_type,
+                ),
+                timeout_sec=15.0,
+            )
+            rows = raw_res.get("Success", []) if isinstance(raw_res, dict) else []
+            if not isinstance(rows, list):
+                return []
+
+            candles: list[Candle] = []
+            for row in rows:
+                dt_str = row.get("datetime")
+                if not dt_str:
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
+                except ValueError:
+                    parsed = datetime.strptime(str(dt_str), "%Y-%m-%d %H:%M:%S")
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=ist_tz)
+                c_start = parsed.astimezone(timezone.utc)
+                candles.append(
+                    Candle(
+                        instrument_id=instrument_id,
+                        interval=interval,
+                        start_time=c_start,
+                        end_time=c_start + timedelta(minutes=step_min),
+                        open=float(row.get("open", 0.0)),
+                        high=float(row.get("high", 0.0)),
+                        low=float(row.get("low", 0.0)),
+                        close=float(row.get("close", 0.0)),
+                        volume=int(float(row.get("volume", 0) or 0)),
+                        open_interest=int(float(row.get("open_interest", 0) or 0)),
+                        source="BREEZE",
+                    )
+                )
+
+            candles = sorted(
+                {
+                    candle.start_time: candle
+                    for candle in candles
+                    if start_time <= candle.start_time <= end_time
+                }.values(),
+                key=lambda candle: candle.start_time,
+            )
+            if candles:
+                await self.repo.save_candles(candles)
+            return candles
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch targeted Breeze window for %s [%s, %s]: %s",
+                instrument_id,
+                from_dt,
+                to_dt,
+                exc,
+            )
+            return []
+
     def _resample_to_15m(self, candles_5m: list[Candle], instrument_id: str) -> list[Candle]:
         """Aggregate 5-minute candles into standard 15-minute bars."""
         if not candles_5m:

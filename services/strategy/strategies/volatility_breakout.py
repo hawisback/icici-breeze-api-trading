@@ -179,6 +179,8 @@ class VolatilityBreakoutStrategy:
                 return finish("RESET", "Missing, stale or invalid real completed spot/futures data")
             elif not bars or features.atr_5m <= 0:
                 return finish("RESET", "Awaiting sufficient market candle history")
+            else:
+                return finish("RESET", "Missing, stale or invalid real completed spot/futures data")
 
         trigger = bars[-1]
         clock = trigger.end_time.astimezone(IST)

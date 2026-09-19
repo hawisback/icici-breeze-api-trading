@@ -713,6 +713,7 @@ export interface SimulationResultData {
   trades: SimulatedTradeRecordData[];
   timeline: SimulationBarSnapshotData[];
   decision_logs: DecisionLogData[];
+  replay_trigger_diagnostics?: Record<string, any>[];
 }
 
 export interface SimulationRequestData {

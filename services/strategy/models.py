@@ -182,6 +182,7 @@ class MarketFeatures(BaseModel):
     # Derivatives Confirmation Scores
     bull_derivatives_score: float = 0.0
     bear_derivatives_score: float = 0.0
+    derivatives_score_components: dict[str, dict[str, float]] = Field(default_factory=dict)
     # Expected Move Context
     expected_daily_points: float = 150.0
     remaining_session_points: float = 100.0
@@ -478,3 +479,4 @@ class SimulationResult(BaseModel):
     trades: list[SimulatedTradeRecord] = Field(default_factory=list)
     timeline: list[SimulationBarSnapshot] = Field(default_factory=list)
     decision_logs: list[DecisionLogEntry] = Field(default_factory=list)
+    replay_trigger_diagnostics: list[dict[str, Any]] = Field(default_factory=list)

@@ -68,6 +68,7 @@ async def test_historical_service_breeze_integration(tmp_path):
 
     mock_breeze_adapter = MagicMock()
     mock_breeze_adapter.client_manager = mock_client_mgr
+    mock_breeze_adapter.rate_limiter = None
 
     mock_gateway = MagicMock()
     mock_gateway.breeze_adapter = mock_breeze_adapter
@@ -88,6 +89,61 @@ async def test_historical_service_breeze_integration(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_targeted_breeze_window_persists_one_minute_candles(tmp_path):
+    """Replay support fetches only the requested 1m window and normalizes UTC."""
+    repo = HistoricalRepository(db_path=tmp_path / "historical.db")
+    await repo.initialize()
+
+    mock_sdk = MagicMock()
+    mock_sdk.get_historical_data_v2.return_value = {
+        "Status": 200,
+        "Success": [
+            {
+                "datetime": "2026-09-16 15:24:00",
+                "open": "23210.00",
+                "high": "23212.00",
+                "low": "23209.00",
+                "close": "23211.00",
+                "volume": "12",
+            },
+            {
+                "datetime": "2026-09-16 15:25:00",
+                "open": "23211.00",
+                "high": "23214.00",
+                "low": "23210.00",
+                "close": "23213.00",
+                "volume": "15",
+            },
+        ],
+    }
+    mock_client_mgr = MagicMock()
+    mock_client_mgr.is_active = True
+    mock_client_mgr.get_sdk_client.return_value = mock_sdk
+    mock_client_mgr.sdk_runner = MagicMock()
+    mock_client_mgr.sdk_runner.run = AsyncMock(side_effect=lambda fn, timeout_sec=None: fn())
+    mock_breeze_adapter = MagicMock()
+    mock_breeze_adapter.client_manager = mock_client_mgr
+    mock_breeze_adapter.rate_limiter = None
+    mock_gateway = MagicMock()
+    mock_gateway.breeze_adapter = mock_breeze_adapter
+
+    service = HistoricalService(repository=repo, broker_gateway=mock_gateway)
+    candles = await service.fetch_candles_from_breeze_window(
+        "INST-NIFTY-INDEX",
+        interval="1m",
+        start_time=datetime(2026, 9, 16, 9, 54, tzinfo=timezone.utc),
+        end_time=datetime(2026, 9, 16, 9, 55, tzinfo=timezone.utc),
+    )
+
+    assert len(candles) == 2
+    assert candles[0].start_time == datetime(2026, 9, 16, 9, 54, tzinfo=timezone.utc)
+    assert candles[0].interval == "1m"
+    assert candles[0].source == "BREEZE"
+    cached = await repo.get_candles("INST-NIFTY-INDEX", "1m")
+    assert len(cached) == 2
+
+
+@pytest.mark.asyncio
 async def test_historical_service_offline_fallback(tmp_path):
     """Verify HistoricalService falls back to synthetic data when Breeze is offline."""
     repo = HistoricalRepository(db_path=tmp_path / "historical.db")
@@ -99,4 +155,3 @@ async def test_historical_service_offline_fallback(tmp_path):
     candles = await service.get_candles("INST-NIFTY-INDEX", interval="5m", limit=10)
     assert len(candles) == 10
     assert candles[0].source == "SIMULATED"
-
