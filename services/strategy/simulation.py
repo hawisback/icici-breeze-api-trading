@@ -16,6 +16,7 @@ from services.strategy.models import (
     ActiveTrade,
     AutoTradingMode,
     DecisionLogEntry,
+    HistoricalReplaySource,
     MarketFeatures,
     OptionSelectionConfig,
     OptionType,
@@ -30,7 +31,13 @@ from services.strategy.models import (
     TradeDirection,
     TradeLifecycleState,
 )
+from services.strategy.replay_metadata import (
+    build_configuration_snapshot,
+    build_data_fingerprint,
+    configuration_fingerprint,
+)
 from services.strategy.position_manager import PositionManager
+from services.strategy.replay_manifest import ReplayManifestRecorder
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 
@@ -47,12 +54,14 @@ class SimulationEngine:
         risk_config: Optional[RiskConfig] = None,
         session_config: Optional[SessionTimersConfig] = None,
         tunables=None,
+        replay_manifest_recorder: Optional[ReplayManifestRecorder] = None,
     ) -> None:
         self.hist_svc = historical_service
         self.risk_config = risk_config or RiskConfig()
         self.session_config = session_config or SessionTimersConfig()
         from services.strategy.models import StrategyTunablesConfig
         self.tunables = tunables or StrategyTunablesConfig()
+        self.replay_manifest_recorder = replay_manifest_recorder
 
     @staticmethod
     def resample_to_15m(candles_5m: list[Candle], instrument_id: str = "INST-NIFTY-INDEX") -> list[Candle]:
@@ -90,20 +99,29 @@ class SimulationEngine:
             )
         return res
 
-    async def get_available_dates(self) -> list[str]:
+    async def get_available_dates(
+        self,
+        historical_source: HistoricalReplaySource = HistoricalReplaySource.BREEZE,
+    ) -> list[str]:
         """Discovers distinct trading session dates available in historical storage."""
         dates: set[str] = set()
         if self.hist_svc and hasattr(self.hist_svc, "repo"):
             try:
                 async with self.hist_svc.repo.engine.connect() as conn:
-                    cursor = await conn.execute("""
+                    if historical_source == HistoricalReplaySource.MIXED:
+                        source_clause = "source IN ('BREEZE', 'KITE', 'LIVE')"
+                        params: tuple[Any, ...] = ()
+                    else:
+                        source_clause = "source = ?"
+                        params = (historical_source.value,)
+                    cursor = await conn.execute(f"""
                         SELECT DISTINCT substr(start_time, 1, 10) as day
                         FROM historical_candles
                         WHERE instrument_id = 'INST-NIFTY-INDEX' AND interval = '5m'
-                        AND source IN ('BREEZE', 'KITE', 'LIVE')
+                        AND {source_clause}
                         ORDER BY day DESC
                         LIMIT 30;
-                    """)
+                    """, params)
                     rows = await cursor.fetchall()
                     for r in rows:
                         if r[0]:
@@ -113,7 +131,15 @@ class SimulationEngine:
 
         return sorted(list(dates), reverse=True)
 
-    async def _fetch_session_candles(self, date_str: str, instrument_id: str) -> tuple[list[Candle], list[Candle]]:
+    async def _fetch_session_candles(
+        self,
+        date_str: str,
+        instrument_id: str,
+        *,
+        historical_source: HistoricalReplaySource,
+        source_diagnostics: dict[str, Any],
+        role: str,
+    ) -> tuple[list[Candle], list[Candle]]:
         """Retrieves warm-up candles and session candles for the given date.
         
         Returns:
@@ -134,7 +160,10 @@ class SimulationEngine:
         if self.hist_svc:
             try:
                 # If breeze is available, proactively fetch to refresh cache
-                if getattr(self.hist_svc, "broker_gateway", None):
+                if (
+                    getattr(self.hist_svc, "broker_gateway", None)
+                    and historical_source in (HistoricalReplaySource.BREEZE, HistoricalReplaySource.MIXED)
+                ):
                     await self.hist_svc.fetch_candles_from_breeze(instrument_id, interval="5m", days_back=7)
 
                 candles = await self.hist_svc.get_candles(
@@ -143,11 +172,39 @@ class SimulationEngine:
                     start_time=warmup_start_utc,
                     end_time=session_end_utc,
                     limit=1000,
+                    requested_source=historical_source.value,
+                    allow_provider_fallback=False,
+                    allow_synthetic_fallback=False,
                 )
                 if candles:
-                    all_candles = sorted((c for c in candles if c.source in ("BREEZE", "KITE", "LIVE") and c.end_time <= min(utc_now(), session_end_utc)), key=lambda c: c.start_time)
+                    all_candles = sorted(
+                        (c for c in candles if c.source in ("BREEZE", "KITE", "LIVE")
+                         and c.end_time <= min(utc_now(), session_end_utc)),
+                        key=lambda c: c.start_time,
+                    )
             except Exception as ex:
                 logger.warning("Historical service query error: %s", ex)
+
+        available_counts: dict[str, int] = {}
+        for candle in all_candles:
+            available_counts[candle.source] = available_counts.get(candle.source, 0) + 1
+        allowed_sources = (
+            {"BREEZE", "KITE", "LIVE"}
+            if historical_source == HistoricalReplaySource.MIXED
+            else {historical_source.value}
+        )
+        selected_candles = [c for c in all_candles if c.source in allowed_sources]
+        selected_counts: dict[str, int] = {}
+        for candle in selected_candles:
+            selected_counts[candle.source] = selected_counts.get(candle.source, 0) + 1
+        source_diagnostics[role] = {
+            "requested_source": historical_source.value,
+            "available_before_filter": dict(sorted(available_counts.items())),
+            "selected_after_filter": dict(sorted(selected_counts.items())),
+            "selected_count": len(selected_candles),
+            "missing_selected_source": len(selected_candles) == 0,
+        }
+        all_candles = selected_candles
 
         # 2. Separate into warm-up vs session candles
         warmup_candles: list[Candle] = []
@@ -165,19 +222,51 @@ class SimulationEngine:
     async def run_day_simulation(self, request: SimulationRequest) -> SimulationResult:
         """Replay actual bars without inventing historical option fills or PnL."""
         date_str = request.date or datetime.now(IST).strftime("%Y-%m-%d")
-        warmup, session = await self._fetch_session_candles(date_str, request.instrument_id)
+        historical_source = request.historical_source
+        bypass_entry_window = (
+            request.bypass_entry_window
+            if request.bypass_entry_window is not None
+            else request.bypass_window
+        )
+        source_diagnostics: dict[str, Any] = {}
+        warmup, session = await self._fetch_session_candles(
+            date_str,
+            request.instrument_id,
+            historical_source=historical_source,
+            source_diagnostics=source_diagnostics,
+            role="spot",
+        )
         futures_history = []
+        selected_contracts: list[dict[str, str | None]] = []
         inst_svc = getattr(self.hist_svc, "instrument_service", None)
         if inst_svc:
             instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
             contracts = sorted((i for i in instruments if i.segment == "FUTURES" and i.expiry
                                 and i.expiry >= date_str), key=lambda i: i.expiry)
             if contracts:
-                warm_fut, day_fut = await self._fetch_session_candles(date_str, contracts[0].instrument_id)
+                selected_contracts = [{
+                    "instrument_id": contracts[0].instrument_id,
+                    "expiry": contracts[0].expiry,
+                }]
+                warm_fut, day_fut = await self._fetch_session_candles(
+                    date_str,
+                    contracts[0].instrument_id,
+                    historical_source=historical_source,
+                    source_diagnostics=source_diagnostics,
+                    role="futures",
+                )
                 futures_history = warm_fut + day_fut
+        if "futures" not in source_diagnostics:
+            source_diagnostics["futures"] = {
+                "requested_source": historical_source.value,
+                "available_before_filter": {},
+                "selected_after_filter": {},
+                "selected_count": 0,
+                "missing_selected_source": True,
+            }
         overrides = request.overrides or ThresholdOverrides()
-        if request.bypass_window:
-            overrides = overrides.model_copy(update={"bypass_entry_window":True})
+        if bypass_entry_window:
+            overrides = overrides.model_copy(update={"bypass_entry_window": True})
         cfg = self.tunables
         strat_a = TrendPullbackStrategy(
             adx_threshold=cfg.adx_threshold, rvol_threshold=cfg.rvol_threshold,
@@ -192,9 +281,46 @@ class SimulationEngine:
                                              max_extension_atr=cfg.breakout_max_extension_atr,
                                              entry_start=self.session_config.strategy_b_no_new_trade_before,
                                              entry_end=self.session_config.no_new_trade_after)
+        missing_data: list[str] = []
+        if source_diagnostics["spot"]["missing_selected_source"] or not session:
+            missing_data.append("spot")
+        if source_diagnostics["futures"]["missing_selected_source"] or not futures_history:
+            missing_data.append("futures")
+        config_snapshot = build_configuration_snapshot(
+            start_date=date_str,
+            end_date=date_str,
+            instrument_id=request.instrument_id,
+            historical_source=historical_source,
+            bypass_entry_window=bypass_entry_window,
+            strategy_a_enabled=cfg.trend_pullback_enabled,
+            overrides=overrides,
+            tunables=cfg,
+            session=self.session_config,
+        )
+        config_hash = configuration_fingerprint(config_snapshot)
+        data_snapshot = build_data_fingerprint(
+            source=historical_source,
+            start_date=date_str,
+            end_date=date_str,
+            spot_candles=warmup + session,
+            futures_candles=futures_history,
+            source_diagnostics=source_diagnostics,
+            futures_contracts=selected_contracts,
+            missing_data=missing_data,
+        )
+        replay_metadata = {
+            "configuration_snapshot": config_snapshot.model_dump(mode="json"),
+            "configuration_fingerprint": config_hash,
+            "data_fingerprint": data_snapshot.model_dump(mode="json"),
+            "historical_source": historical_source.value,
+            "bypass_entry_window": bypass_entry_window,
+            "missing_data": sorted(set(missing_data)),
+        }
         timeline, logs = [], []
         replay_trigger_states: dict[str, dict[str, Any]] = {}
         replay_trigger_diagnostics: list[dict[str, Any]] = []
+        replay_manifest_recorder = self.replay_manifest_recorder or ReplayManifestRecorder()
+        replay_manifest_recorder.set_replay_metadata(replay_metadata)
         running = list(warmup)
         start_h, start_m = map(int, self.session_config.no_new_trade_before.split(":"))
         end_h, end_m = map(int, self.session_config.no_new_trade_after.split(":"))
@@ -208,7 +334,7 @@ class SimulationEngine:
             diags_b = strat_b.diagnose(features, running, overrides=overrides)
             clock = bar.end_time.astimezone(IST)
             minutes = clock.hour*60+clock.minute
-            in_window = request.bypass_window or start_h*60+start_m <= minutes <= end_h*60+end_m
+            in_window = bypass_entry_window or start_h*60+start_m <= minutes <= end_h*60+end_m
             event, details = None, None
             effective_diags_a = diags_a
             if (features.data_ready or features.breakout_data_ready) and in_window:
@@ -337,6 +463,47 @@ class SimulationEngine:
                                         "final_blocker": replay_diag.key_blocker,
                                     }
                                 )
+                            if sig_a is not None:
+                                snapshot = sig_a.features_snapshot
+                                replay_manifest_recorder.record_entry(
+                                    signal=sig_a,
+                                    trading_date=date_str,
+                                    trigger_source_candle_timestamp=stored["source_candle_timestamp"],
+                                    trigger_level=trigger_price,
+                                    simulated_entry_timestamp=stored["processed_timestamp"],
+                                    simulated_entry_price=float(sig_a.spot_reference_price),
+                                    entry_5m_candle_timestamp=bar.start_time,
+                                    entry_occurred_intrabar=True,
+                                    entry_features={
+                                        **snapshot,
+                                        "adx": features.adx_15m,
+                                        "rvol": features.rvol_5m,
+                                        "ema_slope": features.ema20_slope_norm_15m,
+                                        "entry_bar_timestamp": bar.start_time.isoformat(),
+                                    },
+                                    setup_id=stored["setup_id"],
+                                    pullback_swing_low=snapshot.get("pullback_low"),
+                                    pullback_swing_high=snapshot.get("pullback_high"),
+                                    impulse_low=snapshot.get("impulse_low"),
+                                    impulse_high=snapshot.get("impulse_high"),
+                                    atr_at_entry=float(snapshot.get("atr", 0.0)),
+                                    initial_structural_stop=float(sig_a.structural_stop),
+                                    initial_risk_points=float(sig_a.r_points),
+                                    initial_risk_atr=float(replay_record.get("structural_r_atr") or 0.0),
+                                    current_trailing_stop=float(sig_a.structural_stop),
+                                    current_r=0.0,
+                                    highest_favorable_price=float(sig_a.spot_reference_price),
+                                    lowest_favorable_price=float(sig_a.spot_reference_price),
+                                    peak_r=0.0,
+                                    protected_breakeven_active=False,
+                                    profit_lock_active=False,
+                                    runner_mode_active=False,
+                                    current_ladder_stage="OPEN_INITIAL_RISK",
+                                    reversal_score=0,
+                                    adverse_health_counters={},
+                                    entry_bar_timestamp=bar.start_time,
+                                    last_managed_completed_bar_timestamp=None,
+                                )
                             replay_trigger_diagnostics.append(replay_record)
                             break
 
@@ -388,8 +555,52 @@ class SimulationEngine:
                 strategy_a_phase=max(effective_diags_a, key=lambda d: d.passed_count).phase_state,
                 strategy_b_phase=max(diags_b, key=lambda d: d.passed_count).phase_state,
                 event=event, event_details=details))
+
+        # Replay-only lifecycle pass.  It consumes the frozen signal manifests
+        # after signal generation has completed, so PositionManager state can
+        # never suppress or alter Strategy A signal discovery.
+        one_minute_candles: list[Candle] = []
+        if self.hist_svc and hasattr(self.hist_svc, "repo"):
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            one_minute_start = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST).astimezone(timezone.utc)
+            one_minute_end = datetime(target_date.year, target_date.month, target_date.day, 15, 30, tzinfo=IST).astimezone(timezone.utc)
+            try:
+                one_minute_candles = await self.hist_svc.repo.get_candles(
+                    request.instrument_id, "1m", start_time=one_minute_start,
+                    end_time=one_minute_end, limit=1000,
+                )
+                allowed = {"BREEZE", "KITE", "LIVE"} if historical_source == HistoricalReplaySource.MIXED else {historical_source.value}
+                one_minute_candles = [c for c in one_minute_candles if c.source in allowed]
+            except Exception as ex:
+                logger.warning("Historical 1m replay query error: %s", ex)
+
+        from services.strategy.replay_lifecycle import (
+            HistoricalPositionManagerReplayer,
+            build_lifecycle_report,
+        )
+        lifecycle_replayer = HistoricalPositionManagerReplayer(
+            risk_config=self.risk_config,
+            session_config=self.session_config,
+            recorder=replay_manifest_recorder,
+            instrument_id=request.instrument_id,
+            warmup_candles=warmup,
+            session_candles=session,
+            futures_candles=futures_history,
+            one_minute_candles=one_minute_candles,
+        )
+        lifecycle_resolver = lifecycle_replayer.replay(replay_manifest_recorder.records())
+        lifecycle_report = build_lifecycle_report(replay_manifest_recorder.records(), lifecycle_resolver)
+        lifecycle_report["manifest_validation"] = replay_manifest_recorder.validate_complete(expected_count=len(replay_manifest_recorder.records()))
+        replay_lifecycle = lifecycle_report
         return SimulationResult(
-            session_date=date_str, total_bars_evaluated=len(session), total_trades=0, winning_trades=0,
-            losing_trades=0, win_rate_pct=0, total_pnl=0, net_pnl=0, total_realized_r=0,
+            replay_mode="POSITION_MANAGER_REPLAY",
+            session_date=date_str, total_bars_evaluated=len(session), total_trades=lifecycle_report["resolved"],
+            winning_trades=lifecycle_report["winners"], losing_trades=lifecycle_report["losers"],
+            win_rate_pct=lifecycle_report["win_rate_pct"], total_pnl=0, net_pnl=0,
+            total_realized_r=lifecycle_report["average_r"] * lifecycle_report["resolved"],
             max_drawdown_pnl=0, profit_factor=0, timeline=timeline, decision_logs=logs,
-            replay_trigger_diagnostics=replay_trigger_diagnostics)
+            replay_trigger_diagnostics=replay_trigger_diagnostics,
+            replay_manifests=[record.model_dump(mode="json") for record in replay_manifest_recorder.records()],
+            replay_metadata=replay_metadata,
+            replay_lifecycle=replay_lifecycle,
+        )

@@ -1,0 +1,613 @@
+{
+  "metadata": {
+    "configuration_snapshot": {
+      "replay_start_date": "2026-06-01",
+      "replay_end_date": "2026-09-18",
+      "instrument_id": "INST-NIFTY-INDEX",
+      "historical_source": "BREEZE",
+      "bypass_entry_window": false,
+      "strategy_a_enabled": true,
+      "threshold_overrides": {
+        "max_option_premium": null,
+        "max_option_premium_cap": null,
+        "min_option_premium": null,
+        "min_option_premium_floor": null,
+        "adx_threshold": null,
+        "rvol_threshold": null,
+        "ema_slope_threshold": null,
+        "min_confirmation_score": null,
+        "strat_b_min_confirmation": null,
+        "box_max_height_atr": null,
+        "bb_width_percentile": null,
+        "bull_derivatives_score": null,
+        "bear_derivatives_score": null,
+        "breakout_confirm_polls": null,
+        "breakout_buffer_atr": null,
+        "min_impulse_atr": null,
+        "retest_tolerance_atr": null,
+        "min_pullback_depth": null,
+        "max_pullback_depth": null,
+        "min_available_confirmations": null,
+        "strat_b_max_extension_atr": null,
+        "strat_b_breakout_buffer_atr": null,
+        "strat_b_breakout_confirm_polls": null,
+        "strat_b_box_max_age_bars": null,
+        "strat_b_min_available_confirmations": null,
+        "bypass_entry_window": false,
+        "active": false
+      },
+      "strategy_a": {
+        "adx_threshold": 20.0,
+        "rvol_threshold": 1.2,
+        "ema_slope_threshold": 0.1,
+        "min_impulse_atr": 0.7,
+        "pullback_duration_min_bars": 1,
+        "pullback_duration_max_bars": 9,
+        "min_pullback_depth": 0.08,
+        "max_pullback_depth": 0.7,
+        "retest_tolerance_atr": 0.45,
+        "breakout_buffer_atr": 0.02,
+        "breakout_confirm_polls": 1,
+        "min_available_confirmations": 2,
+        "min_confirmation_score": 2,
+        "derivatives_threshold": {
+          "bullish": 1.0,
+          "bearish": 1.0
+        },
+        "structural_r_max_atr": 1.6,
+        "initial_stop_offset_atr": 0.15
+      },
+      "entry_window": {
+        "no_new_trade_before_ist": "09:20",
+        "no_new_trade_after_ist": "14:45"
+      },
+      "setup_window": {
+        "max_pre_cutoff_candles": 4,
+        "max_post_cutoff_candles": 15
+      },
+      "warmup": {
+        "calendar_days": 7,
+        "session_start_ist": "09:15",
+        "session_end_ist": "15:30",
+        "provider_fallback": false,
+        "synthetic_fallback": false
+      },
+      "indicator_warmup_requirements": {
+        "minimum_5m_candles": 29,
+        "minimum_15m_candles": 50,
+        "minimum_futures_5m_candles": 15
+      },
+      "futures_selection_rule": "Select the earliest NIFTY FUTURES contract with expiry >= replay date; replay only its selected historical source candles."
+    },
+    "configuration_fingerprint": "00549a10017288b9970cee8ddd2dbc9f178fcb156a5e34b436e138a00b0a11af",
+    "data_fingerprint": {
+      "source": "BREEZE",
+      "spot_candle_count": 33666,
+      "futures_candle_count": 30464,
+      "spot_earliest_timestamp": "2026-06-01T03:45:00+00:00",
+      "spot_latest_timestamp": "2026-09-18T10:00:00+00:00",
+      "futures_earliest_timestamp": "2026-06-01T03:45:00+00:00",
+      "futures_latest_timestamp": "2026-09-18T10:00:00+00:00",
+      "requested_date_range": {
+        "start": "2026-06-01",
+        "end": "2026-09-18"
+      },
+      "observed_date_range": {
+        "earliest": "2026-06-01T03:45:00+00:00",
+        "latest": "2026-09-18T10:00:00+00:00"
+      },
+      "futures_contracts": [
+        {
+          "instrument_id": "INST-NIFTY-FUT-2026-06-30",
+          "expiry": "2026-06-30"
+        },
+        {
+          "instrument_id": "INST-NIFTY-FUT-2026-07-28",
+          "expiry": "2026-07-28"
+        },
+        {
+          "instrument_id": "INST-NIFTY-FUT-2026-08-25",
+          "expiry": "2026-08-25"
+        },
+        {
+          "instrument_id": "INST-NIFTY-FUT-2026-09-29",
+          "expiry": "2026-09-29"
+        }
+      ],
+      "source_diagnostics": {
+        "spot": {
+          "requested_source": "BREEZE",
+          "available_before_filter": {
+            "BREEZE": 33666,
+            "KITE": 486
+          },
+          "selected_after_filter": {
+            "BREEZE": 33666
+          },
+          "selected_count": 33666,
+          "missing_selected_source": false
+        },
+        "futures": {
+          "requested_source": "BREEZE",
+          "available_before_filter": {
+            "BREEZE": 30464
+          },
+          "selected_after_filter": {
+            "BREEZE": 30464
+          },
+          "selected_count": 30464,
+          "missing_selected_source": false
+        }
+      },
+      "missing_data": [],
+      "dataset_hash": "4c4c2d5a4ddd06b75435f8fec8256a5c43b7a5eb9091c40b2a9ec2b646f9de43"
+    },
+    "historical_source": "BREEZE",
+    "bypass_entry_window": false,
+    "missing_data": []
+  },
+  "report": {
+    "total_signals": 225,
+    "resolved": 224,
+    "ambiguous": 1,
+    "unresolved": 0,
+    "trades": 224,
+    "winners": 103,
+    "losers": 121,
+    "breakeven": 0,
+    "win_rate_pct": 45.98,
+    "average_winner_r": 0.9771,
+    "average_loser_r": -0.8715,
+    "average_r": -0.0215,
+    "median_r": -0.4001,
+    "profit_factor": 0.9544,
+    "max_consecutive_losses": 9,
+    "call": {
+      "trades": 97,
+      "winners": 40,
+      "losers": 57,
+      "breakeven": 0,
+      "win_rate_pct": 41.24,
+      "average_winner_r": 0.7945,
+      "average_loser_r": -0.8781,
+      "average_r": -0.1883,
+      "median_r": -0.6825,
+      "profit_factor": 0.635,
+      "max_consecutive_losses": 5
+    },
+    "put": {
+      "trades": 127,
+      "winners": 63,
+      "losers": 64,
+      "breakeven": 0,
+      "win_rate_pct": 49.61,
+      "average_winner_r": 1.093,
+      "average_loser_r": -0.8656,
+      "average_r": 0.106,
+      "median_r": -0.2616,
+      "profit_factor": 1.243,
+      "max_consecutive_losses": 7
+    },
+    "exit_breakdown": {
+      "ADVERSE_HEALTH_EXIT": {
+        "count": 17,
+        "average_r": -0.5992,
+        "average_mfe_r": 0.1364,
+        "average_mae_r": -0.5992
+      },
+      "PROTECTED_BREAKEVEN": {
+        "count": 36,
+        "average_r": 0.11,
+        "average_mfe_r": 1.0441,
+        "average_mae_r": -0.1008
+      },
+      "RUNNER_STOP_EXIT": {
+        "count": 43,
+        "average_r": 1.8519,
+        "average_mfe_r": 2.8074,
+        "average_mae_r": -0.0824
+      },
+      "SESSION_EXIT": {
+        "count": 1,
+        "average_r": 5.572,
+        "average_mfe_r": 5.5831,
+        "average_mae_r": 0.0
+      },
+      "STRUCTURAL_STOP": {
+        "count": 100,
+        "average_r": -0.9126,
+        "average_mfe_r": 0.1254,
+        "average_mae_r": -0.9137
+      },
+      "THESIS_INVALIDATION": {
+        "count": 4,
+        "average_r": -0.9025,
+        "average_mfe_r": 0.0,
+        "average_mae_r": -0.9026
+      },
+      "TRAILING_STOP_EXIT": {
+        "count": 23,
+        "average_r": 0.4822,
+        "average_mfe_r": 1.5835,
+        "average_mae_r": -0.0926
+      }
+    },
+    "mfe_before_loss_pct": {
+      "0.25": 23.97,
+      "0.5": 7.44,
+      "0.75": 1.65,
+      "1.0": 0.0,
+      "1.5": 0.0
+    },
+    "segments": {
+      "confirmation_count": {
+        "2": {
+          "trades": 24,
+          "winners": 9,
+          "losers": 15,
+          "breakeven": 0,
+          "win_rate_pct": 37.5,
+          "average_winner_r": 1.3069,
+          "average_loser_r": -0.9592,
+          "average_r": -0.1094,
+          "median_r": -0.984,
+          "profit_factor": 0.8175,
+          "max_consecutive_losses": 9
+        },
+        "3": {
+          "trades": 66,
+          "winners": 24,
+          "losers": 42,
+          "breakeven": 0,
+          "win_rate_pct": 36.36,
+          "average_winner_r": 0.6927,
+          "average_loser_r": -0.8408,
+          "average_r": -0.2832,
+          "median_r": -0.648,
+          "profit_factor": 0.4708,
+          "max_consecutive_losses": 13
+        },
+        "4": {
+          "trades": 104,
+          "winners": 53,
+          "losers": 51,
+          "breakeven": 0,
+          "win_rate_pct": 50.96,
+          "average_winner_r": 1.0905,
+          "average_loser_r": -0.8644,
+          "average_r": 0.1318,
+          "median_r": 0.0479,
+          "profit_factor": 1.311,
+          "max_consecutive_losses": 7
+        },
+        "5": {
+          "trades": 30,
+          "winners": 17,
+          "losers": 13,
+          "breakeven": 0,
+          "win_rate_pct": 56.67,
+          "average_winner_r": 0.8505,
+          "average_loser_r": -0.8971,
+          "average_r": 0.0932,
+          "median_r": 0.0854,
+          "profit_factor": 1.2399,
+          "max_consecutive_losses": 3
+        }
+      },
+      "pullback_depth": {
+        "0.20-0.39": {
+          "trades": 70,
+          "winners": 28,
+          "losers": 42,
+          "breakeven": 0,
+          "win_rate_pct": 40.0,
+          "average_winner_r": 1.0485,
+          "average_loser_r": -0.9183,
+          "average_r": -0.1316,
+          "median_r": -0.8239,
+          "profit_factor": 0.7612,
+          "max_consecutive_losses": 7
+        },
+        "0.40-0.59": {
+          "trades": 94,
+          "winners": 51,
+          "losers": 43,
+          "breakeven": 0,
+          "win_rate_pct": 54.26,
+          "average_winner_r": 1.185,
+          "average_loser_r": -0.813,
+          "average_r": 0.271,
+          "median_r": 0.0987,
+          "profit_factor": 1.7287,
+          "max_consecutive_losses": 4
+        },
+        "<0.20": {
+          "trades": 17,
+          "winners": 7,
+          "losers": 10,
+          "breakeven": 0,
+          "win_rate_pct": 41.18,
+          "average_winner_r": 0.1833,
+          "average_loser_r": -0.9262,
+          "average_r": -0.4693,
+          "median_r": -1.0,
+          "profit_factor": 0.1385,
+          "max_consecutive_losses": 3
+        },
+        ">=0.60": {
+          "trades": 43,
+          "winners": 17,
+          "losers": 26,
+          "breakeven": 0,
+          "win_rate_pct": 39.53,
+          "average_winner_r": 0.5627,
+          "average_loser_r": -0.8714,
+          "average_r": -0.3044,
+          "median_r": -0.7199,
+          "profit_factor": 0.4222,
+          "max_consecutive_losses": 7
+        }
+      },
+      "impulse_atr": {
+        "1.00-1.49": {
+          "trades": 37,
+          "winners": 18,
+          "losers": 19,
+          "breakeven": 0,
+          "win_rate_pct": 48.65,
+          "average_winner_r": 0.7415,
+          "average_loser_r": -0.8624,
+          "average_r": -0.0821,
+          "median_r": -0.2206,
+          "profit_factor": 0.8146,
+          "max_consecutive_losses": 6
+        },
+        "1.50-1.99": {
+          "trades": 41,
+          "winners": 23,
+          "losers": 18,
+          "breakeven": 0,
+          "win_rate_pct": 56.1,
+          "average_winner_r": 1.3668,
+          "average_loser_r": -0.9171,
+          "average_r": 0.3641,
+          "median_r": 0.166,
+          "profit_factor": 1.9044,
+          "max_consecutive_losses": 3
+        },
+        "<1.00": {
+          "trades": 2,
+          "winners": 2,
+          "losers": 0,
+          "breakeven": 0,
+          "win_rate_pct": 100.0,
+          "average_winner_r": 0.6895,
+          "average_loser_r": 0.0,
+          "average_r": 0.6895,
+          "median_r": 0.6895,
+          "profit_factor": 0.0,
+          "max_consecutive_losses": 0
+        },
+        ">=2.00": {
+          "trades": 144,
+          "winners": 60,
+          "losers": 84,
+          "breakeven": 0,
+          "win_rate_pct": 41.67,
+          "average_winner_r": 0.908,
+          "average_loser_r": -0.8638,
+          "average_r": -0.1255,
+          "median_r": -0.5735,
+          "profit_factor": 0.7509,
+          "max_consecutive_losses": 8
+        }
+      },
+      "structural_r": {
+        "0.50-0.99": {
+          "trades": 125,
+          "winners": 63,
+          "losers": 62,
+          "breakeven": 0,
+          "win_rate_pct": 50.4,
+          "average_winner_r": 1.0927,
+          "average_loser_r": -0.9194,
+          "average_r": 0.0947,
+          "median_r": 0.1063,
+          "profit_factor": 1.2076,
+          "max_consecutive_losses": 6
+        },
+        "1.00-1.59": {
+          "trades": 97,
+          "winners": 39,
+          "losers": 58,
+          "breakeven": 0,
+          "win_rate_pct": 40.21,
+          "average_winner_r": 0.8108,
+          "average_loser_r": -0.818,
+          "average_r": -0.1631,
+          "median_r": -0.457,
+          "profit_factor": 0.6665,
+          "max_consecutive_losses": 8
+        },
+        "<0.50": {
+          "trades": 2,
+          "winners": 1,
+          "losers": 1,
+          "breakeven": 0,
+          "win_rate_pct": 50.0,
+          "average_winner_r": 0.1788,
+          "average_loser_r": -1.0,
+          "average_r": -0.4106,
+          "median_r": -0.4106,
+          "profit_factor": 0.1788,
+          "max_consecutive_losses": 1
+        }
+      },
+      "adx": {
+        "20-24.99": {
+          "trades": 48,
+          "winners": 24,
+          "losers": 24,
+          "breakeven": 0,
+          "win_rate_pct": 50.0,
+          "average_winner_r": 1.5795,
+          "average_loser_r": -0.8366,
+          "average_r": 0.3715,
+          "median_r": -0.058,
+          "profit_factor": 1.8881,
+          "max_consecutive_losses": 4
+        },
+        "25-29.99": {
+          "trades": 34,
+          "winners": 17,
+          "losers": 17,
+          "breakeven": 0,
+          "win_rate_pct": 50.0,
+          "average_winner_r": 0.8156,
+          "average_loser_r": -0.8939,
+          "average_r": -0.0392,
+          "median_r": -0.2257,
+          "profit_factor": 0.9124,
+          "max_consecutive_losses": 5
+        },
+        "<20": {
+          "trades": 39,
+          "winners": 19,
+          "losers": 20,
+          "breakeven": 0,
+          "win_rate_pct": 48.72,
+          "average_winner_r": 0.9632,
+          "average_loser_r": -0.9735,
+          "average_r": -0.03,
+          "median_r": -0.5961,
+          "profit_factor": 0.9399,
+          "max_consecutive_losses": 3
+        },
+        ">=30": {
+          "trades": 103,
+          "winners": 43,
+          "losers": 60,
+          "breakeven": 0,
+          "win_rate_pct": 41.75,
+          "average_winner_r": 0.7109,
+          "average_loser_r": -0.845,
+          "average_r": -0.1955,
+          "median_r": -0.4965,
+          "profit_factor": 0.6029,
+          "max_consecutive_losses": 6
+        }
+      },
+      "time_of_day": {
+        "09:20-09:59": {
+          "trades": 15,
+          "winners": 10,
+          "losers": 5,
+          "breakeven": 0,
+          "win_rate_pct": 66.67,
+          "average_winner_r": 1.0652,
+          "average_loser_r": -0.9122,
+          "average_r": 0.4061,
+          "median_r": 0.5,
+          "profit_factor": 2.3356,
+          "max_consecutive_losses": 1
+        },
+        "10:00-10:59": {
+          "trades": 51,
+          "winners": 26,
+          "losers": 25,
+          "breakeven": 0,
+          "win_rate_pct": 50.98,
+          "average_winner_r": 0.7553,
+          "average_loser_r": -0.8532,
+          "average_r": -0.0332,
+          "median_r": 0.0159,
+          "profit_factor": 0.9206,
+          "max_consecutive_losses": 6
+        },
+        "11:00-11:59": {
+          "trades": 42,
+          "winners": 18,
+          "losers": 24,
+          "breakeven": 0,
+          "win_rate_pct": 42.86,
+          "average_winner_r": 0.8323,
+          "average_loser_r": -0.8128,
+          "average_r": -0.1077,
+          "median_r": -0.4704,
+          "profit_factor": 0.768,
+          "max_consecutive_losses": 6
+        },
+        "12:00-12:59": {
+          "trades": 44,
+          "winners": 17,
+          "losers": 27,
+          "breakeven": 0,
+          "win_rate_pct": 38.64,
+          "average_winner_r": 1.204,
+          "average_loser_r": -0.8438,
+          "average_r": -0.0526,
+          "median_r": -0.4769,
+          "profit_factor": 0.8984,
+          "max_consecutive_losses": 5
+        },
+        "13:00-13:59": {
+          "trades": 41,
+          "winners": 20,
+          "losers": 21,
+          "breakeven": 0,
+          "win_rate_pct": 48.78,
+          "average_winner_r": 1.032,
+          "average_loser_r": -0.9069,
+          "average_r": 0.0389,
+          "median_r": -0.2206,
+          "profit_factor": 1.0838,
+          "max_consecutive_losses": 5
+        },
+        "14:00-14:45": {
+          "trades": 31,
+          "winners": 12,
+          "losers": 19,
+          "breakeven": 0,
+          "win_rate_pct": 38.71,
+          "average_winner_r": 1.1886,
+          "average_loser_r": -0.9591,
+          "average_r": -0.1277,
+          "median_r": -1.0,
+          "profit_factor": 0.7827,
+          "max_consecutive_losses": 5
+        }
+      },
+      "direction": {
+        "CALL": {
+          "trades": 97,
+          "winners": 40,
+          "losers": 57,
+          "breakeven": 0,
+          "win_rate_pct": 41.24,
+          "average_winner_r": 0.7945,
+          "average_loser_r": -0.8781,
+          "average_r": -0.1883,
+          "median_r": -0.6825,
+          "profit_factor": 0.635,
+          "max_consecutive_losses": 5
+        },
+        "PUT": {
+          "trades": 127,
+          "winners": 63,
+          "losers": 64,
+          "breakeven": 0,
+          "win_rate_pct": 49.61,
+          "average_winner_r": 1.093,
+          "average_loser_r": -0.8656,
+          "average_r": 0.106,
+          "median_r": -0.2616,
+          "profit_factor": 1.243,
+          "max_consecutive_losses": 7
+        }
+      }
+    },
+    "resolver": {
+      "resolver": {}
+    }
+  }
+}

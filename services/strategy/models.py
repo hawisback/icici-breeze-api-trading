@@ -38,6 +38,15 @@ class TradeDirection(str, Enum):
     BEARISH = "BEARISH"
 
 
+class HistoricalReplaySource(str, Enum):
+    """Explicit provider selection for historical replay inputs."""
+
+    BREEZE = "BREEZE"
+    KITE = "KITE"
+    LIVE = "LIVE"
+    MIXED = "MIXED"
+
+
 class OptionType(str, Enum):
     CALL = "CALL"
     PUT = "PUT"
@@ -411,6 +420,10 @@ class SimulationRequest(BaseModel):
     overrides: Optional[ThresholdOverrides] = None
     capital: float = 500000.0
     bypass_window: bool = False
+    # Kept separate from ``bypass_window`` so replay metadata uses the
+    # canonical name without breaking existing API/debug callers.
+    bypass_entry_window: Optional[bool] = None
+    historical_source: HistoricalReplaySource = HistoricalReplaySource.BREEZE
     max_trades_per_day: int = 5
 
 
@@ -464,7 +477,7 @@ class SimulatedTradeRecord(BaseModel):
 
 class SimulationResult(BaseModel):
     replay_mode: str = "SIGNALS_ONLY"
-    limitation: str = "Real completed spot/futures candles only. Historical executable option quotes are unavailable; trade/PnL metrics are not estimated."
+    limitation: str = "Real completed spot/futures candles only. Historical executable option quotes are unavailable; option-dependent rules are unavailable."
     session_date: str
     total_bars_evaluated: int
     total_trades: int
@@ -480,3 +493,6 @@ class SimulationResult(BaseModel):
     timeline: list[SimulationBarSnapshot] = Field(default_factory=list)
     decision_logs: list[DecisionLogEntry] = Field(default_factory=list)
     replay_trigger_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    replay_manifests: list[dict[str, Any]] = Field(default_factory=list)
+    replay_metadata: dict[str, Any] = Field(default_factory=dict)
+    replay_lifecycle: dict[str, Any] = Field(default_factory=dict)

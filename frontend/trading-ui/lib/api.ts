@@ -714,6 +714,8 @@ export interface SimulationResultData {
   timeline: SimulationBarSnapshotData[];
   decision_logs: DecisionLogData[];
   replay_trigger_diagnostics?: Record<string, any>[];
+  replay_manifests?: Record<string, any>[];
+  replay_metadata?: Record<string, any>;
 }
 
 export interface SimulationRequestData {
@@ -722,6 +724,8 @@ export interface SimulationRequestData {
   overrides?: Partial<ThresholdOverridesData>;
   capital?: number;
   bypass_window?: boolean;
+  bypass_entry_window?: boolean;
+  historical_source?: "BREEZE" | "KITE" | "LIVE" | "MIXED";
   max_trades_per_day?: number;
 }
 

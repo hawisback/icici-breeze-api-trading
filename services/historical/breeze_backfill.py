@@ -65,10 +65,17 @@ class BackfillReport:
     futures_sessions: int = 0
     missing_spot_sessions: list[str] = field(default_factory=list)
     missing_futures_sessions: list[str] = field(default_factory=list)
+    partial_spot_sessions: list[dict[str, Any]] = field(default_factory=list)
+    partial_futures_sessions: list[dict[str, Any]] = field(default_factory=list)
     duplicate_candles: int = 0
+    invalid_ohlc_rows: int = 0
     timestamp_gaps: list[dict[str, Any]] = field(default_factory=list)
     futures_volume_present: int = 0
     futures_open_interest_present: int = 0
+    futures_volume_available_pct: float = 0.0
+    futures_open_interest_available_pct: float = 0.0
+    candles_inserted: int = 0
+    candles_skipped_existing: int = 0
     rejected_rows: int = 0
     failed_requests: list[dict[str, Any]] = field(default_factory=list)
     requests_completed: int = 0
@@ -88,10 +95,17 @@ class BackfillReport:
             "futures_sessions": self.futures_sessions,
             "missing_spot_sessions": self.missing_spot_sessions,
             "missing_futures_sessions": self.missing_futures_sessions,
+            "partial_spot_sessions": self.partial_spot_sessions,
+            "partial_futures_sessions": self.partial_futures_sessions,
             "duplicate_candles": self.duplicate_candles,
+            "invalid_ohlc_rows": self.invalid_ohlc_rows,
             "timestamp_gaps": self.timestamp_gaps,
             "futures_candles_containing_volume": self.futures_volume_present,
             "futures_candles_containing_open_interest": self.futures_open_interest_present,
+            "futures_volume_available_pct": self.futures_volume_available_pct,
+            "futures_open_interest_available_pct": self.futures_open_interest_available_pct,
+            "candles_inserted": self.candles_inserted,
+            "candles_skipped_existing": self.candles_skipped_existing,
             "rejected_rows": self.rejected_rows,
             "requests": {
                 "attempted": self.requests_attempted,
@@ -103,7 +117,7 @@ class BackfillReport:
         }
 
 
-def _last_tuesday(year: int, month: int) -> date:
+def _last_weekday(year: int, month: int, weekday: int) -> date:
     """Return NSE's NIFTY monthly expiry date for the given month.
 
     NSE moved NIFTY index derivative expiries to Tuesday for contracts from
@@ -118,7 +132,18 @@ def _last_tuesday(year: int, month: int) -> date:
     else:
         next_month = date(year, month + 1, 1)
     last_day = next_month - timedelta(days=1)
-    return last_day - timedelta(days=(last_day.weekday() - 1) % 7)
+    return last_day - timedelta(days=(last_day.weekday() - weekday) % 7)
+
+
+def _monthly_nifty_futures_expiry(year: int, month: int) -> date:
+    """Resolve the monthly NIFTY futures expiry for its historical rule.
+
+    NIFTY monthly expiries were Thursday through August 2025 and Tuesday from
+    September 2025 onward.  This keeps the contract identity correct when the
+    additive backfill crosses that exchange-calendar change.
+    """
+    weekday = 3 if date(year, month, 1) < date(2025, 9, 1) else 1
+    return _last_weekday(year, month, weekday)
 
 
 def _month_starts(start: date, end: date) -> Iterable[date]:
@@ -135,7 +160,7 @@ def resolve_monthly_futures_expiries(start: date, end: date) -> list[date]:
     first_month = date(start.year, start.month, 1)
     previous_month = date(first_month.year - (first_month.month == 1), 12 if first_month.month == 1 else first_month.month - 1, 1)
     for month_start in (previous_month, *_month_starts(start, end)):
-        expiry = _last_tuesday(month_start.year, month_start.month)
+        expiry = _monthly_nifty_futures_expiry(month_start.year, month_start.month)
         if not expiries or expiries[-1] != expiry:
             expiries.append(expiry)
     return [expiry for expiry in expiries if expiry >= start - timedelta(days=31) and expiry <= end + timedelta(days=31)]
@@ -295,7 +320,7 @@ class BreezeHistoricalBackfill:
                 window_start=self._session_start_utc(chunk_start),
                 window_end=self._session_end_utc(chunk_end),
             )
-            await self.repo.save_candles(candles)
+            await self._save_additive(candles)
 
     async def _fetch_futures(self) -> None:
         for period_start, period_end, expiry in futures_contract_periods(self.config.start_date, self.config.end_date):
@@ -318,8 +343,30 @@ class BreezeHistoricalBackfill:
                     window_start=self._session_start_utc(chunk_start),
                     window_end=self._session_end_utc(chunk_end),
                 )
-                await self.repo.save_candles(candles)
+                await self._save_additive(candles)
                 self.report.futures_contracts[expiry.isoformat()] = self.report.futures_contracts.get(expiry.isoformat(), 0) + len(candles)
+
+    async def _save_additive(self, candles: list[Candle]) -> None:
+        """Persist only missing candle keys; never overwrite existing data."""
+        if not candles:
+            return
+        existing = await self.repo.get_existing_candle_keys(
+            candles[0].instrument_id,
+            candles[0].interval,
+            start_time=min(c.start_time for c in candles),
+            end_time=max(c.start_time for c in candles),
+        )
+        new_candles: list[Candle] = []
+        seen: set[tuple[str, str, str]] = set()
+        for candle in candles:
+            key = (candle.instrument_id, candle.interval, candle.start_time.isoformat())
+            if key in existing or key in seen:
+                self.report.candles_skipped_existing += 1
+                continue
+            seen.add(key)
+            new_candles.append(candle)
+        await self.repo.save_candles(new_candles)
+        self.report.candles_inserted += len(new_candles)
 
     async def _request_chunk(
         self,
@@ -406,8 +453,13 @@ class BreezeHistoricalBackfill:
         for row in rows:
             try:
                 start_time = _breeze_timestamp(row.get("datetime") or row.get("date"))
+                local_start = start_time.astimezone(IST)
                 if start_time < window_start or start_time > window_end:
                     raise ValueError("timestamp is outside the requested 09:15-15:30 IST session window")
+                if local_start.weekday() >= 5:
+                    raise ValueError("timestamp falls on a weekend")
+                if local_start.time() < time(9, 15) or local_start.time() > time(15, 30):
+                    raise ValueError("timestamp is outside the 09:15-15:30 IST session window")
                 open_price = _number(row, "open")
                 high_price = _number(row, "high")
                 low_price = _number(row, "low")
@@ -416,10 +468,13 @@ class BreezeHistoricalBackfill:
                 open_interest = _number(row, "open_interest", required=False)
                 assert open_price is not None and high_price is not None and low_price is not None and close_price is not None
                 if low_price > high_price or not (low_price <= open_price <= high_price) or not (low_price <= close_price <= high_price):
+                    self.report.invalid_ohlc_rows += 1
                     raise ValueError("invalid OHLC relationship")
                 if volume is not None and volume < 0:
+                    self.report.invalid_ohlc_rows += 1
                     raise ValueError("negative volume")
                 if open_interest is not None and open_interest < 0:
+                    self.report.invalid_ohlc_rows += 1
                     raise ValueError("negative open interest")
                 if start_time.minute % 5 != 0 or start_time.second != 0:
                     raise ValueError("timestamp is not aligned to a 5-minute boundary")
@@ -467,8 +522,14 @@ class BreezeHistoricalBackfill:
             self.report.actual_end = max(c.start_time for c in all_downloaded).astimezone(IST).date().isoformat()
         self.report.spot_candles = len(spot)
         self.report.futures_candles = len(futures)
-        self.report.futures_volume_present = self._futures_volume_rows or sum(1 for c in futures if c.volume != 0)
-        self.report.futures_open_interest_present = self._futures_oi_rows or sum(1 for c in futures if c.open_interest not in (None, 0))
+        # Availability is measured over the final persisted dataset, not over
+        # the union of API rows fetched during this run.  The latter can count
+        # preserved existing candles twice on an idempotent backfill.
+        self.report.futures_volume_present = sum(1 for c in futures if c.volume != 0)
+        self.report.futures_open_interest_present = sum(1 for c in futures if c.open_interest not in (None, 0))
+        if futures:
+            self.report.futures_volume_available_pct = round(self.report.futures_volume_present / len(futures) * 100, 2)
+            self.report.futures_open_interest_available_pct = round(self.report.futures_open_interest_present / len(futures) * 100, 2)
         self.report.duplicate_candles = sum(max(0, count - 1) for count in self._incoming_keys.values())
         self.report.expected_weekday_sessions = sum(1 for d in self._dates(self.config.start_date, self.config.end_date) if d.weekday() < 5)
         self.report.spot_sessions = len(self._session_dates(spot))
@@ -478,9 +539,11 @@ class BreezeHistoricalBackfill:
         expected = {d.isoformat() for d in self._dates(self.config.start_date, self.config.end_date) if d.weekday() < 5}
         self.report.missing_spot_sessions = sorted(expected - spot_sessions)
         self.report.missing_futures_sessions = sorted(expected - future_sessions)
+        self.report.partial_spot_sessions = self._partial_sessions(spot, expected)
+        self.report.partial_futures_sessions = self._partial_sessions(futures, expected)
         self.report.timestamp_gaps = self._timestamp_gaps(spot + futures)
-        self.report.notes.append("Futures expiry resolver: NSE NIFTY monthly contracts, last Tuesday of each expiry month.")
-        self.report.notes.append("A primary-key collision is safely replaced; incoming duplicate keys are counted in duplicate_candles.")
+        self.report.notes.append("Futures expiry resolver: Thursday expiries through August 2025, Tuesday expiries from September 2025 onward.")
+        self.report.notes.append("Backfill is additive: existing primary-key candles are preserved; incoming duplicate keys are counted in duplicate_candles.")
 
     async def _remove_out_of_session_rows(self, candles: list[Candle]) -> None:
         """Remove only BREEZE rows outside the requested exchange session."""
@@ -508,6 +571,15 @@ class BreezeHistoricalBackfill:
         return {c.start_time.astimezone(IST).date().isoformat() for c in candles}
 
     @staticmethod
+    def _partial_sessions(candles: list[Candle], expected_dates: set[str]) -> list[dict[str, Any]]:
+        counts: Counter[str] = Counter(c.start_time.astimezone(IST).date().isoformat() for c in candles)
+        return [
+            {"date": day, "candles": counts[day], "expected_candles": 76}
+            for day in sorted(expected_dates)
+            if 0 < counts[day] < 76
+        ]
+
+    @staticmethod
     def _timestamp_gaps(candles: list[Candle]) -> list[dict[str, Any]]:
         grouped: defaultdict[str, list[datetime]] = defaultdict(list)
         for candle in candles:
@@ -533,6 +605,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--start-date", required=True, type=date.fromisoformat)
     parser.add_argument("--end-date", required=True, type=date.fromisoformat)
     parser.add_argument("--json", action="store_true", dest="as_json")
+    parser.add_argument("--report-path", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -546,7 +619,11 @@ async def _main() -> None:
         instruments_db_path=settings.instruments_db_path,
     )
     report = await BreezeHistoricalBackfill(config, settings=settings).run()
-    print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    payload = report.to_dict()
+    if args.report_path:
+        args.report_path.parent.mkdir(parents=True, exist_ok=True)
+        args.report_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -329,7 +329,17 @@ class HistoricalService:
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         limit: int = 500,
+        requested_source: Optional[str] = None,
+        allow_provider_fallback: bool = True,
+        allow_synthetic_fallback: bool = True,
     ) -> list[Candle]:
+        """Return historical candles.
+
+        ``requested_source`` and the fallback flags are replay-boundary
+        controls.  Existing callers retain the prior live/chart behavior by
+        using the defaults; deterministic replay disables provider and
+        synthetic fallback explicitly.
+        """
         breeze_active = False
         if self.broker_gateway:
             active_adapter = getattr(self.broker_gateway, "active_adapter", None)
@@ -339,7 +349,8 @@ class HistoricalService:
         latest_candle = await self.repo.get_latest_candle(instrument_id, interval)
 
         # Proactively fetch from Breeze if session is active and cached candles are missing or simulated
-        if breeze_active and (not latest_candle or latest_candle.source not in ("BREEZE", "KITE", "LIVE")
+        breeze_fetch_allowed = requested_source in (None, "BREEZE", "MIXED")
+        if breeze_active and breeze_fetch_allowed and (not latest_candle or latest_candle.source not in ("BREEZE", "KITE", "LIVE")
                               or (utc_now() - latest_candle.end_time).total_seconds() >= (900 if interval == "15m" else 300)):
             breeze_candles = await self.fetch_candles_from_breeze(instrument_id, interval)
             if breeze_candles:
@@ -355,14 +366,14 @@ class HistoricalService:
         )
 
         has_only_simulated = bool(candles and all(c.source == "SIMULATED" for c in candles))
-        if (not candles or has_only_simulated) and breeze_active:
+        if (not candles or has_only_simulated) and breeze_active and breeze_fetch_allowed and allow_provider_fallback:
             breeze_candles = await self.fetch_candles_from_breeze(instrument_id, interval)
             if breeze_candles:
                 await self.repo.purge_simulated_candles(instrument_id, interval)
                 await self.repo.save_candles(breeze_candles)
                 return sorted(breeze_candles, key=lambda candle: candle.start_time)[-limit:]
 
-        if not candles:
+        if not candles and allow_synthetic_fallback:
             # Fall back to realistic synthetic candles if offline
             candles = await self.generate_synthetic_candles(instrument_id, interval, count=min(limit, 100))
             await self.repo.save_candles(candles)

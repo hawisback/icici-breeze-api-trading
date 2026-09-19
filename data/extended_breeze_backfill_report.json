@@ -1,0 +1,816 @@
+{
+  "actual_date_range_received": {
+    "end": "2026-09-18",
+    "start": "2025-01-01"
+  },
+  "candles_inserted": 0,
+  "candles_skipped_existing": 62584,
+  "duplicate_candles": 0,
+  "expected_weekday_sessions": 448,
+  "failed_api_requests": [],
+  "futures_candles_containing_open_interest": 30361,
+  "futures_candles_containing_volume": 30278,
+  "futures_contract_ids": {
+    "2025-01-30": "INST-NIFTY-FUT-2025-01-30",
+    "2025-02-27": "INST-NIFTY-FUT-2025-02-27",
+    "2025-03-27": "INST-NIFTY-FUT-2025-03-27",
+    "2025-04-24": "INST-NIFTY-FUT-2025-04-24",
+    "2025-05-29": "INST-NIFTY-FUT-2025-05-29",
+    "2025-06-26": "INST-NIFTY-FUT-2025-06-26",
+    "2025-07-31": "INST-NIFTY-FUT-2025-07-31",
+    "2025-08-28": "INST-NIFTY-FUT-2025-08-28",
+    "2025-09-30": "INST-NIFTY-FUT-2025-09-30",
+    "2025-10-28": "INST-NIFTY-FUT-2025-10-28",
+    "2025-11-25": "INST-NIFTY-FUT-2025-11-25",
+    "2025-12-30": "INST-NIFTY-FUT-2025-12-30",
+    "2026-01-27": "INST-NIFTY-FUT-2026-01-27",
+    "2026-02-24": "INST-NIFTY-FUT-2026-02-24",
+    "2026-03-31": "INST-NIFTY-FUT-2026-03-31",
+    "2026-04-28": "INST-NIFTY-FUT-2026-04-28",
+    "2026-05-26": "INST-NIFTY-FUT-2026-05-26",
+    "2026-06-30": "INST-NIFTY-FUT-2026-06-30",
+    "2026-07-28": "INST-NIFTY-FUT-2026-07-28",
+    "2026-08-25": "INST-NIFTY-FUT-2026-08-25",
+    "2026-09-29": "INST-NIFTY-FUT-2026-09-29"
+  },
+  "futures_contracts_used": {
+    "2025-01-30": 1658,
+    "2025-02-27": 1436,
+    "2025-03-27": 1433,
+    "2025-04-24": 1206,
+    "2025-05-29": 1803,
+    "2025-06-26": 1501,
+    "2025-07-31": 1875,
+    "2025-08-28": 1354,
+    "2025-09-30": 1745,
+    "2025-10-28": 1305,
+    "2025-11-25": 1444,
+    "2025-12-30": 1824,
+    "2026-01-27": 1367,
+    "2026-02-24": 1520,
+    "2026-03-31": 0,
+    "2026-04-28": 1368,
+    "2026-05-26": 1444,
+    "2026-06-30": 1746,
+    "2026-07-28": 1520,
+    "2026-08-25": 1520,
+    "2026-09-29": 1292
+  },
+  "futures_open_interest_available_pct": 100.0,
+  "futures_sessions": 402,
+  "futures_volume_available_pct": 99.73,
+  "invalid_ohlc_rows": 2,
+  "missing_futures_sessions": [
+    "2025-02-26",
+    "2025-03-14",
+    "2025-03-31",
+    "2025-04-10",
+    "2025-04-14",
+    "2025-04-18",
+    "2025-05-01",
+    "2025-08-15",
+    "2025-08-27",
+    "2025-10-02",
+    "2025-10-22",
+    "2025-11-05",
+    "2025-12-25",
+    "2026-01-15",
+    "2026-01-26",
+    "2026-02-25",
+    "2026-02-26",
+    "2026-02-27",
+    "2026-03-02",
+    "2026-03-03",
+    "2026-03-04",
+    "2026-03-05",
+    "2026-03-06",
+    "2026-03-09",
+    "2026-03-10",
+    "2026-03-11",
+    "2026-03-12",
+    "2026-03-13",
+    "2026-03-16",
+    "2026-03-17",
+    "2026-03-18",
+    "2026-03-19",
+    "2026-03-20",
+    "2026-03-23",
+    "2026-03-24",
+    "2026-03-25",
+    "2026-03-26",
+    "2026-03-27",
+    "2026-03-30",
+    "2026-03-31",
+    "2026-04-03",
+    "2026-04-14",
+    "2026-05-01",
+    "2026-05-28",
+    "2026-06-26",
+    "2026-09-14"
+  ],
+  "missing_spot_sessions": [
+    "2025-02-26",
+    "2025-03-14",
+    "2025-03-31",
+    "2025-04-10",
+    "2025-04-14",
+    "2025-04-18",
+    "2025-05-01",
+    "2025-08-15",
+    "2025-08-27",
+    "2025-10-02",
+    "2025-10-22",
+    "2025-11-05",
+    "2025-12-25",
+    "2026-01-15",
+    "2026-01-26",
+    "2026-03-03",
+    "2026-03-26",
+    "2026-03-31",
+    "2026-04-03",
+    "2026-04-14",
+    "2026-05-01",
+    "2026-05-28",
+    "2026-06-26",
+    "2026-09-14"
+  ],
+  "nifty_futures_candles": 30361,
+  "nifty_spot_candles": 32523,
+  "notes": [
+    "Futures expiry resolver: Thursday expiries through August 2025, Tuesday expiries from September 2025 onward.",
+    "Backfill is additive: existing primary-key candles are preserved; incoming duplicate keys are counted in duplicate_candles."
+  ],
+  "partial_futures_sessions": [
+    {
+      "candles": 75,
+      "date": "2025-01-01",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-03",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-06",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-09",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-13",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-14",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-15",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-16",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-20",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-21",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-22",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-24",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-27",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-01-30",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-02-06",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-02-10",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-02-11",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-02-12",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-02-13",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-02-14",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-02-21",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-02-27",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-03",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-04",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-05",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-06",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-07",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-10",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-11",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-18",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-20",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-24",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-26",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-03-28",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-01",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-02",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-04",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-07",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-09",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-15",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-17",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-23",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-24",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-25",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-28",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-29",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-04-30",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-02",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-05",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-06",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-07",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-08",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-09",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-12",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-13",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-14",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-20",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-21",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-22",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-23",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-26",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-27",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-28",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-29",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-05-30",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-02",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-03",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-05",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-06",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-09",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-10",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-11",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-12",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-13",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-16",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-17",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-18",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-19",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-20",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-23",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-24",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-25",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-26",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-27",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-06-30",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-01",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-02",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-03",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-04",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-07",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-08",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-09",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-10",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-11",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-14",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-15",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-16",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-17",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-18",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-21",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-22",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-23",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-24",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-25",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-28",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-29",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-30",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-07-31",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-01",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-04",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-05",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-07",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-11",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-12",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-13",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-14",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-18",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-19",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-20",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-25",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-26",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-28",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-08-29",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-09-01",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2025-09-02",
+      "expected_candles": 76
+    },
+    {
+      "candles": 13,
+      "date": "2025-10-21",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2026-01-08",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2026-06-05",
+      "expected_candles": 76
+    },
+    {
+      "candles": 75,
+      "date": "2026-06-17",
+      "expected_candles": 76
+    }
+  ],
+  "partial_spot_sessions": [
+    {
+      "candles": 75,
+      "date": "2025-10-21",
+      "expected_candles": 76
+    }
+  ],
+  "rejected_rows": 1904,
+  "requested_date_range": {
+    "end": "2026-09-18",
+    "start": "2025-01-01"
+  },
+  "requests": {
+    "attempted": 132,
+    "completed": 132,
+    "failed": 0
+  },
+  "spot_sessions": 424,
+  "timestamp_gaps": [
+    {
+      "from": "2025-10-21T06:40:00+00:00",
+      "instrument_id": "INST-NIFTY-INDEX",
+      "missing_minutes": 5,
+      "to": "2025-10-21T06:50:00+00:00"
+    }
+  ]
+}

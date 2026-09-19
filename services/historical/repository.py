@@ -74,6 +74,35 @@ class HistoricalRepository:
             )
             await conn.commit()
 
+    async def get_existing_candle_keys(
+        self,
+        instrument_id: str,
+        interval: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> set[tuple[str, str, str]]:
+        """Return exact candle keys already stored for an additive backfill.
+
+        The historical primary key intentionally does not include ``source``.
+        A backfill must therefore treat any existing key as authoritative and
+        avoid replacing it merely because Breeze returned the same timestamp.
+        """
+        async with self.engine.connect() as conn:
+            clauses = ["instrument_id = ?", "interval = ?"]
+            params: list[object] = [instrument_id, interval]
+            if start_time is not None:
+                clauses.append("start_time >= ?")
+                params.append(start_time.isoformat())
+            if end_time is not None:
+                clauses.append("start_time <= ?")
+                params.append(end_time.isoformat())
+            cursor = await conn.execute(
+                f"SELECT instrument_id, interval, start_time FROM historical_candles WHERE {' AND '.join(clauses)}",
+                params,
+            )
+            rows = await cursor.fetchall()
+            return {(row["instrument_id"], row["interval"], row["start_time"]) for row in rows}
+
     async def get_candles(
         self,
         instrument_id: str,
