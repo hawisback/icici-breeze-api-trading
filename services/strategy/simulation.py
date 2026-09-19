@@ -270,7 +270,11 @@ class SimulationEngine:
         cfg = self.tunables
         strat_a = TrendPullbackStrategy(
             adx_threshold=cfg.adx_threshold, rvol_threshold=cfg.rvol_threshold,
-            ema_slope_threshold=cfg.ema_slope_threshold, min_confirmation_score=cfg.min_confirmation_score)
+            ema_slope_threshold=cfg.ema_slope_threshold, min_confirmation_score=cfg.min_confirmation_score,
+            call_pullback_min_depth=cfg.call_pullback_min_depth,
+            call_pullback_max_depth=cfg.call_pullback_max_depth,
+            put_pullback_min_depth=cfg.put_pullback_min_depth,
+            put_pullback_max_depth=cfg.put_pullback_max_depth)
         strat_b = VolatilityBreakoutStrategy(rvol_threshold=cfg.rvol_threshold, adx_threshold=cfg.adx_threshold,
                                              min_confirmation_score=cfg.strat_b_min_confirmation,
                                              box_max_height_atr=cfg.box_max_height_atr,

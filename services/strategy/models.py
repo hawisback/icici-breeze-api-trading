@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def utc_now() -> datetime:
@@ -112,11 +112,26 @@ class StrategyTunablesConfig(BaseModel):
     adx_threshold: float = Field(default=20.0, ge=10.0, le=40.0)
     rvol_threshold: float = Field(default=1.20, ge=1.0, le=3.0)
     ema_slope_threshold: float = Field(default=0.10, gt=0, le=1.0)
+    # Strategy A uses independent directional pullback bands.  CALL retains
+    # the legacy 8%-70% inclusive range; PUT is the frozen validated candidate
+    # with an inclusive lower and exclusive upper boundary.
+    call_pullback_min_depth: float = Field(default=0.08, ge=0.0, lt=1.0)
+    call_pullback_max_depth: float = Field(default=0.70, gt=0.0, le=1.0)
+    put_pullback_min_depth: float = Field(default=0.40, ge=0.0, lt=1.0)
+    put_pullback_max_depth: float = Field(default=0.60, gt=0.0, le=1.0)
     min_confirmation_score: int = Field(default=2, ge=1, le=6, description="Minimum confirmation points for Strategy A")
     strat_b_min_confirmation: int = Field(default=2, ge=1, le=6, description="Minimum confirmation points for Strategy B")
     box_max_height_atr: float = Field(default=1.50, ge=1.0, le=2.5, description="Max compression box height in ATR")
     supertrend_period: int = Field(default=10)
     supertrend_multiplier: float = Field(default=3.0)
+
+    @model_validator(mode="after")
+    def validate_pullback_bands(self) -> "StrategyTunablesConfig":
+        if self.call_pullback_min_depth > self.call_pullback_max_depth:
+            raise ValueError("call_pullback_min_depth must not exceed call_pullback_max_depth")
+        if self.put_pullback_min_depth >= self.put_pullback_max_depth:
+            raise ValueError("put_pullback_min_depth must be less than put_pullback_max_depth")
+        return self
 
 
 class CompressionBox(BaseModel):
@@ -143,7 +158,7 @@ class AutoTradingConfig(BaseModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     session: SessionTimersConfig = Field(default_factory=SessionTimersConfig)
     tunables: StrategyTunablesConfig = Field(default_factory=StrategyTunablesConfig)
-    strategy_a_revision: int = 2
+    strategy_a_revision: int = 3
 
 
 class MarketFeatures(BaseModel):

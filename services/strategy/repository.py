@@ -132,6 +132,24 @@ class StrategyRepository:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_logs_ts ON decision_logs(timestamp);")
 
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS strategy_option_chain_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    strategy_signal_id TEXT NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    spot_price REAL NOT NULL,
+                    expiry TEXT,
+                    source TEXT NOT NULL,
+                    selector_candidates_json TEXT NOT NULL,
+                    chain_candidates_json TEXT NOT NULL,
+                    selected_contract_json TEXT,
+                    rejection_reason TEXT
+                );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_signal ON strategy_option_chain_snapshots(strategy_signal_id);"
+            )
+
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS strategy_signals (
                     signal_id TEXT PRIMARY KEY,
                     strategy TEXT NOT NULL,
@@ -242,14 +260,18 @@ class StrategyRepository:
                 return default_cfg
             data = json.loads(row["config_json"])
             # Migrate only previous defaults; preserve deliberate custom settings.
-            if data.get("strategy_a_revision", 1) < 2:
+            if data.get("strategy_a_revision", 1) < 3:
                 tunables = data.setdefault("tunables", {})
                 session = data.setdefault("session", {})
                 if tunables.get("rvol_threshold") == 1.30:
                     tunables["rvol_threshold"] = 1.20
                 if session.get("no_new_trade_before") == "09:30":
                     session["no_new_trade_before"] = "09:20"
-                data["strategy_a_revision"] = 2
+                tunables.setdefault("call_pullback_min_depth", 0.08)
+                tunables.setdefault("call_pullback_max_depth", 0.70)
+                tunables.setdefault("put_pullback_min_depth", 0.40)
+                tunables.setdefault("put_pullback_max_depth", 0.60)
+                data["strategy_a_revision"] = 3
                 await conn.execute("UPDATE auto_strategy_config SET config_json = ? WHERE id = 'active'", (json.dumps(data),))
                 await conn.commit()
             return AutoTradingConfig.model_validate(data)
@@ -272,6 +294,32 @@ class StrategyRepository:
                 VALUES ('active', ?, ?)
                 """,
                 (config.model_dump_json(), utc_now().isoformat()),
+            )
+            await conn.commit()
+
+    async def save_option_chain_snapshot(self, snapshot: dict[str, Any]) -> None:
+        """Persist passive selector-input capture without affecting execution."""
+        async with self.engine.connect() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO strategy_option_chain_snapshots (
+                    snapshot_id, strategy_signal_id, captured_at, spot_price, expiry,
+                    source, selector_candidates_json, chain_candidates_json,
+                    selected_contract_json, rejection_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot["snapshot_id"],
+                    snapshot["strategy_signal_id"],
+                    snapshot["captured_at"],
+                    snapshot["spot_price"],
+                    snapshot.get("expiry"),
+                    snapshot.get("source", "UNAVAILABLE"),
+                    json.dumps(snapshot.get("selector_candidates", []), sort_keys=True),
+                    json.dumps(snapshot.get("chain_candidates", []), sort_keys=True),
+                    json.dumps(snapshot["selected_contract"], sort_keys=True) if snapshot.get("selected_contract") else None,
+                    snapshot.get("rejection_reason"),
+                ),
             )
             await conn.commit()
 

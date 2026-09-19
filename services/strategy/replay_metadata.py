@@ -133,8 +133,15 @@ def build_configuration_snapshot(
         "min_impulse_atr": effective("min_impulse_atr", 0.70),
         "pullback_duration_min_bars": 1,
         "pullback_duration_max_bars": 9,
-        "min_pullback_depth": effective("min_pullback_depth", 0.08),
-        "max_pullback_depth": effective("max_pullback_depth", 0.70),
+        # Keep the legacy keys for readers of older metadata while recording
+        # the production candidate's directional bands explicitly.
+        "min_pullback_depth": effective("min_pullback_depth", tunables.call_pullback_min_depth),
+        "max_pullback_depth": effective("max_pullback_depth", tunables.call_pullback_max_depth),
+        "call_pullback_min_depth": effective("min_pullback_depth", tunables.call_pullback_min_depth),
+        "call_pullback_max_depth": effective("max_pullback_depth", tunables.call_pullback_max_depth),
+        "put_pullback_min_depth": effective("min_pullback_depth", tunables.put_pullback_min_depth),
+        "put_pullback_max_depth": effective("max_pullback_depth", tunables.put_pullback_max_depth),
+        "put_pullback_max_exclusive": True,
         "retest_tolerance_atr": effective("retest_tolerance_atr", 0.45),
         "breakout_buffer_atr": effective("breakout_buffer_atr", 0.02),
         "breakout_confirm_polls": effective("breakout_confirm_polls", 1),

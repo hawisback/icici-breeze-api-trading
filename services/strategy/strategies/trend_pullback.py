@@ -49,6 +49,10 @@ class TrendPullbackStrategy:
         min_impulse_atr: float = 0.70,
         min_pullback_depth: float = 0.08,
         max_pullback_depth: float = 0.70,
+        call_pullback_min_depth: Optional[float] = None,
+        call_pullback_max_depth: Optional[float] = None,
+        put_pullback_min_depth: Optional[float] = None,
+        put_pullback_max_depth: Optional[float] = None,
         retest_tolerance_atr: float = 0.45,
         min_available_confirmations: int = 2,
     ) -> None:
@@ -61,6 +65,12 @@ class TrendPullbackStrategy:
         self.min_impulse_atr = min_impulse_atr
         self.min_pullback_depth = min_pullback_depth
         self.max_pullback_depth = max_pullback_depth
+        # The legacy global arguments remain supported for isolated callers and
+        # old tests. Production passes the directional configuration below.
+        self.call_pullback_min_depth = call_pullback_min_depth if call_pullback_min_depth is not None else min_pullback_depth
+        self.call_pullback_max_depth = call_pullback_max_depth if call_pullback_max_depth is not None else max_pullback_depth
+        self.put_pullback_min_depth = put_pullback_min_depth if put_pullback_min_depth is not None else min_pullback_depth
+        self.put_pullback_max_depth = put_pullback_max_depth if put_pullback_max_depth is not None else max_pullback_depth
         self.retest_tolerance_atr = retest_tolerance_atr
         self.min_available_confirmations = min_available_confirmations
         self.state = {d.value: {} for d in TradeDirection}
@@ -742,6 +752,14 @@ class TrendPullbackStrategy:
         pb = [c for c in bars if c.end_time > end]
         age = len(pb)
         duration_status = "WAITING" if age == 0 else ("PASS" if age <= 9 else "INVALID")
+        if bullish:
+            configured_min_depth = setting("min_pullback_depth", self.call_pullback_min_depth)
+            configured_max_depth = setting("max_pullback_depth", self.call_pullback_max_depth)
+            configured_range = f"{configured_min_depth:.0%}\u2013{configured_max_depth:.0%}"
+        else:
+            configured_min_depth = setting("min_pullback_depth", self.put_pullback_min_depth)
+            configured_max_depth = setting("max_pullback_depth", self.put_pullback_max_depth)
+            configured_range = f"{configured_min_depth:.0%}\u2013<{configured_max_depth:.0%}"
         summary["pullback"] = {
             "state": "ACTIVE",
             "bars": age,
@@ -749,6 +767,8 @@ class TrendPullbackStrategy:
             "duration_status": duration_status,
             "depth_pct": 0,
             "depth_status": "WAITING",
+            "depth_range": configured_range,
+            "max_depth_inclusive": bullish,
             "retest": "None",
             "retest_status": "WAITING",
             "structure_preservation_status": "WAITING",
@@ -763,20 +783,33 @@ class TrendPullbackStrategy:
         depth = (impulse["high"] - extreme if bullish else extreme - impulse["low"]) / impulse["height"]
         summary["pullback"]["depth_pct"] = round(depth * 100, 1)
 
-        min_depth = setting("min_pullback_depth", self.min_pullback_depth)
-        max_depth = setting("max_pullback_depth", self.max_pullback_depth)
+        if bullish:
+            min_depth = setting("min_pullback_depth", self.call_pullback_min_depth)
+            max_depth = setting("max_pullback_depth", self.call_pullback_max_depth)
+            max_depth_exclusive = False
+        else:
+            min_depth = setting("min_pullback_depth", self.put_pullback_min_depth)
+            max_depth = setting("max_pullback_depth", self.put_pullback_max_depth)
+            max_depth_exclusive = True
+        # Preserve the legacy CALL tolerance. The frozen PUT candidate uses
+        # exact boundary semantics: minimum inclusive, maximum exclusive.
+        depth_below_min = depth < min_depth if max_depth_exclusive else depth < (min_depth - 1e-6)
+        depth_above_max = depth >= max_depth if max_depth_exclusive else depth > (max_depth + 1e-6)
+        depth_in_range = not depth_below_min and not depth_above_max
         structure_preserved = not (
             trigger_bar.low < impulse["low"] if bullish else trigger_bar.high > impulse["high"]
         )
         summary["pullback"].update(
-            depth_status=("INVALID" if depth > (max_depth + 1e-6) else
-                          "PASS" if depth >= (min_depth - 1e-6) else "WAITING"),
+            depth_status=("INVALID" if depth_above_max else
+                          "PASS" if depth_in_range else "WAITING"),
+            depth_range=(f"{min_depth:.0%}\u2013<{max_depth:.0%}" if max_depth_exclusive else f"{min_depth:.0%}\u2013{max_depth:.0%}"),
+            max_depth_inclusive=not max_depth_exclusive,
             structure_preservation_status="PASS" if structure_preserved else "INVALID",
         )
 
         invalid = (
             age > 9
-            or depth > (max_depth + 1e-6)
+            or depth_above_max
             or not structure_preserved
         )
         if invalid:
@@ -877,7 +910,7 @@ class TrendPullbackStrategy:
 
         futures_vwap_retest = any(name == "Futures VWAP" for name in retests)
         futures_vwap_retest_available = any(c.end_time in aligned for c in pb)
-        pb_ok = (1 <= age <= 9 and (min_depth - 1e-6) <= depth <= (max_depth + 1e-6) and bool(retests))
+        pb_ok = 1 <= age <= 9 and depth_in_range and bool(retests)
         pb_gap = (
             f"Pullback qualified ({age} bars, {depth:.1%}, retest: {', '.join(retests)})"
             if pb_ok
@@ -888,14 +921,18 @@ class TrendPullbackStrategy:
             "Pullback duration, depth and retest",
             pb_ok,
             f"{age} bars; {depth:.1%}; {retests}",
-            f"1-9 bars; {min_depth:.0%}-{max_depth:.0%}; retest within {retest_tol:.2f} ATR",
+            (f"1-9 bars; {min_depth:.0%}\u2013<{max_depth:.0%}; retest within {retest_tol:.2f} ATR"
+             if max_depth_exclusive else
+             f"1-9 bars; {min_depth:.0%}\u2013{max_depth:.0%}; retest within {retest_tol:.2f} ATR"),
             pb_gap,
         )
         summary["pullback"].update(
             state="QUALIFIED" if pb_ok else "ACTIVE",
             duration_status="PASS" if 1 <= age <= 9 else "INVALID",
-            depth_status=("INVALID" if depth > (max_depth + 1e-6) else
-                          "PASS" if depth >= (min_depth - 1e-6) else "WAITING"),
+            depth_status=("INVALID" if depth_above_max else
+                          "PASS" if depth_in_range else "WAITING"),
+            depth_range=(f"{min_depth:.0%}\u2013<{max_depth:.0%}" if max_depth_exclusive else f"{min_depth:.0%}\u2013{max_depth:.0%}"),
+            max_depth_inclusive=not max_depth_exclusive,
             retest=", ".join(retests) or "None",
             retest_status="PASS" if retests else "WAITING",
             structure_preservation_status="PASS" if structure_preserved else "INVALID",

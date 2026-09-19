@@ -476,6 +476,9 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
                 <div className="text-[10px] text-slate-400 mt-1">
                   {currentStrategy.phase_summary.pullback?.bars ?? 0} bars | {currentStrategy.phase_summary.pullback?.depth_pct ?? 0}%
                 </div>
+                <div className="text-[10px] text-cyan-300 mt-1">
+                  Required pullback depth: {currentStrategy.phase_summary.pullback?.depth_range || "configured range"}
+                </div>
               </div>
 
               {/* Phase 4: Trigger */}

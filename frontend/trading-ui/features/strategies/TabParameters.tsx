@@ -479,6 +479,32 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
                 onChange={e => setForm({...form, tunables: {...form.tunables, min_confirmation_score: Number(e.target.value)}})}
                 className="block w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" />
             </label>
+
+            <label className="block">
+              <span className="text-xs text-slate-400 font-medium">CALL pullback range</span>
+              <span className="block text-[10px] text-slate-600 mb-1">Existing Strategy A range; maximum is inclusive.</span>
+              <div className="grid grid-cols-2 gap-2">
+                <input type="number" min="0" max="1" step="0.01" value={form.tunables.call_pullback_min_depth ?? 0.08}
+                  onChange={e => setForm({...form, tunables: {...form.tunables, call_pullback_min_depth: Number(e.target.value)}})}
+                  className="bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" aria-label="CALL pullback minimum" />
+                <input type="number" min="0" max="1" step="0.01" value={form.tunables.call_pullback_max_depth ?? 0.70}
+                  onChange={e => setForm({...form, tunables: {...form.tunables, call_pullback_max_depth: Number(e.target.value)}})}
+                  className="bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" aria-label="CALL pullback maximum" />
+              </div>
+            </label>
+
+            <label className="block">
+              <span className="text-xs text-slate-400 font-medium">PUT pullback range</span>
+              <span className="block text-[10px] text-cyan-400 mb-1">Frozen candidate: 40% inclusive to &lt;60% exclusive.</span>
+              <div className="grid grid-cols-2 gap-2">
+                <input type="number" min="0" max="1" step="0.01" value={form.tunables.put_pullback_min_depth ?? 0.40}
+                  onChange={e => setForm({...form, tunables: {...form.tunables, put_pullback_min_depth: Number(e.target.value)}})}
+                  className="bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" aria-label="PUT pullback minimum" />
+                <input type="number" min="0" max="1" step="0.01" value={form.tunables.put_pullback_max_depth ?? 0.60}
+                  onChange={e => setForm({...form, tunables: {...form.tunables, put_pullback_max_depth: Number(e.target.value)}})}
+                  className="bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" aria-label="PUT pullback maximum" />
+              </div>
+            </label>
           </div>
         </div>
 

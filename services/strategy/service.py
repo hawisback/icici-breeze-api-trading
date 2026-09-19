@@ -79,6 +79,10 @@ class StrategyService:
             rvol_threshold=self.config.tunables.rvol_threshold,
             min_confirmation_score=self.config.tunables.min_confirmation_score,
             ema_slope_threshold=self.config.tunables.ema_slope_threshold,
+            call_pullback_min_depth=self.config.tunables.call_pullback_min_depth,
+            call_pullback_max_depth=self.config.tunables.call_pullback_max_depth,
+            put_pullback_min_depth=self.config.tunables.put_pullback_min_depth,
+            put_pullback_max_depth=self.config.tunables.put_pullback_max_depth,
         )
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
@@ -141,6 +145,10 @@ class StrategyService:
             rvol_threshold=self.config.tunables.rvol_threshold,
             min_confirmation_score=self.config.tunables.min_confirmation_score,
             ema_slope_threshold=self.config.tunables.ema_slope_threshold,
+            call_pullback_min_depth=self.config.tunables.call_pullback_min_depth,
+            call_pullback_max_depth=self.config.tunables.call_pullback_max_depth,
+            put_pullback_min_depth=self.config.tunables.put_pullback_min_depth,
+            put_pullback_max_depth=self.config.tunables.put_pullback_max_depth,
         )
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
@@ -431,6 +439,21 @@ class StrategyService:
             option_chain=chain,
             override_premium_cap=self._active_overrides.max_option_premium_cap,
         )
+        # Passive shadow capture only. The selector has already run and its
+        # result is never changed by this recorder; persistence failures are
+        # intentionally non-blocking for paper/live execution paths.
+        if signal.strategy == StrategyName.TREND_PULLBACK:
+            try:
+                await self._capture_option_chain_snapshot(
+                    signal=signal,
+                    spot_price=features.spot_price,
+                    chain=chain,
+                    selector_candidates=candidates,
+                    selected_contract=selected_contract,
+                    rejection_reason=rejection_reason,
+                )
+            except Exception:
+                logger.exception("Passive option-chain snapshot capture failed")
 
         if not selected_contract:
             await self._log_decision(
@@ -850,6 +873,77 @@ class StrategyService:
             except Exception:
                 logger.exception("Option-chain retrieval failed")
         return {"source": "UNAVAILABLE", "strikes": []}
+
+    async def _capture_option_chain_snapshot(
+        self,
+        *,
+        signal: StrategySignal,
+        spot_price: float,
+        chain: dict[str, Any],
+        selector_candidates: list[dict[str, Any]],
+        selected_contract: Any,
+        rejection_reason: Optional[str],
+    ) -> None:
+        """Persist the exact selector inputs observed at an ENTRY_READY event."""
+        selected_right = "CE" if signal.option_type == OptionType.CALL else "PE"
+        normalized_selector_candidates: list[dict[str, Any]] = []
+        status_by_strike: dict[tuple[float, str], dict[str, Any]] = {}
+        for candidate in selector_candidates:
+            item = dict(candidate)
+            item["right"] = selected_right
+            item["premium"] = item.get("ask")
+            item["eligible"] = item.get("status") == "ELIGIBLE"
+            item["rejection_reason"] = None if item["eligible"] else item.get("status")
+            normalized_selector_candidates.append(item)
+            status_by_strike[(float(item["strike"]), selected_right)] = item
+
+        candidate_strikes = {float(item["strike"]) for item in normalized_selector_candidates}
+        chain_candidates: list[dict[str, Any]] = []
+        for strike_row in chain.get("strikes", []):
+            try:
+                strike = float(strike_row["strike"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if candidate_strikes and strike not in candidate_strikes:
+                continue
+            for leg_key, right in (("call", "CE"), ("put", "PE")):
+                leg = strike_row.get(leg_key)
+                if not leg:
+                    continue
+                bid = float(leg.get("bid", 0.0) or 0.0)
+                ask = float(leg.get("ask", 0.0) or 0.0)
+                mid = (bid + ask) / 2.0 if bid + ask > 0 else 0.0
+                spread_pct = round((ask - bid) / mid * 100.0, 2) if mid > 0 else None
+                selector_item = status_by_strike.get((strike, right))
+                chain_candidates.append({
+                    "strike": strike,
+                    "right": right,
+                    "instrument_id": leg.get("instrument_id"),
+                    "expiry": leg.get("expiry") or chain.get("expiry"),
+                    "bid": bid,
+                    "ask": ask,
+                    "premium": ask,
+                    "spread_pct": spread_pct,
+                    "open_interest": int(leg.get("open_interest", 0) or 0),
+                    "volume": int(leg.get("volume", 0) or 0),
+                    "lot_size": int(leg.get("lot_size", 0) or 0),
+                    "eligible": selector_item.get("eligible") if selector_item else None,
+                    "rejection_reason": selector_item.get("rejection_reason") if selector_item else "NOT_EVALUATED_BY_DIRECTIONAL_SELECTOR",
+                })
+
+        await self.repo.save_option_chain_snapshot({
+            "snapshot_id": f"OPTCHAIN-{generate_id()}",
+            "strategy_signal_id": signal.signal_id,
+            "captured_at": utc_now().isoformat(),
+            "spot_price": float(spot_price),
+            "chain_spot_price": chain.get("spot_price"),
+            "expiry": chain.get("expiry"),
+            "source": chain.get("source", "UNAVAILABLE"),
+            "selector_candidates": normalized_selector_candidates,
+            "chain_candidates": chain_candidates,
+            "selected_contract": selected_contract.model_dump(mode="json") if selected_contract else None,
+            "rejection_reason": rejection_reason,
+        })
 
     async def _log_decision(
         self,

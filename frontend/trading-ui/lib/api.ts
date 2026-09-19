@@ -307,6 +307,10 @@ export interface StrategyStatusData {
       adx_threshold: number;
       rvol_threshold: number;
       ema_slope_threshold: number;
+      call_pullback_min_depth: number;
+      call_pullback_max_depth: number;
+      put_pullback_min_depth: number;
+      put_pullback_max_depth: number;
       min_confirmation_score: number;
       supertrend_period: number;
       supertrend_multiplier: number;
@@ -407,7 +411,7 @@ export interface StrategyTriggerDiagnosticsData {
     setup_cutoff_event?: string;
     setup_age_seconds?: number | null;
     completed_5m_candles_since_cutoff?: number;
-    pullback?: { state: string; bars: number; depth_pct: number; retest: string };
+    pullback?: { state: string; bars: number; depth_pct: number; retest: string; depth_range?: string; max_depth_inclusive?: boolean };
     compression?: { bb_percentile: number; is_compressed: boolean };
     box?: { status: string; high: number; low: number; height_pts: number; height_atr: number; bars_active: number };
     trigger?: { waiting_for: string; gap_pts: number };

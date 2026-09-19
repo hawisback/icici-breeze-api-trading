@@ -1,0 +1,94 @@
+{
+  "candidate": "FROZEN_STRATEGY_A_DIRECTIONAL_PUT_40_TO_60",
+  "production_status": "CANDIDATE_ENABLED_IN_PAPER_CONFIGURATION",
+  "live_trading_enabled": false,
+  "configuration": {
+    "call_pullback_min_depth": 0.08,
+    "call_pullback_max_depth": 0.70,
+    "call_max_inclusive": true,
+    "put_pullback_min_depth": 0.40,
+    "put_pullback_max_depth": 0.60,
+    "put_min_inclusive": true,
+    "put_max_exclusive": true,
+    "configuration_fingerprint": "067fb1a91651c86cc8d7b4f63cfeea9dcce9db1a9e0eef0a7940b35ac57852c3"
+  },
+  "dataset": {
+    "source": "BREEZE",
+    "start_date": "2025-01-01",
+    "end_date": "2026-09-18",
+    "approved_sessions": 401,
+    "dataset_fingerprint": "4db732153f84f517dcba0015feee63d1acdfbd91b49f00a783ed5b11cfb7e5f3"
+  },
+  "regression": {
+    "put": {
+      "signals": 241,
+      "resolved": 240,
+      "ambiguous": 1,
+      "average_r": 0.2513,
+      "profit_factor": 1.5729,
+      "cumulative_r": 60.3215,
+      "max_consecutive_losses": 8,
+      "maximum_drawdown_r": 18.3473
+    },
+    "call": {
+      "signals": 628,
+      "changed_entries": 0,
+      "changed_signal_ids": 0
+    },
+    "full_strategy_a": {
+      "signals": 869,
+      "resolved": 859,
+      "ambiguous": 10,
+      "average_r": 0.0759,
+      "profit_factor": 1.1688,
+      "cumulative_r": 65.2020,
+      "max_consecutive_losses": 7,
+      "maximum_drawdown_r": 37.5558
+    },
+    "validated_experiment_signal_comparison": {
+      "full_signal_ids_match": true,
+      "put_signal_ids_match": true,
+      "entry_timestamps_or_prices_changed": 0
+    }
+  },
+  "historical_baselines": {
+    "legacy_strategy_a_original": {
+      "artifact": "data/extended_strategy_a_replay_report.json",
+      "configuration_fingerprint": "0f0254ab914abb94e1d378c8409d69e034cfd6fcf518b3163e8ed9fa972ad056",
+      "preserved": true
+    },
+    "frozen_strategy_a_candidate": {
+      "artifact": "data/frozen_strategy_a_candidate_replay_report.json",
+      "configuration_fingerprint": "067fb1a91651c86cc8d7b4f63cfeea9dcce9db1a9e0eef0a7940b35ac57852c3",
+      "preserved": true
+    }
+  },
+  "option_validation_status": "UNDERLYING_VALIDATED / OPTION_EXECUTION_PENDING",
+  "option_execution_blockers": [
+    "historical chain snapshots unavailable",
+    "historical bid/ask and spread unavailable",
+    "complete historical option contract master unavailable"
+  ],
+  "forward_option_chain_capture": {
+    "status": "ENABLED_PASSIVE_PAPER_SHADOW_CAPTURE",
+    "table": "strategy_option_chain_snapshots",
+    "selector_behavior_changed": false,
+    "execution_behavior_changed": false,
+    "captured_fields": [
+      "timestamp",
+      "spot",
+      "expiry",
+      "candidate strikes",
+      "CE/PE",
+      "bid",
+      "ask",
+      "spread",
+      "OI",
+      "volume",
+      "lot size",
+      "premium",
+      "eligibility/rejection reason",
+      "selected contract"
+    ]
+  }
+}

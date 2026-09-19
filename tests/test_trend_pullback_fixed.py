@@ -585,6 +585,29 @@ def test_pullback_depth_thresholds():
     assert TrendPullbackStrategy(breakout_confirm_polls=1).evaluate(f, b_71, m, fu) is None
 
 
+def test_directional_put_pullback_band_has_exact_boundaries_and_call_is_unchanged():
+    # For the production directional configuration, PUT accepts exactly 40%
+    # and rejects 60%; the legacy CALL 8%-70% behavior remains separate.
+    def put_signal_for_pullback_high(high: float):
+        f, bars, macro, futures = setup(bear=True)
+        bars = [c.model_copy() for c in bars]
+        for index in (4, 5, 6):
+            bars[index] = bars[index].model_copy(update={"high": high})
+        f.ema9_5m = high
+        f.ema20_5m = high
+        return TrendPullbackStrategy(
+            breakout_confirm_polls=1,
+            call_pullback_min_depth=0.08,
+            call_pullback_max_depth=0.70,
+            put_pullback_min_depth=0.40,
+            put_pullback_max_depth=0.60,
+        ).evaluate(f, bars, macro, futures)
+
+    assert put_signal_for_pullback_high(108.0) is not None  # exactly 40%
+    assert put_signal_for_pullback_high(107.999) is None
+    assert put_signal_for_pullback_high(112.0) is None  # exactly 60%, exclusive
+
+
 def test_retest_distance_thresholds():
     # 0.45 ATR retest distance -> accept; > 0.45 ATR -> reject
     f, b, m, fu = setup(bear=False)
