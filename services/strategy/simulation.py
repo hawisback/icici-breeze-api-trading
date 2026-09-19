@@ -125,11 +125,18 @@ class SimulationEngine:
                     rows = await cursor.fetchall()
                     for r in rows:
                         if r[0]:
-                            dates.add(str(r[0]))
-            except Exception as ex:
-                logger.warning("Failed to query historical dates: %s", ex)
+                            raw_date = str(r[0])
+                            try:
+                                parsed_date = datetime.strptime(raw_date, "%Y-%m-%d")
+                            except ValueError:
+                                logger.warning("Skipping malformed historical session date: %r", raw_date)
+                                continue
+                            dates.add(parsed_date.strftime("%Y-%m-%d"))
+            except Exception:
+                logger.exception("Failed to query historical dates")
+                raise
 
-        return sorted(list(dates), reverse=True)
+        return sorted(dates, reverse=True)
 
     async def _fetch_session_candles(
         self,
@@ -581,6 +588,8 @@ class SimulationEngine:
         from services.strategy.replay_lifecycle import (
             HistoricalPositionManagerReplayer,
             build_lifecycle_report,
+            build_simulated_trade_records,
+            summarize_simulated_pnl,
         )
         lifecycle_replayer = HistoricalPositionManagerReplayer(
             risk_config=self.risk_config,
@@ -594,15 +603,17 @@ class SimulationEngine:
         )
         lifecycle_resolver = lifecycle_replayer.replay(replay_manifest_recorder.records())
         lifecycle_report = build_lifecycle_report(replay_manifest_recorder.records(), lifecycle_resolver)
+        trades = build_simulated_trade_records(replay_manifest_recorder.records())
+        total_pnl, net_pnl = summarize_simulated_pnl(trades)
         lifecycle_report["manifest_validation"] = replay_manifest_recorder.validate_complete(expected_count=len(replay_manifest_recorder.records()))
         replay_lifecycle = lifecycle_report
         return SimulationResult(
             replay_mode="POSITION_MANAGER_REPLAY",
             session_date=date_str, total_bars_evaluated=len(session), total_trades=lifecycle_report["resolved"],
             winning_trades=lifecycle_report["winners"], losing_trades=lifecycle_report["losers"],
-            win_rate_pct=lifecycle_report["win_rate_pct"], total_pnl=0, net_pnl=0,
+            win_rate_pct=lifecycle_report["win_rate_pct"], total_pnl=total_pnl, net_pnl=net_pnl,
             total_realized_r=lifecycle_report["average_r"] * lifecycle_report["resolved"],
-            max_drawdown_pnl=0, profit_factor=0, timeline=timeline, decision_logs=logs,
+            max_drawdown_pnl=None, profit_factor=0, trades=trades, timeline=timeline, decision_logs=logs,
             replay_trigger_diagnostics=replay_trigger_diagnostics,
             replay_manifests=[record.model_dump(mode="json") for record in replay_manifest_recorder.records()],
             replay_metadata=replay_metadata,

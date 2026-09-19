@@ -686,7 +686,7 @@ export interface SimulatedTradeRecordData {
   contract_symbol: string;
   entry_time: string;
   entry_spot: number;
-  entry_premium: number;
+  entry_premium?: number | null;
   exit_time?: string | null;
   exit_spot?: number | null;
   exit_premium?: number | null;
@@ -697,8 +697,8 @@ export interface SimulatedTradeRecordData {
   realized_r: number;
   quantity: number;
   lots: number;
-  gross_pnl: number;
-  net_pnl: number;
+  gross_pnl?: number | null;
+  net_pnl?: number | null;
   hold_duration_mins: number;
 }
 
@@ -709,10 +709,10 @@ export interface SimulationResultData {
   winning_trades: number;
   losing_trades: number;
   win_rate_pct: number;
-  total_pnl: number;
-  net_pnl: number;
+  total_pnl: number | null;
+  net_pnl: number | null;
   total_realized_r: number;
-  max_drawdown_pnl: number;
+  max_drawdown_pnl: number | null;
   profit_factor: number;
   trades: SimulatedTradeRecordData[];
   timeline: SimulationBarSnapshotData[];
@@ -748,7 +748,12 @@ export async function runStrategySimulation(req: SimulationRequestData = {}): Pr
 
 export async function fetchSimulationAvailableDates(): Promise<string[]> {
   const res = await fetch(`${API_BASE}/strategies/simulate/available-dates`);
-  if (!res.ok) throw new Error("Failed to fetch available simulation dates");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const detail = typeof err?.detail === "string" ? err.detail : "";
+    const developmentDetail = process.env.NODE_ENV === "development" && detail ? `: ${detail}` : "";
+    throw new Error(`Failed to fetch available simulation dates (${res.status})${developmentDetail}`);
+  }
   const data = await res.json();
   return data.dates || [];
 }

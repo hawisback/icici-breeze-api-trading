@@ -474,7 +474,7 @@ class SimulatedTradeRecord(BaseModel):
     contract_symbol: str
     entry_time: str
     entry_spot: float
-    entry_premium: float
+    entry_premium: float | None = None
     exit_time: Optional[str] = None
     exit_spot: Optional[float] = None
     exit_premium: Optional[float] = None
@@ -485,8 +485,8 @@ class SimulatedTradeRecord(BaseModel):
     realized_r: float = 0.0
     quantity: int
     lots: int
-    gross_pnl: float = 0.0
-    net_pnl: float = 0.0
+    gross_pnl: float | None = None
+    net_pnl: float | None = None
     hold_duration_mins: float = 0.0
 
 
@@ -499,10 +499,10 @@ class SimulationResult(BaseModel):
     winning_trades: int
     losing_trades: int
     win_rate_pct: float
-    total_pnl: float
-    net_pnl: float
+    total_pnl: float | None
+    net_pnl: float | None
     total_realized_r: float
-    max_drawdown_pnl: float
+    max_drawdown_pnl: float | None
     profit_factor: float
     trades: list[SimulatedTradeRecord] = Field(default_factory=list)
     timeline: list[SimulationBarSnapshot] = Field(default_factory=list)

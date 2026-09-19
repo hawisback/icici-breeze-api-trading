@@ -32,6 +32,12 @@ import {
   runStrategySimulation,
 } from "../../lib/api";
 
+const formatPnl = (value: number | null | undefined): string =>
+  value == null ? "N/A" : `${value >= 0 ? "+" : ""}\u20b9${value.toLocaleString()}`;
+
+const formatAmount = (value: number | null | undefined): string =>
+  value == null ? "N/A" : `\u20b9${value.toLocaleString()}`;
+
 export const TabReplaySimulation: React.FC = () => {
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>("");
@@ -65,6 +71,7 @@ export const TabReplaySimulation: React.FC = () => {
       }
     } catch (err: any) {
       console.error("Failed to load available dates", err);
+      setErrorMsg(err instanceof Error ? err.message : "Failed to load available simulation dates.");
     }
   };
 
@@ -99,6 +106,10 @@ export const TabReplaySimulation: React.FC = () => {
     result?.timeline && result.timeline.length > 0
       ? result.timeline[Math.min(selectedBarIndex, result.timeline.length - 1)]
       : null;
+  const trades = result?.trades ?? [];
+  const netPnl = result?.net_pnl;
+  const grossPnl = result?.total_pnl;
+  const hasNetPnl = netPnl !== null && netPnl !== undefined;
 
   const jumpToNextEvent = () => {
     if (!result?.timeline) return;
@@ -332,7 +343,7 @@ export const TabReplaySimulation: React.FC = () => {
                 Total Trades
               </div>
               <div className="text-xl font-mono font-bold text-slate-100">
-                {result.total_trades}
+                {trades.length}
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
                 {result.winning_trades}W - {result.losing_trades}L
@@ -361,9 +372,25 @@ export const TabReplaySimulation: React.FC = () => {
               <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
                 Simulated Net PnL
               </div>
+              <div className={`text-xl font-mono font-bold ${!hasNetPnl ? "text-slate-300" : netPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {formatPnl(netPnl)}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-1">
+                Gross: {formatAmount(grossPnl)}
+              </div>
+              {!hasNetPnl && (
+                <div className="text-[10px] text-amber-300 mt-1" title="Historical option prices unavailable">
+                  Historical option prices unavailable
+                </div>
+              )}
+            </div>
+            {/*
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
+                Simulated Net PnL
+              </div>
               <div
                 className={`text-xl font-mono font-bold ${
-                  result.net_pnl >= 0 ? "text-emerald-400" : "text-rose-400"
+                  !hasNetPnl ? "text-slate-300" : netPnl >= 0 ? "text-emerald-400" : "text-rose-400"
                 }`}
               >
                 {result.net_pnl >= 0 ? "+" : ""}₹{result.net_pnl.toLocaleString()}
@@ -372,6 +399,8 @@ export const TabReplaySimulation: React.FC = () => {
                 Gross: ₹{result.total_pnl.toLocaleString()}
               </div>
             </div>
+
+            */}
 
             {/* Realized R */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
@@ -387,12 +416,23 @@ export const TabReplaySimulation: React.FC = () => {
                 {result.total_realized_r}R
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
-                Avg: {result.total_trades > 0 ? (result.total_realized_r / result.total_trades).toFixed(2) : "0.00"}R / trade
+                Avg: {trades.length > 0 ? (result.total_realized_r / trades.length).toFixed(2) : "0.00"}R / trade
               </div>
             </div>
 
             {/* Max Drawdown */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
+                Max Drawdown
+              </div>
+              <div className="text-xl font-mono font-bold text-slate-300">
+                {result.max_drawdown_pnl == null ? "N/A" : formatAmount(result.max_drawdown_pnl)}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-1">
+                Intraday peak-to-trough
+              </div>
+            </div>
+            {/*
               <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
                 Max Drawdown
               </div>
@@ -403,6 +443,8 @@ export const TabReplaySimulation: React.FC = () => {
                 Intraday peak-to-trough
               </div>
             </div>
+
+            */}
 
             {/* Bars Evaluated */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
@@ -422,14 +464,14 @@ export const TabReplaySimulation: React.FC = () => {
           <div className="bg-slate-900/95 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
             <div className="bg-slate-950 px-5 py-3.5 border-b border-slate-800 flex items-center justify-between">
               <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-                Simulated Trades ({result.trades.length})
+                Simulated Trades ({trades.length})
               </h3>
               <span className="text-[11px] text-slate-400">
                 Executed under production position sizing & trailing stop ladder
               </span>
             </div>
 
-            {result.trades.length === 0 ? (
+            {trades.length === 0 ? (
               <div className="p-8 text-center text-slate-400 text-xs">
                 <AlertCircle className="w-6 h-6 text-amber-400 mx-auto mb-2" />
                 <span>No trades were triggered during this session under the active rules & thresholds.</span>
@@ -453,8 +495,10 @@ export const TabReplaySimulation: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/50 font-mono">
-                    {result.trades.map((t) => {
-                      const isWin = t.net_pnl > 0;
+                    {trades.map((t) => {
+                      const tradeNetPnl = t.net_pnl;
+                      const hasTradeNetPnl = tradeNetPnl !== null && tradeNetPnl !== undefined;
+                      const isWin = hasTradeNetPnl && tradeNetPnl > 0;
                       return (
                         <tr key={t.trade_id} className="hover:bg-slate-800/30 transition">
                           <td className="py-3 px-4 text-slate-400 text-[11px]">
@@ -491,12 +535,18 @@ export const TabReplaySimulation: React.FC = () => {
                           <td className="py-3 px-3 text-slate-300">
                             <div>{t.entry_time}</div>
                             <div className="text-[10px] text-slate-400">
+                              Option price: {formatAmount(t.entry_premium)} (Spot: {formatAmount(t.entry_spot)})
+                            </div>
+                            <div className="hidden">
                               ₹{t.entry_premium} (Spot ₹{t.entry_spot})
                             </div>
                           </td>
                           <td className="py-3 px-3 text-slate-300">
                             <div>{t.exit_time || "-"}</div>
                             <div className="text-[10px] text-slate-400">
+                              Option price: {formatAmount(t.exit_premium)} (Spot: {formatAmount(t.exit_spot)})
+                            </div>
+                            <div className="hidden">
                               ₹{t.exit_premium ?? "-"} (Spot ₹{t.exit_spot ?? "-"})
                             </div>
                           </td>
@@ -526,11 +576,28 @@ export const TabReplaySimulation: React.FC = () => {
                           </td>
                           <td
                             className={`py-3 px-4 text-right font-bold text-sm ${
+                              !hasTradeNetPnl ? "text-slate-300" : isWin ? "text-emerald-400" : "text-rose-400"
+                            }`}
+                          >
+                            {hasTradeNetPnl ? formatPnl(tradeNetPnl) : "N/A"}
+                          </td>
+                          {/*
+                          <td
+                            className={`py-3 px-3 text-right font-bold ${
+                              t.realized_r >= 0 ? "text-cyan-400" : "text-rose-400"
+                            }`}
+                          >
+                            {t.realized_r >= 0 ? "+" : ""}
+                            {t.realized_r}R
+                          </td>
+                          <td
+                            className={`py-3 px-4 text-right font-bold text-sm ${
                               isWin ? "text-emerald-400" : "text-rose-400"
                             }`}
                           >
                             {isWin ? "+" : ""}₹{t.net_pnl.toLocaleString()}
                           </td>
+                          */}
                         </tr>
                       );
                     })}

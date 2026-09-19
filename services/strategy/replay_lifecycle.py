@@ -22,6 +22,7 @@ from services.strategy.models import (
     OptionType,
     RiskConfig,
     SessionTimersConfig,
+    SimulatedTradeRecord,
     StrategyName,
     TradeDirection,
     TradeLifecycleState,
@@ -389,6 +390,65 @@ class HistoricalPositionManagerReplayer:
 
 def _trade_rows(records: Iterable[ReplayManifestRecord]) -> list[ReplayManifestRecord]:
     return [r for r in records if r.lifecycle_status == "RESOLVED" and r.realized_r is not None]
+
+
+def build_simulated_trade_records(records: Iterable[ReplayManifestRecord]) -> list[SimulatedTradeRecord]:
+    """Expose resolved lifecycle records in the simulation response shape.
+
+    The replay manifest is the authoritative source for these values.  This
+    adapter only serializes the lifecycle result for the existing API model;
+    it does not recalculate entries, exits, sizing, stops, or P&L.
+    """
+    rows: list[SimulatedTradeRecord] = []
+    for record in _trade_rows(records):
+        hold_duration_mins = 0.0
+        if record.exit_timestamp is not None:
+            hold_duration_mins = max(
+                0.0,
+                (record.exit_timestamp - record.simulated_entry_timestamp).total_seconds() / 60.0,
+            )
+        rows.append(
+            SimulatedTradeRecord(
+                trade_id=record.replay_signal_id,
+                strategy=record.strategy_id,
+                direction="BULLISH" if record.direction == "CALL" else "BEARISH",
+                option_type=record.direction,
+                strike=0.0,
+                contract_symbol="HISTORICAL-SPOT",
+                entry_time=record.simulated_entry_timestamp.isoformat(),
+                entry_spot=record.simulated_entry_price,
+                entry_premium=None,
+                exit_time=record.exit_timestamp.isoformat() if record.exit_timestamp else None,
+                exit_spot=record.exit_price,
+                exit_premium=None,
+                exit_reason=record.exit_reason,
+                initial_stop=record.initial_structural_stop,
+                initial_r_points=record.initial_risk_points,
+                peak_r=record.mfe_r if record.mfe_r is not None else record.peak_r,
+                realized_r=float(record.realized_r),
+                quantity=1,
+                lots=1,
+                gross_pnl=None,
+                net_pnl=None,
+                hold_duration_mins=hold_duration_mins,
+            )
+        )
+    return rows
+
+
+def summarize_simulated_pnl(
+    trades: Iterable[SimulatedTradeRecord],
+) -> tuple[float | None, float | None]:
+    """Aggregate P&L only when every canonical trade has P&L values."""
+    rows = list(trades)
+    if not rows:
+        return 0.0, 0.0
+    if any(row.gross_pnl is None or row.net_pnl is None for row in rows):
+        return None, None
+    return (
+        round(sum(row.gross_pnl for row in rows if row.gross_pnl is not None), 2),
+        round(sum(row.net_pnl for row in rows if row.net_pnl is not None), 2),
+    )
 
 
 def _basic(rows: list[ReplayManifestRecord]) -> dict[str, Any]:

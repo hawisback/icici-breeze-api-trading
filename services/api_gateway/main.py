@@ -1178,9 +1178,16 @@ async def run_strategy_simulation(req: SimulationRequest):
 
 @app.get("/api/v1/strategies/simulate/available-dates")
 async def get_simulation_available_dates():
-    services = get_services()
-    dates = await services.strategy_svc.get_available_simulation_dates()
-    return {"dates": dates}
+    try:
+        services = get_services()
+        dates = await services.strategy_svc.get_available_simulation_dates()
+        return {"dates": dates}
+    except Exception as exc:
+        logger.exception("Failed to load available simulation dates")
+        raise HTTPException(
+            status_code=503,
+            detail="Historical simulation dates are temporarily unavailable.",
+        ) from exc
 
 
 @app.get("/api/v1/audit/logs")
