@@ -142,6 +142,10 @@ class SimulationEngine:
             "candle_count": sum(len(candles) for candles in candles_by_instrument.values()),
             "fetched_candle_count": fetched_count,
             "price_basis": "BREEZE_HISTORICAL_OHLC_CLOSE" if available else None,
+            "mark_policy": "latest_completed_candle_close_at_event",
+            "pricing_field": "completed_candle_close",
+            "bid_ask_available": False,
+            "executable_fill_equivalent": False,
             "selection": "nearest_strike_first_expiry_on_or_after_replay_date",
         }
 
@@ -713,10 +717,12 @@ class SimulationEngine:
             record.option_data_status == "AVAILABLE" for record in resolved_records
         )
         limitation = (
-            "Real Breeze historical option OHLC close prices used for entry/exit PNL; "
-            "historical bid/ask and point-in-time option-chain selection are unavailable."
+            "Real Breeze historical option OHLC completed-candle close marks used for entry/exit PNL; "
+            "these are not executable fills, historical bid/ask and point-in-time option-chain "
+            "selection are unavailable."
             if option_complete else
-            "Real completed spot/futures candles only. Historical option candles were unavailable for one or more resolved trades."
+            "Real completed spot/futures candles only. Historical completed option candles were "
+            "unavailable for one or more resolved trades."
         )
         lifecycle_report["manifest_validation"] = replay_manifest_recorder.validate_complete(expected_count=len(replay_manifest_recorder.records()))
         replay_lifecycle = lifecycle_report

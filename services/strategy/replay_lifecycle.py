@@ -7,6 +7,7 @@ to decide when an intrabar event is chronologically usable.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
@@ -392,14 +393,66 @@ def _trade_rows(records: Iterable[ReplayManifestRecord]) -> list[ReplayManifestR
     return [r for r in records if r.lifecycle_status == "RESOLVED" and r.realized_r is not None]
 
 
-def _historical_close_at(candles: list[Candle], timestamp: datetime | None) -> float | None:
-    """Return the last real candle close available at an event timestamp."""
-    if timestamp is None:
+def _utc_timestamp(value: datetime | None) -> datetime | None:
+    """Return an aware UTC timestamp, rejecting naive values."""
+    if value is None or value.tzinfo is None or value.utcoffset() is None:
         return None
-    eligible = [c for c in candles if c.start_time <= timestamp and c.close > 0]
+    return value.astimezone(timezone.utc)
+
+
+def _historical_candle_at(candles: list[Candle], timestamp: datetime | None) -> Candle | None:
+    """Return the latest valid historical candle completed by ``timestamp``.
+
+    Historical OHLC closes are only known after their candle ends.  In
+    particular, a candle beginning at the event timestamp is still incomplete
+    and must not be used as a historical mark.
+    """
+    event_timestamp = _utc_timestamp(timestamp)
+    if event_timestamp is None:
+        return None
+
+    eligible: list[tuple[datetime, datetime, Candle]] = []
+    for candle in candles:
+        candle_start = _utc_timestamp(candle.start_time)
+        candle_end = _utc_timestamp(candle.end_time)
+        close = float(candle.close)
+        if (
+            candle_start is None
+            or candle_end is None
+            or candle_start > candle_end
+            or candle_end > event_timestamp
+            or close <= 0
+            or not math.isfinite(close)
+        ):
+            continue
+        eligible.append((candle_end, candle_start, candle))
+
     if not eligible:
         return None
-    return float(max(eligible, key=lambda candle: candle.start_time).close)
+    return max(eligible, key=lambda item: (item[0], item[1]))[2]
+
+
+def _historical_close_at(candles: list[Candle], timestamp: datetime | None) -> float | None:
+    """Return the latest valid completed candle close at an event timestamp."""
+    candle = _historical_candle_at(candles, timestamp)
+    return float(candle.close) if candle is not None else None
+
+
+def _historical_mark_provenance(candle: Candle | None, timestamp: datetime | None) -> dict[str, Any]:
+    event_timestamp = _utc_timestamp(timestamp)
+    candle_start = _utc_timestamp(candle.start_time) if candle is not None else None
+    candle_end = _utc_timestamp(candle.end_time) if candle is not None else None
+    return {
+        "event_timestamp": event_timestamp.isoformat() if event_timestamp is not None else None,
+        "candle_start": candle_start.isoformat() if candle_start is not None else None,
+        "candle_end": candle_end.isoformat() if candle_end is not None else None,
+        "mark_age_seconds": (
+            (event_timestamp - candle_end).total_seconds()
+            if event_timestamp is not None and candle_end is not None
+            else None
+        ),
+        "available": candle is not None,
+    }
 
 
 def attach_historical_option_prices(
@@ -408,11 +461,12 @@ def attach_historical_option_prices(
     candles_by_instrument: dict[str, list[Candle]],
     risk_config: RiskConfig,
 ) -> None:
-    """Attach real Breeze option-candle prices to resolved replay records.
+    """Attach completed-candle Breeze option marks to resolved replay records.
 
     Breeze historical data is OHLCV, not historical bid/ask.  Therefore this
-    deliberately uses the candle close at the replay event and labels the
-    result accordingly; it never derives an option price from the underlying.
+    deliberately uses the most recent completed candle close at each replay
+    event and labels the result as a historical mark; it never derives an
+    option price from the underlying or uses an incomplete/future candle.
     Contract selection is deterministic (nearest strike in the first expiry
     available on the replay date) because Breeze has no historical chain
     snapshot endpoint for replay-time selection.
@@ -436,6 +490,16 @@ def attach_historical_option_prices(
 
     for record in records:
         record.option_data_status = "UNAVAILABLE"
+        record.historical_option_provenance = {
+            "historical_price_source": "BREEZE_HISTORICAL_OHLC",
+            "pricing_field": "completed_candle_close",
+            "mark_policy": "latest_completed_candle_close_at_event",
+            "contract_selection_method": "nearest_strike_first_expiry_on_or_after_replay_date",
+            "bid_ask_available": False,
+            "executable_fill_equivalent": False,
+            "entry": _historical_mark_provenance(None, record.simulated_entry_timestamp),
+            "exit": _historical_mark_provenance(None, record.exit_timestamp),
+        }
         direction = "CALL" if record.direction == "CALL" else "PUT"
         candidates = [
             item for item in normalized
@@ -455,8 +519,19 @@ def attach_historical_option_prices(
         record.option_lot_size = selected["lot_size"]
 
         candles = candles_by_instrument.get(selected["instrument_id"], [])
-        entry_price = _historical_close_at(candles, record.simulated_entry_timestamp)
-        exit_price = _historical_close_at(candles, record.exit_timestamp)
+        entry_candle = _historical_candle_at(candles, record.simulated_entry_timestamp)
+        exit_candle = _historical_candle_at(candles, record.exit_timestamp)
+        record.historical_option_provenance["entry"] = _historical_mark_provenance(
+            entry_candle, record.simulated_entry_timestamp
+        )
+        record.historical_option_provenance["exit"] = _historical_mark_provenance(
+            exit_candle, record.exit_timestamp
+        )
+        record.historical_option_provenance["candle_sources"] = sorted({
+            candle.source for candle in (entry_candle, exit_candle) if candle is not None
+        })
+        entry_price = float(entry_candle.close) if entry_candle is not None else None
+        exit_price = float(exit_candle.close) if exit_candle is not None else None
         if entry_price is None or exit_price is None or selected["lot_size"] <= 0:
             record.option_data_quality_reason = "Breeze historical option candle unavailable at entry or exit"
             continue

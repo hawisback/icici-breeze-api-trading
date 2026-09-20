@@ -16,6 +16,7 @@ from services.strategy.models import (
     ThresholdOverrides,
 )
 from services.strategy.replay_lifecycle import (
+    _historical_close_at,
     attach_historical_option_prices,
     build_simulated_trade_records,
     summarize_simulated_pnl,
@@ -129,16 +130,30 @@ def test_historical_option_candles_populate_net_pnl():
     candles = [
         Candle(
             instrument_id=contract.instrument_id, interval="1m",
+            start_time=record.simulated_entry_timestamp - timedelta(minutes=1),
+            end_time=record.simulated_entry_timestamp,
+            open=120.0, high=121.0, low=119.0, close=120.0, volume=100,
+            source="BREEZE",
+        ),
+        Candle(
+            instrument_id=contract.instrument_id, interval="1m",
             start_time=record.simulated_entry_timestamp,
             end_time=record.simulated_entry_timestamp + timedelta(minutes=1),
-            open=120.0, high=121.0, low=119.0, close=120.0, volume=100,
+            open=999.0, high=999.0, low=999.0, close=999.0, volume=100,
+            source="BREEZE",
+        ),
+        Candle(
+            instrument_id=contract.instrument_id, interval="1m",
+            start_time=record.exit_timestamp - timedelta(minutes=1),
+            end_time=record.exit_timestamp,
+            open=110.0, high=111.0, low=109.0, close=110.0, volume=100,
             source="BREEZE",
         ),
         Candle(
             instrument_id=contract.instrument_id, interval="1m",
             start_time=record.exit_timestamp,
             end_time=record.exit_timestamp + timedelta(minutes=1),
-            open=110.0, high=111.0, low=109.0, close=110.0, volume=100,
+            open=888.0, high=888.0, low=888.0, close=888.0, volume=100,
             source="BREEZE",
         ),
     ]
@@ -152,6 +167,66 @@ def test_historical_option_candles_populate_net_pnl():
     assert trade.quantity == 25
     assert trade.gross_pnl == -250.0
     assert trade.net_pnl is not None and trade.net_pnl < trade.gross_pnl
+    assert record.historical_option_provenance["pricing_field"] == "completed_candle_close"
+    assert record.historical_option_provenance["entry"]["candle_end"] == record.simulated_entry_timestamp.isoformat()
+    assert record.historical_option_provenance["exit"]["candle_end"] == record.exit_timestamp.isoformat()
+    assert record.historical_option_provenance["entry"]["mark_age_seconds"] == 0.0
+    assert record.historical_option_provenance["bid_ask_available"] is False
+    assert record.historical_option_provenance["executable_fill_equivalent"] is False
+
+
+def _option_candle(start: datetime, close: float) -> Candle:
+    return Candle(
+        instrument_id="OPTION",
+        interval="1m",
+        start_time=start,
+        end_time=start + timedelta(minutes=1),
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=1,
+        source="BREEZE",
+    )
+
+
+def test_historical_close_at_rejects_candle_at_event_start():
+    event = datetime(2026, 9, 17, 10, 0, tzinfo=timezone.utc)
+    assert _historical_close_at([_option_candle(event, 100.0)], event) is None
+
+
+def test_historical_close_at_rejects_candle_during_event():
+    start = datetime(2026, 9, 17, 10, 0, tzinfo=timezone.utc)
+    assert _historical_close_at([_option_candle(start, 100.0)], start + timedelta(seconds=30)) is None
+
+
+def test_historical_close_at_allows_exact_completion_boundary():
+    start = datetime(2026, 9, 17, 10, 0, tzinfo=timezone.utc)
+    assert _historical_close_at([_option_candle(start, 100.0)], start + timedelta(minutes=1)) == 100.0
+
+
+def test_historical_close_at_uses_most_recent_completed_candle():
+    start = datetime(2026, 9, 17, 9, 59, tzinfo=timezone.utc)
+    event = start + timedelta(seconds=90)
+    candles = [_option_candle(start, 95.0), _option_candle(start + timedelta(minutes=1), 100.0)]
+    assert _historical_close_at(candles, event) == 95.0
+
+
+def test_historical_close_at_never_selects_future_only_candles():
+    event = datetime(2026, 9, 17, 10, 0, tzinfo=timezone.utc)
+    assert _historical_close_at([_option_candle(event + timedelta(minutes=1), 100.0)], event) is None
+
+
+def test_historical_close_at_ignores_invalid_close_and_falls_back():
+    start = datetime(2026, 9, 17, 9, 58, tzinfo=timezone.utc)
+    candles = [_option_candle(start, 95.0), _option_candle(start + timedelta(minutes=1), 0.0)]
+    assert _historical_close_at(candles, start + timedelta(minutes=2)) == 95.0
+
+
+def test_historical_close_at_normalizes_aware_timezones():
+    event = datetime(2026, 9, 17, 15, 31, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    start = datetime(2026, 9, 17, 9, 59, tzinfo=timezone.utc)
+    assert _historical_close_at([_option_candle(start, 100.0)], event) == 100.0
 
 
 @pytest.mark.asyncio

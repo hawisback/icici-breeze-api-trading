@@ -135,6 +135,7 @@ class ReplayManifestRecord(BaseModel):
     option_transaction_costs: float | None = None
     option_price_source: str | None = None
     option_data_quality_reason: str | None = None
+    historical_option_provenance: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReplayManifestRecorder:
