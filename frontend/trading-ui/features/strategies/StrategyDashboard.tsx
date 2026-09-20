@@ -144,6 +144,11 @@ export const StrategyDashboard: React.FC = () => {
           <p className="text-xs text-slate-400 mt-0.5">
             Strategy A (Trend Pullback) & Strategy B (Volatility Breakout) with automated contract selection under ₹{status?.config.option_selection.max_option_premium ?? 70} cap.
           </p>
+          <div className="flex items-center gap-2 mt-2 text-[10px] font-bold tracking-wider">
+            <span className="px-2 py-1 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">PUT — PAPER</span>
+            <span className="px-2 py-1 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">CALL — SHADOW ONLY</span>
+            <span className="px-2 py-1 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">LIVE TRADING — DISABLED</span>
+          </div>
         </div>
 
         {/* Master Action Buttons */}
@@ -315,4 +320,3 @@ export const StrategyDashboard: React.FC = () => {
     </div>
   );
 };
-

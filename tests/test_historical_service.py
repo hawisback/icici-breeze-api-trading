@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
 
 from libs.contracts.models import Candle
 from services.historical.repository import HistoricalRepository
@@ -141,6 +142,53 @@ async def test_targeted_breeze_window_persists_one_minute_candles(tmp_path):
     assert candles[0].source == "BREEZE"
     cached = await repo.get_candles("INST-NIFTY-INDEX", "1m")
     assert len(cached) == 2
+
+
+@pytest.mark.asyncio
+async def test_targeted_breeze_window_sends_option_contract_fields(tmp_path):
+    """Breeze V2 requires the underlying plus explicit option identity."""
+    repo = HistoricalRepository(db_path=tmp_path / "historical.db")
+    await repo.initialize()
+
+    mock_sdk = MagicMock()
+    mock_sdk.get_historical_data_v2.return_value = {
+        "Status": 200,
+        "Success": [{
+            "datetime": "2026-09-17 09:20:00",
+            "open": "120.0", "high": "121.0", "low": "119.0", "close": "120.5",
+            "volume": "100", "open_interest": "1000",
+        }],
+    }
+    mock_client_mgr = MagicMock()
+    mock_client_mgr.is_active = True
+    mock_client_mgr.get_sdk_client.return_value = mock_sdk
+    mock_client_mgr.sdk_runner = MagicMock()
+    mock_client_mgr.sdk_runner.run = AsyncMock(side_effect=lambda fn, timeout_sec=None: fn())
+    mock_gateway = MagicMock()
+    mock_gateway.breeze_adapter.client_manager = mock_client_mgr
+    mock_gateway.breeze_adapter.rate_limiter = None
+    instrument_service = SimpleNamespace(
+        get_instrument=AsyncMock(return_value=SimpleNamespace(
+            segment="OPTIONS", underlying="NIFTY", exchange="NFO", expiry="2026-09-22",
+            strike=23300.0, option_right=SimpleNamespace(value="PUT"),
+        ))
+    )
+    service = HistoricalService(repository=repo, broker_gateway=mock_gateway, instrument_service=instrument_service)
+
+    await service.fetch_candles_from_breeze_window(
+        "INST-NIFTY-2026-09-22-23300-PE",
+        interval="1m",
+        start_time=datetime(2026, 9, 17, 3, 50, tzinfo=timezone.utc),
+        end_time=datetime(2026, 9, 17, 3, 51, tzinfo=timezone.utc),
+    )
+
+    kwargs = mock_sdk.get_historical_data_v2.call_args.kwargs
+    assert kwargs["stock_code"] == "NIFTY"
+    assert kwargs["exchange_code"] == "NFO"
+    assert kwargs["product_type"] == "options"
+    assert kwargs["expiry_date"] == "2026-09-22T06:00:00.000Z"
+    assert kwargs["right"] == "put"
+    assert kwargs["strike_price"] == "23300.0"
 
 
 @pytest.mark.asyncio

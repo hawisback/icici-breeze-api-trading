@@ -148,6 +148,61 @@ class StrategyRepository:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_signal ON strategy_option_chain_snapshots(strategy_signal_id);"
             )
+            snapshot_columns = await (await conn.execute("PRAGMA table_info(strategy_option_chain_snapshots)")).fetchall()
+            existing_snapshot_columns = {r["name"] for r in snapshot_columns}
+            for column_name, column_type in (
+                ("selector_timestamp", "TEXT"), ("signal_timestamp", "TEXT"),
+                ("direction", "TEXT"), ("selector_result", "TEXT"),
+            ):
+                if column_name not in existing_snapshot_columns:
+                    await conn.execute(f"ALTER TABLE strategy_option_chain_snapshots ADD COLUMN {column_name} {column_type}")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS strategy_option_quotes (
+                    quote_id TEXT PRIMARY KEY,
+                    trade_id TEXT,
+                    strategy_signal_id TEXT,
+                    instrument_id TEXT NOT NULL,
+                    quote_timestamp TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    freshness_seconds REAL,
+                    bid REAL,
+                    ask REAL,
+                    ltp REAL,
+                    volume INTEGER,
+                    open_interest INTEGER,
+                    status TEXT NOT NULL,
+                    reason TEXT,
+                    raw_json TEXT NOT NULL
+                );
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_option_quotes_trade ON strategy_option_quotes(trade_id, quote_timestamp);")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS strategy_execution_ledger (
+                    ledger_id TEXT PRIMARY KEY,
+                    trade_id TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    raw_bid REAL,
+                    raw_ask REAL,
+                    raw_ltp REAL,
+                    executable_price REAL,
+                    slippage_points REAL NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    cost_assumption_version TEXT NOT NULL,
+                    reason TEXT
+                );
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_execution_trade ON strategy_execution_ledger(trade_id, timestamp);")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS strategy_eod_reports (
+                    session_date TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    report_json TEXT NOT NULL,
+                    PRIMARY KEY (session_date, direction)
+                );
+            """)
 
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS strategy_signals (
@@ -305,8 +360,9 @@ class StrategyRepository:
                 INSERT OR REPLACE INTO strategy_option_chain_snapshots (
                     snapshot_id, strategy_signal_id, captured_at, spot_price, expiry,
                     source, selector_candidates_json, chain_candidates_json,
-                    selected_contract_json, rejection_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    selected_contract_json, rejection_reason, selector_timestamp,
+                    signal_timestamp, direction, selector_result
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot["snapshot_id"],
@@ -319,7 +375,91 @@ class StrategyRepository:
                     json.dumps(snapshot.get("chain_candidates", []), sort_keys=True),
                     json.dumps(snapshot["selected_contract"], sort_keys=True) if snapshot.get("selected_contract") else None,
                     snapshot.get("rejection_reason"),
+                    snapshot.get("selector_timestamp", snapshot.get("captured_at")),
+                    snapshot.get("signal_timestamp"), snapshot.get("direction"), snapshot.get("selector_result"),
                 ),
+            )
+            await conn.commit()
+
+    async def list_option_chain_snapshots(self, session_date: Optional[str] = None) -> list[dict[str, Any]]:
+        async with self.engine.connect() as conn:
+            query = "SELECT * FROM strategy_option_chain_snapshots"
+            params: tuple[Any, ...] = ()
+            if session_date:
+                query += " WHERE substr(captured_at, 1, 10) = ?"
+                params = (session_date,)
+            query += " ORDER BY captured_at ASC"
+            rows = await (await conn.execute(query, params)).fetchall()
+            return [
+                {
+                    "snapshot_id": r["snapshot_id"], "strategy_signal_id": r["strategy_signal_id"],
+                    "captured_at": r["captured_at"], "spot_price": r["spot_price"], "expiry": r["expiry"],
+                    "source": r["source"], "selector_candidates": json.loads(r["selector_candidates_json"]),
+                    "chain_candidates": json.loads(r["chain_candidates_json"]),
+                    "selected_contract": json.loads(r["selected_contract_json"]) if r["selected_contract_json"] else None,
+                    "rejection_reason": r["rejection_reason"],
+                }
+                for r in rows
+            ]
+
+    async def save_option_quote(self, quote: dict[str, Any]) -> None:
+        async with self.engine.connect() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO strategy_option_quotes (
+                    quote_id, trade_id, strategy_signal_id, instrument_id,
+                    quote_timestamp, source, freshness_seconds, bid, ask, ltp,
+                    volume, open_interest, status, reason, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    quote.get("quote_id", generate_id()), quote.get("trade_id"), quote.get("strategy_signal_id"),
+                    quote["instrument_id"], quote["quote_timestamp"], quote.get("source", "UNKNOWN"),
+                    quote.get("freshness_seconds"), quote.get("bid"), quote.get("ask"), quote.get("ltp"),
+                    quote.get("volume"), quote.get("open_interest"), quote.get("status", "UNAVAILABLE"),
+                    quote.get("reason"), json.dumps(quote, sort_keys=True, default=str),
+                ),
+            )
+            await conn.commit()
+
+    async def list_option_quotes(self, session_date: Optional[str] = None) -> list[dict[str, Any]]:
+        async with self.engine.connect() as conn:
+            query = "SELECT * FROM strategy_option_quotes"
+            params: tuple[Any, ...] = ()
+            if session_date:
+                query += " WHERE substr(quote_timestamp, 1, 10) = ?"
+                params = (session_date,)
+            query += " ORDER BY quote_timestamp ASC"
+            rows = await (await conn.execute(query, params)).fetchall()
+            return [dict(r) for r in rows]
+
+    async def save_execution_ledger(self, entry: dict[str, Any]) -> None:
+        async with self.engine.connect() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO strategy_execution_ledger (
+                    ledger_id, trade_id, side, timestamp, raw_bid, raw_ask, raw_ltp,
+                    executable_price, slippage_points, quantity, source,
+                    cost_assumption_version, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.get("ledger_id", generate_id()), entry["trade_id"], entry["side"], entry["timestamp"],
+                    entry.get("raw_bid"), entry.get("raw_ask"), entry.get("raw_ltp"), entry.get("executable_price"),
+                    entry.get("slippage_points", 0.0), entry["quantity"], entry.get("source", "UNKNOWN"),
+                    entry.get("cost_assumption_version", "unknown"), entry.get("reason"),
+                ),
+            )
+            await conn.commit()
+
+    async def save_eod_report(self, session_date: str, direction: str, report: dict[str, Any]) -> None:
+        async with self.engine.connect() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO strategy_eod_reports
+                (session_date, direction, generated_at, report_json) VALUES (?, ?, ?, ?)
+                """,
+                (session_date, direction, utc_now().isoformat(), json.dumps(report, sort_keys=True, default=str)),
             )
             await conn.commit()
 

@@ -123,6 +123,18 @@ class ReplayManifestRecord(BaseModel):
     mae_r: float | None = None
     ambiguous: bool = False
     option_data_status: str = "UNAVAILABLE"
+    option_contract_instrument_id: str | None = None
+    option_contract_symbol: str | None = None
+    option_expiry: str | None = None
+    option_strike: float | None = None
+    option_lot_size: int | None = None
+    option_entry_price: float | None = None
+    option_exit_price: float | None = None
+    option_gross_pnl: float | None = None
+    option_net_pnl: float | None = None
+    option_transaction_costs: float | None = None
+    option_price_source: str | None = None
+    option_data_quality_reason: str | None = None
 
 
 class ReplayManifestRecorder:

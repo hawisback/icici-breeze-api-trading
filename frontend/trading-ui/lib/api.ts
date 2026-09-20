@@ -502,6 +502,18 @@ export interface AutoTradeData {
   gross_pnl?: number | null;
   net_pnl?: number | null;
   realized_r?: number | null;
+  signal_id?: string | null;
+  selected_contract_snapshot?: Record<string, any>;
+  current_bid?: number | null;
+  current_ask?: number | null;
+  current_ltp?: number | null;
+  current_quote_source?: string | null;
+  current_quote_freshness_seconds?: number | null;
+  underlying_exit_reason?: string | null;
+  option_exit_reason?: string | null;
+  return_on_premium_pct?: number | null;
+  slippage_cost?: number | null;
+  transaction_costs?: number | null;
 }
 
 export interface DecisionLogData {
@@ -703,6 +715,7 @@ export interface SimulatedTradeRecordData {
 }
 
 export interface SimulationResultData {
+  limitation?: string;
   session_date: string;
   total_bars_evaluated: number;
   total_trades: number;

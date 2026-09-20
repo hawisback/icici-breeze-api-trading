@@ -130,7 +130,7 @@ export const TabReplaySimulation: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <p className="text-sm text-amber-300">Signal replay uses real completed spot and futures candles. Historical option bid/ask quotes are unavailable, so trades and P&amp;L are not estimated. Missing market history produces no signals.</p>
+      <p className="text-sm text-amber-300">{result?.limitation || "Replay uses real completed Breeze spot/futures candles. Run a session to load historical option prices when available."} Missing market history produces no signals.</p>
       {/* 1. Simulation Control & Session Selector */}
       <div className="bg-slate-900/95 border border-slate-800 rounded-xl p-5 shadow-xl">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">

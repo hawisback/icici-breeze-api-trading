@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import logging
 from typing import Any, Optional
@@ -138,6 +138,13 @@ class BreezeMarketDataAdapter(BrokerMarketDataPort):
         )
         data = BreezeResponseValidator.unwrap_success(raw_resp)
         rows: list[dict[str, Any]] = data if isinstance(data, list) else []
+        interval_minutes = {
+            FeedInterval.ONE_SECOND: 1 / 60,
+            FeedInterval.ONE_MINUTE: 1,
+            FeedInterval.FIVE_MINUTE: 5,
+            FeedInterval.THIRTY_MINUTE: 30,
+            FeedInterval.ONE_DAY: 1440,
+        }.get(interval, 1)
 
         candles: list[Candle] = []
         for row in rows:
@@ -148,7 +155,7 @@ class BreezeMarketDataAdapter(BrokerMarketDataPort):
                     instrument=instrument,
                     interval=interval,
                     start_time=start_time,
-                    end_time=start_time,  # Interval boundary can be computed if needed
+                    end_time=start_time + timedelta(minutes=interval_minutes),
                     open=Decimal(str(row.get("open", "0"))),
                     high=Decimal(str(row.get("high", "0"))),
                     low=Decimal(str(row.get("low", "0"))),

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import logging
 from time import monotonic
 from typing import Any, Optional
@@ -133,6 +133,7 @@ class OptionChainService:
                         "available_expiries": all_expiries,
                         "atm_strike": round(live_spot / step) * step,
                         "source": "BREEZE",
+                        "captured_at": datetime.now(timezone.utc).isoformat(),
                         "strikes": sorted_strikes,
                     }
             except Exception as exc:

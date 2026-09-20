@@ -91,6 +91,8 @@ class ContractSelector:
                 "instrument_id": instrument_id,
                 "expiry": expiry,
                 "lot_size": int(leg.get("lot_size", 0) or 0),
+                "ltp": float(leg.get("ltp", 0.0) or 0.0),
+                "instrument_token": leg.get("instrument_token") or leg.get("token") or leg.get("broker_token"),
             }
             inspected_candidates.append(cand_info)
             if not instrument_id or not expiry:
@@ -164,6 +166,9 @@ class ContractSelector:
             volume=int(best["volume"]),
             spread_pct=float(best["spread_pct"]),
             lot_size=best["lot_size"],
+            ltp=float(best.get("ltp", 0.0) or 0.0),
+            instrument_token=best.get("instrument_token"),
+            premium=float(best["ask"]),
         )
 
         return selected, inspected_candidates, None

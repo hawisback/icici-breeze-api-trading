@@ -200,6 +200,7 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
                 <div>
                   <div className="text-[11px] text-slate-400">CONTRACT</div>
                   <div className="text-base font-bold text-slate-100">{activeTrade.contract_symbol}</div>
+                  <div className="text-xs text-slate-400">Expiry {activeTrade.expiry} • Strike {activeTrade.strike}</div>
                   <div className="text-xs text-slate-400">{activeTrade.lots} Lots ({activeTrade.quantity} Qty)</div>
                 </div>
 
@@ -212,7 +213,8 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
                 <div>
                   <div className="text-[11px] text-slate-400">CURRENT PREMIUM</div>
                   <div className="text-base font-bold text-cyan-300">₹{activeTrade.current_option_price.toFixed(2)}</div>
-                  <div className="text-xs text-slate-400">Spot: {activeTrade.current_spot_price.toFixed(1)}</div>
+                  <div className="text-xs text-slate-400">Bid {activeTrade.current_bid?.toFixed(2) ?? "--"} / Ask {activeTrade.current_ask?.toFixed(2) ?? "--"}</div>
+                  <div className="text-xs text-slate-400">LTP {activeTrade.current_ltp?.toFixed(2) ?? "--"} • Spot: {activeTrade.current_spot_price.toFixed(1)}</div>
                 </div>
 
                 <div>

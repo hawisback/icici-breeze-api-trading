@@ -1119,6 +1119,12 @@ async def get_strategy_trades(limit: int = 50):
     return await services.strategy_svc.list_trades(limit=limit)
 
 
+@app.get("/api/v1/strategies/eod-report")
+async def get_strategy_eod_report(session_date: Optional[str] = Query(default=None)):
+    services = get_services()
+    return await services.strategy_svc.get_eod_report(session_date=session_date)
+
+
 @app.post("/api/v1/strategies/trades/{trade_id}/exit")
 async def exit_strategy_trade(trade_id: str, req: StrategyExitRequest = StrategyExitRequest()):
     services = get_services()

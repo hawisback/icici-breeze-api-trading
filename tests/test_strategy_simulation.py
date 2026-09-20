@@ -12,9 +12,14 @@ from services.strategy.models import (
     SimulatedTradeRecord,
     SimulationRequest,
     SimulationResult,
+    RiskConfig,
     ThresholdOverrides,
 )
-from services.strategy.replay_lifecycle import build_simulated_trade_records, summarize_simulated_pnl
+from services.strategy.replay_lifecycle import (
+    attach_historical_option_prices,
+    build_simulated_trade_records,
+    summarize_simulated_pnl,
+)
 from services.strategy.replay_manifest import ReplayManifestRecord
 from services.strategy.simulation import SimulationEngine
 
@@ -108,6 +113,45 @@ def test_simulation_result_trades_are_the_canonical_summary_rows():
         trades=build_simulated_trade_records([]),
     )
     assert empty_result.total_trades == 0 == len(empty_result.trades)
+
+
+def test_historical_option_candles_populate_net_pnl():
+    record = _resolved_manifest(2, -1.0)
+    record.simulated_entry_price = 23306.0
+    contract = SimpleNamespace(
+        instrument_id="INST-NIFTY-2026-09-22-23300-CE",
+        stock_code="NIFTY23300CE",
+        expiry="2026-09-22",
+        strike=23300.0,
+        option_right=SimpleNamespace(value="CALL"),
+        lot_size=25,
+    )
+    candles = [
+        Candle(
+            instrument_id=contract.instrument_id, interval="1m",
+            start_time=record.simulated_entry_timestamp,
+            end_time=record.simulated_entry_timestamp + timedelta(minutes=1),
+            open=120.0, high=121.0, low=119.0, close=120.0, volume=100,
+            source="BREEZE",
+        ),
+        Candle(
+            instrument_id=contract.instrument_id, interval="1m",
+            start_time=record.exit_timestamp,
+            end_time=record.exit_timestamp + timedelta(minutes=1),
+            open=110.0, high=111.0, low=109.0, close=110.0, volume=100,
+            source="BREEZE",
+        ),
+    ]
+
+    attach_historical_option_prices([record], [contract], {contract.instrument_id: candles}, RiskConfig())
+    trade = build_simulated_trade_records([record])[0]
+
+    assert record.option_data_status == "AVAILABLE"
+    assert trade.entry_premium == 120.0
+    assert trade.exit_premium == 110.0
+    assert trade.quantity == 25
+    assert trade.gross_pnl == -250.0
+    assert trade.net_pnl is not None and trade.net_pnl < trade.gross_pnl
 
 
 @pytest.mark.asyncio

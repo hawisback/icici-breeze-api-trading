@@ -63,6 +63,46 @@ class HistoricalService:
             return "1day", 1440
         return "5minute", 5
 
+    async def _breeze_contract_args(self, instrument_id: str) -> dict[str, str]:
+        """Build the contract-specific arguments required by Breeze V2.
+
+        Breeze's historical endpoint does not infer an option from the
+        platform instrument id.  Options must be requested using the
+        underlying stock code plus NFO/options, expiry, right, and strike.
+        Keeping this mapping here also makes the legacy historical service
+        path behave the same as the clean broker adapter path.
+        """
+        if not self.instrument_service:
+            return {}
+        instrument = await self.instrument_service.get_instrument(instrument_id)
+        if not instrument:
+            return {}
+        segment = str(instrument.segment or "").upper()
+        if segment == "OPTIONS":
+            if not instrument.expiry or instrument.strike is None or not instrument.option_right:
+                return {}
+            right = getattr(instrument.option_right, "value", instrument.option_right)
+            return {
+                "stock_code": instrument.underlying,
+                "exchange_code": instrument.exchange or "NFO",
+                "product_type": "options",
+                "expiry_date": f"{instrument.expiry}T06:00:00.000Z",
+                "right": "call" if str(right).upper() in {"CALL", "CE"} else "put",
+                "strike_price": str(instrument.strike),
+            }
+        if segment == "FUTURES":
+            if not instrument.expiry:
+                return {}
+            return {
+                "stock_code": instrument.underlying,
+                "exchange_code": instrument.exchange or "NFO",
+                "product_type": "futures",
+                "expiry_date": f"{instrument.expiry}T00:00:00.000Z",
+                "right": "others",
+                "strike_price": "0",
+            }
+        return {}
+
     async def fetch_candles_from_breeze(
         self,
         instrument_id: str,
@@ -101,14 +141,16 @@ class HistoricalService:
             return []
 
         stock_code, exchange, product_type = self._map_instrument_to_breeze(instrument_id)
-        contract_args = {}
-        if self.instrument_service:
+        contract_args = await self._breeze_contract_args(instrument_id)
+        if contract_args:
+            stock_code = contract_args.pop("stock_code")
+            exchange = contract_args.pop("exchange_code")
+            product_type = contract_args.pop("product_type")
+        elif self.instrument_service:
             instrument = await self.instrument_service.get_instrument(instrument_id)
-            if instrument and instrument.segment == "FUTURES":
-                if not instrument.expiry:
-                    return []
-                stock_code, exchange, product_type = instrument.underlying, instrument.exchange, "futures"
-                contract_args = {"expiry_date": instrument.expiry + "T00:00:00.000Z", "right": "others", "strike_price": "0"}
+            if instrument and str(instrument.segment).upper() in {"OPTIONS", "FUTURES"}:
+                logger.warning("Missing Breeze contract metadata for %s", instrument_id)
+                return []
         breeze_interval, step_min = self._map_interval_to_breeze(interval)
 
         now = utc_now()
@@ -220,6 +262,17 @@ class HistoricalService:
         from_dt = start_ist.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         to_dt = end_ist.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
+        contract_args = await self._breeze_contract_args(instrument_id)
+        if contract_args:
+            stock_code = contract_args.pop("stock_code")
+            exchange = contract_args.pop("exchange_code")
+            product_type = contract_args.pop("product_type")
+        elif self.instrument_service:
+            instrument = await self.instrument_service.get_instrument(instrument_id)
+            if instrument and str(instrument.segment).upper() in {"OPTIONS", "FUTURES"}:
+                logger.warning("Missing Breeze contract metadata for %s", instrument_id)
+                return []
+
         try:
             rate_limiter = getattr(breeze_adapter, "rate_limiter", None)
             if rate_limiter is not None and hasattr(rate_limiter, "acquire_read"):
@@ -233,6 +286,7 @@ class HistoricalService:
                     stock_code=stock_code,
                     exchange_code=exchange,
                     product_type=product_type,
+                    **contract_args,
                 ),
                 timeout_sec=15.0,
             )

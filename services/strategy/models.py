@@ -16,6 +16,7 @@ def utc_now() -> datetime:
 
 class AutoTradingMode(str, Enum):
     PAPER = "PAPER"
+    SHADOW_ONLY = "SHADOW_ONLY"
     LIVE = "LIVE"
     DISABLED = "DISABLED"
 
@@ -89,6 +90,16 @@ class RiskConfig(BaseModel):
     cooldown_after_loss_min: int = Field(default=10, ge=0, le=60, description="Cooldown wait in minutes after a losing exit")
     option_hard_stop_pct: float = Field(default=25.0, ge=10.0, le=50.0, description="Emergency option premium loss stop %")
     account_equity: float = Field(default=500000.0, gt=0)
+    # Forward option-validation assumptions.  These do not alter signal,
+    # selector, PositionManager, or exit rules.
+    paper_slippage_points: float = Field(default=0.0, ge=0.0)
+    paper_brokerage_per_order: float = Field(default=20.0, ge=0.0)
+    paper_exchange_charge_rate: float = Field(default=0.0003503, ge=0.0)
+    paper_stt_sell_rate: float = Field(default=0.001, ge=0.0)
+    paper_gst_rate: float = Field(default=0.18, ge=0.0)
+    paper_sebi_charge_rate: float = Field(default=0.000001, ge=0.0)
+    paper_stamp_buy_rate: float = Field(default=0.00003, ge=0.0)
+    paper_cost_assumption_version: str = "paper_options_costs_v1"
 
 
 class SessionTimersConfig(BaseModel):
@@ -228,6 +239,9 @@ class SelectedContract(BaseModel):
     volume: int
     spread_pct: float
     lot_size: int = Field(gt=0)
+    ltp: float = 0.0
+    instrument_token: Optional[str] = None
+    premium: Optional[float] = None
 
 
 class StrategySignal(BaseModel):
@@ -301,6 +315,49 @@ class ActiveTrade(BaseModel):
     gross_pnl: Optional[float] = None
     net_pnl: Optional[float] = None
     realized_r: Optional[float] = None
+    # Immutable entry-selection/audit snapshot.  Quote updates never modify
+    # these contract identity fields.
+    signal_id: Optional[str] = None
+    selector_timestamp: Optional[datetime] = None
+    selected_contract_snapshot: dict[str, Any] = Field(default_factory=dict)
+    entry_bid: Optional[float] = None
+    entry_ask: Optional[float] = None
+    entry_ltp: Optional[float] = None
+    entry_quote_source: Optional[str] = None
+    entry_quote_timestamp: Optional[datetime] = None
+    entry_quote_freshness_seconds: Optional[float] = None
+    entry_slippage_points: float = 0.0
+    entry_raw_ask: Optional[float] = None
+    entry_executable_price: Optional[float] = None
+    # Latest selected-contract quote, persisted for the UI and audit trail.
+    current_bid: Optional[float] = None
+    current_ask: Optional[float] = None
+    current_ltp: Optional[float] = None
+    current_quote_source: Optional[str] = None
+    current_quote_timestamp: Optional[datetime] = None
+    current_quote_freshness_seconds: Optional[float] = None
+    current_quote_volume: Optional[int] = None
+    current_quote_open_interest: Optional[int] = None
+    option_data_status: str = "ENTRY_CAPTURED"
+    option_data_quality_reasons: list[str] = Field(default_factory=list)
+    # Underlying lifecycle and option execution are intentionally separate.
+    underlying_exit_reason: Optional[str] = None
+    underlying_exit_time: Optional[datetime] = None
+    option_exit_reason: Optional[str] = None
+    option_exit_time: Optional[datetime] = None
+    # Explicit cost ledger values.
+    raw_gross_option_pnl: Optional[float] = None
+    brokerage: Optional[float] = None
+    exchange_charges: Optional[float] = None
+    stt: Optional[float] = None
+    gst: Optional[float] = None
+    sebi_charges: Optional[float] = None
+    stamp_duty: Optional[float] = None
+    slippage_cost: Optional[float] = None
+    transaction_costs: Optional[float] = None
+    return_on_premium_pct: Optional[float] = None
+    cost_assumption_version: Optional[str] = None
+    cost_assumptions: dict[str, Any] = Field(default_factory=dict)
 
 
 class DecisionLogEntry(BaseModel):

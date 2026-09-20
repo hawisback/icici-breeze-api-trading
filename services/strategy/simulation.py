@@ -63,6 +63,88 @@ class SimulationEngine:
         self.tunables = tunables or StrategyTunablesConfig()
         self.replay_manifest_recorder = replay_manifest_recorder
 
+    async def _fetch_replay_option_candles(
+        self,
+        records: list[Any],
+        date_str: str,
+        session_start: datetime,
+        session_end: datetime,
+        historical_source: HistoricalReplaySource,
+    ) -> tuple[list[Any], dict[str, list[Candle]], dict[str, Any]]:
+        """Resolve replay contracts and load their real 1-minute OHLC candles."""
+        inst_svc = getattr(self.hist_svc, "instrument_service", None)
+        if not inst_svc or not records:
+            return [], {}, {"status": "UNAVAILABLE", "reason": "instrument service unavailable", "contracts": 0}
+
+        try:
+            instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
+        except Exception as exc:
+            logger.warning("Historical option contract lookup failed: %s", exc)
+            return [], {}, {"status": "UNAVAILABLE", "reason": "contract lookup failed", "contracts": 0}
+
+        option_instruments = [
+            instrument for instrument in instruments
+            if str(getattr(instrument, "segment", "")).upper() == "OPTIONS"
+            and getattr(instrument, "expiry", None)
+            and str(instrument.expiry) >= date_str
+            and getattr(instrument, "strike", None) is not None
+            and getattr(instrument, "option_right", None)
+        ]
+        selected: dict[str, Any] = {}
+        for record in records:
+            direction = "CALL" if record.direction == "CALL" else "PUT"
+            candidates = [
+                instrument for instrument in option_instruments
+                if str(getattr(getattr(instrument, "option_right", None), "value", "")).upper() in {direction, "CE" if direction == "CALL" else "PE"}
+            ]
+            if not candidates:
+                continue
+            expiry = min(str(instrument.expiry) for instrument in candidates)
+            same_expiry = [instrument for instrument in candidates if str(instrument.expiry) == expiry]
+            contract = min(same_expiry, key=lambda instrument: abs(float(instrument.strike) - record.simulated_entry_price))
+            selected[contract.instrument_id] = contract
+
+        candles_by_instrument: dict[str, list[Candle]] = {}
+        allowed_sources = {"BREEZE", "KITE", "LIVE"} if historical_source == HistoricalReplaySource.MIXED else {historical_source.value}
+        fetched_count = 0
+        for instrument_id, contract in selected.items():
+            candles: list[Candle] = []
+            if hasattr(self.hist_svc, "repo"):
+                try:
+                    candles = await self.hist_svc.repo.get_candles(
+                        instrument_id, "1m", start_time=session_start, end_time=session_end, limit=1000,
+                    )
+                    candles = [c for c in candles if c.source in allowed_sources]
+                except Exception as exc:
+                    logger.warning("Historical option cache query failed for %s: %s", instrument_id, exc)
+
+            if not candles and hasattr(self.hist_svc, "fetch_candles_from_breeze_window") and historical_source in (HistoricalReplaySource.BREEZE, HistoricalReplaySource.MIXED):
+                try:
+                    candles = await self.hist_svc.fetch_candles_from_breeze_window(
+                        instrument_id,
+                        interval="1m",
+                        start_time=session_start,
+                        end_time=session_end,
+                    )
+                    fetched_count += len(candles)
+                except Exception as exc:
+                    logger.warning("Historical option fetch failed for %s: %s", instrument_id, exc)
+            candles_by_instrument[instrument_id] = sorted(
+                [c for c in candles if c.source in allowed_sources],
+                key=lambda candle: candle.start_time,
+            )
+
+        available = sum(bool(candles) for candles in candles_by_instrument.values())
+        return list(selected.values()), candles_by_instrument, {
+            "status": "AVAILABLE" if available else "UNAVAILABLE",
+            "contracts": len(selected),
+            "contracts_with_candles": available,
+            "candle_count": sum(len(candles) for candles in candles_by_instrument.values()),
+            "fetched_candle_count": fetched_count,
+            "price_basis": "BREEZE_HISTORICAL_OHLC_CLOSE" if available else None,
+            "selection": "nearest_strike_first_expiry_on_or_after_replay_date",
+        }
+
     @staticmethod
     def resample_to_15m(candles_5m: list[Candle], instrument_id: str = "INST-NIFTY-INDEX") -> list[Candle]:
         """Resample a 5m candle sequence into 15m candles."""
@@ -587,6 +669,7 @@ class SimulationEngine:
 
         from services.strategy.replay_lifecycle import (
             HistoricalPositionManagerReplayer,
+            attach_historical_option_prices,
             build_lifecycle_report,
             build_simulated_trade_records,
             summarize_simulated_pnl,
@@ -603,12 +686,43 @@ class SimulationEngine:
         )
         lifecycle_resolver = lifecycle_replayer.replay(replay_manifest_recorder.records())
         lifecycle_report = build_lifecycle_report(replay_manifest_recorder.records(), lifecycle_resolver)
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        option_session_start = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST).astimezone(timezone.utc)
+        option_session_end = datetime(target_date.year, target_date.month, target_date.day, 15, 30, tzinfo=IST).astimezone(timezone.utc)
+        option_contracts, option_candles, option_data = await self._fetch_replay_option_candles(
+            replay_manifest_recorder.records(),
+            date_str,
+            option_session_start,
+            option_session_end,
+            historical_source,
+        )
+        attach_historical_option_prices(
+            replay_manifest_recorder.records(),
+            option_contracts,
+            option_candles,
+            self.risk_config,
+        )
+        replay_metadata["historical_option_data"] = option_data
         trades = build_simulated_trade_records(replay_manifest_recorder.records())
         total_pnl, net_pnl = summarize_simulated_pnl(trades)
+        resolved_records = [
+            record for record in replay_manifest_recorder.records()
+            if record.lifecycle_status == "RESOLVED" and record.realized_r is not None
+        ]
+        option_complete = bool(resolved_records) and all(
+            record.option_data_status == "AVAILABLE" for record in resolved_records
+        )
+        limitation = (
+            "Real Breeze historical option OHLC close prices used for entry/exit PNL; "
+            "historical bid/ask and point-in-time option-chain selection are unavailable."
+            if option_complete else
+            "Real completed spot/futures candles only. Historical option candles were unavailable for one or more resolved trades."
+        )
         lifecycle_report["manifest_validation"] = replay_manifest_recorder.validate_complete(expected_count=len(replay_manifest_recorder.records()))
         replay_lifecycle = lifecycle_report
         return SimulationResult(
             replay_mode="POSITION_MANAGER_REPLAY",
+            limitation=limitation,
             session_date=date_str, total_bars_evaluated=len(session), total_trades=lifecycle_report["resolved"],
             winning_trades=lifecycle_report["winners"], losing_trades=lifecycle_report["losers"],
             win_rate_pct=lifecycle_report["win_rate_pct"], total_pnl=total_pnl, net_pnl=net_pnl,

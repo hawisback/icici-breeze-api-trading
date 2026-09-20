@@ -22,6 +22,7 @@ from libs.contracts.models import (
     utc_now,
 )
 from libs.events.bus import EventBus, EventEnvelope, Topics, get_event_bus
+from libs.config.settings import get_platform_settings
 from services.oms.service import OMSService
 from services.strategy.contract_selector import ContractSelector
 from services.strategy.features import FeatureEngine
@@ -113,6 +114,7 @@ class StrategyService:
         self._market_snapshot = ([], [], [])
         self._evaluation_lock = asyncio.Lock()
         self._last_eval_time: datetime = datetime.min.replace(tzinfo=timezone.utc)  # epoch → forces first-call refresh
+        self._last_eod_report_date: Optional[str] = None
 
 
     def _reset_setups(self, at):
@@ -169,6 +171,169 @@ class StrategyService:
             session_config=self.config.session,
             tunables=self.config.tunables,
         )
+
+    @staticmethod
+    def _is_strategy_a(strategy: StrategyName) -> bool:
+        return strategy == StrategyName.TREND_PULLBACK
+
+    def _execution_mode_for_signal(self, signal: StrategySignal) -> AutoTradingMode:
+        """Strategy A's forward-validation modes are direction-bound and non-live."""
+        if self._is_strategy_a(signal.strategy):
+            return AutoTradingMode.SHADOW_ONLY if signal.option_type == OptionType.CALL else AutoTradingMode.PAPER
+        return self.config.mode
+
+    def _paper_slippage(self) -> float:
+        return float(self.config.risk.paper_slippage_points)
+
+    @staticmethod
+    def _live_orders_enabled() -> bool:
+        try:
+            return bool(get_platform_settings().live_trading_enabled)
+        except Exception:
+            return False
+
+    def _cost_metadata(self) -> dict[str, Any]:
+        r = self.config.risk
+        return {
+            "version": r.paper_cost_assumption_version,
+            "brokerage_per_order": r.paper_brokerage_per_order,
+            "exchange_charge_rate": r.paper_exchange_charge_rate,
+            "stt_sell_rate": r.paper_stt_sell_rate,
+            "gst_rate": r.paper_gst_rate,
+            "sebi_charge_rate": r.paper_sebi_charge_rate,
+            "stamp_buy_rate": r.paper_stamp_buy_rate,
+            "slippage_points": self._paper_slippage(),
+        }
+
+    async def _record_option_quote(self, trade: ActiveTrade, quote: dict[str, Any]) -> None:
+        """Persist every selected-contract quote, including unusable samples."""
+        quote = dict(quote)
+        quote.setdefault("trade_id", trade.trade_id)
+        quote.setdefault("strategy_signal_id", trade.signal_id)
+        quote.setdefault("instrument_id", trade.contract_instrument_id)
+        quote.setdefault("quote_timestamp", utc_now().isoformat())
+        try:
+            await self.repo.save_option_quote(quote)
+        except Exception:
+            logger.exception("Option quote audit persistence failed")
+
+    async def _record_execution(self, entry: dict[str, Any]) -> None:
+        try:
+            await self.repo.save_execution_ledger(entry)
+        except Exception:
+            logger.exception("Option execution audit persistence failed")
+
+    async def _resolve_option_quote(self, trade: ActiveTrade) -> dict[str, Any]:
+        """Resolve only a real, fresh quote for the immutable selected contract.
+
+        There is deliberately no spot/delta or entry-price fallback here.  A
+        missing quote is an incomplete validation observation, never a fill.
+        """
+        now = utc_now()
+        reasons: list[str] = []
+        if self.mkt_svc:
+            q = self.mkt_svc.get_latest_quote(trade.contract_instrument_id)
+            if q:
+                freshness = max(0.0, (now - q.timestamp).total_seconds())
+                quote = {
+                    "quote_timestamp": q.timestamp.isoformat(),
+                    "source": getattr(q, "source", "UNKNOWN"),
+                    "freshness_seconds": freshness,
+                    "bid": float(getattr(q, "best_bid", 0) or 0),
+                    "ask": float(getattr(q, "best_ask", 0) or 0),
+                    "ltp": float(getattr(q, "last_price", 0) or 0),
+                    "volume": int(getattr(q, "volume", 0) or 0),
+                    "open_interest": int(getattr(q, "open_interest", 0) or 0),
+                }
+                if quote["source"] in ("BREEZE", "KITE", "LIVE") and freshness <= 30:
+                    if quote["bid"] <= 0:
+                        reasons.append("missing bid")
+                    if quote["ask"] <= 0:
+                        reasons.append("missing ask")
+                    if quote["ask"] > 0 and quote["bid"] > quote["ask"]:
+                        reasons.append("zero/invalid spread")
+                    # Preserve the pre-existing live reconciliation path,
+                    # which only requires a broker bid for a pending sell.
+                    if trade.mode == AutoTradingMode.LIVE and quote["bid"] > 0 and (quote["ask"] <= 0 or quote["bid"] <= quote["ask"]):
+                        quote["status"] = "VALID"
+                        await self._record_option_quote(trade, quote)
+                        return quote
+                    if not reasons:
+                        quote["status"] = "VALID"
+                        await self._record_option_quote(trade, quote)
+                        return quote
+                elif quote["source"] in ("BREEZE", "KITE", "LIVE"):
+                    reasons.append("stale quote")
+                else:
+                    reasons.append("API error")
+
+        if self.chain_svc:
+            try:
+                chain = await self.chain_svc.get_chain(underlying="NIFTY", expiry=trade.expiry)
+                source = chain.get("source", "UNKNOWN")
+                captured_at = chain.get("captured_at") or now.isoformat()
+                captured_dt = datetime.fromisoformat(captured_at.replace("Z", "+00:00")) if isinstance(captured_at, str) else now
+                freshness = max(0.0, (now - captured_dt).total_seconds())
+                for strike in chain.get("strikes", []):
+                    for side in ("call", "put"):
+                        leg = strike.get(side) or {}
+                        if leg.get("instrument_id") != trade.contract_instrument_id and leg.get("symbol") != trade.contract_symbol:
+                            continue
+                        quote = {
+                            "quote_timestamp": captured_dt.isoformat(),
+                            "source": source,
+                            "freshness_seconds": freshness,
+                            "bid": float(leg.get("bid") or 0),
+                            "ask": float(leg.get("ask") or 0),
+                            "ltp": float(leg.get("ltp") or 0),
+                            "volume": int(leg.get("volume") or 0),
+                            "open_interest": int(leg.get("open_interest") or 0),
+                        }
+                        if source not in ("BREEZE", "KITE", "LIVE"):
+                            reasons.append("API error: non-live/synthetic option quote")
+                        elif freshness > 30:
+                            reasons.append("stale quote")
+                        elif quote["bid"] <= 0:
+                            reasons.append("missing bid")
+                        elif quote["ask"] <= 0:
+                            reasons.append("missing ask")
+                        elif quote["bid"] > quote["ask"]:
+                            reasons.append("zero/invalid spread")
+                        elif quote["ltp"] <= 0:
+                            reasons.append("option quote unavailable after entry")
+                        else:
+                            quote["status"] = "VALID"
+                            await self._record_option_quote(trade, quote)
+                            return quote
+                        await self._record_option_quote(trade, {**quote, "status": "INVALID", "reason": reasons[-1]})
+                        break
+            except Exception as exc:
+                reasons.append(f"API error: {type(exc).__name__}")
+
+        if not reasons:
+            reasons.append("option quote unavailable after entry")
+        quote = {
+            "quote_timestamp": now.isoformat(), "source": "UNAVAILABLE", "freshness_seconds": None,
+            "bid": None, "ask": None, "ltp": None, "volume": None, "open_interest": None,
+            "status": "UNAVAILABLE", "reason": "; ".join(dict.fromkeys(reasons)),
+        }
+        await self._record_option_quote(trade, quote)
+        return quote
+
+    def _apply_quote_to_trade(self, trade: ActiveTrade, quote: dict[str, Any]) -> None:
+        trade.current_bid = quote.get("bid")
+        trade.current_ask = quote.get("ask")
+        trade.current_ltp = quote.get("ltp")
+        trade.current_quote_source = quote.get("source")
+        ts = quote.get("quote_timestamp")
+        trade.current_quote_timestamp = datetime.fromisoformat(ts.replace("Z", "+00:00")) if isinstance(ts, str) else None
+        trade.current_quote_freshness_seconds = quote.get("freshness_seconds")
+        trade.current_quote_volume = quote.get("volume")
+        trade.current_quote_open_interest = quote.get("open_interest")
+        trade.option_data_status = quote.get("status", "UNAVAILABLE")
+        reason = quote.get("reason")
+        if reason and reason not in trade.option_data_quality_reasons:
+            trade.option_data_quality_reasons.append(reason)
 
     async def _seed_default_strategy(self) -> None:
         # 1. Default EMA Breakout Strategy (for test & manual signal compatibility)
@@ -275,6 +440,12 @@ class StrategyService:
                 interval = max(1, self.config.tunables.evaluation_interval_sec)
                 await asyncio.sleep(interval)
                 await self.evaluate_cycle()
+                ist_now = utc_now().astimezone(timezone(timedelta(hours=5, minutes=30)))
+                force_exit = datetime.strptime(self.config.session.force_exit_time, "%H:%M").time()
+                session_date = ist_now.date().isoformat()
+                if ist_now.time() >= force_exit and self._last_eod_report_date != session_date:
+                    await self.generate_eod_report(session_date)
+                    self._last_eod_report_date = session_date
                 # Broadcast live status update to UI over event bus
                 st = await self.get_status()
                 await self.bus.publish(
@@ -439,6 +610,9 @@ class StrategyService:
             option_chain=chain,
             override_premium_cap=self._active_overrides.max_option_premium_cap,
         )
+        if signal.strategy == StrategyName.TREND_PULLBACK and chain.get("source") not in ("BREEZE", "KITE", "LIVE"):
+            selected_contract = None
+            rejection_reason = chain.get("validation_rejection", "NO_REAL_OPTION_QUOTE")
         # Passive shadow capture only. The selector has already run and its
         # result is never changed by this recorder; persistence failures are
         # intentionally non-blocking for paper/live execution paths.
@@ -487,8 +661,17 @@ class StrategyService:
             )
             return {"status": "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"}
 
-        # 12. Check LIVE Arming Gate
-        if self.config.mode == AutoTradingMode.LIVE and not self.config.system_armed:
+        execution_mode = self._execution_mode_for_signal(signal)
+
+        # Strategy A is permanently paper/shadow for this forward-validation
+        # phase.  It cannot inherit a globally selected LIVE mode.
+        if self._is_strategy_a(signal.strategy) and execution_mode == AutoTradingMode.LIVE:
+            execution_mode = AutoTradingMode.SHADOW_ONLY if signal.option_type == OptionType.CALL else AutoTradingMode.PAPER
+
+        # 12. Check LIVE Arming Gate for non-Strategy-A compatibility paths.
+        if execution_mode == AutoTradingMode.LIVE and not self._live_orders_enabled():
+            return {"status": "LIVE_TRADING_DISABLED"}
+        if execution_mode == AutoTradingMode.LIVE and not self.config.system_armed:
             await self._log_decision(
                 category="SECURITY",
                 strategy=signal.strategy.value,
@@ -499,14 +682,16 @@ class StrategyService:
 
         # 13. Create Active Trade and dispatch Order
         trade_id = f"TRD-{int(now.timestamp())}"
+        entry_slippage = self._paper_slippage() if execution_mode in (AutoTradingMode.PAPER, AutoTradingMode.SHADOW_ONLY) else 0.0
+        entry_price = round(selected_contract.ask_price + entry_slippage, 2)
         hard_stop_price = round(
-            selected_contract.ask_price * (1.0 - (self.config.risk.option_hard_stop_pct / 100.0)),
+            entry_price * (1.0 - (self.config.risk.option_hard_stop_pct / 100.0)),
             2,
         )
 
         new_trade = ActiveTrade(
             trade_id=trade_id,
-            mode=self.config.mode,
+            mode=execution_mode,
             strategy=signal.strategy,
             direction=signal.direction,
             option_type=signal.option_type,
@@ -518,7 +703,7 @@ class StrategyService:
             lot_size=selected_contract.lot_size,
             lots=lots,
             entry_time=now,
-            entry_option_price=selected_contract.ask_price,
+            entry_option_price=entry_price,
             entry_spot_price=signal.spot_reference_price,
             initial_structural_stop=signal.structural_stop,
             initial_r_points=signal.r_points,
@@ -527,16 +712,53 @@ class StrategyService:
             box_high=signal.features_snapshot.get("box_high"),
             box_low=signal.features_snapshot.get("box_low"),
             atr_at_lock=signal.features_snapshot.get("atr_at_lock"),
-            current_option_price=selected_contract.ask_price,
+            current_option_price=selected_contract.ltp or selected_contract.ask_price,
             current_spot_price=features.spot_price,
             current_trailing_stop=signal.structural_stop,
             option_hard_stop_price=hard_stop_price,
             current_r=0.0,
             peak_r=0.0,
-            state=TradeLifecycleState.ENTRY_PENDING if self.config.mode == AutoTradingMode.LIVE else TradeLifecycleState.OPEN_INITIAL_RISK,
+            state=TradeLifecycleState.ENTRY_PENDING if execution_mode == AutoTradingMode.LIVE else TradeLifecycleState.OPEN_INITIAL_RISK,
+            signal_id=signal.signal_id,
+            selector_timestamp=now,
+            selected_contract_snapshot=selected_contract.model_dump(mode="json"),
+            entry_bid=selected_contract.bid_price,
+            entry_ask=selected_contract.ask_price,
+            entry_ltp=selected_contract.ltp,
+            entry_quote_source=chain.get("source"),
+            entry_quote_timestamp=now,
+            entry_quote_freshness_seconds=0.0,
+            entry_slippage_points=entry_slippage,
+            entry_raw_ask=selected_contract.ask_price,
+            entry_executable_price=entry_price,
+            current_bid=selected_contract.bid_price,
+            current_ask=selected_contract.ask_price,
+            current_ltp=selected_contract.ltp,
+            current_quote_source=chain.get("source"),
+            current_quote_timestamp=now,
+            current_quote_freshness_seconds=0.0,
+            current_quote_volume=selected_contract.volume,
+            current_quote_open_interest=selected_contract.open_interest,
+            option_data_status="ENTRY_CAPTURED",
+            cost_assumption_version=self.config.risk.paper_cost_assumption_version,
+            cost_assumptions=self._cost_metadata(),
         )
 
         await self.repo.save_trade(new_trade)
+        await self._record_execution({
+            "trade_id": new_trade.trade_id,
+            "side": "BUY",
+            "timestamp": now.isoformat(),
+            "raw_bid": selected_contract.bid_price,
+            "raw_ask": selected_contract.ask_price,
+            "raw_ltp": selected_contract.ltp,
+            "executable_price": entry_price,
+            "slippage_points": entry_slippage,
+            "quantity": quantity,
+            "source": chain.get("source", "UNKNOWN"),
+            "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+            "reason": "PAPER_OR_SHADOW_ENTRY",
+        })
         self._active_trades_cache.append(new_trade)
 
         await self._log_decision(
@@ -547,7 +769,7 @@ class StrategyService:
         )
 
         # In LIVE mode, dispatch OrderIntent to OMS
-        if self.config.mode == AutoTradingMode.LIVE:
+        if execution_mode == AutoTradingMode.LIVE and not self._is_strategy_a(signal.strategy):
             intent = OrderIntent(
                 intent_id=generate_id(),
                 correlation_id=trade_id,
@@ -635,7 +857,15 @@ class StrategyService:
                         await gateway.modify_order(order.broker_order_id, price=bid, mode=order.trading_mode)
                 return
 
-        current_option_price = await self._resolve_option_price(trade, features)
+        quote = await self._resolve_option_quote(trade)
+        self._apply_quote_to_trade(trade, quote)
+        current_option_price = quote.get("ltp") or quote.get("bid")
+        if quote.get("status") != "VALID" or not current_option_price or float(current_option_price) <= 0:
+            # A quote gap is an incomplete validation observation, not a
+            # synthetic mark and never an executable exit.
+            await self.repo.save_trade(trade)
+            return
+        current_option_price = round(float(current_option_price), 2)
         self.position_manager.bull_derivatives_threshold = self._active_overrides.bull_derivatives_score if self._active_overrides.bull_derivatives_score is not None else 2
         self.position_manager.bear_derivatives_threshold = self._active_overrides.bear_derivatives_score if self._active_overrides.bear_derivatives_score is not None else 2
         updated_trade, exit_reason = self.position_manager.update_position(
@@ -645,8 +875,17 @@ class StrategyService:
         exit_reason = trade.pending_exit_reason or exit_reason
         if exit_reason:
             if trade.mode == AutoTradingMode.LIVE:
-                bid = await self._executable_bid(trade)
-                order_price = bid if bid is not None else current_option_price
+                if self._is_strategy_a(trade.strategy) and trade.selected_contract_snapshot and not self._live_orders_enabled():
+                    trade.option_data_status = "LIVE_TRADING_DISABLED"
+                    await self.repo.save_trade(trade)
+                    return
+                bid = quote.get("bid")
+                if not bid or float(bid) <= 0:
+                    trade.option_data_status = "INVALID"
+                    trade.option_data_quality_reasons.append("missing bid") if "missing bid" not in trade.option_data_quality_reasons else None
+                    await self.repo.save_trade(trade)
+                    return
+                order_price = round(float(bid) - self._paper_slippage(), 2)
                 intent = OrderIntent(
                     correlation_id=trade.trade_id, strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
                     source=SourceType.STRATEGY, instrument_id=trade.contract_instrument_id,
@@ -659,18 +898,50 @@ class StrategyService:
                 trade.state = TradeLifecycleState.EXIT_PENDING
                 await self.repo.save_trade(trade)
             else:
-                await self._close_trade(trade, features, current_option_price, exit_reason)
+                sell_price = round(float(quote["bid"]) - self._paper_slippage(), 2)
+                await self._close_trade(trade, features, sell_price, exit_reason, quote=quote)
         else:
             await self.repo.save_trade(updated_trade)
 
-    async def _close_trade(self, trade, features, price, reason):
+    async def _close_trade(self, trade, features, price, reason, quote: Optional[dict[str, Any]] = None):
         trade.state = TradeLifecycleState.CLOSED
         trade.exit_time = utc_now()
         trade.exit_option_price = price
         trade.exit_spot_price = features.spot_price if features else trade.current_spot_price
         trade.exit_reason = reason
-        trade.gross_pnl = round((price-trade.entry_option_price)*trade.quantity, 2)
-        trade.net_pnl = round(trade.gross_pnl-40, 2)
+        trade.option_exit_time = trade.exit_time
+        trade.option_exit_reason = reason
+        if str(reason) == "OPTION_HARD_STOP_HIT":
+            trade.underlying_exit_reason = "OPTION_HARD_STOP_PREEMPTED_UNDERLYING"
+            trade.underlying_exit_time = None
+        else:
+            trade.underlying_exit_reason = reason
+            trade.underlying_exit_time = trade.exit_time
+
+        raw_entry = float(trade.entry_raw_ask or trade.entry_option_price)
+        raw_exit = float((quote or {}).get("bid") or price)
+        trade.raw_gross_option_pnl = round((raw_exit - raw_entry) * trade.quantity, 2)
+        trade.gross_pnl = round((price - trade.entry_option_price) * trade.quantity, 2)
+        entry_slip = abs(float(trade.entry_executable_price or trade.entry_option_price) - raw_entry)
+        exit_slip = abs(raw_exit - float(price))
+        trade.slippage_cost = round((entry_slip + exit_slip) * trade.quantity, 2)
+        turnover = (float(trade.entry_option_price) + float(price)) * trade.quantity
+        buy_turnover = float(trade.entry_option_price) * trade.quantity
+        sell_turnover = float(price) * trade.quantity
+        r = self.config.risk
+        trade.brokerage = round(2 * r.paper_brokerage_per_order, 2)
+        trade.exchange_charges = round(turnover * r.paper_exchange_charge_rate, 2)
+        trade.stt = round(sell_turnover * r.paper_stt_sell_rate, 2)
+        trade.sebi_charges = round(turnover * r.paper_sebi_charge_rate, 2)
+        trade.stamp_duty = round(buy_turnover * r.paper_stamp_buy_rate, 2)
+        trade.gst = round((trade.brokerage + trade.exchange_charges + trade.sebi_charges) * r.paper_gst_rate, 2)
+        trade.transaction_costs = round(
+            trade.brokerage + trade.exchange_charges + trade.stt + trade.gst + trade.sebi_charges + trade.stamp_duty,
+            2,
+        )
+        trade.net_pnl = round(trade.gross_pnl - trade.transaction_costs, 2)
+        trade.return_on_premium_pct = round((trade.net_pnl / buy_turnover) * 100, 4) if buy_turnover else None
+        trade.cost_assumption_version = r.paper_cost_assumption_version
         trade.realized_r = trade.current_r
         if trade.gross_pnl < 0:
             self._last_loss_exit_time = trade.exit_time
@@ -679,6 +950,20 @@ class StrategyService:
         self._active_trades_cache = [t for t in self._active_trades_cache if t.trade_id != trade.trade_id]
         await self._save_runtime()
         await self.repo.save_trade(trade)
+        await self._record_execution({
+            "trade_id": trade.trade_id,
+            "side": "SELL",
+            "timestamp": trade.exit_time.isoformat(),
+            "raw_bid": (quote or {}).get("bid"),
+            "raw_ask": (quote or {}).get("ask"),
+            "raw_ltp": (quote or {}).get("ltp"),
+            "executable_price": price,
+            "slippage_points": self._paper_slippage(),
+            "quantity": trade.quantity,
+            "source": (quote or {}).get("source", "UNKNOWN"),
+            "cost_assumption_version": r.paper_cost_assumption_version,
+            "reason": reason,
+        })
         await self._log_decision("EXIT", trade.strategy.value, "Position closed: " + str(reason), trade.model_dump(mode="json"))
         await self.bus.publish(EventEnvelope(topic=Topics.STRATEGY_SIGNAL, payload={"event": "TRADE_CLOSED", "trade": trade.model_dump(mode="json")}))
 
@@ -696,10 +981,23 @@ class StrategyService:
             return next((t for t in trades if t.trade_id == trade_id), None)
 
         features = self._last_features or await self._gather_features()
-        exit_price = await self._resolve_option_price(target, features)
+        quote = await self._resolve_option_quote(target)
+        self._apply_quote_to_trade(target, quote)
+        if quote.get("status") != "VALID" or not quote.get("bid") or float(quote.get("bid")) <= 0:
+            # Compatibility for legacy manually-created records that predate
+            # selected-contract capture. Forward-validation trades always have
+            # selected_contract_snapshot and are never synthetically filled.
+            if target.mode == AutoTradingMode.PAPER and not target.selected_contract_snapshot and not target.signal_id:
+                await self._close_trade(target, features, target.current_option_price, reason, quote={
+                    "bid": target.current_option_price, "source": "LEGACY_MANUAL_RECORD"
+                })
+                return target
+            await self.repo.save_trade(target)
+            return target
+        exit_price = round(float(quote["bid"]) - self._paper_slippage(), 2)
 
-        if target.mode == AutoTradingMode.PAPER:
-            await self._close_trade(target, features, exit_price, reason)
+        if target.mode in (AutoTradingMode.PAPER, AutoTradingMode.SHADOW_ONLY):
+            await self._close_trade(target, features, exit_price, reason, quote=quote)
             return target
         else:
             intent = OrderIntent(
@@ -767,80 +1065,12 @@ class StrategyService:
             logger.exception("Real candle retrieval failed")
             return []
 
-    async def _resolve_option_price(self, trade: ActiveTrade, features: Optional[MarketFeatures] = None) -> float:
-        """Resolves the current option price using live quotes, option chain, or spot delta model.
-        
-        Guarantees that active positions (live and paper) reflect realistic market prices and track spot moves.
-        """
-        # 1. Direct quote in Market Service
-        if self.mkt_svc:
-            q = self.mkt_svc.get_latest_quote(trade.contract_instrument_id)
-            if q:
-                bid = float(getattr(q, "best_bid", 0) or 0)
-                ltp = float(getattr(q, "last_price", 0) or getattr(q, "ltp", 0) or 0)
-                if bid > 0:
-                    return round(bid, 2)
-                if ltp > 0:
-                    return round(ltp, 2)
-
-        # 2. Check Option Chain for held contract
-        if self.chain_svc:
-            try:
-                chain = await self.chain_svc.get_chain(underlying="NIFTY", expiry=trade.expiry)
-                for strike in chain.get("strikes", []):
-                    for side in ("call", "put"):
-                        leg = strike.get(side) or {}
-                        if leg.get("instrument_id") == trade.contract_instrument_id or leg.get("symbol") == trade.contract_symbol:
-                            bid = float(leg.get("bid") or 0)
-                            ltp = float(leg.get("ltp") or 0)
-                            ask = float(leg.get("ask") or 0)
-                            if bid > 0:
-                                return round(bid, 2)
-                            if ltp > 0:
-                                return round(ltp, 2)
-                            if ask > 0:
-                                return round(ask, 2)
-            except Exception:
-                pass
-
-        # 3. Dynamic Spot-Derived Delta Tracking (Guarantees paper positions move with live market)
-        current_spot = 0.0
-        if features and features.spot_price > 0:
-            current_spot = features.spot_price
-        elif self.mkt_svc:
-            q_spot = self.mkt_svc.get_latest_quote("INST-NIFTY-INDEX")
-            if q_spot and q_spot.last_price > 0:
-                current_spot = q_spot.last_price
-
-        if current_spot > 0 and trade.entry_spot_price > 0 and trade.entry_option_price > 0:
-            delta_spot = current_spot - trade.entry_spot_price
-            # Approximate delta based on moneyness
-            strike = float(getattr(trade, "strike", getattr(trade, "strike_price", 0.0)) or 0.0)
-            if strike <= 0 and trade.contract_symbol:
-                import re
-                m = re.search(r"(\d{5})", trade.contract_symbol)
-                if m:
-                    strike = float(m.group(1))
-
-            opt_type_val = getattr(trade.option_type, "value", str(trade.option_type)).upper()
-            if strike > 0:
-                moneyness = (current_spot - strike) if opt_type_val == "CALL" else (strike - current_spot)
-                delta = max(0.15, min(0.85, 0.50 + (moneyness / 400.0)))
-            else:
-                delta = 0.50
-
-            if opt_type_val == "CALL":
-                price_change = delta * delta_spot
-            else:
-                price_change = delta * (-delta_spot)
-
-            derived_price = round(max(0.50, trade.entry_option_price + price_change), 2)
-            return derived_price
-
-        # 4. Fallback to existing current or entry price
-        if trade.current_option_price > 0:
-            return round(trade.current_option_price, 2)
-        return round(trade.entry_option_price, 2)
+    async def _resolve_option_price(self, trade: ActiveTrade, features: Optional[MarketFeatures] = None) -> Optional[float]:
+        """Compatibility helper returning only a real current option price."""
+        quote = await self._resolve_option_quote(trade)
+        self._apply_quote_to_trade(trade, quote)
+        value = quote.get("ltp") or quote.get("bid")
+        return round(float(value), 2) if value and float(value) > 0 and quote.get("status") == "VALID" else None
 
     async def _executable_bid(self, trade: ActiveTrade) -> Optional[float]:
         q = self.mkt_svc.get_latest_quote(trade.contract_instrument_id) if self.mkt_svc else None
@@ -867,9 +1097,10 @@ class StrategyService:
                 chain = await self.chain_svc.get_chain(underlying="NIFTY")
                 if chain.get("source") in ("BREEZE", "KITE", "LIVE"):
                     return chain
+                # Offline/synthetic matrices remain usable by the UI, but may
+                # never create a forward option-validation trade.
                 if chain.get("strikes"):
-                    if self.config.mode == AutoTradingMode.PAPER or chain.get("source") == "SIMULATED":
-                        return chain
+                    return {**chain, "source": "UNAVAILABLE", "validation_rejection": "synthetic option prices are not executable"}
             except Exception:
                 logger.exception("Option-chain retrieval failed")
         return {"source": "UNAVAILABLE", "strikes": []}
@@ -919,9 +1150,11 @@ class StrategyService:
                     "strike": strike,
                     "right": right,
                     "instrument_id": leg.get("instrument_id"),
+                    "instrument_token": leg.get("instrument_token") or leg.get("token") or leg.get("broker_token"),
                     "expiry": leg.get("expiry") or chain.get("expiry"),
                     "bid": bid,
                     "ask": ask,
+                    "ltp": float(leg.get("ltp", 0.0) or 0.0),
                     "premium": ask,
                     "spread_pct": spread_pct,
                     "open_interest": int(leg.get("open_interest", 0) or 0),
@@ -935,6 +1168,9 @@ class StrategyService:
             "snapshot_id": f"OPTCHAIN-{generate_id()}",
             "strategy_signal_id": signal.signal_id,
             "captured_at": utc_now().isoformat(),
+            "selector_timestamp": utc_now().isoformat(),
+            "signal_timestamp": signal.timestamp.isoformat(),
+            "direction": signal.direction.value,
             "spot_price": float(spot_price),
             "chain_spot_price": chain.get("spot_price"),
             "expiry": chain.get("expiry"),
@@ -942,6 +1178,7 @@ class StrategyService:
             "selector_candidates": normalized_selector_candidates,
             "chain_candidates": chain_candidates,
             "selected_contract": selected_contract.model_dump(mode="json") if selected_contract else None,
+            "selector_result": "SELECTED" if selected_contract else "REJECTED",
             "rejection_reason": rejection_reason,
         })
 
@@ -1112,6 +1349,10 @@ class StrategyService:
             override_premium_cap=cap,
         )
 
+        if strategy == StrategyName.TREND_PULLBACK and chain.get("source") not in ("BREEZE", "KITE", "LIVE"):
+            selected_contract = None
+            rejection_reason = chain.get("validation_rejection", "NO_REAL_OPTION_QUOTE")
+
         if not selected_contract:
             await self._log_decision(
                 category="FORCE_ENTRY",
@@ -1131,8 +1372,14 @@ class StrategyService:
         if lots < 1:
             return {"status": "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"}
 
-        # 4. Check LIVE Arming Gate
-        if self.config.mode == AutoTradingMode.LIVE and not self.config.system_armed:
+        execution_mode = (
+            AutoTradingMode.SHADOW_ONLY if option_type == OptionType.CALL else AutoTradingMode.PAPER
+        ) if strategy == StrategyName.TREND_PULLBACK else self.config.mode
+
+        # 4. Check LIVE Arming Gate for non-Strategy-A compatibility paths.
+        if execution_mode == AutoTradingMode.LIVE and not self._live_orders_enabled():
+            return {"status": "LIVE_TRADING_DISABLED"}
+        if execution_mode == AutoTradingMode.LIVE and not self.config.system_armed:
             await self._log_decision(
                 category="SECURITY",
                 strategy=strategy.value,
@@ -1143,14 +1390,16 @@ class StrategyService:
 
         # 5. Create Active Trade
         trade_id = f"TRD-FORCED-{int(now.timestamp())}"
+        entry_slippage = self._paper_slippage() if execution_mode in (AutoTradingMode.PAPER, AutoTradingMode.SHADOW_ONLY) else 0.0
+        entry_price = round(selected_contract.ask_price + entry_slippage, 2)
         hard_stop_price = round(
-            selected_contract.ask_price * (1.0 - (self.config.risk.option_hard_stop_pct / 100.0)),
+            entry_price * (1.0 - (self.config.risk.option_hard_stop_pct / 100.0)),
             2,
         )
 
         new_trade = ActiveTrade(
             trade_id=trade_id,
-            mode=self.config.mode,
+            mode=execution_mode,
             strategy=strategy,
             direction=direction,
             option_type=option_type,
@@ -1162,21 +1411,57 @@ class StrategyService:
             lot_size=selected_contract.lot_size,
             lots=lots,
             entry_time=now,
-            entry_option_price=selected_contract.ask_price,
+            entry_option_price=entry_price,
             entry_spot_price=spot,
             initial_structural_stop=structural_stop,
             initial_r_points=r_points,
-            current_option_price=selected_contract.ask_price,
+            current_option_price=selected_contract.ltp or selected_contract.ask_price,
             current_spot_price=spot,
             current_trailing_stop=structural_stop,
             option_hard_stop_price=hard_stop_price,
             current_r=0.0,
             peak_r=0.0,
-            state=TradeLifecycleState.ENTRY_PENDING if self.config.mode == AutoTradingMode.LIVE else TradeLifecycleState.OPEN_INITIAL_RISK,
+            state=TradeLifecycleState.ENTRY_PENDING if execution_mode == AutoTradingMode.LIVE else TradeLifecycleState.OPEN_INITIAL_RISK,
+            selected_contract_snapshot=selected_contract.model_dump(mode="json"),
+            entry_bid=selected_contract.bid_price,
+            entry_ask=selected_contract.ask_price,
+            entry_ltp=selected_contract.ltp,
+            entry_quote_source=chain.get("source"),
+            entry_quote_timestamp=now,
+            entry_quote_freshness_seconds=0.0,
+            entry_slippage_points=entry_slippage,
+            entry_raw_ask=selected_contract.ask_price,
+            entry_executable_price=entry_price,
+            current_bid=selected_contract.bid_price,
+            current_ask=selected_contract.ask_price,
+            current_ltp=selected_contract.ltp,
+            current_quote_source=chain.get("source"),
+            current_quote_timestamp=now,
+            current_quote_freshness_seconds=0.0,
+            current_quote_volume=selected_contract.volume,
+            current_quote_open_interest=selected_contract.open_interest,
+            cost_assumption_version=self.config.risk.paper_cost_assumption_version,
+            cost_assumptions=self._cost_metadata(),
         )
 
         await self.repo.save_trade(new_trade)
         self._active_trades_cache.append(new_trade)
+
+        if strategy == StrategyName.TREND_PULLBACK:
+            await self._record_execution({
+                "trade_id": new_trade.trade_id,
+                "side": "BUY",
+                "timestamp": now.isoformat(),
+                "raw_bid": selected_contract.bid_price,
+                "raw_ask": selected_contract.ask_price,
+                "raw_ltp": selected_contract.ltp,
+                "executable_price": entry_price,
+                "slippage_points": entry_slippage,
+                "quantity": quantity,
+                "source": chain.get("source", "UNKNOWN"),
+                "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                "reason": "PAPER_OR_SHADOW_ENTRY",
+            })
 
         await self._log_decision(
             category="ORDER",
@@ -1186,7 +1471,7 @@ class StrategyService:
         )
 
         # In LIVE mode, dispatch OrderIntent
-        if self.config.mode == AutoTradingMode.LIVE:
+        if execution_mode == AutoTradingMode.LIVE and strategy != StrategyName.TREND_PULLBACK:
             intent = OrderIntent(
                 intent_id=generate_id(),
                 correlation_id=trade_id,
@@ -1244,9 +1529,16 @@ class StrategyService:
                         "closed_5m_time": None,
                         "closed_5m_price": None,
                     })
-                cur_price = await self._resolve_option_price(trade, safe_features)
-                updated_trade, _ = self.position_manager.update_position(trade, cur_price, safe_features)
-                await self.repo.save_trade(updated_trade)
+                quote = await self._resolve_option_quote(trade)
+                self._apply_quote_to_trade(trade, quote)
+                cur_price = quote.get("ltp") or quote.get("bid")
+                if quote.get("status") == "VALID" and cur_price and float(cur_price) > 0:
+                    updated_trade, _ = self.position_manager.update_position(trade, round(float(cur_price), 2), safe_features)
+                    await self.repo.save_trade(updated_trade)
+                else:
+                    # Preserve the data-quality gap and do not let a stale or
+                    # missing quote manufacture a lifecycle mark/fill.
+                    await self.repo.save_trade(trade)
 
         active_trades = await self.repo.get_active_trades()
         self._active_trades_cache = active_trades
@@ -1278,6 +1570,54 @@ class StrategyService:
     async def list_decision_logs(self, limit: int = 100) -> list[dict[str, Any]]:
         logs = await self.repo.list_decision_logs(limit=limit)
         return [l.model_dump(mode="json") for l in logs]
+
+    async def generate_eod_report(self, session_date: Optional[str] = None) -> dict[str, Any]:
+        """Build and persist the forward option-validation session report."""
+        ist = timezone(timedelta(hours=5, minutes=30))
+        day = session_date or utc_now().astimezone(ist).date().isoformat()
+        signals = await self.repo.list_strategy_signals(limit=10000)
+        signals = [s for s in signals if s["strategy"] == StrategyName.TREND_PULLBACK.value and s["timestamp"][:10] == day]
+        snapshots = await self.repo.list_option_chain_snapshots(day)
+        quotes = await self.repo.list_option_quotes(day)
+        trades = [t for t in await self.repo.list_trades(limit=10000) if t.entry_time.astimezone(ist).date().isoformat() == day and t.strategy == StrategyName.TREND_PULLBACK]
+        report: dict[str, Any] = {"session_date": day, "generated_at": utc_now().isoformat(), "directions": {}}
+        for option_type in (OptionType.PUT, OptionType.CALL):
+            side_trades = [t for t in trades if t.option_type == option_type]
+            side_signals = [s for s in signals if s["option_type"] == option_type.value]
+            side_snapshots = [s for s in snapshots if s["strategy_signal_id"] in {x["signal_id"] for x in side_signals}]
+            side_quotes = [q for q in quotes if q.get("trade_id") in {t.trade_id for t in side_trades}]
+            pnl = [float(t.net_pnl or 0) for t in side_trades]
+            gross = sum(float(t.gross_pnl or 0) for t in side_trades)
+            winners = sum(p > 0 for p in pnl)
+            losers = sum(p < 0 for p in pnl)
+            valid_quotes = sum(q.get("status") == "VALID" for q in side_quotes)
+            report["directions"][option_type.value] = {
+                "execution_state": "PAPER" if option_type == OptionType.PUT else "SHADOW_ONLY",
+                "signals": len(side_signals),
+                "selector_attempts": len(side_snapshots),
+                "contracts_selected": sum(bool(s.get("selected_contract")) for s in side_snapshots),
+                "selector_rejections": sum(not bool(s.get("selected_contract")) for s in side_snapshots),
+                "paper_shadow_trades": len(side_trades),
+                "option_hard_stop_exits": sum(t.option_exit_reason == "OPTION_HARD_STOP_HIT" for t in side_trades),
+                "underlying_lifecycle_exits": sum(
+                    bool(t.underlying_exit_reason) and t.option_exit_reason != "OPTION_HARD_STOP_HIT" for t in side_trades
+                ),
+                "winners": winners,
+                "losers": losers,
+                "gross_inr": round(gross, 2),
+                "net_inr": round(sum(pnl), 2),
+                "average_premium_return_pct": round(sum((t.return_on_premium_pct or 0) for t in side_trades) / len(side_trades), 4) if side_trades else 0.0,
+                "transaction_costs": round(sum(float(t.transaction_costs or 0) for t in side_trades), 2),
+                "slippage": round(sum(float(t.slippage_cost or 0) for t in side_trades), 2),
+                "missing_data_count": sum(q.get("status") != "VALID" for q in side_quotes),
+                "option_data_coverage_pct": round(valid_quotes / len(side_quotes) * 100, 2) if side_quotes else 0.0,
+                "trades": [t.model_dump(mode="json") for t in side_trades],
+            }
+            await self.repo.save_eod_report(day, option_type.value, report["directions"][option_type.value])
+        return report
+
+    async def get_eod_report(self, session_date: Optional[str] = None) -> dict[str, Any]:
+        return await self.generate_eod_report(session_date)
 
     async def list_trades(self, limit: int = 50) -> list[dict[str, Any]]:
         trades = await self.repo.list_trades(limit=limit)
@@ -1322,7 +1662,13 @@ class StrategyService:
             EventEnvelope(topic=Topics.STRATEGY_SIGNAL, payload=signal.model_dump())
         )
 
-        if trading_mode == TradingMode.SHADOW:
+        # Strategy A forward-validation signals are audit/simulation only.
+        # This guard is intentionally before construction of any OMS intent.
+        strategy_tag = str((metadata or {}).get("strategy", "")).upper()
+        is_strategy_a_validation = strategy_tag in {StrategyName.TREND_PULLBACK.value, "STRATEGY_A", "CALL", "PUT"}
+        if trading_mode == TradingMode.SHADOW or is_strategy_a_validation:
+            return signal
+        if trading_mode == TradingMode.LIVE and not self._live_orders_enabled():
             return signal
 
         intent = OrderIntent(

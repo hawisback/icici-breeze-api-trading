@@ -392,6 +392,98 @@ def _trade_rows(records: Iterable[ReplayManifestRecord]) -> list[ReplayManifestR
     return [r for r in records if r.lifecycle_status == "RESOLVED" and r.realized_r is not None]
 
 
+def _historical_close_at(candles: list[Candle], timestamp: datetime | None) -> float | None:
+    """Return the last real candle close available at an event timestamp."""
+    if timestamp is None:
+        return None
+    eligible = [c for c in candles if c.start_time <= timestamp and c.close > 0]
+    if not eligible:
+        return None
+    return float(max(eligible, key=lambda candle: candle.start_time).close)
+
+
+def attach_historical_option_prices(
+    records: Iterable[ReplayManifestRecord],
+    contracts: Iterable[Any],
+    candles_by_instrument: dict[str, list[Candle]],
+    risk_config: RiskConfig,
+) -> None:
+    """Attach real Breeze option-candle prices to resolved replay records.
+
+    Breeze historical data is OHLCV, not historical bid/ask.  Therefore this
+    deliberately uses the candle close at the replay event and labels the
+    result accordingly; it never derives an option price from the underlying.
+    Contract selection is deterministic (nearest strike in the first expiry
+    available on the replay date) because Breeze has no historical chain
+    snapshot endpoint for replay-time selection.
+    """
+    normalized: list[dict[str, Any]] = []
+    for contract in contracts:
+        expiry = getattr(contract, "expiry", None)
+        strike = getattr(contract, "strike", None)
+        option_right = getattr(getattr(contract, "option_right", None), "value", getattr(contract, "option_right", None))
+        instrument_id = getattr(contract, "instrument_id", None)
+        if not instrument_id or not expiry or strike is None or not option_right:
+            continue
+        normalized.append({
+            "instrument_id": instrument_id,
+            "symbol": getattr(contract, "stock_code", instrument_id),
+            "expiry": str(expiry),
+            "strike": float(strike),
+            "right": str(option_right).upper(),
+            "lot_size": int(getattr(contract, "lot_size", 0) or 0),
+        })
+
+    for record in records:
+        record.option_data_status = "UNAVAILABLE"
+        direction = "CALL" if record.direction == "CALL" else "PUT"
+        candidates = [
+            item for item in normalized
+            if item["right"] in {direction, "CE" if direction == "CALL" else "PE"}
+            and item["expiry"] >= record.trading_date
+        ]
+        if not candidates:
+            record.option_data_quality_reason = "No historical contract metadata for replay date"
+            continue
+        expiry = min(item["expiry"] for item in candidates)
+        candidates = [item for item in candidates if item["expiry"] == expiry]
+        selected = min(candidates, key=lambda item: abs(item["strike"] - record.simulated_entry_price))
+        record.option_contract_instrument_id = selected["instrument_id"]
+        record.option_contract_symbol = selected["symbol"]
+        record.option_expiry = selected["expiry"]
+        record.option_strike = selected["strike"]
+        record.option_lot_size = selected["lot_size"]
+
+        candles = candles_by_instrument.get(selected["instrument_id"], [])
+        entry_price = _historical_close_at(candles, record.simulated_entry_timestamp)
+        exit_price = _historical_close_at(candles, record.exit_timestamp)
+        if entry_price is None or exit_price is None or selected["lot_size"] <= 0:
+            record.option_data_quality_reason = "Breeze historical option candle unavailable at entry or exit"
+            continue
+
+        quantity = selected["lot_size"]
+        gross = round((exit_price - entry_price) * quantity, 2)
+        turnover = (entry_price + exit_price) * quantity
+        buy_turnover = entry_price * quantity
+        sell_turnover = exit_price * quantity
+        brokerage = 2 * risk_config.paper_brokerage_per_order
+        exchange_charges = turnover * risk_config.paper_exchange_charge_rate
+        stt = sell_turnover * risk_config.paper_stt_sell_rate
+        sebi = turnover * risk_config.paper_sebi_charge_rate
+        stamp = buy_turnover * risk_config.paper_stamp_buy_rate
+        gst = (brokerage + exchange_charges + sebi) * risk_config.paper_gst_rate
+        costs = round(brokerage + exchange_charges + stt + gst + sebi + stamp, 2)
+
+        record.option_entry_price = round(entry_price, 2)
+        record.option_exit_price = round(exit_price, 2)
+        record.option_gross_pnl = gross
+        record.option_transaction_costs = costs
+        record.option_net_pnl = round(gross - costs, 2)
+        record.option_price_source = "BREEZE_HISTORICAL_OHLC_CLOSE"
+        record.option_data_status = "AVAILABLE"
+        record.option_data_quality_reason = None
+
+
 def build_simulated_trade_records(records: Iterable[ReplayManifestRecord]) -> list[SimulatedTradeRecord]:
     """Expose resolved lifecycle records in the simulation response shape.
 
@@ -413,23 +505,23 @@ def build_simulated_trade_records(records: Iterable[ReplayManifestRecord]) -> li
                 strategy=record.strategy_id,
                 direction="BULLISH" if record.direction == "CALL" else "BEARISH",
                 option_type=record.direction,
-                strike=0.0,
-                contract_symbol="HISTORICAL-SPOT",
+                strike=float(record.option_strike or 0.0),
+                contract_symbol=record.option_contract_symbol or "HISTORICAL-SPOT",
                 entry_time=record.simulated_entry_timestamp.isoformat(),
                 entry_spot=record.simulated_entry_price,
-                entry_premium=None,
+                entry_premium=record.option_entry_price,
                 exit_time=record.exit_timestamp.isoformat() if record.exit_timestamp else None,
                 exit_spot=record.exit_price,
-                exit_premium=None,
+                exit_premium=record.option_exit_price,
                 exit_reason=record.exit_reason,
                 initial_stop=record.initial_structural_stop,
                 initial_r_points=record.initial_risk_points,
                 peak_r=record.mfe_r if record.mfe_r is not None else record.peak_r,
                 realized_r=float(record.realized_r),
-                quantity=1,
+                quantity=int(record.option_lot_size or 1),
                 lots=1,
-                gross_pnl=None,
-                net_pnl=None,
+                gross_pnl=record.option_gross_pnl,
+                net_pnl=record.option_net_pnl,
                 hold_duration_mins=hold_duration_mins,
             )
         )
