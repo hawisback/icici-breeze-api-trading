@@ -4,7 +4,14 @@ import pytest
 
 from libs.contracts.models import Candle
 from services.strategy.features import FeatureEngine
-from services.strategy.models import MarketFeatures, ThresholdOverrides, TradeDirection, RiskConfig
+from services.strategy.models import (
+    CompressionBox,
+    MarketFeatures,
+    RiskConfig,
+    StrategyTunablesConfig,
+    ThresholdOverrides,
+    TradeDirection,
+)
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 from services.strategy.position_manager import PositionManager
 
@@ -37,7 +44,7 @@ def advance(f,bars,bear=False,close=None):
 
 
 @pytest.mark.parametrize("bear",[False,True])
-def test_breakout_parity_frozen_r_and_restart_dedup(bear):
+def test_completed_breakout_parity_frozen_r_and_restart_dedup(bear):
     f,bars = setup()
     strat = VolatilityBreakoutStrategy()
     before = strat.export_state()
@@ -49,30 +56,64 @@ def test_breakout_parity_frozen_r_and_restart_dedup(bear):
     strat = VolatilityBreakoutStrategy()
     strat.restore_state(saved)
     advance(f,bars,bear)
-    # Poll 1: Breakout detected, waiting for 2nd poll confirmation
-    assert strat.evaluate(f,bars) is None
-    assert strat.breakout_confirm_count == 1
-    # Poll 2: Breakout confirmed
+    # A completed breakout candle qualifies on its first evaluation.
     diag = strat.diagnose(f,bars)[int(bear)]
     assert diag.overall_status == "READY_TO_TRIGGER"  # RVOL is not mandatory
     signal = strat.evaluate(f,bars)
     assert signal.direction == (TradeDirection.BEARISH if bear else TradeDirection.BULLISH)
-    assert signal.spot_reference_price == f.spot_price
+    assert signal.spot_reference_price == bars[-1].close
+    assert signal.features_snapshot["entry_reference_spot"] == bars[-1].close
     assert signal.r_points == pytest.approx(2.25)
     assert signal.timestamp == bars[-1].end_time
     assert signal.features_snapshot["confirmation_score"] == 3
+    assert signal.features_snapshot["raw_confirmation_score"] == 3
+    assert signal.features_snapshot["oi_wall_penalty"] == 0
+    assert signal.features_snapshot["effective_confirmation_score"] == 3
+    assert strat.breakout_confirm_count == 0
+    after_signal = strat.export_state()
     assert strat.evaluate(f,bars) is None
+    assert strat.export_state() == after_signal
     restored = VolatilityBreakoutStrategy()
     restored.restore_state(strat.export_state())
     assert restored.evaluate(f,bars) is None
 
 
-def test_box_ages_only_on_completed_bars_and_expires_after_twelve():
+@pytest.mark.parametrize("bear",[False,True])
+def test_intrabar_live_quote_cannot_trigger_or_mutate_same_candle(bear):
+    f,bars = setup()
+    strat = VolatilityBreakoutStrategy()
+    strat.evaluate(f,bars)
+    advance(f,bars,bear=bear,close=102 if not bear else 98)
+    f.spot_price = 110 if not bear else 90
+
+    assert strat.evaluate(f,bars) is None
+    after = strat.export_state()
+    assert after["box"] is not None
+    assert after["box"]["bars_active"] == 1
+    assert after["breakout_confirm_count"] == 0
+    assert after["last_bar"] == bars[-1].end_time.isoformat()
+
+    # A repeated scheduler poll for the same completed candle is a no-op.
+    assert strat.evaluate(f,bars) is None
+    assert strat.export_state() == after
+    assert strat.evaluate(f,bars) is None
+    assert strat.export_state() == after
+
+
+def test_box_lock_candle_cannot_trigger_its_own_breakout():
+    f,bars = setup()
+    strat = VolatilityBreakoutStrategy()
+    assert strat.evaluate(f,bars) is None
+    assert strat.locked_box is not None
+    assert strat.export_state()["last_bar"] == bars[-1].end_time.isoformat()
+
+
+def test_box_ages_only_on_completed_bars_and_expires_after_eight():
     f,bars = setup()
     strat = VolatilityBreakoutStrategy()
     strat.evaluate(f,bars)
     high = strat.locked_box.box_high
-    for i in range(1,15):
+    for i in range(1,10):
         last = bars[-1]
         bars.append(last.model_copy(update={"start_time":last.end_time,"end_time":last.end_time+timedelta(minutes=5)}))
         f.timestamp = bars[-1].end_time
@@ -81,7 +122,7 @@ def test_box_ages_only_on_completed_bars_and_expires_after_twelve():
         for _ in range(5):
             strat.diagnose(f,bars)
             strat.evaluate(f,bars)
-        if i <= 12:
+        if i <= 8:
             assert strat.locked_box.bars_active == i
             assert strat.locked_box.box_high == high
         else:
@@ -115,17 +156,66 @@ def test_confirmation_overrides_do_not_leak_from_strategy_a_and_wall_penalty():
     strat.evaluate(f,bars,overrides=override)
     advance(f,bars)
     assert strat.evaluate(f,bars,overrides=override) is not None
+
+    # CALL: raw 4 - relevant bullish wall penalty 1 = effective 3, so it passes.
     f,bars = setup()
-    strat = VolatilityBreakoutStrategy(breakout_confirm_polls=1)
+    strat = VolatilityBreakoutStrategy()
+    strat.evaluate(f,bars)
+    advance(f,bars)
+    f.rvol_5m = 1.20
+    f.bullish_oi_wall = True
+    diag = strat.diagnose(f,bars)[0]
+    confirmation = diag.phase_summary["confirmation"]
+    assert confirmation["oi_wall_detected"] is True
+    assert confirmation["raw_confirmation_score"] == 4
+    assert confirmation["oi_wall_penalty"] == 1
+    assert confirmation["effective_confirmation_score"] == 3
+    assert confirmation["score"] == 3
+    sig = strat.evaluate(f,bars)
+    assert sig is not None
+    assert sig.features_snapshot["raw_confirmation_score"] == 4
+    assert sig.features_snapshot["oi_wall_penalty"] == 1
+    assert sig.features_snapshot["effective_confirmation_score"] == 3
+
+    # CALL: raw 3 - relevant bullish wall penalty 1 = effective 2, so it fails.
+    f,bars = setup()
+    strat = VolatilityBreakoutStrategy()
     strat.evaluate(f,bars)
     advance(f,bars)
     f.bullish_oi_wall = True
     diag = strat.diagnose(f,bars)[0]
-    # Change 9: OI wall does NOT deduct points; informational only
-    assert diag.phase_summary["confirmation"]["oi_wall_detected"] is True
-    assert diag.phase_summary["confirmation"]["score"] == 3
-    sig = strat.evaluate(f,bars)
-    assert sig is not None
+    confirmation = diag.phase_summary["confirmation"]
+    assert (confirmation["raw_confirmation_score"], confirmation["oi_wall_penalty"], confirmation["effective_confirmation_score"]) == (3, 1, 2)
+    assert diag.overall_status == "WAITING"
+    assert strat.evaluate(f,bars) is None
+
+    # An opposing-direction wall does not penalize a CALL.
+    f,bars = setup()
+    strat = VolatilityBreakoutStrategy()
+    strat.evaluate(f,bars)
+    advance(f,bars)
+    f.bearish_oi_wall = True
+    assert strat.diagnose(f,bars)[0].phase_summary["confirmation"]["oi_wall_penalty"] == 0
+    assert strat.evaluate(f,bars) is not None
+
+    # PUT parity: bearish wall is relevant; bullish wall is irrelevant.
+    f,bars = setup()
+    strat = VolatilityBreakoutStrategy()
+    strat.evaluate(f,bars)
+    advance(f,bars,bear=True)
+    f.bearish_oi_wall = True
+    diag = strat.diagnose(f,bars)[1]
+    assert diag.phase_summary["confirmation"]["oi_wall_penalty"] == 1
+    assert diag.phase_summary["confirmation"]["effective_confirmation_score"] == 2
+    assert strat.evaluate(f,bars) is None
+
+    f,bars = setup()
+    strat = VolatilityBreakoutStrategy()
+    strat.evaluate(f,bars)
+    advance(f,bars,bear=True)
+    f.bullish_oi_wall = True
+    assert strat.diagnose(f,bars)[1].phase_summary["confirmation"]["oi_wall_penalty"] == 0
+    assert strat.evaluate(f,bars) is not None
     assert sig.features_snapshot["oi_wall_detected"] is True
 
 
@@ -133,8 +223,8 @@ def test_overextension_abandons_box():
     f,bars = setup()
     strat = VolatilityBreakoutStrategy()
     strat.evaluate(f,bars)
-    # Box high is 103, ATR is 5. Max extension 0.90 * 5 = 4.5. 103 + 4.5 = 107.5.
-    # Close at 107 is within extension; 108 is overextended (> 107.5).
+    # Box high is 103, ATR is 5. Max extension 0.75 * 5 = 3.75. 103 + 3.75 = 106.75.
+    # Close at 107 is overextended (> 106.75).
     advance(f,bars,close=108)
     bars[-1] = bars[-1].model_copy(update={"high":108.1})
     f.spot_price = 108
@@ -246,141 +336,96 @@ def test_bb_compression_thresholds_and_lookback():
 
     strat = VolatilityBreakoutStrategy()
     assert strat.bb_percentile_lookback == 60
-    assert strat.bb_width_percentile_threshold == 35.0
+    assert strat.bb_width_percentile_threshold == 25.0
 
     f, bars = setup()
-    # 34th percentile: passes compression
-    f.bb_width_percentile = 34.0
+    # 25th percentile: passes compression and locks a box.
+    f.bb_width_percentile = 25.0
     diag = strat.diagnose(f, bars)[0]
     assert diag.phase_summary["compression_pass"] is True
     assert diag.phase_state == "BOX_LOCKED"
+    assert strat.evaluate(f, bars) is None
+    assert strat.locked_box is not None
 
-    # 35th percentile: passes compression (boundary <= 35)
-    f.bb_width_percentile = 35.0
-    strat_35 = VolatilityBreakoutStrategy()
-    diag = strat_35.diagnose(f, bars)[0]
-    assert diag.phase_summary["compression_pass"] is True
-    assert diag.phase_state == "BOX_LOCKED"
-
-    # 36th percentile: fails compression (> 35)
-    f.bb_width_percentile = 36.0
-    strat_36 = VolatilityBreakoutStrategy()
-    diag = strat_36.diagnose(f, bars)[0]
+    # 25.1st percentile: fails compression (> 25).
+    f.bb_width_percentile = 25.1
+    strat_251 = VolatilityBreakoutStrategy()
+    diag = strat_251.diagnose(f, bars)[0]
     assert diag.phase_summary["compression_pass"] is False
     assert diag.phase_summary["primary_blocker"] == "NO_COMPRESSION"
-    assert strat_36.evaluate(f, bars) is None
-    assert strat_36.locked_box is None
+    assert strat_251.evaluate(f, bars) is None
+    assert strat_251.locked_box is None
 
 
 def test_box_height_thresholds():
     f, bars = setup()
     strat = VolatilityBreakoutStrategy()
-    assert strat.box_max_height_atr == 1.50
+    assert strat.box_max_height_atr == 1.30
 
-    # ATR is 5.0. Max box height = 1.50 * 5.0 = 7.50.
-    # Height 7.45 (1.49 ATR): PASS
-    bars_149 = [c.model_copy(update={"high": 103.70, "low": 96.25}) for c in bars]
-    strat_149 = VolatilityBreakoutStrategy()
-    diag = strat_149.diagnose(f, bars_149)[0]
+    # ATR is 5.0. Max box height = 1.30 * 5.0 = 6.50.
+    # Height 6.50 (1.30 ATR): PASS
+    bars_130 = [c.model_copy(update={"high": 102.75, "low": 96.25}) for c in bars]
+    strat_130 = VolatilityBreakoutStrategy()
+    diag = strat_130.diagnose(f, bars_130)[0]
     assert diag.phase_summary["compression_pass"] is True
     assert diag.phase_state == "BOX_LOCKED"
 
-    # Height 7.50 (1.50 ATR): PASS
-    bars_150 = [c.model_copy(update={"high": 103.75, "low": 96.25}) for c in bars]
-    strat_150 = VolatilityBreakoutStrategy()
-    diag = strat_150.diagnose(f, bars_150)[0]
-    assert diag.phase_summary["compression_pass"] is True
-    assert diag.phase_state == "BOX_LOCKED"
-
-    # Height 7.55 (1.51 ATR): FAIL (BOX_TOO_LARGE)
-    bars_151 = [c.model_copy(update={"high": 103.80, "low": 96.25}) for c in bars]
-    strat_151 = VolatilityBreakoutStrategy()
-    diag = strat_151.diagnose(f, bars_151)[0]
+    # Height 6.55 (>1.30 ATR): FAIL (BOX_TOO_LARGE)
+    bars_over = [c.model_copy(update={"high": 102.80, "low": 96.25}) for c in bars]
+    strat_over = VolatilityBreakoutStrategy()
+    diag = strat_over.diagnose(f, bars_over)[0]
     assert diag.phase_summary["compression_pass"] is False
     assert diag.phase_summary["primary_blocker"] == "BOX_TOO_LARGE"
-    assert strat_151.evaluate(f, bars_151) is None
-    assert strat_151.locked_box is None
+    assert strat_over.evaluate(f, bars_over) is None
+    assert strat_over.locked_box is None
 
 
-def test_live_price_breakout_trigger_and_polling():
+def test_completed_close_breakout_requires_no_polling_and_supports_put_parity():
     f, bars = setup()
     strat = VolatilityBreakoutStrategy()
     strat.evaluate(f, bars)
     assert strat.locked_box is not None
 
     advance(f, bars)
-    # Live spot_price moves to 103.20 (beyond 103.15 call_trigger)
-    f.spot_price = 103.20
-
-    # Poll 1: Breakout detected, but requires 2 matching polls
-    diag1 = strat.diagnose(f, bars)[0]
-    assert diag1.overall_status == "WAITING"
-    assert diag1.phase_summary["primary_blocker"] == "BREAKOUT_NOT_CONFIRMED"
-    assert strat.evaluate(f, bars) is None
-    assert strat.breakout_confirm_count == 1
-    assert strat.confirm_direction == TradeDirection.BULLISH
-
-    # Price drops back inside box to 102.0
-    f.spot_price = 102.0
-    diag_drop = strat.diagnose(f, bars)[0]
-    assert diag_drop.phase_summary["primary_blocker"] == "WAITING_FOR_BREAKOUT"
-    assert strat.evaluate(f, bars) is None
-    # Poll count reset on price drop, but box remains locked
-    assert strat.breakout_confirm_count == 0
-    assert strat.confirm_direction is None
-    assert strat.locked_box is not None
-
-    # Price rises again beyond trigger to 103.20
-    f.spot_price = 103.20
-    # Poll 1 of new attempt:
-    assert strat.evaluate(f, bars) is None
-    assert strat.breakout_confirm_count == 1
-    # Poll 2 of new attempt:
+    # The live quote deliberately disagrees with the completed candle close.
+    f.spot_price = 110.0
     diag2 = strat.diagnose(f, bars)[0]
     assert diag2.overall_status == "READY_TO_TRIGGER"
     sig = strat.evaluate(f, bars)
     assert sig is not None
     assert sig.direction == TradeDirection.BULLISH
-    assert sig.spot_reference_price == 103.20
+    assert sig.spot_reference_price == bars[-1].close
+    assert sig.features_snapshot["entry_reference_spot"] == bars[-1].close
 
-    # Test PUT trigger with 2 polls
+    # Test PUT trigger on its first completed-candle evaluation.
     f_bear, bars_bear = setup()
     strat_bear = VolatilityBreakoutStrategy()
     strat_bear.evaluate(f_bear, bars_bear)
     advance(f_bear, bars_bear, bear=True)
-    # Live price drops to 96.80 (< 96.85 put_trigger)
-    f_bear.spot_price = 96.80
-    assert strat_bear.evaluate(f_bear, bars_bear) is None
-    assert strat_bear.breakout_confirm_count == 1
-    assert strat_bear.confirm_direction == TradeDirection.BEARISH
+    f_bear.spot_price = 90.0
     sig_bear = strat_bear.evaluate(f_bear, bars_bear)
     assert sig_bear is not None
     assert sig_bear.direction == TradeDirection.BEARISH
-    assert sig_bear.spot_reference_price == 96.80
+    assert sig_bear.spot_reference_price == bars_bear[-1].close
 
 
 def test_anti_chase_extension_thresholds():
+    # 0.75 ATR extension: 103 + 0.75 * 5 = 106.75 (PASS - boundary).
     f, bars = setup()
-    strat = VolatilityBreakoutStrategy(breakout_confirm_polls=1)
+    strat = VolatilityBreakoutStrategy()
     strat.evaluate(f, bars)
-    advance(f, bars)
+    advance(f, bars, close=106.75)
+    diag = strat.diagnose(f, bars)[0]
+    assert diag.phase_summary["extension"]["passed"] is True
+    assert diag.overall_status == "READY_TO_TRIGGER"
 
-    # 1. 0.89 ATR extension: 103 + 0.89 * 5 = 107.45 (PASS)
-    f.spot_price = 107.45
-    diag_89 = strat.diagnose(f, bars)[0]
-    assert diag_89.phase_summary["extension"]["passed"] is True
-    assert diag_89.overall_status == "READY_TO_TRIGGER"
-
-    # 2. 0.90 ATR extension: 103 + 0.90 * 5 = 107.50 (PASS - boundary)
-    f.spot_price = 107.50
-    diag_90 = strat.diagnose(f, bars)[0]
-    assert diag_90.phase_summary["extension"]["passed"] is True
-    assert diag_90.overall_status == "READY_TO_TRIGGER"
-
-    # 3. 0.91 ATR extension: 103 + 0.91 * 5 = 107.55 (FAIL - overextended)
-    f.spot_price = 107.55
-    diag_91 = strat.diagnose(f, bars)[0]
-    assert diag_91.phase_summary["primary_blocker"] == "BREAKOUT_OVEREXTENDED"
+    # Just over 0.75 ATR extension (106.76) is rejected.
+    f, bars = setup()
+    strat = VolatilityBreakoutStrategy()
+    strat.evaluate(f, bars)
+    advance(f, bars, close=106.76)
+    diag = strat.diagnose(f, bars)[0]
+    assert diag.phase_summary["primary_blocker"] == "BREAKOUT_OVEREXTENDED"
     assert strat.evaluate(f, bars) is None
     assert strat.locked_box is None
 
@@ -392,20 +437,22 @@ def test_ternary_confirmation_scoring():
     advance(f, bars, close=104)
     f.spot_price = 104.0
 
-    # Case A: 2 pass, 1 fail, 3 None -> 2 of 3 available (PASS)
+    # Case A: 3 pass, 1 fail, 2 None -> 3 of 4 available (PASS at R1 minimum).
     f.futures_price = 110.0
     f.futures_vwap = 115.0  # VWAP fails
-    f.rvol_5m = 0.0         # None
+    f.rvol_5m = 1.20        # Passes the frozen R1 RVOL threshold.
     f.breakout_bull_derivatives_score = None  # None
     f.futures_buildup = None                 # None
 
     diag = strat.diagnose(f, bars)[0]
-    assert diag.phase_summary["confirmation"]["score"] == 2
-    assert diag.phase_summary["confirmation"]["available"] == 3
+    assert diag.phase_summary["confirmation"]["score"] == 3
+    assert diag.phase_summary["confirmation"]["raw_confirmation_score"] == 3
+    assert diag.phase_summary["confirmation"]["oi_wall_penalty"] == 0
+    assert diag.phase_summary["confirmation"]["available"] == 4
     assert diag.overall_status == "READY_TO_TRIGGER"
     assert strat.evaluate(f, bars) is not None
 
-    # Case B: 1 pass, 2 fail, 3 None -> 1 of 3 available (FAIL: CONFIRMATION_SCORE_LOW)
+    # Case B: 2 pass, 1 fail, 3 None -> 2 of 3 available (FAIL at R1 minimum 3).
     f2, bars2 = setup()
     strat2 = VolatilityBreakoutStrategy(breakout_confirm_polls=1)
     strat2.evaluate(f2, bars2)
@@ -417,13 +464,14 @@ def test_ternary_confirmation_scoring():
     f2.timestamp = c_weak.end_time
     f2.spot_price = 104.0
     f2.futures_price = 110.0
-    f2.futures_vwap = 115.0  # VWAP fails
+    f2.futures_vwap = 105.0  # VWAP passes
     f2.rvol_5m = 0.0         # None
     f2.breakout_bull_derivatives_score = None  # None
     f2.futures_buildup = None                 # None
 
     diag2 = strat2.diagnose(f2, bars2)[0]
-    assert diag2.phase_summary["confirmation"]["score"] == 1
+    assert diag2.phase_summary["confirmation"]["score"] == 2
+    assert diag2.phase_summary["confirmation"]["effective_confirmation_score"] == 2
     assert diag2.phase_summary["confirmation"]["available"] == 3
     assert diag2.phase_summary["primary_blocker"] == "CONFIRMATION_SCORE_LOW"
 
@@ -451,18 +499,100 @@ def test_structural_risk_gate():
     strat.evaluate(f, bars)
     advance(f, bars, close=104)
 
-    # 1. Normal risk: live_price = 104.0. Stop = 103 - 1.25 = 101.75. Risk = 2.25 (0.45 ATR <= 1.20 ATR) -> PASS
-    f.spot_price = 104.0
+    # 1. Normal risk: completed close = 104.0. Stop = 103 - 1.25 = 101.75.
+    # Risk = 2.25 (0.45 ATR <= 1.20 ATR) -> PASS, despite a different live quote.
+    f.spot_price = 108.0
     diag_pass = strat.diagnose(f, bars)[0]
     assert diag_pass.phase_summary["risk"]["initial_risk_atr"] == 0.45
     assert diag_pass.overall_status == "READY_TO_TRIGGER"
 
-    # 2. Risk too high: spot_price = 108.0 with max_extension relaxed to 1.5 ATR
+    # 2. Risk too high: completed close = 108.0 with max_extension relaxed to 1.5 ATR
     f_risk, bars_risk = setup()
     strat_risk = VolatilityBreakoutStrategy(breakout_confirm_polls=1, max_extension_atr=1.5)
     strat_risk.evaluate(f_risk, bars_risk)
-    advance(f_risk, bars_risk, close=104)
-    f_risk.spot_price = 108.0
+    advance(f_risk, bars_risk, close=108)
+    f_risk.spot_price = 104.0
     diag_risk = strat_risk.diagnose(f_risk, bars_risk)[0]
     assert diag_risk.phase_summary["primary_blocker"] == "RISK_TOO_HIGH"
+
+
+def test_strategy_b_r1_defaults_agree_across_construction_paths(monkeypatch):
+    from unittest.mock import Mock
+
+    from services.strategy.service import StrategyService
+    from services.strategy.simulation import SimulationEngine
+
+    expected = {
+        "rvol_threshold": 1.20,
+        "min_confirmation_score": 3,
+        "bb_width_percentile_threshold": 25.0,
+        "box_max_height_atr": 1.30,
+        "lookback_bars": 8,
+        "max_age_bars": 8,
+        "breakout_buffer_atr": 0.05,
+        "max_extension_atr": 0.75,
+    }
+
+    direct = VolatilityBreakoutStrategy()
+    assert {name: getattr(direct, name) for name in expected} == expected
+
+    config = StrategyTunablesConfig()
+    assert config.bb_width_percentile_threshold == 25.0
+    assert config.compression_lookback_bars == 8
+    assert config.box_max_age_bars == 8
+    assert config.breakout_buffer_atr == 0.05
+    assert config.breakout_max_extension_atr == 0.75
+    assert config.strat_b_min_confirmation == 3
+    assert config.box_max_height_atr == 1.30
+    assert config.rvol_threshold == 1.20
+
+    box = CompressionBox(
+        box_high=103, box_low=97, box_height=6, atr_at_lock=5,
+        bb_width_at_lock=25,
+    )
+    assert box.max_bars == 8
+
+    service = StrategyService(Mock())
+    assert {name: getattr(service.strategy_b, name) for name in expected} == expected
+
+    engine = SimulationEngine(tunables=config)
+    assert engine.tunables is config
+
+    # Exercise the production simulation construction call without running a
+    # historical replay.  Empty data is sufficient to reach construction.
+    import services.strategy.simulation as simulation_module
+    captured = {}
+
+    class SpyVolatilityBreakout:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    async def empty_fetch(date_str, instrument_id, historical_source, source_diagnostics, role):
+        source_diagnostics[role] = {
+            "requested_source": historical_source.value,
+            "available_before_filter": {},
+            "selected_after_filter": {},
+            "selected_count": 0,
+            "missing_selected_source": True,
+        }
+        return [], []
+
+    monkeypatch.setattr(simulation_module, "VolatilityBreakoutStrategy", SpyVolatilityBreakout)
+    monkeypatch.setattr(engine, "_fetch_session_candles", empty_fetch)
+    from services.strategy.models import SimulationRequest
+    import asyncio
+    asyncio.run(engine.run_day_simulation(SimulationRequest(date="2026-09-18")))
+    assert captured == {
+        "rvol_threshold": 1.20,
+        "adx_threshold": 20.0,
+        "min_confirmation_score": 3,
+        "box_max_height_atr": 1.30,
+        "bb_width_percentile_threshold": 25.0,
+        "lookback_bars": 8,
+        "max_age_bars": 8,
+        "breakout_buffer_atr": 0.05,
+        "max_extension_atr": 0.75,
+        "entry_start": "09:25",
+        "entry_end": "14:45",
+    }
 

@@ -1,4 +1,4 @@
-"""Strategy B: Volatility compression breakout with live price trigger and multi-factor confirmation."""
+"""Strategy B: Volatility compression breakout with completed-candle trigger and multi-factor confirmation."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -15,24 +15,24 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class VolatilityBreakoutStrategy:
-    """Strategy B implementation with immutable compression box, live price breakout,
-    2-poll confirmation, relaxed anti-chase, ternary confirmation model, and structural risk gate.
+    """Strategy B implementation with immutable compression box, completed-candle breakout,
+    ternary confirmation model, and structural risk gate.
     """
 
     def __init__(
         self,
         rvol_threshold: float = 1.20,
         adx_threshold: float = 20.0,
-        min_confirmation_score: int = 2,
+        min_confirmation_score: int = 3,
         min_available_confirmations: int = 3,
-        bb_width_percentile_threshold: float = 35.0,
+        bb_width_percentile_threshold: float = 25.0,
         bb_width_percentile_lookback: int = 60,
-        box_max_height_atr: float = 1.50,
+        box_max_height_atr: float = 1.30,
         lookback_bars: int = 8,
-        max_age_bars: int = 12,
-        breakout_buffer_atr: float = 0.03,
+        max_age_bars: int = 8,
+        breakout_buffer_atr: float = 0.05,
         breakout_confirm_polls: int = 2,
-        max_extension_atr: float = 0.90,
+        max_extension_atr: float = 0.75,
         entry_start: str = "09:25",
         entry_end: str = "14:45",
     ) -> None:
@@ -96,7 +96,6 @@ class VolatilityBreakoutStrategy:
         max_age = setting("strat_b_box_max_age_bars", self.max_age_bars)
         buf_atr = setting("strat_b_breakout_buffer_atr", setting("breakout_buffer_atr", self.breakout_buffer_atr))
         max_ext = setting("strat_b_max_extension_atr", setting("breakout_max_extension_atr", self.max_extension_atr))
-        required_polls = setting("strat_b_breakout_confirm_polls", setting("breakout_confirm_polls", self.breakout_confirm_polls))
 
         conditions_bull: list[TriggerCondition] = []
         conditions_bear: list[TriggerCondition] = []
@@ -194,7 +193,7 @@ class VolatilityBreakoutStrategy:
 
         fingerprint = repr((
             bb_target, height_target, required_conf, min_available, rvol_target,
-            self.lookback_bars, max_age, buf_atr, max_ext, required_polls,
+            self.lookback_bars, max_age, buf_atr, max_ext,
             self.entry_start, self.entry_end,
             setting("bull_derivatives_score", 2), setting("bear_derivatives_score", 2),
         ))
@@ -207,6 +206,9 @@ class VolatilityBreakoutStrategy:
             return finish("RESET", "Outside Strategy B entry window")
 
         stamp = trigger.end_time.isoformat()
+        if self.last_bar and trigger.end_time <= datetime.fromisoformat(self.last_bar):
+            return finish("WAITING_FOR_BREAKOUT", "Completed 5m candle already evaluated")
+        self.last_bar = stamp
 
         # Step 1: Manage Active Box Aging and Expiry
         if self.locked_box:
@@ -285,7 +287,7 @@ class VolatilityBreakoutStrategy:
                 condition("compression_bb", "Historical BB width percentile", False, bb_current, f"<={bb_target:.1f}%ile", f"Current BB width is {bb_current}; waiting for a fresh contiguous compression window")
                 condition("compression_height", "Compression height in ATR", False, height_current, f"<={height_target:.2f} ATR", "Waiting for a fresh contiguous compression window with enough bars")
                 condition("box_age_bars", "Consolidation box age", False, "0 bars", f"<={max_age} bars", "No active box locked")
-                condition("breakout_trigger", "Live price breakout confirmation", False, f"Live ₹{live_price:.2f}", "Awaiting box lock", "No active box locked")
+                condition("breakout_trigger", "Completed 5m breakout close", False, f"Completed close ₹{trigger.close:.2f}", "Awaiting box lock", "No active box locked")
                 condition("anti_chase_extension", "Anti-chase extension", False, "Awaiting box lock", f"<={max_ext:.2f} ATR", "No active box locked")
                 condition("confirmation_score", "Entry confirmations", False, f"CALL {preview_bull[0]} passed / {preview_bull[1]} available; PUT {preview_bear[0]} passed / {preview_bear[1]} available", f">={required_conf} passed", "Confirmation evidence is available; final score is evaluated after box lock")
                 condition("risk_band", "Structural initial R", False, "Awaiting box lock", "<= 1.20 ATR", "No active box locked")
@@ -333,10 +335,10 @@ class VolatilityBreakoutStrategy:
 
             call_trigger = round(high + buf_atr * atr, 2)
             put_trigger = round(low - buf_atr * atr, 2)
-            call_gap = f"Live spot ₹{live_price:.2f} is {call_trigger - live_price:.2f} pts below trigger ₹{call_trigger:.2f}"
-            put_gap = f"Live spot ₹{live_price:.2f} is {live_price - put_trigger:.2f} pts above trigger ₹{put_trigger:.2f}"
-            condition("breakout_trigger", "Live price breakout confirmation", False, f"Live ₹{live_price:.2f}", f"> ₹{call_trigger:.2f}", call_gap, for_dir=TradeDirection.BULLISH)
-            condition("breakout_trigger", "Live price breakout confirmation", False, f"Live ₹{live_price:.2f}", f"< ₹{put_trigger:.2f}", put_gap, for_dir=TradeDirection.BEARISH)
+            call_gap = f"Completed close ₹{trigger.close:.2f} is {call_trigger - trigger.close:.2f} pts below trigger ₹{call_trigger:.2f}"
+            put_gap = f"Completed close ₹{trigger.close:.2f} is {trigger.close - put_trigger:.2f} pts above trigger ₹{put_trigger:.2f}"
+            condition("breakout_trigger", "Completed 5m breakout close", False, f"Completed close ₹{trigger.close:.2f}", f"> ₹{call_trigger:.2f}", call_gap, for_dir=TradeDirection.BULLISH)
+            condition("breakout_trigger", "Completed 5m breakout close", False, f"Completed close ₹{trigger.close:.2f}", f"< ₹{put_trigger:.2f}", put_gap, for_dir=TradeDirection.BEARISH)
             condition("anti_chase_extension", "Anti-chase extension", False, "Awaiting box lock", f"<={max_ext:.2f} ATR", "Awaiting box lock")
             condition("confirmation_score", "Entry confirmations", False, f"CALL {preview_bull[0]} passed / {preview_bull[1]} available; PUT {preview_bear[0]} passed / {preview_bear[1]} available", f">={required_conf} passed", "Confirmation evidence is available; final score is evaluated after box lock")
             condition("risk_band", "Structural initial R", False, "Awaiting box lock", "<= 1.20 ATR", "Awaiting box lock")
@@ -360,9 +362,9 @@ class VolatilityBreakoutStrategy:
                 "bars": 0, "max_bars": max_age
             }
             summary["box_frozen"] = True
-            return finish("BOX_LOCKED", "BOX_LOCKED: Box frozen; waiting for live price breakout")
+            return finish("BOX_LOCKED", "BOX_LOCKED: Box frozen; waiting for completed 5m breakout close")
 
-        # Step 3: Active Frozen Box Diagnostics & Live Breakout Evaluation
+        # Step 3: Active Frozen Box Diagnostics & Completed-Bar Breakout Evaluation
         box = self.locked_box
         atr = box.atr_at_lock
         summary["box"] = {
@@ -391,8 +393,9 @@ class VolatilityBreakoutStrategy:
         call_trigger = round(box.box_high + buf_atr * atr, 2)
         put_trigger = round(box.box_low - buf_atr * atr, 2)
 
-        bullish = (live_price > call_trigger)
-        bearish = (live_price < put_trigger)
+        breakout_close = trigger.close
+        bullish = (breakout_close > call_trigger)
+        bearish = (breakout_close < put_trigger)
 
         # Check abnormal intrabar candle expansion
         if trigger.high - trigger.low > 4 * atr:
@@ -461,41 +464,56 @@ class VolatilityBreakoutStrategy:
             psd = [v for v in avail if v is True]
             return conf_dict, avail, psd
 
+        def score_confirmations(d: TradeDirection):
+            """Return ternary confirmation data plus the directional OI-wall adjustment.
+
+            FeatureEngine already computes directional relative OI walls.  A wall is
+            one opposing confirmation point, not an automatic rejection, and does
+            not change the number of available confirmation factors.
+            """
+            conf_dict, avail, passed = eval_confirmations(d)
+            raw_score = len(passed)
+            oi_wall = bool(features.bullish_oi_wall if d == TradeDirection.BULLISH else features.bearish_oi_wall)
+            oi_wall_penalty = 1 if oi_wall else 0
+            effective_score = max(0, raw_score - oi_wall_penalty)
+            return conf_dict, avail, passed, raw_score, oi_wall_penalty, effective_score, oi_wall
+
         if not (bullish or bearish):
             self.breakout_confirm_count = 0
             self.confirm_direction = None
             summary["breakout_confirm_count"] = 0
             summary["live_price"] = live_price
+            summary["completed_close"] = breakout_close
 
-            call_gap = f"Live spot ₹{live_price:.2f} is {call_trigger - live_price:.2f} pts below trigger ₹{call_trigger:.2f}"
-            put_gap = f"Live spot ₹{live_price:.2f} is {live_price - put_trigger:.2f} pts above trigger ₹{put_trigger:.2f}"
+            call_gap = f"Completed close ₹{breakout_close:.2f} is {call_trigger - breakout_close:.2f} pts below trigger ₹{call_trigger:.2f}"
+            put_gap = f"Completed close ₹{breakout_close:.2f} is {breakout_close - put_trigger:.2f} pts above trigger ₹{put_trigger:.2f}"
 
-            condition("breakout_trigger", "Live price breakout confirmation", False, f"Live ₹{live_price:.2f}", f"> ₹{call_trigger:.2f}", call_gap, for_dir=TradeDirection.BULLISH)
-            condition("breakout_trigger", "Live price breakout confirmation", False, f"Live ₹{live_price:.2f}", f"< ₹{put_trigger:.2f}", put_gap, for_dir=TradeDirection.BEARISH)
+            condition("breakout_trigger", "Completed 5m breakout close", False, f"Completed close ₹{breakout_close:.2f}", f"> ₹{call_trigger:.2f}", call_gap, for_dir=TradeDirection.BULLISH)
+            condition("breakout_trigger", "Completed 5m breakout close", False, f"Completed close ₹{breakout_close:.2f}", f"< ₹{put_trigger:.2f}", put_gap, for_dir=TradeDirection.BEARISH)
 
             # CALL
-            call_ext = max(0.0, live_price - box.box_high)
+            call_ext = max(0.0, breakout_close - box.box_high)
             call_ext_atr = round(call_ext / atr, 2) if atr > 0 else 0
             condition("anti_chase_extension", "Anti-chase extension", True, f"{call_ext_atr:.2f} ATR", f"<={max_ext:.2f} ATR", f"Extension within {max_ext:.2f} ATR limit", for_dir=TradeDirection.BULLISH)
-            conf_dict_bull, avail_bull, psd_bull = eval_confirmations(TradeDirection.BULLISH)
-            conf_ok_bull = (len(avail_bull) >= min_available and len(psd_bull) >= required_conf)
-            condition("confirmation_score", "Entry confirmations", conf_ok_bull, f"{len(psd_bull)} passed / {len(avail_bull)} available", f">={required_conf} passed of >={min_available} available", f"{len(psd_bull)} passed / {len(avail_bull)} available", for_dir=TradeDirection.BULLISH)
+            conf_dict_bull, avail_bull, psd_bull, raw_bull, penalty_bull, effective_bull, wall_bull = score_confirmations(TradeDirection.BULLISH)
+            conf_ok_bull = (len(avail_bull) >= min_available and effective_bull >= required_conf)
+            condition("confirmation_score", "Entry confirmations", conf_ok_bull, f"{effective_bull} effective / {raw_bull} raw / {len(avail_bull)} available", f">={required_conf} effective of >={min_available} available", f"{effective_bull} effective / {raw_bull} raw / {len(avail_bull)} available (OI wall penalty: {penalty_bull})", for_dir=TradeDirection.BULLISH)
             call_stop = round(box.box_high - 0.25 * atr, 2)
             call_risk = round(call_trigger - call_stop, 2)
             condition("risk_band", "Structural initial R", bool(0 < call_risk <= 1.20 * atr + 1e-9), f"{round(call_risk / atr, 2) if atr > 0 else 0:.2f} ATR", "<= 1.20 ATR", f"Initial R at trigger: {round(call_risk / atr, 2) if atr > 0 else 0:.2f} ATR", for_dir=TradeDirection.BULLISH)
 
             # PUT
-            put_ext = max(0.0, box.box_low - live_price)
+            put_ext = max(0.0, box.box_low - breakout_close)
             put_ext_atr = round(put_ext / atr, 2) if atr > 0 else 0
             condition("anti_chase_extension", "Anti-chase extension", True, f"{put_ext_atr:.2f} ATR", f"<={max_ext:.2f} ATR", f"Extension within {max_ext:.2f} ATR limit", for_dir=TradeDirection.BEARISH)
-            conf_dict_bear, avail_bear, psd_bear = eval_confirmations(TradeDirection.BEARISH)
-            conf_ok_bear = (len(avail_bear) >= min_available and len(psd_bear) >= required_conf)
-            condition("confirmation_score", "Entry confirmations", conf_ok_bear, f"{len(psd_bear)} passed / {len(avail_bear)} available", f">={required_conf} passed of >={min_available} available", f"{len(psd_bear)} passed / {len(avail_bear)} available", for_dir=TradeDirection.BEARISH)
+            conf_dict_bear, avail_bear, psd_bear, raw_bear, penalty_bear, effective_bear, wall_bear = score_confirmations(TradeDirection.BEARISH)
+            conf_ok_bear = (len(avail_bear) >= min_available and effective_bear >= required_conf)
+            condition("confirmation_score", "Entry confirmations", conf_ok_bear, f"{effective_bear} effective / {raw_bear} raw / {len(avail_bear)} available", f">={required_conf} effective of >={min_available} available", f"{effective_bear} effective / {raw_bear} raw / {len(avail_bear)} available (OI wall penalty: {penalty_bear})", for_dir=TradeDirection.BEARISH)
             put_stop = round(box.box_low + 0.25 * atr, 2)
             put_risk = round(put_stop - put_trigger, 2)
             condition("risk_band", "Structural initial R", bool(0 < put_risk <= 1.20 * atr + 1e-9), f"{round(put_risk / atr, 2) if atr > 0 else 0:.2f} ATR", "<= 1.20 ATR", f"Initial R at trigger: {round(put_risk / atr, 2) if atr > 0 else 0:.2f} ATR", for_dir=TradeDirection.BEARISH)
 
-            return finish("WAITING_FOR_BREAKOUT", "WAITING_FOR_BREAKOUT: Live price within consolidation boundaries")
+            return finish("WAITING_FOR_BREAKOUT", "WAITING_FOR_BREAKOUT: Completed close within consolidation boundaries")
 
         breakout_dir = TradeDirection.BULLISH if bullish else TradeDirection.BEARISH
         other_dir = TradeDirection.BEARISH if bullish else TradeDirection.BULLISH
@@ -506,22 +524,22 @@ class VolatilityBreakoutStrategy:
         # Opposite direction diagnostic populating
         other_trigger = put_trigger if bullish else call_trigger
         other_gap = (
-            f"Live spot ₹{live_price:.2f} is {live_price - other_trigger:.2f} pts above trigger ₹{other_trigger:.2f}"
+            f"Completed close ₹{breakout_close:.2f} is {breakout_close - other_trigger:.2f} pts above trigger ₹{other_trigger:.2f}"
             if bullish else
-            f"Live spot ₹{live_price:.2f} is {other_trigger - live_price:.2f} pts below trigger ₹{other_trigger:.2f}"
+            f"Completed close ₹{breakout_close:.2f} is {other_trigger - breakout_close:.2f} pts below trigger ₹{other_trigger:.2f}"
         )
-        condition("breakout_trigger", "Live price breakout confirmation", False, f"Live ₹{live_price:.2f}", f"{'<' if bullish else '>'} ₹{other_trigger:.2f}", other_gap, for_dir=other_dir)
+        condition("breakout_trigger", "Completed 5m breakout close", False, f"Completed close ₹{breakout_close:.2f}", f"{'<' if bullish else '>'} ₹{other_trigger:.2f}", other_gap, for_dir=other_dir)
         condition("anti_chase_extension", "Anti-chase extension", True, "0.00 ATR", f"<={max_ext:.2f} ATR", "Within extension limit", for_dir=other_dir)
-        _, o_avail, o_psd = eval_confirmations(other_dir)
-        condition("confirmation_score", "Entry confirmations", (len(o_avail) >= min_available and len(o_psd) >= required_conf), f"{len(o_psd)} passed / {len(o_avail)} available", f">={required_conf} passed of >={min_available} available", f"{len(o_psd)} passed / {len(o_avail)} available", for_dir=other_dir)
+        _, o_avail, o_psd, o_raw, o_penalty, o_effective, _ = score_confirmations(other_dir)
+        condition("confirmation_score", "Entry confirmations", (len(o_avail) >= min_available and o_effective >= required_conf), f"{o_effective} effective / {o_raw} raw / {len(o_avail)} available", f">={required_conf} effective of >={min_available} available", f"{o_effective} effective / {o_raw} raw / {len(o_avail)} available (OI wall penalty: {o_penalty})", for_dir=other_dir)
         o_stop = round((box.box_low + 0.25 * atr) if bullish else (box.box_high - 0.25 * atr), 2)
-        o_risk = round(abs(live_price - o_stop), 2)
+        o_risk = round(abs(breakout_close - o_stop), 2)
         condition("risk_band", "Structural initial R", bool(0 < o_risk <= 1.20 * atr + 1e-9), f"{round(o_risk / atr, 2) if atr > 0 else 0:.2f} ATR", "<= 1.20 ATR", f"Risk {round(o_risk / atr, 2) if atr > 0 else 0:.2f} ATR", for_dir=other_dir)
 
         # Step 4: Anti-Chase Extension Check (Change 6)
-        extension = sign * (live_price - edge)
+        extension = sign * (breakout_close - edge)
         ext_ok = (extension <= max_ext * atr + 1e-9)
-        ext_gap = f"Live extension {extension/atr:.2f} ATR <= limit {max_ext:.2f} ATR" if ext_ok else f"Live extension {extension/atr:.2f} ATR exceeds limit {max_ext:.2f} ATR"
+        ext_gap = f"Completed-close extension {extension/atr:.2f} ATR <= limit {max_ext:.2f} ATR" if ext_ok else f"Completed-close extension {extension/atr:.2f} ATR exceeds limit {max_ext:.2f} ATR"
         condition("anti_chase_extension", "Anti-chase extension", ext_ok, f"{round(extension / atr, 2):.2f} ATR", f"<={max_ext:.2f} ATR", ext_gap, for_dir=breakout_dir)
         summary["extension"] = {
             "breakout_extension_atr": round(extension / atr, 2),
@@ -534,76 +552,60 @@ class VolatilityBreakoutStrategy:
             self.reset(trigger.end_time)
             return finish(
                 "RESET",
-                f"BREAKOUT_OVEREXTENDED: Live extension {extension/atr:.2f} ATR exceeds limit {max_ext:.2f} ATR",
+                f"BREAKOUT_OVEREXTENDED: Completed-close extension {extension/atr:.2f} ATR exceeds limit {max_ext:.2f} ATR",
                 direction=breakout_dir,
             )
 
-        # Step 5: Breakout Polling Confirmation (Change 5)
-        if self.confirm_direction == breakout_dir:
-            self.breakout_confirm_count += 1
-        else:
-            self.confirm_direction = breakout_dir
-            self.breakout_confirm_count = 1
-
-        confirmed = (self.breakout_confirm_count >= required_polls)
-        trig_gap = (
-            f"Breakout confirmed (+{abs(live_price - trigger_price):.2f} pts beyond trigger)"
-            if confirmed else
-            f"Live price {live_price:.2f} beyond trigger (poll {self.breakout_confirm_count}/{required_polls})"
-        )
+        # Step 5: The completed breakout candle is evaluated once.
+        self.breakout_confirm_count = 0
+        self.confirm_direction = None
         condition(
             "breakout_trigger",
-            "Live price breakout confirmation",
-            confirmed,
-            f"Live ₹{live_price:.2f} vs Trigger ₹{trigger_price:.2f} (polls {self.breakout_confirm_count}/{required_polls})",
-            f"{'>' if bullish else '<'} ₹{trigger_price:.2f} for {required_polls} polls",
-            trig_gap,
+            "Completed 5m breakout close",
+            True,
+            f"Completed close ₹{breakout_close:.2f} vs Trigger ₹{trigger_price:.2f}",
+            f"{'>' if bullish else '<'} ₹{trigger_price:.2f}",
+            f"Completed close qualifies on first evaluation",
             for_dir=breakout_dir,
         )
         summary["trigger"] = {
             "breakout_trigger_price": trigger_price,
+            "completed_close": breakout_close,
             "live_price": live_price,
-            "breakout_confirm_count": self.breakout_confirm_count,
-            "required_polls": required_polls,
-            "confirmed": confirmed,
+            "breakout_confirm_count": 0,
+            "confirmed": True,
         }
         summary["direction"] = breakout_dir.value
         summary["breakout_trigger_price"] = trigger_price
+        summary["completed_close"] = breakout_close
         summary["live_price"] = live_price
-        summary["breakout_confirm_count"] = self.breakout_confirm_count
-
-        if not confirmed:
-            return finish(
-                "WAITING_FOR_BREAKOUT",
-                f"BREAKOUT_NOT_CONFIRMED: Live price {live_price:.2f} beyond trigger (poll {self.breakout_confirm_count}/{required_polls})",
-                direction=breakout_dir,
-            )
+        summary["breakout_confirm_count"] = 0
 
         # Step 6: Multi-Factor Ternary Confirmation Model (Changes 7 & 8)
         deriv = features.breakout_bull_derivatives_score if bullish else features.breakout_bear_derivatives_score
-        confirmations, available_confirmations, passed_confirmations = eval_confirmations(breakout_dir)
+        confirmations, available_confirmations, passed_confirmations, raw_confirmation_score, oi_wall_penalty, effective_confirmation_score, oi_wall = score_confirmations(breakout_dir)
 
-        # OI Wall check (Change 9: Informational only; no score penalty)
-        oi_wall = bool(features.bullish_oi_wall if bullish else features.bearish_oi_wall)
-
-        conf_ok = (len(available_confirmations) >= min_available and len(passed_confirmations) >= required_conf)
+        conf_ok = (len(available_confirmations) >= min_available and effective_confirmation_score >= required_conf)
         conf_gap = (
-            f"Confirmations qualified ({len(passed_confirmations)} passed / {len(available_confirmations)} available)"
+            f"Confirmations qualified ({effective_confirmation_score} effective / {raw_confirmation_score} raw / {len(available_confirmations)} available)"
             if conf_ok else
-            f"Need {required_conf - len(passed_confirmations)} more confirmations ({len(passed_confirmations)}/{required_conf})"
+            f"Need {required_conf - effective_confirmation_score} more confirmations ({effective_confirmation_score}/{required_conf} effective; {raw_confirmation_score} raw)"
         )
         condition(
             "confirmation_score",
             "Entry confirmations",
             conf_ok,
-            f"{len(passed_confirmations)} passed / {len(available_confirmations)} available (OI wall: {oi_wall})",
-            f">={required_conf} passed of >={min_available} available",
+            f"{effective_confirmation_score} effective / {raw_confirmation_score} raw / {len(available_confirmations)} available (OI wall penalty: {oi_wall_penalty})",
+            f">={required_conf} effective of >={min_available} available",
             conf_gap,
             for_dir=breakout_dir,
         )
 
         summary["confirmation"] = {
-            "score": len(passed_confirmations),
+            "score": effective_confirmation_score,
+            "raw_confirmation_score": raw_confirmation_score,
+            "oi_wall_penalty": oi_wall_penalty,
+            "effective_confirmation_score": effective_confirmation_score,
             "available": len(available_confirmations),
             "required": required_conf,
             "min_available": min_available,
@@ -612,6 +614,9 @@ class VolatilityBreakoutStrategy:
         }
         summary["available_confirmation_count"] = len(available_confirmations)
         summary["passed_confirmation_count"] = len(passed_confirmations)
+        summary["raw_confirmation_score"] = raw_confirmation_score
+        summary["oi_wall_penalty"] = oi_wall_penalty
+        summary["effective_confirmation_score"] = effective_confirmation_score
         summary["rvol_pass"] = confirmations.get("rvol")
         summary["body_strength_pass"] = confirmations.get("body_strength")
         summary["close_location_pass"] = confirmations.get("close_location")
@@ -628,17 +633,17 @@ class VolatilityBreakoutStrategy:
                 direction=breakout_dir,
             )
 
-        if len(passed_confirmations) < required_conf:
+        if effective_confirmation_score < required_conf:
             self.reset(trigger.end_time)
             return finish(
                 "CONFIRMATION_FAILED",
-                f"CONFIRMATION_SCORE_LOW: Passed confirmations {len(passed_confirmations)} < required {required_conf}",
+                f"CONFIRMATION_SCORE_LOW: Effective confirmations {effective_confirmation_score} < required {required_conf} (raw {raw_confirmation_score}, OI wall penalty {oi_wall_penalty})",
                 direction=breakout_dir,
             )
 
         # Step 7: Structural Stop & Initial Risk Gate (Change 10)
         stop = round(edge - sign * 0.25 * atr, 2)
-        risk = round(sign * (live_price - stop), 2)
+        risk = round(sign * (breakout_close - stop), 2)
         max_risk = 1.20 * atr
 
         risk_ok = bool(0 < risk <= (max_risk + 1e-9))
@@ -676,7 +681,7 @@ class VolatilityBreakoutStrategy:
             direction=breakout_dir,
             option_type=OptionType.CALL if bullish else OptionType.PUT,
             timestamp=trigger.end_time,
-            spot_reference_price=live_price,
+            spot_reference_price=breakout_close,
             structural_stop=stop,
             r_points=risk,
             derivatives_score=deriv or 0.0,
@@ -685,11 +690,14 @@ class VolatilityBreakoutStrategy:
                 "box_low": box.box_low,
                 "atr_at_lock": atr,
                 "box_created_time": box.created_bar_time,
-                "confirmation_score": len(passed_confirmations),
-                "confirmation_ratio": f"{len(passed_confirmations)}/{len(available_confirmations)}",
+                "confirmation_score": effective_confirmation_score,
+                "raw_confirmation_score": raw_confirmation_score,
+                "oi_wall_penalty": oi_wall_penalty,
+                "effective_confirmation_score": effective_confirmation_score,
+                "confirmation_ratio": f"{effective_confirmation_score}/{len(available_confirmations)}",
                 "confirmation_factors": confirmations,
                 "oi_wall_detected": oi_wall,
-                "entry_reference_spot": live_price,
+                "entry_reference_spot": breakout_close,
                 "breakout_trigger_price": trigger_price,
                 "breakout_extension_atr": round(extension / atr, 2),
             },

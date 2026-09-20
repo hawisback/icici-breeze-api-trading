@@ -112,11 +112,11 @@ class SessionTimersConfig(BaseModel):
 
 class StrategyTunablesConfig(BaseModel):
     """Algorithmic tuning parameters."""
-    bb_width_percentile_threshold: float = Field(default=35.0, ge=15, le=50)
+    bb_width_percentile_threshold: float = Field(default=25.0, ge=15, le=50)
     compression_lookback_bars: int = Field(default=8, ge=6, le=10)
-    box_max_age_bars: int = Field(default=12, ge=1, le=20)
-    breakout_buffer_atr: float = Field(default=0.03, ge=0.01, le=0.10)
-    breakout_max_extension_atr: float = Field(default=0.90, ge=0.60, le=1.5)
+    box_max_age_bars: int = Field(default=8, ge=1, le=20)
+    breakout_buffer_atr: float = Field(default=0.05, ge=0.01, le=0.10)
+    breakout_max_extension_atr: float = Field(default=0.75, ge=0.60, le=1.5)
     evaluation_interval_sec: int = Field(default=2, ge=1, le=10, description="Scheduler loop interval in seconds")
     trend_pullback_enabled: bool = Field(default=True)
     volatility_breakout_enabled: bool = Field(default=True)
@@ -131,8 +131,8 @@ class StrategyTunablesConfig(BaseModel):
     put_pullback_min_depth: float = Field(default=0.40, ge=0.0, lt=1.0)
     put_pullback_max_depth: float = Field(default=0.60, gt=0.0, le=1.0)
     min_confirmation_score: int = Field(default=2, ge=1, le=6, description="Minimum confirmation points for Strategy A")
-    strat_b_min_confirmation: int = Field(default=2, ge=1, le=6, description="Minimum confirmation points for Strategy B")
-    box_max_height_atr: float = Field(default=1.50, ge=1.0, le=2.5, description="Max compression box height in ATR")
+    strat_b_min_confirmation: int = Field(default=3, ge=1, le=6, description="Minimum confirmation points for Strategy B")
+    box_max_height_atr: float = Field(default=1.30, ge=1.0, le=2.5, description="Max compression box height in ATR")
     supertrend_period: int = Field(default=10)
     supertrend_multiplier: float = Field(default=3.0)
 
@@ -155,7 +155,7 @@ class CompressionBox(BaseModel):
     locked_at: datetime = Field(default_factory=utc_now)
     created_bar_time: str = ""
     bars_active: int = 0
-    max_bars: int = 12
+    max_bars: int = 8
     is_locked: bool = False
 
 
