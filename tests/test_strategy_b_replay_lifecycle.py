@@ -163,6 +163,40 @@ def test_strategy_b_replay_uses_position_manager_false_breakout_behavior():
     assert any(event.event == "FALSE_BREAKOUT_EXIT" for event in record.events)
 
 
+def test_replay_favorable_event_uses_completed_candle_timestamp_without_intrabar_data():
+    recorder, record, entry_bar = _recorded_b_record()
+    favorable_bar = entry_bar.model_copy(update={
+        "start_time": entry_bar.end_time,
+        "end_time": entry_bar.end_time + timedelta(minutes=5),
+        "open": 101.0,
+        "high": 103.0,
+        "low": 100.5,
+        "close": 102.0,
+    })
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=RiskConfig(),
+        session_config=SessionTimersConfig(),
+        recorder=recorder,
+        instrument_id="INDEX",
+        warmup_candles=[],
+        session_candles=[entry_bar, favorable_bar],
+        futures_candles=[],
+    )
+    replayer._features = lambda bar, running: MarketFeatures(
+        timestamp=bar.end_time,
+        spot_price=bar.close,
+        closed_5m_price=bar.close,
+        closed_5m_time=bar.end_time,
+        atr_5m=2.0,
+    )
+
+    replayer.replay_record(record)
+
+    favorable_event = next(event for event in record.events if event.event == "+1R")
+    assert favorable_event.timestamp == favorable_bar.end_time
+    assert favorable_event.source_candle == favorable_bar.start_time
+
+
 def test_strategy_b_replay_rejects_missing_structural_state():
     _, record, _ = _recorded_b_record()
     record.box_high = None

@@ -380,7 +380,11 @@ class HistoricalPositionManagerReplayer:
                 return
 
             if level is not None and favorable_price is not None:
-                event_time = bar.start_time
+                # The bar high/low is only known once this completed candle
+                # ends.  Without minute-level ordering, do not timestamp a
+                # favorable event at the start of a candle whose future range
+                # was used to detect it.
+                event_time = bar.end_time
                 trade, _ = pm.update_position(trade, 0.0, _feature_at(features, spot=favorable_price, timestamp=event_time, completed=False), as_of=event_time)
                 self._record_event(record, event=_event_name_for_level(level), timestamp=event_time, price=favorable_price, trade=trade, source=bar.start_time)
 
