@@ -1,6 +1,8 @@
 """Contract tests for the Strategy A configuration and lifecycle model."""
 
 from datetime import datetime, timedelta, timezone
+import json
+from unittest.mock import Mock
 
 import pytest
 from pydantic import ValidationError
@@ -14,6 +16,8 @@ from services.strategy.models import (
     StrategyStateSnapshot,
     StrategyTunablesConfig,
 )
+from services.strategy.repository import StrategyRepository
+from services.strategy.service import StrategyService
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 
@@ -46,13 +50,20 @@ def make_setup(direction: StrategyDirection = StrategyDirection.CALL) -> Strateg
 def test_strategy_a_defaults_are_single_and_consistent_with_runtime_constructor():
     config = StrategyTunablesConfig()
     auto_config = AutoTradingConfig()
-    strategy = TrendPullbackStrategy(
+    v2_strategy = TrendPullbackStrategy(
         adx_threshold=config.adx_threshold,
         breakout_buffer_atr=config.trigger_buffer_atr,
     )
+    legacy_strategy = TrendPullbackStrategy(
+        adx_threshold=config.legacy_strategy_a_adx_threshold,
+        breakout_buffer_atr=config.legacy_trigger_buffer_atr,
+    )
 
     assert auto_config.tunables.model_dump() == config.model_dump()
-    assert strategy.adx_threshold == config.adx_threshold == 22.0
+    assert v2_strategy.adx_threshold == config.adx_threshold == 22.0
+    assert v2_strategy.breakout_buffer_atr == config.trigger_buffer_atr == 0.05
+    assert legacy_strategy.adx_threshold == config.legacy_strategy_a_adx_threshold == 20.0
+    assert legacy_strategy.breakout_buffer_atr == config.legacy_trigger_buffer_atr == 0.02
     assert config.ema_fast_period == 20
     assert config.ema_slow_period == 50
     assert config.adx_period == config.atr_period == 14
@@ -79,6 +90,16 @@ def test_strategy_a_defaults_are_single_and_consistent_with_runtime_constructor(
     )
     # Strategy B keeps its pre-refactor hypothesis explicitly.
     assert config.strategy_b_adx_threshold == 20.0
+
+
+def test_service_keeps_legacy_strategy_a_evaluator_and_strategy_b_values():
+    config = StrategyTunablesConfig()
+    service = StrategyService(oms_service=Mock(), repository=Mock())
+
+    assert service.config.tunables.adx_threshold == config.adx_threshold
+    assert service.strategy_a.adx_threshold == config.legacy_strategy_a_adx_threshold
+    assert service.strategy_a.breakout_buffer_atr == config.legacy_trigger_buffer_atr
+    assert service.strategy_b.adx_threshold == config.strategy_b_adx_threshold
 
 
 @pytest.mark.parametrize(
@@ -139,8 +160,83 @@ def test_state_model_rejects_impossible_combinations_and_allows_legal_transition
         flat.transition(StrategyState.ENTERED, setup=setup, entry_timestamp=setup.setup_timestamp)
 
 
+def test_legacy_triggered_state_never_recovers_as_an_open_position():
+    assert StrategyState("SEARCHING") is StrategyState.FLAT
+    assert StrategyState("TRIGGERED") is StrategyState.ARMED
+    assert StrategyState("PAUSED") is StrategyState.FLAT
+
+    with pytest.raises(ValidationError):
+        StrategyStateSnapshot.model_validate({"state": "TRIGGERED"})
+
+    recovered = StrategyStateSnapshot.model_validate({
+        "state": "TRIGGERED",
+        "direction": "CALL",
+        "setup": make_setup().model_dump(),
+    })
+    assert recovered.state is StrategyState.ARMED
+    assert recovered.entry_timestamp is None
+
+
 def test_existing_strategy_public_imports_remain_available():
     # These imports/constructors are existing integration points for service,
     # replay, and callers that use Strategy B directly.
     assert TrendPullbackStrategy is not None
     assert VolatilityBreakoutStrategy is not None
+
+
+@pytest.mark.parametrize("old_adx", [20.0, 25.0, 18.0])
+@pytest.mark.asyncio
+async def test_persisted_adx_migration_preserves_strategy_b_and_documents_v2_policy(tmp_path, old_adx):
+    repo = StrategyRepository(tmp_path / f"strategy-{old_adx}.db")
+    await repo.initialize()
+    await repo.save_auto_config(AutoTradingConfig(strategy_a_revision=3))
+
+    async with repo.engine.connect() as conn:
+        row = await (await conn.execute(
+            "SELECT config_json FROM auto_strategy_config WHERE id = 'active'"
+        )).fetchone()
+        persisted = json.loads(row["config_json"])
+        persisted["strategy_a_revision"] = 3
+        persisted["tunables"]["adx_threshold"] = old_adx
+        persisted["tunables"].pop("strategy_b_adx_threshold", None)
+        persisted["tunables"].pop("legacy_strategy_a_adx_threshold", None)
+        await conn.execute(
+            "UPDATE auto_strategy_config SET config_json = ? WHERE id = 'active'",
+            (json.dumps(persisted),),
+        )
+        await conn.commit()
+
+    migrated = await repo.get_auto_config()
+    expected_v2_adx = 22.0 if old_adx == 20.0 else old_adx
+    assert migrated.strategy_a_revision == 4
+    assert migrated.tunables.strategy_b_adx_threshold == old_adx
+    assert migrated.tunables.legacy_strategy_a_adx_threshold == old_adx
+    assert migrated.tunables.adx_threshold == expected_v2_adx
+
+
+@pytest.mark.parametrize("field_name", [
+    "setup_timestamp",
+    "confirmation_bar_timestamp",
+    "setup_expiry_timestamp",
+])
+def test_setup_rejects_naive_timestamps(field_name):
+    payload = make_setup().model_dump()
+    payload[field_name] = datetime(2026, 9, 20, 9, 45)
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        StrategySetup.model_validate(payload)
+
+
+def test_state_rejects_naive_entry_and_cooldown_timestamps():
+    setup = make_setup()
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        StrategyStateSnapshot(
+            state=StrategyState.ENTERED,
+            direction=StrategyDirection.CALL,
+            setup=setup,
+            entry_timestamp=datetime(2026, 9, 20, 10, 0),
+        )
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        StrategyStateSnapshot(
+            state=StrategyState.COOLDOWN,
+            cooldown_until=datetime(2026, 9, 20, 10, 15),
+        )

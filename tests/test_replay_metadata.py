@@ -140,7 +140,10 @@ def test_breeze_baseline_signal_ids_are_reproducible():
         engine = SimulationEngine(
             historical_service=HistoricalService(instrument_service=InstrumentService())
         )
-        actual = set()
+        total_manifest_count = 0
+        strategy_a_manifest_count = 0
+        strategy_b_manifest_count = 0
+        actual_strategy_a = set()
         for date in dates:
             result = await engine.run_day_simulation(
                 SimulationRequest(
@@ -149,9 +152,31 @@ def test_breeze_baseline_signal_ids_are_reproducible():
                     bypass_entry_window=False,
                 )
             )
-            actual.update(record["replay_signal_id"] for record in result.replay_manifests)
-        return expected, actual
+            records = result.replay_manifests
+            total_manifest_count += len(records)
+            strategy_a_records = [
+                record for record in records if record["strategy_id"] == "TREND_PULLBACK"
+            ]
+            strategy_b_records = [
+                record for record in records if record["strategy_id"] == "VOLATILITY_BREAKOUT"
+            ]
+            strategy_a_manifest_count += len(strategy_a_records)
+            strategy_b_manifest_count += len(strategy_b_records)
+            actual_strategy_a.update(record["replay_signal_id"] for record in strategy_a_records)
+        return (
+            expected,
+            actual_strategy_a,
+            total_manifest_count,
+            strategy_a_manifest_count,
+            strategy_b_manifest_count,
+        )
 
-    expected, actual = asyncio.run(run())
-    assert len(actual) == 225
-    assert actual == expected
+    expected, actual_strategy_a, total_count, strategy_a_count, strategy_b_count = asyncio.run(run())
+    print(
+        "Replay manifests: "
+        f"total={total_count}, strategy_a={strategy_a_count}, strategy_b={strategy_b_count}"
+    )
+    assert total_count == strategy_a_count + strategy_b_count
+    assert strategy_a_count == 225
+    assert len(actual_strategy_a) == 225
+    assert actual_strategy_a == expected

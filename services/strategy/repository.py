@@ -319,30 +319,45 @@ class StrategyRepository:
                 await self.save_auto_config(default_cfg)
                 return default_cfg
             data = json.loads(row["config_json"])
-            # Migrate only previous defaults; preserve deliberate custom settings.
+            # Migrate only known schema/default changes. The old shared ADX
+            # value is captured before Strategy A V2 conversion so Strategy B
+            # and the frozen Strategy A evaluator retain old behavior.
+            tunables = data.setdefault("tunables", {})
+            old_shared_adx = tunables.get("adx_threshold", 20.0)
+            changed = False
+            if "strategy_b_adx_threshold" not in tunables:
+                tunables["strategy_b_adx_threshold"] = old_shared_adx
+                changed = True
+            if "legacy_strategy_a_adx_threshold" not in tunables:
+                tunables["legacy_strategy_a_adx_threshold"] = old_shared_adx
+                changed = True
+
+            # Deterministic V2 policy: every old value exactly equal to the
+            # historical shared default 20 is treated as the old default and
+            # converted to the V2 contract default 22. Values other than 20
+            # are preserved as explicit/custom hypotheses. We cannot infer
+            # whether a persisted 20 was intentional.
             if data.get("strategy_a_revision", 1) < 3:
-                tunables = data.setdefault("tunables", {})
                 session = data.setdefault("session", {})
                 if tunables.get("rvol_threshold") == 1.30:
                     tunables["rvol_threshold"] = 1.20
+                    changed = True
                 if session.get("no_new_trade_before") == "09:30":
                     session["no_new_trade_before"] = "09:20"
+                    changed = True
                 tunables.setdefault("call_pullback_min_depth", 0.08)
                 tunables.setdefault("call_pullback_max_depth", 0.70)
                 tunables.setdefault("put_pullback_min_depth", 0.40)
                 tunables.setdefault("put_pullback_max_depth", 0.60)
                 data["strategy_a_revision"] = 3
-                await conn.execute("UPDATE auto_strategy_config SET config_json = ? WHERE id = 'active'", (json.dumps(data),))
-                await conn.commit()
+                changed = True
             if data.get("strategy_a_revision", 1) < 4:
-                # 20 was the historical shared/default ADX value.  Preserve
-                # deliberate overrides while moving the old default to the
-                # new Strategy A hypothesis; Strategy B has its own explicit
-                # 20 threshold in StrategyTunablesConfig.
-                tunables = data.setdefault("tunables", {})
                 if tunables.get("adx_threshold") == 20.0:
                     tunables["adx_threshold"] = 22.0
+                    changed = True
                 data["strategy_a_revision"] = 4
+                changed = True
+            if changed:
                 await conn.execute("UPDATE auto_strategy_config SET config_json = ? WHERE id = 'active'", (json.dumps(data),))
                 await conn.commit()
             return AutoTradingConfig.model_validate(data)

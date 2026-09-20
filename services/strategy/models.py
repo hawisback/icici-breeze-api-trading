@@ -15,6 +15,12 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _require_aware(value: datetime, field_name: str) -> None:
+    """Reject timestamps whose timezone semantics are ambiguous."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+
+
 class AutoTradingMode(str, Enum):
     PAPER = "PAPER"
     SHADOW_ONLY = "SHADOW_ONLY"
@@ -30,9 +36,10 @@ class StrategyName(str, Enum):
 class StrategyState(str, Enum):
     """Deterministic Strategy A lifecycle states.
 
-    ``SEARCHING`` and ``TRIGGERED`` are accepted by the enum parser through
-    ``_missing_`` for old API/runtime payloads, but new serialized values use
-    the five-state contract below.
+    Legacy values are accepted by the enum parser through ``_missing_`` for
+    old API/runtime payloads, but new serialized values use the five-state
+    contract below. ``TRIGGERED`` maps to ``ARMED`` because the old evaluator
+    represented a fired/pre-entry condition, not a broker-confirmed fill.
     """
 
     FLAT = "FLAT"
@@ -45,7 +52,7 @@ class StrategyState(str, Enum):
     def _missing_(cls, value: object) -> Optional["StrategyState"]:
         # Compatibility for persisted/API state written before the contract
         # was introduced.  These are aliases, not new lifecycle states.
-        legacy = {"SEARCHING": cls.FLAT, "TRIGGERED": cls.ENTERED, "PAUSED": cls.COOLDOWN}
+        legacy = {"SEARCHING": cls.FLAT, "TRIGGERED": cls.ARMED, "PAUSED": cls.FLAT}
         return legacy.get(value)
 
 
@@ -240,11 +247,13 @@ class StrategyTunablesConfig(BaseModel):
 
 
 class StrategySetup(BaseModel):
-    """Immutable, deterministic setup snapshot for Strategy A."""
+    """Immutable setup snapshot using completed 15-minute bar end timestamps."""
 
     direction: StrategyDirection
-    setup_timestamp: datetime
-    confirmation_bar_timestamp: datetime
+    setup_timestamp: datetime = Field(description="Timezone-aware setup event timestamp")
+    confirmation_bar_timestamp: datetime = Field(
+        description="Timezone-aware end timestamp of the completed confirmation bar"
+    )
     confirmation_high: float = Field(gt=0)
     confirmation_low: float = Field(gt=0)
     trigger_price: float = Field(gt=0)
@@ -252,13 +261,16 @@ class StrategySetup(BaseModel):
     initial_underlying_r: float = Field(gt=0)
     relevant_support_resistance_level: float = Field(gt=0)
     confluence_references: list[str] = Field(default_factory=list)
-    setup_expiry_timestamp: datetime
+    setup_expiry_timestamp: datetime = Field(description="Timezone-aware setup expiry timestamp")
     setup_expiry_bar_index: int = Field(ge=0)
     invalidation_state: SetupInvalidationState = SetupInvalidationState.ACTIVE
     invalidation_reason: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_setup_integrity(self) -> "StrategySetup":
+        _require_aware(self.setup_timestamp, "setup_timestamp")
+        _require_aware(self.confirmation_bar_timestamp, "confirmation_bar_timestamp")
+        _require_aware(self.setup_expiry_timestamp, "setup_expiry_timestamp")
         if self.confirmation_high <= self.confirmation_low:
             raise ValueError("confirmation_high must be greater than confirmation_low")
         if self.setup_timestamp < self.confirmation_bar_timestamp:
@@ -284,7 +296,12 @@ class StrategySetup(BaseModel):
 
 
 class StrategyStateSnapshot(BaseModel):
-    """Serializable state-machine snapshot with impossible combinations rejected."""
+    """Serializable state-machine snapshot with impossible combinations rejected.
+
+    ``entry_timestamp`` and ``cooldown_until`` are timezone-aware event
+    timestamps. An old ``TRIGGERED`` value is therefore never enough to
+    construct an ``ENTERED`` snapshot without explicit setup and entry data.
+    """
 
     state: StrategyState = StrategyState.FLAT
     direction: Optional[StrategyDirection] = None
@@ -294,6 +311,10 @@ class StrategyStateSnapshot(BaseModel):
 
     @model_validator(mode="after")
     def validate_state_combination(self) -> "StrategyStateSnapshot":
+        if self.entry_timestamp is not None:
+            _require_aware(self.entry_timestamp, "entry_timestamp")
+        if self.cooldown_until is not None:
+            _require_aware(self.cooldown_until, "cooldown_until")
         if self.state == StrategyState.FLAT:
             if any(value is not None for value in (self.direction, self.setup, self.entry_timestamp, self.cooldown_until)):
                 raise ValueError("FLAT state cannot carry setup, direction, entry, or cooldown data")
