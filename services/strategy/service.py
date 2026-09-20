@@ -176,11 +176,21 @@ class StrategyService:
     def _is_strategy_a(strategy: StrategyName) -> bool:
         return strategy == StrategyName.TREND_PULLBACK
 
-    def _execution_mode_for_signal(self, signal: StrategySignal) -> AutoTradingMode:
-        """Strategy A's forward-validation modes are direction-bound and non-live."""
-        if self._is_strategy_a(signal.strategy):
-            return AutoTradingMode.SHADOW_ONLY if signal.option_type == OptionType.CALL else AutoTradingMode.PAPER
+    def _execution_mode_for_strategy(
+        self,
+        strategy: StrategyName,
+        option_type: OptionType,
+    ) -> AutoTradingMode:
+        """Resolve a strategy's execution mode without allowing B to go live."""
+        if self._is_strategy_a(strategy):
+            return AutoTradingMode.SHADOW_ONLY if option_type == OptionType.CALL else AutoTradingMode.PAPER
+        if strategy == StrategyName.VOLATILITY_BREAKOUT and self.config.mode == AutoTradingMode.LIVE:
+            return AutoTradingMode.SHADOW_ONLY
         return self.config.mode
+
+    def _execution_mode_for_signal(self, signal: StrategySignal) -> AutoTradingMode:
+        """Resolve signal execution while keeping Strategy B non-live during validation."""
+        return self._execution_mode_for_strategy(signal.strategy, signal.option_type)
 
     def _paper_slippage(self) -> float:
         return float(self.config.risk.paper_slippage_points)
@@ -603,6 +613,7 @@ class StrategyService:
         )
 
         # 10. Contract Selection under Max Option Premium Cap
+        execution_mode = self._execution_mode_for_signal(signal)
         chain = await self._get_option_chain()
         selected_contract, candidates, rejection_reason = self.contract_selector.select_contract(
             direction=signal.direction,
@@ -616,7 +627,7 @@ class StrategyService:
         # Passive shadow capture only. The selector has already run and its
         # result is never changed by this recorder; persistence failures are
         # intentionally non-blocking for paper/live execution paths.
-        if signal.strategy == StrategyName.TREND_PULLBACK:
+        if signal.strategy in (StrategyName.TREND_PULLBACK, StrategyName.VOLATILITY_BREAKOUT):
             try:
                 await self._capture_option_chain_snapshot(
                     signal=signal,
@@ -625,6 +636,7 @@ class StrategyService:
                     selector_candidates=candidates,
                     selected_contract=selected_contract,
                     rejection_reason=rejection_reason,
+                    execution_mode=execution_mode,
                 )
             except Exception:
                 logger.exception("Passive option-chain snapshot capture failed")
@@ -660,13 +672,6 @@ class StrategyService:
                 details={"capital_cap": self.config.risk.max_trade_capital, "premium": selected_contract.ask_price},
             )
             return {"status": "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"}
-
-        execution_mode = self._execution_mode_for_signal(signal)
-
-        # Strategy A is permanently paper/shadow for this forward-validation
-        # phase.  It cannot inherit a globally selected LIVE mode.
-        if self._is_strategy_a(signal.strategy) and execution_mode == AutoTradingMode.LIVE:
-            execution_mode = AutoTradingMode.SHADOW_ONLY if signal.option_type == OptionType.CALL else AutoTradingMode.PAPER
 
         # 12. Check LIVE Arming Gate for non-Strategy-A compatibility paths.
         if execution_mode == AutoTradingMode.LIVE and not self._live_orders_enabled():
@@ -1114,6 +1119,7 @@ class StrategyService:
         selector_candidates: list[dict[str, Any]],
         selected_contract: Any,
         rejection_reason: Optional[str],
+        execution_mode: AutoTradingMode,
     ) -> None:
         """Persist the exact selector inputs observed at an ENTRY_READY event."""
         selected_right = "CE" if signal.option_type == OptionType.CALL else "PE"
@@ -1164,12 +1170,16 @@ class StrategyService:
                     "rejection_reason": selector_item.get("rejection_reason") if selector_item else "NOT_EVALUATED_BY_DIRECTIONAL_SELECTOR",
                 })
 
+        captured_at = utc_now().isoformat()
         await self.repo.save_option_chain_snapshot({
             "snapshot_id": f"OPTCHAIN-{generate_id()}",
             "strategy_signal_id": signal.signal_id,
-            "captured_at": utc_now().isoformat(),
+            "captured_at": captured_at,
             "selector_timestamp": utc_now().isoformat(),
+            "chain_snapshot_timestamp": chain.get("captured_at") or captured_at,
             "signal_timestamp": signal.timestamp.isoformat(),
+            "strategy": signal.strategy.value,
+            "execution_mode": execution_mode.value,
             "direction": signal.direction.value,
             "spot_price": float(spot_price),
             "chain_spot_price": chain.get("spot_price"),
@@ -1372,9 +1382,7 @@ class StrategyService:
         if lots < 1:
             return {"status": "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"}
 
-        execution_mode = (
-            AutoTradingMode.SHADOW_ONLY if option_type == OptionType.CALL else AutoTradingMode.PAPER
-        ) if strategy == StrategyName.TREND_PULLBACK else self.config.mode
+        execution_mode = self._execution_mode_for_strategy(strategy, option_type)
 
         # 4. Check LIVE Arming Gate for non-Strategy-A compatibility paths.
         if execution_mode == AutoTradingMode.LIVE and not self._live_orders_enabled():
@@ -1666,7 +1674,8 @@ class StrategyService:
         # This guard is intentionally before construction of any OMS intent.
         strategy_tag = str((metadata or {}).get("strategy", "")).upper()
         is_strategy_a_validation = strategy_tag in {StrategyName.TREND_PULLBACK.value, "STRATEGY_A", "CALL", "PUT"}
-        if trading_mode == TradingMode.SHADOW or is_strategy_a_validation:
+        is_strategy_b_validation = strategy_tag == StrategyName.VOLATILITY_BREAKOUT.value
+        if trading_mode == TradingMode.SHADOW or is_strategy_a_validation or is_strategy_b_validation:
             return signal
         if trading_mode == TradingMode.LIVE and not self._live_orders_enabled():
             return signal

@@ -142,7 +142,10 @@ class StrategyRepository:
                     selector_candidates_json TEXT NOT NULL,
                     chain_candidates_json TEXT NOT NULL,
                     selected_contract_json TEXT,
-                    rejection_reason TEXT
+                    rejection_reason TEXT,
+                    strategy TEXT,
+                    execution_mode TEXT,
+                    chain_snapshot_timestamp TEXT
                 );
             """)
             await conn.execute(
@@ -153,6 +156,8 @@ class StrategyRepository:
             for column_name, column_type in (
                 ("selector_timestamp", "TEXT"), ("signal_timestamp", "TEXT"),
                 ("direction", "TEXT"), ("selector_result", "TEXT"),
+                ("strategy", "TEXT"), ("execution_mode", "TEXT"),
+                ("chain_snapshot_timestamp", "TEXT"),
             ):
                 if column_name not in existing_snapshot_columns:
                     await conn.execute(f"ALTER TABLE strategy_option_chain_snapshots ADD COLUMN {column_name} {column_type}")
@@ -361,8 +366,9 @@ class StrategyRepository:
                     snapshot_id, strategy_signal_id, captured_at, spot_price, expiry,
                     source, selector_candidates_json, chain_candidates_json,
                     selected_contract_json, rejection_reason, selector_timestamp,
-                    signal_timestamp, direction, selector_result
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    signal_timestamp, direction, selector_result, strategy,
+                    execution_mode, chain_snapshot_timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot["snapshot_id"],
@@ -377,6 +383,8 @@ class StrategyRepository:
                     snapshot.get("rejection_reason"),
                     snapshot.get("selector_timestamp", snapshot.get("captured_at")),
                     snapshot.get("signal_timestamp"), snapshot.get("direction"), snapshot.get("selector_result"),
+                    snapshot.get("strategy"), snapshot.get("execution_mode"),
+                    snapshot.get("chain_snapshot_timestamp", snapshot.get("captured_at")),
                 ),
             )
             await conn.commit()
@@ -397,7 +405,8 @@ class StrategyRepository:
                     "source": r["source"], "selector_candidates": json.loads(r["selector_candidates_json"]),
                     "chain_candidates": json.loads(r["chain_candidates_json"]),
                     "selected_contract": json.loads(r["selected_contract_json"]) if r["selected_contract_json"] else None,
-                    "rejection_reason": r["rejection_reason"],
+                    "rejection_reason": r["rejection_reason"], "strategy": r["strategy"],
+                    "execution_mode": r["execution_mode"], "chain_snapshot_timestamp": r["chain_snapshot_timestamp"],
                 }
                 for r in rows
             ]
