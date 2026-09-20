@@ -76,10 +76,15 @@ class StrategyService:
         self.contract_selector = ContractSelector(self.config.option_selection)
 
         self.strategy_a = TrendPullbackStrategy(
-            adx_threshold=self.config.tunables.adx_threshold,
+            adx_threshold=self.config.tunables.legacy_strategy_a_adx_threshold,
             rvol_threshold=self.config.tunables.rvol_threshold,
             min_confirmation_score=self.config.tunables.min_confirmation_score,
             ema_slope_threshold=self.config.tunables.ema_slope_threshold,
+            breakout_buffer_atr=self.config.tunables.legacy_trigger_buffer_atr,
+            breakout_confirm_polls=self.config.tunables.legacy_breakout_confirm_polls,
+            min_impulse_atr=self.config.tunables.legacy_min_impulse_atr,
+            retest_tolerance_atr=self.config.tunables.legacy_retest_tolerance_atr,
+            min_available_confirmations=self.config.tunables.legacy_min_available_confirmations,
             call_pullback_min_depth=self.config.tunables.call_pullback_min_depth,
             call_pullback_max_depth=self.config.tunables.call_pullback_max_depth,
             put_pullback_min_depth=self.config.tunables.put_pullback_min_depth,
@@ -87,7 +92,7 @@ class StrategyService:
         )
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
-            adx_threshold=self.config.tunables.adx_threshold,
+            adx_threshold=self.config.tunables.strategy_b_adx_threshold,
             min_confirmation_score=self.config.tunables.strat_b_min_confirmation,
             box_max_height_atr=self.config.tunables.box_max_height_atr,
             bb_width_percentile_threshold=self.config.tunables.bb_width_percentile_threshold,
@@ -143,10 +148,15 @@ class StrategyService:
         self.position_manager = PositionManager(self.config.risk, self.config.session)
         self.contract_selector = ContractSelector(self.config.option_selection)
         self.strategy_a = TrendPullbackStrategy(
-            adx_threshold=self.config.tunables.adx_threshold,
+            adx_threshold=self.config.tunables.legacy_strategy_a_adx_threshold,
             rvol_threshold=self.config.tunables.rvol_threshold,
             min_confirmation_score=self.config.tunables.min_confirmation_score,
             ema_slope_threshold=self.config.tunables.ema_slope_threshold,
+            breakout_buffer_atr=self.config.tunables.legacy_trigger_buffer_atr,
+            breakout_confirm_polls=self.config.tunables.legacy_breakout_confirm_polls,
+            min_impulse_atr=self.config.tunables.legacy_min_impulse_atr,
+            retest_tolerance_atr=self.config.tunables.legacy_retest_tolerance_atr,
+            min_available_confirmations=self.config.tunables.legacy_min_available_confirmations,
             call_pullback_min_depth=self.config.tunables.call_pullback_min_depth,
             call_pullback_max_depth=self.config.tunables.call_pullback_max_depth,
             put_pullback_min_depth=self.config.tunables.put_pullback_min_depth,
@@ -154,7 +164,7 @@ class StrategyService:
         )
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
-            adx_threshold=self.config.tunables.adx_threshold,
+            adx_threshold=self.config.tunables.strategy_b_adx_threshold,
             min_confirmation_score=self.config.tunables.strat_b_min_confirmation,
             box_max_height_atr=self.config.tunables.box_max_height_atr,
             bb_width_percentile_threshold=self.config.tunables.bb_width_percentile_threshold,

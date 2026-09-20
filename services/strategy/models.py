@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
+from math import isclose
 from typing import Any, Optional
 from pydantic import BaseModel, Field, model_validator
 
@@ -27,16 +28,52 @@ class StrategyName(str, Enum):
 
 
 class StrategyState(str, Enum):
-    SEARCHING = "SEARCHING"
+    """Deterministic Strategy A lifecycle states.
+
+    ``SEARCHING`` and ``TRIGGERED`` are accepted by the enum parser through
+    ``_missing_`` for old API/runtime payloads, but new serialized values use
+    the five-state contract below.
+    """
+
+    FLAT = "FLAT"
     SETUP = "SETUP"
-    TRIGGERED = "TRIGGERED"
+    ARMED = "ARMED"
+    ENTERED = "ENTERED"
     COOLDOWN = "COOLDOWN"
-    PAUSED = "PAUSED"
+
+    @classmethod
+    def _missing_(cls, value: object) -> Optional["StrategyState"]:
+        # Compatibility for persisted/API state written before the contract
+        # was introduced.  These are aliases, not new lifecycle states.
+        legacy = {"SEARCHING": cls.FLAT, "TRIGGERED": cls.ENTERED, "PAUSED": cls.COOLDOWN}
+        return legacy.get(value)
 
 
 class TradeDirection(str, Enum):
     BULLISH = "BULLISH"
     BEARISH = "BEARISH"
+
+
+class StrategyDirection(str, Enum):
+    """Strategy A direction and its option execution vehicle."""
+
+    CALL = "CALL"
+    PUT = "PUT"
+
+    @classmethod
+    def from_trade_direction(cls, direction: TradeDirection) -> "StrategyDirection":
+        return cls.CALL if direction == TradeDirection.BULLISH else cls.PUT
+
+    @property
+    def trade_direction(self) -> TradeDirection:
+        return TradeDirection.BULLISH if self is self.CALL else TradeDirection.BEARISH
+
+
+class SetupInvalidationState(str, Enum):
+    ACTIVE = "ACTIVE"
+    INVALIDATED = "INVALIDATED"
+    EXPIRED = "EXPIRED"
+    CONSUMED = "CONSUMED"
 
 
 class HistoricalReplaySource(str, Enum):
@@ -111,7 +148,13 @@ class SessionTimersConfig(BaseModel):
 
 
 class StrategyTunablesConfig(BaseModel):
-    """Algorithmic tuning parameters."""
+    """Single configuration source for strategy hypotheses.
+
+    The Strategy A fields are deliberately kept here, alongside the existing
+    Strategy B fields, so existing ``config.tunables`` callers continue to
+    work.  Strategy B's ADX threshold is explicit and remains at its prior
+    value; ``adx_threshold`` is now the authoritative Strategy A default.
+    """
     bb_width_percentile_threshold: float = Field(default=25.0, ge=15, le=50)
     compression_lookback_bars: int = Field(default=8, ge=6, le=10)
     box_max_age_bars: int = Field(default=8, ge=1, le=20)
@@ -120,7 +163,52 @@ class StrategyTunablesConfig(BaseModel):
     evaluation_interval_sec: int = Field(default=2, ge=1, le=10, description="Scheduler loop interval in seconds")
     trend_pullback_enabled: bool = Field(default=True)
     volatility_breakout_enabled: bool = Field(default=True)
-    adx_threshold: float = Field(default=20.0, ge=10.0, le=40.0)
+    # Strategy A authoritative defaults.
+    ema_fast_period: int = Field(default=20, ge=1, description="Fast EMA period on completed 15m bars")
+    ema_slow_period: int = Field(default=50, ge=2, description="Slow EMA period on completed 15m bars")
+    adx_period: int = Field(default=14, ge=1)
+    adx_threshold: float = Field(default=22.0, ge=0.0, le=100.0)
+    atr_period: int = Field(default=14, ge=1)
+    ema_separation_min_atr: float = Field(default=0.10, ge=0.0)
+    confluence_distance_atr: float = Field(default=0.25, ge=0.0)
+    sr_zone_atr: float = Field(default=0.10, ge=0.0)
+    confirmation_min_body_ratio: float = Field(default=0.40, ge=0.0, le=1.0)
+    confirmation_close_location_pct: float = Field(default=0.30, ge=0.0, le=0.5)
+    confirmation_max_range_atr: float = Field(default=1.50, gt=0.0)
+    trigger_buffer_atr: float = Field(default=0.05, ge=0.0)
+    trigger_validity_bars: int = Field(default=2, ge=1)
+    maximum_chase_atr: float = Field(default=0.25, ge=0.0)
+    structural_stop_buffer_atr: float = Field(default=0.10, ge=0.0)
+    minimum_stop_distance_atr: float = Field(default=0.80, gt=0.0)
+    maximum_stop_distance_atr: float = Field(default=1.50, gt=0.0)
+    minimum_room_to_opposing_sr_r: float = Field(default=1.50, gt=0.0)
+    t1_r: float = Field(default=1.50, gt=0.0)
+    runner_target_reference_r: float = Field(default=2.50, gt=0.0)
+    trailing_activation_r: float = Field(default=1.0, gt=0.0)
+    entry_session_start: str = Field(default="09:45", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    entry_session_end: str = Field(default="14:45", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    forced_exit_time: str = Field(default="15:15", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+    # The existing evaluator still consumes these legacy constructor knobs.
+    # They remain injectable until the behavior refactor maps the evaluator
+    # to the completed-15m contract in the next prompt.
+    legacy_breakout_confirm_polls: int = Field(default=1, ge=1)
+    legacy_strategy_a_adx_threshold: float = Field(
+        default=20.0,
+        ge=0.0,
+        le=100.0,
+        description="Temporary evaluator compatibility value; remove when the new evaluator is wired",
+    )
+    legacy_trigger_buffer_atr: float = Field(
+        default=0.02,
+        ge=0.0,
+        description="Temporary evaluator compatibility value; new contract hypothesis is trigger_buffer_atr",
+    )
+    legacy_min_impulse_atr: float = Field(default=0.70, gt=0.0)
+    legacy_retest_tolerance_atr: float = Field(default=0.45, ge=0.0)
+    legacy_min_available_confirmations: int = Field(default=2, ge=1)
+    strategy_b_adx_threshold: float = Field(default=20.0, ge=0.0, le=100.0)
+
     rvol_threshold: float = Field(default=1.20, ge=1.0, le=3.0)
     ema_slope_threshold: float = Field(default=0.10, gt=0, le=1.0)
     # Strategy A uses independent directional pullback bands.  CALL retains
@@ -142,7 +230,126 @@ class StrategyTunablesConfig(BaseModel):
             raise ValueError("call_pullback_min_depth must not exceed call_pullback_max_depth")
         if self.put_pullback_min_depth >= self.put_pullback_max_depth:
             raise ValueError("put_pullback_min_depth must be less than put_pullback_max_depth")
+        if self.ema_fast_period >= self.ema_slow_period:
+            raise ValueError("ema_fast_period must be less than ema_slow_period")
+        if self.minimum_stop_distance_atr > self.maximum_stop_distance_atr:
+            raise ValueError("minimum_stop_distance_atr must not exceed maximum_stop_distance_atr")
+        if not (self.entry_session_start < self.entry_session_end < self.forced_exit_time):
+            raise ValueError("Strategy A session must satisfy start < end < forced exit")
         return self
+
+
+class StrategySetup(BaseModel):
+    """Immutable, deterministic setup snapshot for Strategy A."""
+
+    direction: StrategyDirection
+    setup_timestamp: datetime
+    confirmation_bar_timestamp: datetime
+    confirmation_high: float = Field(gt=0)
+    confirmation_low: float = Field(gt=0)
+    trigger_price: float = Field(gt=0)
+    structural_stop: float = Field(gt=0)
+    initial_underlying_r: float = Field(gt=0)
+    relevant_support_resistance_level: float = Field(gt=0)
+    confluence_references: list[str] = Field(default_factory=list)
+    setup_expiry_timestamp: datetime
+    setup_expiry_bar_index: int = Field(ge=0)
+    invalidation_state: SetupInvalidationState = SetupInvalidationState.ACTIVE
+    invalidation_reason: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_setup_integrity(self) -> "StrategySetup":
+        if self.confirmation_high <= self.confirmation_low:
+            raise ValueError("confirmation_high must be greater than confirmation_low")
+        if self.setup_timestamp < self.confirmation_bar_timestamp:
+            raise ValueError("setup_timestamp cannot precede confirmation_bar_timestamp")
+        if self.setup_expiry_timestamp < self.setup_timestamp:
+            raise ValueError("setup_expiry_timestamp cannot precede setup_timestamp")
+        if not isclose(
+            self.initial_underlying_r,
+            abs(self.trigger_price - self.structural_stop),
+            rel_tol=1e-6,
+            abs_tol=1e-6,
+        ):
+            raise ValueError("initial_underlying_r must equal trigger/structural-stop distance")
+        if self.direction == StrategyDirection.CALL and self.structural_stop >= self.trigger_price:
+            raise ValueError("CALL structural_stop must be below trigger_price")
+        if self.direction == StrategyDirection.PUT and self.structural_stop <= self.trigger_price:
+            raise ValueError("PUT structural_stop must be above trigger_price")
+        if self.invalidation_state == SetupInvalidationState.ACTIVE and self.invalidation_reason is not None:
+            raise ValueError("active setup cannot have an invalidation_reason")
+        if self.invalidation_state != SetupInvalidationState.ACTIVE and not self.invalidation_reason:
+            raise ValueError("invalidated, expired, or consumed setup requires invalidation_reason")
+        return self
+
+
+class StrategyStateSnapshot(BaseModel):
+    """Serializable state-machine snapshot with impossible combinations rejected."""
+
+    state: StrategyState = StrategyState.FLAT
+    direction: Optional[StrategyDirection] = None
+    setup: Optional[StrategySetup] = None
+    entry_timestamp: Optional[datetime] = None
+    cooldown_until: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def validate_state_combination(self) -> "StrategyStateSnapshot":
+        if self.state == StrategyState.FLAT:
+            if any(value is not None for value in (self.direction, self.setup, self.entry_timestamp, self.cooldown_until)):
+                raise ValueError("FLAT state cannot carry setup, direction, entry, or cooldown data")
+        elif self.state in (StrategyState.SETUP, StrategyState.ARMED):
+            if self.setup is None or self.direction is None:
+                raise ValueError(f"{self.state.value} state requires direction and setup")
+            if self.direction != self.setup.direction:
+                raise ValueError("state direction must match setup direction")
+            if self.setup.invalidation_state != SetupInvalidationState.ACTIVE:
+                raise ValueError(f"{self.state.value} state requires an active setup")
+            if self.entry_timestamp is not None or self.cooldown_until is not None:
+                raise ValueError(f"{self.state.value} state cannot carry entry or cooldown data")
+        elif self.state == StrategyState.ENTERED:
+            if self.setup is None or self.direction is None or self.entry_timestamp is None:
+                raise ValueError("ENTERED state requires direction, setup, and entry_timestamp")
+            if self.direction != self.setup.direction:
+                raise ValueError("state direction must match setup direction")
+            if self.cooldown_until is not None:
+                raise ValueError("ENTERED state cannot carry cooldown data")
+        elif self.state == StrategyState.COOLDOWN:
+            if self.direction is not None or self.setup is not None or self.entry_timestamp is not None:
+                raise ValueError("COOLDOWN state cannot carry direction, setup, or entry data")
+            if self.cooldown_until is None:
+                raise ValueError("COOLDOWN state requires cooldown_until")
+        return self
+
+    def transition(
+        self,
+        target: StrategyState,
+        *,
+        setup: Optional[StrategySetup] = None,
+        entry_timestamp: Optional[datetime] = None,
+        cooldown_until: Optional[datetime] = None,
+    ) -> "StrategyStateSnapshot":
+        """Return a validated next state or reject an illegal transition."""
+        allowed = {
+            StrategyState.FLAT: {StrategyState.SETUP, StrategyState.COOLDOWN},
+            StrategyState.SETUP: {StrategyState.ARMED, StrategyState.FLAT, StrategyState.COOLDOWN},
+            StrategyState.ARMED: {StrategyState.ENTERED, StrategyState.FLAT, StrategyState.COOLDOWN},
+            StrategyState.ENTERED: {StrategyState.FLAT, StrategyState.COOLDOWN},
+            StrategyState.COOLDOWN: {StrategyState.FLAT},
+        }
+        if target not in allowed[self.state]:
+            raise ValueError(f"invalid strategy state transition: {self.state.value} -> {target.value}")
+        if target == StrategyState.FLAT:
+            return StrategyStateSnapshot()
+        if target == StrategyState.COOLDOWN:
+            return StrategyStateSnapshot(state=target, cooldown_until=cooldown_until)
+        next_setup = setup or self.setup
+        next_direction = next_setup.direction if next_setup else self.direction
+        return StrategyStateSnapshot(
+            state=target,
+            direction=next_direction,
+            setup=next_setup,
+            entry_timestamp=entry_timestamp if target == StrategyState.ENTERED else None,
+        )
 
 
 class CompressionBox(BaseModel):
@@ -169,7 +376,7 @@ class AutoTradingConfig(BaseModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     session: SessionTimersConfig = Field(default_factory=SessionTimersConfig)
     tunables: StrategyTunablesConfig = Field(default_factory=StrategyTunablesConfig)
-    strategy_a_revision: int = 3
+    strategy_a_revision: int = 4
 
 
 class MarketFeatures(BaseModel):

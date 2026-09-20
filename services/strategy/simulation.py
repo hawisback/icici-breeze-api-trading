@@ -435,13 +435,18 @@ class SimulationEngine:
             overrides = overrides.model_copy(update={"bypass_entry_window": True})
         cfg = self.tunables
         strat_a = TrendPullbackStrategy(
-            adx_threshold=cfg.adx_threshold, rvol_threshold=cfg.rvol_threshold,
+            adx_threshold=cfg.legacy_strategy_a_adx_threshold, rvol_threshold=cfg.rvol_threshold,
             ema_slope_threshold=cfg.ema_slope_threshold, min_confirmation_score=cfg.min_confirmation_score,
+            breakout_buffer_atr=cfg.legacy_trigger_buffer_atr,
+            breakout_confirm_polls=cfg.legacy_breakout_confirm_polls,
+            min_impulse_atr=cfg.legacy_min_impulse_atr,
+            retest_tolerance_atr=cfg.legacy_retest_tolerance_atr,
+            min_available_confirmations=cfg.legacy_min_available_confirmations,
             call_pullback_min_depth=cfg.call_pullback_min_depth,
             call_pullback_max_depth=cfg.call_pullback_max_depth,
             put_pullback_min_depth=cfg.put_pullback_min_depth,
             put_pullback_max_depth=cfg.put_pullback_max_depth)
-        strat_b = VolatilityBreakoutStrategy(rvol_threshold=cfg.rvol_threshold, adx_threshold=cfg.adx_threshold,
+        strat_b = VolatilityBreakoutStrategy(rvol_threshold=cfg.rvol_threshold, adx_threshold=cfg.strategy_b_adx_threshold,
                                              min_confirmation_score=cfg.strat_b_min_confirmation,
                                              box_max_height_atr=cfg.box_max_height_atr,
                                              bb_width_percentile_threshold=cfg.bb_width_percentile_threshold,

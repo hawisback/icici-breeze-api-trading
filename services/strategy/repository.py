@@ -334,6 +334,17 @@ class StrategyRepository:
                 data["strategy_a_revision"] = 3
                 await conn.execute("UPDATE auto_strategy_config SET config_json = ? WHERE id = 'active'", (json.dumps(data),))
                 await conn.commit()
+            if data.get("strategy_a_revision", 1) < 4:
+                # 20 was the historical shared/default ADX value.  Preserve
+                # deliberate overrides while moving the old default to the
+                # new Strategy A hypothesis; Strategy B has its own explicit
+                # 20 threshold in StrategyTunablesConfig.
+                tunables = data.setdefault("tunables", {})
+                if tunables.get("adx_threshold") == 20.0:
+                    tunables["adx_threshold"] = 22.0
+                data["strategy_a_revision"] = 4
+                await conn.execute("UPDATE auto_strategy_config SET config_json = ? WHERE id = 'active'", (json.dumps(data),))
+                await conn.commit()
             return AutoTradingConfig.model_validate(data)
 
     async def save_runtime(self, state: dict, strategy: str = "trend_pullback") -> None:

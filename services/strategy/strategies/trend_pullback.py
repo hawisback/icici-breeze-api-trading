@@ -8,7 +8,7 @@ from typing import Any, Optional
 from services.strategy.features import FeatureEngine
 from services.strategy.models import (
     OptionType, StrategyName, StrategySignal, StrategyTriggerDiagnostics,
-    TradeDirection, TriggerCondition,
+    StrategyTunablesConfig, TradeDirection, TriggerCondition,
 )
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -40,39 +40,43 @@ class TrendPullbackStrategy:
 
     def __init__(
         self,
-        adx_threshold: float = 18.0,
-        rvol_threshold: float = 1.20,
-        min_confirmation_score: int = 2,
-        ema_slope_threshold: float = 0.10,
-        breakout_buffer_atr: float = 0.02,
-        breakout_confirm_polls: int = 1,
-        min_impulse_atr: float = 0.70,
-        min_pullback_depth: float = 0.08,
-        max_pullback_depth: float = 0.70,
+        adx_threshold: Optional[float] = None,
+        rvol_threshold: Optional[float] = None,
+        min_confirmation_score: Optional[int] = None,
+        ema_slope_threshold: Optional[float] = None,
+        breakout_buffer_atr: Optional[float] = None,
+        breakout_confirm_polls: Optional[int] = None,
+        min_impulse_atr: Optional[float] = None,
+        min_pullback_depth: Optional[float] = None,
+        max_pullback_depth: Optional[float] = None,
         call_pullback_min_depth: Optional[float] = None,
         call_pullback_max_depth: Optional[float] = None,
         put_pullback_min_depth: Optional[float] = None,
         put_pullback_max_depth: Optional[float] = None,
-        retest_tolerance_atr: float = 0.45,
-        min_available_confirmations: int = 2,
+        retest_tolerance_atr: Optional[float] = None,
+        min_available_confirmations: Optional[int] = None,
     ) -> None:
-        self.adx_threshold = adx_threshold
-        self.rvol_threshold = rvol_threshold
-        self.min_confirmation_score = min_confirmation_score
-        self.ema_slope_threshold = ema_slope_threshold
-        self.breakout_buffer_atr = breakout_buffer_atr
-        self.breakout_confirm_polls = breakout_confirm_polls
-        self.min_impulse_atr = min_impulse_atr
-        self.min_pullback_depth = min_pullback_depth
-        self.max_pullback_depth = max_pullback_depth
+        defaults = StrategyTunablesConfig()
+        # The current evaluator remains frozen for replay compatibility. The
+        # new Strategy A hypothesis is stored in config and is wired by the
+        # behavior refactor, not by this contract-only prompt.
+        self.adx_threshold = defaults.legacy_strategy_a_adx_threshold if adx_threshold is None else adx_threshold
+        self.rvol_threshold = defaults.rvol_threshold if rvol_threshold is None else rvol_threshold
+        self.min_confirmation_score = defaults.min_confirmation_score if min_confirmation_score is None else min_confirmation_score
+        self.ema_slope_threshold = defaults.ema_slope_threshold if ema_slope_threshold is None else ema_slope_threshold
+        self.breakout_buffer_atr = defaults.legacy_trigger_buffer_atr if breakout_buffer_atr is None else breakout_buffer_atr
+        self.breakout_confirm_polls = defaults.legacy_breakout_confirm_polls if breakout_confirm_polls is None else breakout_confirm_polls
+        self.min_impulse_atr = defaults.legacy_min_impulse_atr if min_impulse_atr is None else min_impulse_atr
+        self.min_pullback_depth = defaults.call_pullback_min_depth if min_pullback_depth is None else min_pullback_depth
+        self.max_pullback_depth = defaults.call_pullback_max_depth if max_pullback_depth is None else max_pullback_depth
         # The legacy global arguments remain supported for isolated callers and
         # old tests. Production passes the directional configuration below.
-        self.call_pullback_min_depth = call_pullback_min_depth if call_pullback_min_depth is not None else min_pullback_depth
-        self.call_pullback_max_depth = call_pullback_max_depth if call_pullback_max_depth is not None else max_pullback_depth
-        self.put_pullback_min_depth = put_pullback_min_depth if put_pullback_min_depth is not None else min_pullback_depth
-        self.put_pullback_max_depth = put_pullback_max_depth if put_pullback_max_depth is not None else max_pullback_depth
-        self.retest_tolerance_atr = retest_tolerance_atr
-        self.min_available_confirmations = min_available_confirmations
+        self.call_pullback_min_depth = call_pullback_min_depth if call_pullback_min_depth is not None else self.min_pullback_depth
+        self.call_pullback_max_depth = call_pullback_max_depth if call_pullback_max_depth is not None else self.max_pullback_depth
+        self.put_pullback_min_depth = put_pullback_min_depth if put_pullback_min_depth is not None else self.min_pullback_depth
+        self.put_pullback_max_depth = put_pullback_max_depth if put_pullback_max_depth is not None else self.max_pullback_depth
+        self.retest_tolerance_atr = defaults.legacy_retest_tolerance_atr if retest_tolerance_atr is None else retest_tolerance_atr
+        self.min_available_confirmations = defaults.legacy_min_available_confirmations if min_available_confirmations is None else min_available_confirmations
         self.state = {d.value: {} for d in TradeDirection}
 
     def export_state(self) -> dict[str, Any]:
