@@ -127,7 +127,7 @@ async def test_missing_quote_does_not_create_a_synthetic_fill_or_call_position_m
     repo.save_trade.assert_awaited()
 
 
-def test_selected_contract_identity_is_immutable_during_quote_updates_and_put_band_is_frozen():
+def test_selected_contract_identity_is_immutable_during_quote_updates():
     service, _, _ = _service(None)
     trade = _trade()
     identity = dict(trade.selected_contract_snapshot)
@@ -138,7 +138,3 @@ def test_selected_contract_identity_is_immutable_during_quote_updates_and_put_ba
     })
     assert trade.selected_contract_snapshot == identity
     assert trade.contract_instrument_id == "OPT-1"
-    assert service.config.tunables.put_pullback_min_depth == 0.40
-    assert service.config.tunables.put_pullback_max_depth == 0.60
-    assert service.config.tunables.call_pullback_min_depth == 0.08
-    assert service.config.tunables.call_pullback_max_depth == 0.70

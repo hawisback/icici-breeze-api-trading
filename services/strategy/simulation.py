@@ -434,18 +434,7 @@ class SimulationEngine:
         if bypass_entry_window:
             overrides = overrides.model_copy(update={"bypass_entry_window": True})
         cfg = self.tunables
-        strat_a = TrendPullbackStrategy(
-            adx_threshold=cfg.legacy_strategy_a_adx_threshold, rvol_threshold=cfg.rvol_threshold,
-            ema_slope_threshold=cfg.ema_slope_threshold, min_confirmation_score=cfg.min_confirmation_score,
-            breakout_buffer_atr=cfg.legacy_trigger_buffer_atr,
-            breakout_confirm_polls=cfg.legacy_breakout_confirm_polls,
-            min_impulse_atr=cfg.legacy_min_impulse_atr,
-            retest_tolerance_atr=cfg.legacy_retest_tolerance_atr,
-            min_available_confirmations=cfg.legacy_min_available_confirmations,
-            call_pullback_min_depth=cfg.call_pullback_min_depth,
-            call_pullback_max_depth=cfg.call_pullback_max_depth,
-            put_pullback_min_depth=cfg.put_pullback_min_depth,
-            put_pullback_max_depth=cfg.put_pullback_max_depth)
+        strat_a = TrendPullbackStrategy(config=cfg)
         strat_b = VolatilityBreakoutStrategy(rvol_threshold=cfg.rvol_threshold, adx_threshold=cfg.strategy_b_adx_threshold,
                                              min_confirmation_score=cfg.strat_b_min_confirmation,
                                              box_max_height_atr=cfg.box_max_height_atr,
@@ -492,7 +481,6 @@ class SimulationEngine:
             "missing_data": sorted(set(missing_data)),
         }
         timeline, logs = [], []
-        replay_trigger_states: dict[str, dict[str, Any]] = {}
         replay_trigger_diagnostics: list[dict[str, Any]] = []
         replay_manifest_recorder = self.replay_manifest_recorder or ReplayManifestRecorder()
         replay_manifest_recorder.set_replay_metadata(replay_metadata)
@@ -512,191 +500,37 @@ class SimulationEngine:
             in_window = bypass_entry_window or start_h*60+start_m <= minutes <= end_h*60+end_m
             event, details = None, None
             effective_diags_a = diags_a
-            if (features.data_ready or features.breakout_data_ready) and in_window:
-                sig_a = None
-                replay_trigger_handled = False
-                if cfg.trend_pullback_enabled and features.data_ready:
-                    for diag in diags_a:
-                        direction = diag.direction.value
-                        direction_label = "CALL" if direction == "BULLISH" else "PUT"
-                        phase_summary = diag.phase_summary or {}
-                        impulse = phase_summary.get("impulse") or {}
-                        trigger = phase_summary.get("trigger") or {}
-                        stored = replay_trigger_states.get(direction)
-
-                        if diag.phase_state != "WAIT_FOR_TRIGGER" or not impulse.get("found") or not trigger:
-                            if stored:
-                                replay_trigger_states.pop(direction, None)
-                            continue
-
-                        setup_id = (
-                            f"{direction_label}:{impulse.get('impulse_start')}"
-                            f"->{impulse.get('impulse_end')}"
-                        )
-                        if stored is None or stored["setup_id"] != setup_id:
-                            replay_trigger_states[direction] = stored = {
-                                "setup_id": setup_id,
-                                "direction": direction_label,
-                                "wait_timestamp": bar.end_time.isoformat(),
-                                "trigger_price": float(trigger["breakout_trigger_price"]),
-                                "buffer_atr": trigger.get("atr_buffer_multiple"),
-                                "buffer_points": trigger.get("atr_buffer_points"),
-                                "source_candle_timestamp": bar.end_time.isoformat(),
-                                "attempt_number": 0,
-                            }
-                            # The candle that establishes the trigger is not itself
-                            # evaluated as a later crossing candle.
-                            continue
-
-                        # A replay crossing is a one-time event for this locked
-                        # setup.  Keep the setup record after the crossing so a
-                        # later candle cannot recreate the trigger or require a
-                        # second crossing.  The state is cleared only when the
-                        # underlying strategy no longer reports this setup as
-                        # WAIT_FOR_TRIGGER (for example, on invalidation).
-                        if stored.get("processed"):
-                            replay_trigger_handled = True
-                            continue
-
-                        stored["attempt_number"] += 1
-                        trigger_price = stored["trigger_price"]
-                        crossed = (
-                            bar.high >= trigger_price
-                            if direction_label == "CALL"
-                            else bar.low <= trigger_price
-                        )
-                        crossing_amount = (
-                            bar.high - trigger_price
-                            if direction_label == "CALL"
-                            else trigger_price - bar.low
-                        ) if crossed else 0.0
-
-                        replay_record = {
-                            "direction": direction_label,
-                            "setup_id": stored["setup_id"],
-                            "wait_for_trigger_timestamp": stored["wait_timestamp"],
-                            "stored_trigger_level": trigger_price,
-                            "atr_buffer_multiple": stored["buffer_atr"],
-                            "atr_buffer_points": stored["buffer_points"],
-                            "trigger_source_candle_timestamp": stored["source_candle_timestamp"],
-                            "historical_candle_timestamp": bar.end_time.isoformat(),
-                            "historical_candle_ohlc": {
-                                "open": bar.open,
-                                "high": bar.high,
-                                "low": bar.low,
-                                "close": bar.close,
-                            },
-                            "intrabar_crossing": "YES" if crossed else "NO",
-                            "crossing_amount": round(crossing_amount, 2) if crossed else 0.0,
-                            "simulated_trigger_timestamp": bar.end_time.isoformat() if crossed else None,
-                            "simulated_trigger_price": trigger_price if crossed else None,
-                            "replay_price_used": "candle_high" if direction_label == "CALL" else "candle_low",
-                        }
-
-                        if crossed:
-                            sig_a, replay_diag = strat_a.evaluate_replay_trigger(
-                                diag.direction,
-                                features,
-                                running,
-                                macro,
-                                futures,
-                                overrides,
-                                trigger_price=trigger_price,
-                                trigger_timestamp=bar.end_time.isoformat(),
-                                source_candle_timestamp=stored["source_candle_timestamp"],
-                                historical_candle_timestamp=bar.end_time.isoformat(),
-                            )
-                            replay_trigger_handled = True
-                            stored["processed"] = True
-                            stored["processed_timestamp"] = bar.end_time.isoformat()
-                            if replay_diag:
-                                effective_diags_a = [
-                                    replay_diag if item.direction == diag.direction else item
-                                    for item in diags_a
-                                ]
-                                replay_summary = replay_diag.phase_summary or {}
-                                replay_confirmation = replay_summary.get("confirmation") or {}
-                                replay_risk = replay_summary.get("risk") or {}
-                                risk_condition = next(
-                                    (item for item in replay_diag.conditions if item.id == "risk_r_band"),
-                                    None,
-                                )
-                                replay_record.update(
-                                    {
-                                        "confirmation_available": replay_confirmation.get("available_confirmation_count"),
-                                        "confirmation_passed": replay_confirmation.get("passed_confirmation_count"),
-                                        "confirmation_result": replay_confirmation.get("reason"),
-                                        "structural_r_atr": replay_risk.get("initial_risk_atr"),
-                                        "structural_r_result": (
-                                            "PASS"
-                                            if risk_condition and risk_condition.status in ("PASSED", "PASS")
-                                            else "FAIL"
-                                        ),
-                                        "signal_generated": bool(sig_a),
-                                        "entry_ready": bool(sig_a),
-                                        "final_state": replay_diag.phase_state,
-                                        "final_blocker": replay_diag.key_blocker,
-                                    }
-                                )
-                            if sig_a is not None:
-                                snapshot = sig_a.features_snapshot
-                                replay_manifest_recorder.record_entry(
-                                    signal=sig_a,
-                                    trading_date=date_str,
-                                    trigger_source_candle_timestamp=stored["source_candle_timestamp"],
-                                    trigger_level=trigger_price,
-                                    simulated_entry_timestamp=stored["processed_timestamp"],
-                                    simulated_entry_price=float(sig_a.spot_reference_price),
-                                    entry_5m_candle_timestamp=bar.start_time,
-                                    entry_occurred_intrabar=True,
-                                    entry_features={
-                                        **snapshot,
-                                        "adx": features.adx_15m,
-                                        "rvol": features.rvol_5m,
-                                        "ema_slope": features.ema20_slope_norm_15m,
-                                        "entry_bar_timestamp": bar.start_time.isoformat(),
-                                    },
-                                    setup_id=stored["setup_id"],
-                                    pullback_swing_low=snapshot.get("pullback_low"),
-                                    pullback_swing_high=snapshot.get("pullback_high"),
-                                    impulse_low=snapshot.get("impulse_low"),
-                                    impulse_high=snapshot.get("impulse_high"),
-                                    atr_at_entry=float(snapshot.get("atr", 0.0)),
-                                    initial_structural_stop=float(sig_a.structural_stop),
-                                    initial_risk_points=float(sig_a.r_points),
-                                    initial_risk_atr=float(replay_record.get("structural_r_atr") or 0.0),
-                                    current_trailing_stop=float(sig_a.structural_stop),
-                                    current_r=0.0,
-                                    highest_favorable_price=float(sig_a.spot_reference_price),
-                                    lowest_favorable_price=float(sig_a.spot_reference_price),
-                                    peak_r=0.0,
-                                    protected_breakeven_active=False,
-                                    profit_lock_active=False,
-                                    runner_mode_active=False,
-                                    current_ladder_stage="OPEN_INITIAL_RISK",
-                                    reversal_score=0,
-                                    adverse_health_counters={},
-                                    entry_bar_timestamp=bar.start_time,
-                                    last_managed_completed_bar_timestamp=None,
-                                )
-                            replay_trigger_diagnostics.append(replay_record)
-                            break
-
-                        replay_record.update(
-                            {
-                                "confirmation_available": None,
-                                "confirmation_passed": None,
-                                "confirmation_result": None,
-                                "structural_r_atr": None,
-                                "structural_r_result": None,
-                                "final_state": "WAIT_FOR_TRIGGER",
-                                "final_blocker": diag.key_blocker,
-                            }
-                        )
-                        replay_trigger_diagnostics.append(replay_record)
-
-                if not replay_trigger_handled and cfg.trend_pullback_enabled:
+            sig_a = None
+            if (futures and in_window) or (features.data_ready or features.breakout_data_ready) and in_window:
+                if cfg.trend_pullback_enabled and futures:
+                    # Strategy A replay calls the exact production state
+                    # machine.  There is no replay-only trigger evaluator.
                     sig_a = strat_a.evaluate(features, running, macro, futures, overrides)
+                    effective_diags_a = strat_a.diagnose(features, running, macro, overrides=overrides, futures_candles=futures)
+                    if sig_a is not None:
+                        snapshot = sig_a.features_snapshot
+                        replay_manifest_recorder.record_entry(
+                            signal=sig_a, trading_date=date_str,
+                            trigger_source_candle_timestamp=bar.end_time,
+                            trigger_level=float(snapshot.get("trigger", sig_a.spot_reference_price)),
+                            simulated_entry_timestamp=bar.end_time,
+                            simulated_entry_price=float(snapshot.get("entry_price", sig_a.spot_reference_price)),
+                            entry_5m_candle_timestamp=bar.end_time,
+                            entry_occurred_intrabar=False, entry_features=snapshot,
+                            setup_id=sig_a.signal_id,
+                            pullback_swing_low=None, pullback_swing_high=None,
+                            impulse_low=None, impulse_high=None,
+                            atr_at_entry=float(snapshot.get("atr14", 0.0)),
+                            initial_structural_stop=float(sig_a.structural_stop),
+                            initial_risk_points=float(sig_a.r_points),
+                            initial_risk_atr=(float(sig_a.r_points) / float(snapshot.get("atr14", 1.0))) if snapshot.get("atr14") else 0.0,
+                            current_trailing_stop=float(sig_a.structural_stop), current_r=0.0,
+                            highest_favorable_price=float(sig_a.spot_reference_price), lowest_favorable_price=float(sig_a.spot_reference_price),
+                            peak_r=0.0, protected_breakeven_active=False, profit_lock_active=False,
+                            runner_mode_active=False, current_ladder_stage="OPEN_INITIAL_RISK", reversal_score=0,
+                            adverse_health_counters={}, entry_bar_timestamp=bar.end_time,
+                            last_managed_completed_bar_timestamp=None,
+                        )
                 sig_b = strat_b.evaluate(features, running, overrides=overrides) if cfg.volatility_breakout_enabled else None
                 if sig_b is not None:
                     _record_strategy_b_manifest(
@@ -711,22 +545,9 @@ class SimulationEngine:
                     logs.append(DecisionLogEntry(id=f"SIM-{idx}", timestamp=bar.end_time, category="SETUP",
                                                  strategy=signal.strategy.value, message=details,
                                                  details=signal.model_dump(mode="json")))
-                elif replay_trigger_handled:
-                    replay_event = replay_trigger_diagnostics[-1]
-                    event = "TRIGGER_CROSSED"
-                    details = replay_event.get("final_blocker") or "Intrabar trigger crossed"
-                    logs.append(DecisionLogEntry(
-                        id=f"SIM-TRIGGER-{idx}",
-                        timestamp=bar.end_time,
-                        category="TRIGGER",
-                        strategy=StrategyName.TREND_PULLBACK.value,
-                        message=details,
-                        details=replay_event,
-                    ))
             else:
                 strat_a.reset(bar.end_time)
                 strat_b.reset(bar.end_time)
-                replay_trigger_states.clear()
                 details = features.data_reason if not features.data_ready else "Outside entry window"
             timeline.append(SimulationBarSnapshot(
                 bar_index=idx, timestamp=bar.end_time.isoformat(), ist_time=clock.strftime("%H:%M"),
@@ -734,7 +555,7 @@ class SimulationEngine:
                 ema9_5m=features.ema9_5m, ema20_5m=features.ema20_5m,
                 supertrend=features.supertrend_direction, adx_15m=features.adx_15m,
                 rvol_5m=features.rvol_5m, bb_width_percentile=features.bb_width_percentile,
-                strategy_a_phase=max(effective_diags_a, key=lambda d: d.passed_count).phase_state,
+                strategy_a_phase=(max(effective_diags_a, key=lambda d: d.passed_count).phase_state if effective_diags_a else strat_a.snapshot.state.value),
                 strategy_b_phase=max(diags_b, key=lambda d: d.passed_count).phase_state,
                 event=event, event_details=details))
 

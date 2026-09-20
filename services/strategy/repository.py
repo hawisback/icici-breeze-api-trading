@@ -345,10 +345,6 @@ class StrategyRepository:
                 if session.get("no_new_trade_before") == "09:30":
                     session["no_new_trade_before"] = "09:20"
                     changed = True
-                tunables.setdefault("call_pullback_min_depth", 0.08)
-                tunables.setdefault("call_pullback_max_depth", 0.70)
-                tunables.setdefault("put_pullback_min_depth", 0.40)
-                tunables.setdefault("put_pullback_max_depth", 0.60)
                 data["strategy_a_revision"] = 3
                 changed = True
             if data.get("strategy_a_revision", 1) < 4:

@@ -120,70 +120,32 @@ def build_configuration_snapshot(
 ) -> ReplayConfigurationSnapshot:
     """Capture effective values without changing strategy construction."""
 
-    # These are the existing Strategy A constructor/decision defaults.  They
-    # are recorded here, not applied here, so the strategy remains authoritative.
-    def effective(name: str, default: Any) -> Any:
-        value = getattr(overrides, name, None)
-        return default if value is None else value
-
+    contract_fields = (
+        "ema_fast_period", "ema_slow_period", "adx_period", "adx_threshold",
+        "atr_period", "ema_separation_min_atr", "confluence_distance_atr",
+        "sr_zone_atr", "confirmation_min_body_ratio", "confirmation_close_location_pct",
+        "confirmation_max_range_atr", "trigger_buffer_atr", "trigger_validity_bars",
+        "maximum_chase_atr", "structural_stop_buffer_atr", "minimum_stop_distance_atr",
+        "maximum_stop_distance_atr", "minimum_room_to_opposing_sr_r", "t1_r",
+        "runner_target_reference_r", "trailing_activation_r", "entry_session_start",
+        "entry_session_end", "forced_exit_time",
+    )
     strategy_a = {
-        # Strategy A contract hypotheses are captured from the same typed
-        # configuration used by the live service; replay does not redefine
-        # these defaults.
-        "ema_fast_period": tunables.ema_fast_period,
-        "ema_slow_period": tunables.ema_slow_period,
-        "adx_period": tunables.adx_period,
-        "adx_threshold": effective("adx_threshold", tunables.adx_threshold),
-        "atr_period": tunables.atr_period,
-        "ema_separation_min_atr": tunables.ema_separation_min_atr,
-        "confluence_distance_atr": tunables.confluence_distance_atr,
-        "sr_zone_atr": tunables.sr_zone_atr,
-        "confirmation_min_body_ratio": tunables.confirmation_min_body_ratio,
-        "confirmation_close_location_pct": tunables.confirmation_close_location_pct,
-        "confirmation_max_range_atr": tunables.confirmation_max_range_atr,
-        "trigger_buffer_atr": tunables.trigger_buffer_atr,
-        "trigger_validity_bars": tunables.trigger_validity_bars,
-        "maximum_chase_atr": tunables.maximum_chase_atr,
-        "structural_stop_buffer_atr": tunables.structural_stop_buffer_atr,
-        "minimum_stop_distance_atr": tunables.minimum_stop_distance_atr,
-        "maximum_stop_distance_atr": tunables.maximum_stop_distance_atr,
-        "minimum_room_to_opposing_sr_r": tunables.minimum_room_to_opposing_sr_r,
-        "t1_r": tunables.t1_r,
-        "runner_target_reference_r": tunables.runner_target_reference_r,
-        "trailing_activation_r": tunables.trailing_activation_r,
-        "entry_session_start": tunables.entry_session_start,
-        "entry_session_end": tunables.entry_session_end,
-        "forced_exit_time": tunables.forced_exit_time,
-        "evaluator_compatibility": {
-            "adx_threshold": tunables.legacy_strategy_a_adx_threshold,
-            "trigger_buffer_atr": tunables.legacy_trigger_buffer_atr,
-            "note": "The legacy evaluator remains frozen until the Strategy A behavior refactor.",
+        "evaluator_version": "trend_pullback_confluence_v1",
+        "contract_config": {name: (getattr(overrides, name) if getattr(overrides, name, None) is not None else getattr(tunables, name)) for name in contract_fields},
+        "compatibility_config": {
+            "legacy_fields": {
+                "adx_threshold": tunables.legacy_strategy_a_adx_threshold,
+                "trigger_buffer_atr": tunables.legacy_trigger_buffer_atr,
+                "min_impulse_atr": tunables.legacy_min_impulse_atr,
+                "retest_tolerance_atr": tunables.legacy_retest_tolerance_atr,
+                "min_available_confirmations": tunables.legacy_min_available_confirmations,
+            },
+            "active": False,
         },
-        "rvol_threshold": effective("rvol_threshold", tunables.rvol_threshold),
-        "ema_slope_threshold": effective("ema_slope_threshold", tunables.ema_slope_threshold),
-        "min_impulse_atr": effective("min_impulse_atr", 0.70),
-        "pullback_duration_min_bars": 1,
-        "pullback_duration_max_bars": 9,
-        # Keep the legacy keys for readers of older metadata while recording
-        # the production candidate's directional bands explicitly.
-        "min_pullback_depth": effective("min_pullback_depth", tunables.call_pullback_min_depth),
-        "max_pullback_depth": effective("max_pullback_depth", tunables.call_pullback_max_depth),
-        "call_pullback_min_depth": effective("min_pullback_depth", tunables.call_pullback_min_depth),
-        "call_pullback_max_depth": effective("max_pullback_depth", tunables.call_pullback_max_depth),
-        "put_pullback_min_depth": effective("min_pullback_depth", tunables.put_pullback_min_depth),
-        "put_pullback_max_depth": effective("max_pullback_depth", tunables.put_pullback_max_depth),
-        "put_pullback_max_exclusive": True,
-        "retest_tolerance_atr": effective("retest_tolerance_atr", 0.45),
-        "breakout_buffer_atr": effective("breakout_buffer_atr", 0.02),
-        "breakout_confirm_polls": effective("breakout_confirm_polls", 1),
-        "min_available_confirmations": effective("min_available_confirmations", 2),
-        "min_confirmation_score": effective("min_confirmation_score", tunables.min_confirmation_score),
-        "derivatives_threshold": {
-            "bullish": effective("bull_derivatives_score", 1.0),
-            "bearish": effective("bear_derivatives_score", 1.0),
-        },
-        "structural_r_max_atr": 1.60,
-        "initial_stop_offset_atr": 0.15,
+        "completed_bar_interval": "15m",
+        "signal_instrument": "NIFTY_FUTURES",
+        "option_selection_downstream": True,
     }
     return ReplayConfigurationSnapshot(
         replay_start_date=start_date,
@@ -195,8 +157,9 @@ def build_configuration_snapshot(
         threshold_overrides=overrides.model_dump(mode="json"),
         strategy_a=strategy_a,
         entry_window={
-            "no_new_trade_before_ist": session.no_new_trade_before,
-            "no_new_trade_after_ist": session.no_new_trade_after,
+            "no_new_trade_before_ist": tunables.entry_session_start,
+            "no_new_trade_after_ist": tunables.entry_session_end,
+            "forced_exit_ist": tunables.forced_exit_time,
         },
         setup_window={
             "max_pre_cutoff_candles": 4,
@@ -211,8 +174,8 @@ def build_configuration_snapshot(
         },
         indicator_warmup_requirements={
             "minimum_5m_candles": 29,
-            "minimum_15m_candles": 50,
-            "minimum_futures_5m_candles": 15,
+            "minimum_15m_candles": tunables.ema_slow_period,
+            "minimum_futures_5m_candles": tunables.atr_period + 1,
         },
         futures_selection_rule=(
             "Select the earliest NIFTY FUTURES contract with expiry >= replay date; "

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from typing import Any, Optional
 from datetime import datetime, timedelta, timezone
 
@@ -17,6 +18,7 @@ from services.strategy.models import (
     RiskConfig,
     SessionTimersConfig,
     StrategyName,
+    StrategyTunablesConfig,
     TradeDirection,
     TradeLifecycleState,
     utc_now,
@@ -24,6 +26,71 @@ from services.strategy.models import (
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+@dataclass(frozen=True)
+class StructuralRiskEstimate:
+    """Underlying-thesis risk translated into option execution risk."""
+
+    underlying_r: float
+    option_loss_per_lot: float
+    risk_budget: float
+    lots: int
+    quantity: int
+    method: str
+    rejection_reason: str | None = None
+
+
+class UnderlyingRiskSizer:
+    """Size options from futures structural R, never from an arbitrary premium stop."""
+
+    def __init__(self, risk_config: RiskConfig | None = None) -> None:
+        self.config = risk_config or RiskConfig()
+
+    def estimate_option_loss_per_lot(
+        self,
+        *,
+        underlying_entry: float,
+        underlying_stop: float,
+        option_delta: float | None,
+        lot_size: int,
+        option_entry: float,
+        multiplier: float = 1.0,
+        fallback_loss_per_lot: float | None = None,
+    ) -> tuple[float, str]:
+        r = abs(underlying_entry - underlying_stop)
+        if r <= 0 or lot_size <= 0 or option_entry <= 0:
+            raise ValueError("invalid structural-risk sizing inputs")
+        if option_delta is not None and 0 < abs(option_delta) <= 1:
+            return abs(option_delta) * r * lot_size * multiplier, "DELTA_APPROXIMATION"
+        if fallback_loss_per_lot is not None and fallback_loss_per_lot > 0:
+            return fallback_loss_per_lot, "CONFIGURED_FALLBACK"
+        raise ValueError("OPTION_RISK_UNAVAILABLE")
+
+    def size(
+        self,
+        *,
+        underlying_entry: float,
+        underlying_stop: float,
+        option_delta: float | None,
+        lot_size: int,
+        option_entry: float,
+        account_equity: float | None = None,
+        fallback_loss_per_lot: float | None = None,
+    ) -> StructuralRiskEstimate:
+        equity = account_equity or self.config.account_equity
+        budget = equity * self.config.risk_per_trade_pct_of_account / 100.0
+        loss_per_lot, method = self.estimate_option_loss_per_lot(
+            underlying_entry=underlying_entry, underlying_stop=underlying_stop,
+            option_delta=option_delta, lot_size=lot_size, option_entry=option_entry,
+            fallback_loss_per_lot=fallback_loss_per_lot,
+        )
+        capital_lots = math.floor(self.config.max_trade_capital / (option_entry * lot_size))
+        risk_lots = math.floor(budget / loss_per_lot) if loss_per_lot > 0 else 0
+        lots = min(capital_lots, risk_lots, self.config.max_lots_per_trade)
+        if lots < 1:
+            return StructuralRiskEstimate(abs(underlying_entry - underlying_stop), loss_per_lot, budget, 0, 0, method, "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET")
+        return StructuralRiskEstimate(abs(underlying_entry - underlying_stop), loss_per_lot, budget, lots, lots * lot_size, method)
 
 
 class PositionManager:
@@ -35,11 +102,52 @@ class PositionManager:
         session_config: Optional[SessionTimersConfig] = None,
         bull_derivatives_threshold: float = 2.0,
         bear_derivatives_threshold: float = 2.0,
+        strategy_config: Optional[StrategyTunablesConfig] = None,
     ) -> None:
         self.risk_config = risk_config or RiskConfig()
         self.session_config = session_config or SessionTimersConfig()
         self.bull_derivatives_threshold = bull_derivatives_threshold
         self.bear_derivatives_threshold = bear_derivatives_threshold
+        self.strategy_config = strategy_config or StrategyTunablesConfig()
+
+    def update_strategy_a_position(
+        self,
+        trade: ActiveTrade,
+        current_underlying_price: float,
+        current_option_price: float,
+        as_of=None,
+    ) -> tuple[ActiveTrade, Optional[str]]:
+        """Manage Strategy A from futures structural R only."""
+        if current_underlying_price <= 0 or trade.initial_r_points <= 0:
+            return trade, "INVALID_INITIAL_UNDERLYING_R"
+        trade.current_spot_price = current_underlying_price
+        trade.current_option_price = current_option_price
+        trade.current_r = round(
+            (current_underlying_price - trade.entry_spot_price) / trade.initial_r_points
+            if trade.direction == TradeDirection.BULLISH
+            else (trade.entry_spot_price - current_underlying_price) / trade.initial_r_points,
+            4,
+        )
+        trade.peak_r = max(trade.peak_r, trade.current_r)
+        trade.unrealized_pnl = round((current_option_price - trade.entry_option_price) * trade.quantity, 2)
+        if as_of is not None and self.is_force_exit_time(as_of):
+            return trade, "SESSION_FORCE_SQUARE_OFF_1515"
+        if current_option_price > 0 and current_option_price <= trade.option_hard_stop_price:
+            return trade, "OPTION_EMERGENCY_STOP"
+        if trade.direction == TradeDirection.BULLISH and current_underlying_price <= trade.initial_structural_stop:
+            return trade, "UNDERLYING_STRUCTURAL_STOP"
+        if trade.direction == TradeDirection.BEARISH and current_underlying_price >= trade.initial_structural_stop:
+            return trade, "UNDERLYING_STRUCTURAL_STOP"
+        activation = self.strategy_config.trailing_activation_r
+        if trade.peak_r >= activation:
+            trade.state = TradeLifecycleState.PROTECTED_BREAKEVEN
+            if trade.direction == TradeDirection.BULLISH:
+                trade.current_trailing_stop = max(trade.current_trailing_stop, trade.entry_spot_price)
+            else:
+                trade.current_trailing_stop = min(trade.current_trailing_stop, trade.entry_spot_price)
+        if trade.peak_r >= self.strategy_config.runner_target_reference_r:
+            trade.state = TradeLifecycleState.RUNNER_MODE
+        return trade, None
 
     def calculate_position_size(
         self,
@@ -175,6 +283,10 @@ class PositionManager:
         Returns:
             (updated_trade, exit_reason_if_triggered)
         """
+        if trade.strategy == StrategyName.TREND_PULLBACK:
+            underlying = features.futures_price if features.futures_price > 0 else features.spot_price
+            return self.update_strategy_a_position(trade, underlying, current_option_price, as_of)
+
         spot = features.spot_price
         trade.current_spot_price = spot
         trade.current_option_price = current_option_price

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from math import isclose
 from typing import Any, Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def utc_now() -> datetime:
@@ -108,7 +108,13 @@ class TradeLifecycleState(str, Enum):
 
 
 class OptionSelectionConfig(BaseModel):
-    """Configuration for automated contract selection with maximum premium cap."""
+    """Strategy-aware option execution constraints.
+
+    Premium fields remain only as compatibility fields for Strategy B/UI
+    callers.  Strategy A moneyness is determined by delta and never by a
+    premium cap.
+    """
+    model_config = ConfigDict(extra="forbid")
     max_option_premium: float = Field(default=70.00, ge=5.0, le=500.0, description="Upper ceiling for option premium purchase")
     min_option_premium: float = Field(default=15.00, ge=1.0, le=100.0, description="Lower floor to avoid ultra-low delta lotto options")
     max_otm_strikes: int = Field(default=4, ge=0, le=10, description="Maximum number of strikes out-of-the-money")
@@ -116,6 +122,23 @@ class OptionSelectionConfig(BaseModel):
     max_bid_ask_spread_pct: float = Field(default=3.0, ge=0.5, le=10.0, description="Maximum acceptable bid-ask spread %")
     prefer_premium_closest_to_cap: bool = Field(default=True, description="Prefer the eligible contract closest to max_option_premium")
     use_current_expiry_on_0dte: bool = Field(default=False, description="Whether to trade 0DTE on expiry day or roll to next weekly")
+    preferred_delta_min: float = Field(default=0.60, gt=0.0, lt=1.0)
+    preferred_delta_max: float = Field(default=0.65, gt=0.0, lt=1.0)
+    allowed_delta_min: float = Field(default=0.55, gt=0.0, lt=1.0)
+    allowed_delta_max: float = Field(default=0.70, gt=0.0, lt=1.0)
+    minimum_expiry_sessions_remaining: int = Field(default=2, ge=0)
+    max_quote_age_seconds: float = Field(default=30.0, gt=0.0)
+    minimum_volume: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_delta_ranges(self) -> "OptionSelectionConfig":
+        if self.preferred_delta_min > self.preferred_delta_max:
+            raise ValueError("preferred delta range is inverted")
+        if self.allowed_delta_min > self.allowed_delta_max:
+            raise ValueError("allowed delta range is inverted")
+        if not (self.allowed_delta_min <= self.preferred_delta_min <= self.preferred_delta_max <= self.allowed_delta_max):
+            raise ValueError("preferred delta range must be inside allowed delta range")
+        return self
 
 
 class RiskConfig(BaseModel):
@@ -218,14 +241,6 @@ class StrategyTunablesConfig(BaseModel):
 
     rvol_threshold: float = Field(default=1.20, ge=1.0, le=3.0)
     ema_slope_threshold: float = Field(default=0.10, gt=0, le=1.0)
-    # Strategy A uses independent directional pullback bands.  CALL retains
-    # the legacy 8%-70% inclusive range; PUT is the frozen validated candidate
-    # with an inclusive lower and exclusive upper boundary.
-    call_pullback_min_depth: float = Field(default=0.08, ge=0.0, lt=1.0)
-    call_pullback_max_depth: float = Field(default=0.70, gt=0.0, le=1.0)
-    put_pullback_min_depth: float = Field(default=0.40, ge=0.0, lt=1.0)
-    put_pullback_max_depth: float = Field(default=0.60, gt=0.0, le=1.0)
-    min_confirmation_score: int = Field(default=2, ge=1, le=6, description="Minimum confirmation points for Strategy A")
     strat_b_min_confirmation: int = Field(default=3, ge=1, le=6, description="Minimum confirmation points for Strategy B")
     box_max_height_atr: float = Field(default=1.30, ge=1.0, le=2.5, description="Max compression box height in ATR")
     supertrend_period: int = Field(default=10)
@@ -233,10 +248,6 @@ class StrategyTunablesConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_pullback_bands(self) -> "StrategyTunablesConfig":
-        if self.call_pullback_min_depth > self.call_pullback_max_depth:
-            raise ValueError("call_pullback_min_depth must not exceed call_pullback_max_depth")
-        if self.put_pullback_min_depth >= self.put_pullback_max_depth:
-            raise ValueError("put_pullback_min_depth must be less than put_pullback_max_depth")
         if self.ema_fast_period >= self.ema_slow_period:
             raise ValueError("ema_fast_period must be less than ema_slow_period")
         if self.minimum_stop_distance_atr > self.maximum_stop_distance_atr:
@@ -260,11 +271,13 @@ class StrategySetup(BaseModel):
     structural_stop: float = Field(gt=0)
     initial_underlying_r: float = Field(gt=0)
     relevant_support_resistance_level: float = Field(gt=0)
-    confluence_references: list[str] = Field(default_factory=list)
+    confluence_references: tuple[str, ...] = Field(min_length=1)
     setup_expiry_timestamp: datetime = Field(description="Timezone-aware setup expiry timestamp")
     setup_expiry_bar_index: int = Field(ge=0)
     invalidation_state: SetupInvalidationState = SetupInvalidationState.ACTIVE
     invalidation_reason: Optional[str] = None
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     @model_validator(mode="after")
     def validate_setup_integrity(self) -> "StrategySetup":
@@ -273,6 +286,8 @@ class StrategySetup(BaseModel):
         _require_aware(self.setup_expiry_timestamp, "setup_expiry_timestamp")
         if self.confirmation_high <= self.confirmation_low:
             raise ValueError("confirmation_high must be greater than confirmation_low")
+        if any(not ref or not ref.strip() for ref in self.confluence_references):
+            raise ValueError("confluence_references must contain non-empty values")
         if self.setup_timestamp < self.confirmation_bar_timestamp:
             raise ValueError("setup_timestamp cannot precede confirmation_bar_timestamp")
         if self.setup_expiry_timestamp < self.setup_timestamp:
@@ -309,6 +324,8 @@ class StrategyStateSnapshot(BaseModel):
     entry_timestamp: Optional[datetime] = None
     cooldown_until: Optional[datetime] = None
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     @model_validator(mode="after")
     def validate_state_combination(self) -> "StrategyStateSnapshot":
         if self.entry_timestamp is not None:
@@ -334,6 +351,12 @@ class StrategyStateSnapshot(BaseModel):
                 raise ValueError("state direction must match setup direction")
             if self.cooldown_until is not None:
                 raise ValueError("ENTERED state cannot carry cooldown data")
+            if self.entry_timestamp < self.setup.setup_timestamp:
+                raise ValueError("entry_timestamp cannot precede setup_timestamp")
+            if self.entry_timestamp > self.setup.setup_expiry_timestamp:
+                raise ValueError("entry_timestamp cannot exceed setup expiry")
+            if self.setup.invalidation_state in (SetupInvalidationState.INVALIDATED, SetupInvalidationState.EXPIRED):
+                raise ValueError("ENTERED state cannot use invalidated or expired setup")
         elif self.state == StrategyState.COOLDOWN:
             if self.direction is not None or self.setup is not None or self.entry_timestamp is not None:
                 raise ValueError("COOLDOWN state cannot carry direction, setup, or entry data")
@@ -365,6 +388,15 @@ class StrategyStateSnapshot(BaseModel):
             return StrategyStateSnapshot(state=target, cooldown_until=cooldown_until)
         next_setup = setup or self.setup
         next_direction = next_setup.direction if next_setup else self.direction
+        if target == StrategyState.ENTERED:
+            if next_setup is None:
+                raise ValueError("ENTERED transition requires a setup")
+            # Entry consumes the setup atomically.  This prevents a restart or
+            # duplicate evaluation from recreating the same confirmation.
+            next_setup = StrategySetup.model_validate(next_setup.model_dump(mode="json") | {
+                "invalidation_state": SetupInvalidationState.CONSUMED.value,
+                "invalidation_reason": "ENTRY_CONSUMED",
+            })
         return StrategyStateSnapshot(
             state=target,
             direction=next_direction,
@@ -470,6 +502,15 @@ class SelectedContract(BaseModel):
     ltp: float = 0.0
     instrument_token: Optional[str] = None
     premium: Optional[float] = None
+    delta: Optional[float] = None
+    gamma: Optional[float] = None
+    greek_source: str = "UNAVAILABLE"
+    greek_timestamp: Optional[datetime] = None
+    quote_timestamp: Optional[datetime] = None
+    quote_freshness_seconds: Optional[float] = None
+    mid_price: Optional[float] = None
+    spread_points: Optional[float] = None
+    selection_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class StrategySignal(BaseModel):
@@ -586,6 +627,16 @@ class ActiveTrade(BaseModel):
     return_on_premium_pct: Optional[float] = None
     cost_assumption_version: Optional[str] = None
     cost_assumptions: dict[str, Any] = Field(default_factory=dict)
+    futures_contract_id: Optional[str] = None
+    underlying_entry_price: Optional[float] = None
+    underlying_structural_stop: Optional[float] = None
+    underlying_r: Optional[float] = None
+    selected_option_delta: Optional[float] = None
+    selected_option_delta_source: str = "UNAVAILABLE"
+    selected_option_gamma: Optional[float] = None
+    selected_option_gamma_source: str = "UNAVAILABLE"
+    risk_budget: Optional[float] = None
+    estimated_option_loss_at_structural_stop: Optional[float] = None
 
 
 class DecisionLogEntry(BaseModel):

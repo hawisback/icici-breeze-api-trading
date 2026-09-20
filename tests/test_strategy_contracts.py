@@ -92,13 +92,13 @@ def test_strategy_a_defaults_are_single_and_consistent_with_runtime_constructor(
     assert config.strategy_b_adx_threshold == 20.0
 
 
-def test_service_keeps_legacy_strategy_a_evaluator_and_strategy_b_values():
+def test_service_uses_authoritative_strategy_a_configuration_and_preserves_strategy_b():
     config = StrategyTunablesConfig()
     service = StrategyService(oms_service=Mock(), repository=Mock())
 
     assert service.config.tunables.adx_threshold == config.adx_threshold
-    assert service.strategy_a.adx_threshold == config.legacy_strategy_a_adx_threshold
-    assert service.strategy_a.breakout_buffer_atr == config.legacy_trigger_buffer_atr
+    assert service.strategy_a.adx_threshold == config.adx_threshold
+    assert service.strategy_a.breakout_buffer_atr == config.trigger_buffer_atr
     assert service.strategy_b.adx_threshold == config.strategy_b_adx_threshold
 
 

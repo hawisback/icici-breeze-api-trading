@@ -43,11 +43,12 @@ from services.strategy.models import (
     TradeLifecycleState,
     TriggerDiagnosticsResponse,
 )
-from services.strategy.position_manager import PositionManager
+from services.strategy.position_manager import PositionManager, UnderlyingRiskSizer
 from services.strategy.repository import StrategyRepository
 from services.strategy.simulation import SimulationEngine
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
+from services.strategy.telemetry import StrategyAEvaluationRecord, StrategyATelemetryStore
 
 logger = logging.getLogger(__name__)
 
@@ -72,24 +73,11 @@ class StrategyService:
         self.hist_svc = historical_service
 
         self.config = AutoTradingConfig()
-        self.position_manager = PositionManager(self.config.risk, self.config.session)
+        self.position_manager = PositionManager(self.config.risk, self.config.session, strategy_config=self.config.tunables)
+        self.risk_sizer = UnderlyingRiskSizer(self.config.risk)
         self.contract_selector = ContractSelector(self.config.option_selection)
 
-        self.strategy_a = TrendPullbackStrategy(
-            adx_threshold=self.config.tunables.legacy_strategy_a_adx_threshold,
-            rvol_threshold=self.config.tunables.rvol_threshold,
-            min_confirmation_score=self.config.tunables.min_confirmation_score,
-            ema_slope_threshold=self.config.tunables.ema_slope_threshold,
-            breakout_buffer_atr=self.config.tunables.legacy_trigger_buffer_atr,
-            breakout_confirm_polls=self.config.tunables.legacy_breakout_confirm_polls,
-            min_impulse_atr=self.config.tunables.legacy_min_impulse_atr,
-            retest_tolerance_atr=self.config.tunables.legacy_retest_tolerance_atr,
-            min_available_confirmations=self.config.tunables.legacy_min_available_confirmations,
-            call_pullback_min_depth=self.config.tunables.call_pullback_min_depth,
-            call_pullback_max_depth=self.config.tunables.call_pullback_max_depth,
-            put_pullback_min_depth=self.config.tunables.put_pullback_min_depth,
-            put_pullback_max_depth=self.config.tunables.put_pullback_max_depth,
-        )
+        self.strategy_a = TrendPullbackStrategy(config=self.config.tunables)
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
             adx_threshold=self.config.tunables.strategy_b_adx_threshold,
@@ -120,11 +108,37 @@ class StrategyService:
         self._evaluation_lock = asyncio.Lock()
         self._last_eval_time: datetime = datetime.min.replace(tzinfo=timezone.utc)  # epoch → forces first-call refresh
         self._last_eod_report_date: Optional[str] = None
+        self.strategy_a_telemetry = StrategyATelemetryStore()
 
 
     def _reset_setups(self, at):
         self.strategy_a.reset(at)
         self.strategy_b.reset(at)
+
+    def _record_strategy_a_evaluation(self, features: MarketFeatures, signal: StrategySignal | None) -> None:
+        futures = self._market_snapshot[2]
+        if not futures:
+            return
+        snapshot = signal.features_snapshot if signal else {}
+        candle_timestamp = snapshot.get("completed_candle_timestamp") or futures[-1].end_time.isoformat()
+        contract = snapshot.get("futures_contract") or futures[-1].instrument_id
+        self.strategy_a_telemetry.append(StrategyAEvaluationRecord(
+            timestamp=features.timestamp.isoformat(),
+            futures_contract=contract,
+            completed_candle_timestamp=candle_timestamp,
+            ema20=snapshot.get("ema20", features.ema20_15m), ema50=snapshot.get("ema50", features.ema50_15m),
+            adx=snapshot.get("adx14", features.adx_15m), plus_di=snapshot.get("plus_di14", features.plus_di_15m),
+            minus_di=snapshot.get("minus_di14", features.minus_di_15m), atr=snapshot.get("atr14", features.atr_15m),
+            vwap=snapshot.get("session_vwap", features.futures_vwap), active_support=snapshot.get("support"),
+            active_resistance=snapshot.get("resistance"), trend_result=snapshot.get("trend"),
+            trigger=snapshot.get("trigger"), structural_stop=signal.structural_stop if signal else None,
+            underlying_r=signal.r_points if signal else None, strategy_state=self.strategy_a.snapshot.state.value,
+            rejection_or_invalidation_reason=self.strategy_a.last_event.reason if self.strategy_a.last_event else None,
+            entry_fill=snapshot.get("entry_price"), management_event=self.strategy_a.last_event.event if self.strategy_a.last_event else None,
+        ))
+
+    def get_strategy_a_telemetry_summary(self) -> dict[str, Any]:
+        return self.strategy_a_telemetry.summary()
 
     async def _save_runtime(self):
         await self.repo.save_runtime(self.strategy_a.export_state())
@@ -145,23 +159,10 @@ class StrategyService:
             self._loop_task = asyncio.create_task(self._run_scheduler_loop())
 
     def _sync_subcomponents(self) -> None:
-        self.position_manager = PositionManager(self.config.risk, self.config.session)
+        self.position_manager = PositionManager(self.config.risk, self.config.session, strategy_config=self.config.tunables)
+        self.risk_sizer = UnderlyingRiskSizer(self.config.risk)
         self.contract_selector = ContractSelector(self.config.option_selection)
-        self.strategy_a = TrendPullbackStrategy(
-            adx_threshold=self.config.tunables.legacy_strategy_a_adx_threshold,
-            rvol_threshold=self.config.tunables.rvol_threshold,
-            min_confirmation_score=self.config.tunables.min_confirmation_score,
-            ema_slope_threshold=self.config.tunables.ema_slope_threshold,
-            breakout_buffer_atr=self.config.tunables.legacy_trigger_buffer_atr,
-            breakout_confirm_polls=self.config.tunables.legacy_breakout_confirm_polls,
-            min_impulse_atr=self.config.tunables.legacy_min_impulse_atr,
-            retest_tolerance_atr=self.config.tunables.legacy_retest_tolerance_atr,
-            min_available_confirmations=self.config.tunables.legacy_min_available_confirmations,
-            call_pullback_min_depth=self.config.tunables.call_pullback_min_depth,
-            call_pullback_max_depth=self.config.tunables.call_pullback_max_depth,
-            put_pullback_min_depth=self.config.tunables.put_pullback_min_depth,
-            put_pullback_max_depth=self.config.tunables.put_pullback_max_depth,
-        )
+        self.strategy_a = TrendPullbackStrategy(config=self.config.tunables)
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
             adx_threshold=self.config.tunables.strategy_b_adx_threshold,
@@ -519,7 +520,9 @@ class StrategyService:
 
         self._active_trades_cache = await self.repo.get_active_trades()
         bypass = getattr(self._active_overrides, "bypass_entry_window", False)
-        if not (features.data_ready or features.breakout_data_ready or (bypass and features.spot_price > 0)):
+        _, _, futures_candles = self._market_snapshot
+        strategy_a_data_ready = self.config.tunables.trend_pullback_enabled and bool(futures_candles)
+        if not (strategy_a_data_ready or features.data_ready or features.breakout_data_ready or (bypass and features.spot_price > 0)):
             self._reset_setups(now)
             await self._save_runtime()
             return {"status": "DATA_UNAVAILABLE", "reason": features.data_reason}
@@ -589,6 +592,7 @@ class StrategyService:
 
         if self.config.tunables.trend_pullback_enabled:
             signal = self.strategy_a.evaluate(features, candles_5m, candles_15m, futures_candles=futures_candles, overrides=self._active_overrides)
+            self._record_strategy_a_evaluation(features, signal)
             await self._save_runtime()
 
         if not signal and self.config.tunables.volatility_breakout_enabled:
@@ -622,14 +626,18 @@ class StrategyService:
             },
         )
 
-        # 10. Contract Selection under Max Option Premium Cap
+        # 10. Select execution contract downstream of the underlying signal.
         execution_mode = self._execution_mode_for_signal(signal)
         chain = await self._get_option_chain()
+        is_strategy_a = self._is_strategy_a(signal.strategy)
+        selector_underlying = signal.spot_reference_price if is_strategy_a else features.spot_price
         selected_contract, candidates, rejection_reason = self.contract_selector.select_contract(
             direction=signal.direction,
-            spot_price=features.spot_price,
+            spot_price=selector_underlying,
             option_chain=chain,
             override_premium_cap=self._active_overrides.max_option_premium_cap,
+            strategy_a=is_strategy_a,
+            as_of=signal.timestamp,
         )
         if signal.strategy == StrategyName.TREND_PULLBACK and chain.get("source") not in ("BREEZE", "KITE", "LIVE"):
             selected_contract = None
@@ -641,7 +649,7 @@ class StrategyService:
             try:
                 await self._capture_option_chain_snapshot(
                     signal=signal,
-                    spot_price=features.spot_price,
+                    spot_price=selector_underlying,
                     chain=chain,
                     selector_candidates=candidates,
                     selected_contract=selected_contract,
@@ -668,11 +676,22 @@ class StrategyService:
         )
 
         # 11. Position Sizing
-        lots, quantity = self.position_manager.calculate_position_size(
-            entry_premium=selected_contract.ask_price,
-            account_equity=self.config.risk.account_equity,
-            lot_size=selected_contract.lot_size,
-        )
+        if self._is_strategy_a(signal.strategy):
+            sizing = self.risk_sizer.size(
+                underlying_entry=signal.spot_reference_price,
+                underlying_stop=signal.structural_stop,
+                option_delta=selected_contract.delta,
+                lot_size=selected_contract.lot_size,
+                option_entry=selected_contract.ask_price,
+                account_equity=self.config.risk.account_equity,
+            )
+            lots, quantity = sizing.lots, sizing.quantity
+        else:
+            lots, quantity = self.position_manager.calculate_position_size(
+                entry_premium=selected_contract.ask_price,
+                account_equity=self.config.risk.account_equity,
+                lot_size=selected_contract.lot_size,
+            )
 
         if lots < 1:
             await self._log_decision(
@@ -728,7 +747,7 @@ class StrategyService:
             box_low=signal.features_snapshot.get("box_low"),
             atr_at_lock=signal.features_snapshot.get("atr_at_lock"),
             current_option_price=selected_contract.ltp or selected_contract.ask_price,
-            current_spot_price=features.spot_price,
+            current_spot_price=(signal.spot_reference_price if self._is_strategy_a(signal.strategy) else features.spot_price),
             current_trailing_stop=signal.structural_stop,
             option_hard_stop_price=hard_stop_price,
             current_r=0.0,
@@ -757,6 +776,16 @@ class StrategyService:
             option_data_status="ENTRY_CAPTURED",
             cost_assumption_version=self.config.risk.paper_cost_assumption_version,
             cost_assumptions=self._cost_metadata(),
+            futures_contract_id=signal.features_snapshot.get("futures_contract"),
+            underlying_entry_price=signal.spot_reference_price,
+            underlying_structural_stop=signal.structural_stop,
+            underlying_r=signal.r_points,
+            selected_option_delta=selected_contract.delta,
+            selected_option_delta_source=selected_contract.greek_source,
+            selected_option_gamma=selected_contract.gamma,
+            selected_option_gamma_source=selected_contract.greek_source,
+            risk_budget=self.config.risk.account_equity * self.config.risk.risk_per_trade_pct_of_account / 100.0,
+            estimated_option_loss_at_structural_stop=(sizing.option_loss_per_lot * lots if self._is_strategy_a(signal.strategy) else None),
         )
 
         await self.repo.save_trade(new_trade)
@@ -884,7 +913,7 @@ class StrategyService:
         self.position_manager.bull_derivatives_threshold = self._active_overrides.bull_derivatives_score if self._active_overrides.bull_derivatives_score is not None else 2
         self.position_manager.bear_derivatives_threshold = self._active_overrides.bear_derivatives_score if self._active_overrides.bear_derivatives_score is not None else 2
         updated_trade, exit_reason = self.position_manager.update_position(
-            trade, current_option_price, features
+            trade, current_option_price, features, as_of=features.timestamp
         )
 
         exit_reason = trade.pending_exit_reason or exit_reason
@@ -1359,7 +1388,7 @@ class StrategyService:
             structural_stop = round(spot + (0.85 * atr), 2)
             r_points = round(structural_stop - spot, 2)
 
-        # 2. Contract Selection under Max Premium Cap
+        # 2. Select the execution contract after constructing the manual thesis.
         chain = await self._get_option_chain()
         cap = override_premium_cap or self._active_overrides.max_option_premium_cap
         selected_contract, candidates, rejection_reason = self.contract_selector.select_contract(
@@ -1367,6 +1396,8 @@ class StrategyService:
             spot_price=spot,
             option_chain=chain,
             override_premium_cap=cap,
+            strategy_a=(strategy == StrategyName.TREND_PULLBACK),
+            as_of=now,
         )
 
         if strategy == StrategyName.TREND_PULLBACK and chain.get("source") not in ("BREEZE", "KITE", "LIVE"):
@@ -1383,11 +1414,22 @@ class StrategyService:
             return {"status": "CONTRACT_SELECTION_FAILED", "reason": rejection_reason, "candidates": candidates}
 
         # 3. Position Sizing
-        lots, quantity = self.position_manager.calculate_position_size(
-            entry_premium=selected_contract.ask_price,
-            account_equity=self.config.risk.account_equity,
-            lot_size=selected_contract.lot_size,
-        )
+        if strategy == StrategyName.TREND_PULLBACK:
+            sizing = self.risk_sizer.size(
+                underlying_entry=spot,
+                underlying_stop=structural_stop,
+                option_delta=selected_contract.delta,
+                lot_size=selected_contract.lot_size,
+                option_entry=selected_contract.ask_price,
+                account_equity=self.config.risk.account_equity,
+            )
+            lots, quantity = sizing.lots, sizing.quantity
+        else:
+            lots, quantity = self.position_manager.calculate_position_size(
+                entry_premium=selected_contract.ask_price,
+                account_equity=self.config.risk.account_equity,
+                lot_size=selected_contract.lot_size,
+            )
 
         if lots < 1:
             return {"status": "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"}
@@ -1551,7 +1593,7 @@ class StrategyService:
                 self._apply_quote_to_trade(trade, quote)
                 cur_price = quote.get("ltp") or quote.get("bid")
                 if quote.get("status") == "VALID" and cur_price and float(cur_price) > 0:
-                    updated_trade, _ = self.position_manager.update_position(trade, round(float(cur_price), 2), safe_features)
+                    updated_trade, _ = self.position_manager.update_position(trade, round(float(cur_price), 2), safe_features, as_of=safe_features.timestamp)
                     await self.repo.save_trade(updated_trade)
                 else:
                     # Preserve the data-quality gap and do not let a stale or
