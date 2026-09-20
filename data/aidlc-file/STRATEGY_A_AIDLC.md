@@ -5,7 +5,7 @@
 > **Lifecycle type:** Brownfield strategy replacement / refactor  
 > **Tracker version:** 1.0  
 > **Last reviewed branch:** `strategy-a-trend-pullback-v2`  
-> **Last reviewed head:** `8c445b0`  
+> **Last reviewed head:** `43218b2`  
 > **Lifecycle owner:** Human approval required at every phase gate
 
 ---
@@ -1580,7 +1580,7 @@ Known limitation: paper/shadow observation-period metrics require future runtime
 ## Consolidated review section
 
 Repository state before commit: branch `strategy-a-trend-pullback-v2`, starting
-commit `6402a6e`; implementation commit `8c445b0`.
+commit `6402a6e`; implementation commit `43218b2`.
 
 Architecture now flows through completed NIFTY futures candles → canonical
 features/pivots → deterministic state machine → delta-aware option selection →
@@ -1623,7 +1623,7 @@ OMS/risk tests, and generic replay infrastructure.
 
 Phase: 1–10  
 Status: `[?] Awaiting human review/approval`  
-Implementation commit: `8c445b0`  
+Implementation commit: `43218b2`  
 Acceptance gate: automated implementation evidence recorded; human review required  
 Known limitations: intrabar ordering, historical option quote coverage, and paper/shadow observation period  
 Human approval: pending
