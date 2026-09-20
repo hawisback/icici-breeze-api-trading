@@ -19,14 +19,27 @@ from services.strategy.models import StrategySignal
 
 
 def _confirmation_counts(snapshot: dict[str, Any]) -> tuple[int | None, int | None]:
-    """Extract the already-calculated Strategy A confirmation counts."""
-    raw = snapshot.get("confirmation_score")
-    if isinstance(raw, str) and "/" in raw:
-        passed, available = raw.split("/", 1)
+    """Extract available/effective counts from Strategy A or B snapshots."""
+    ratio = snapshot.get("confirmation_ratio")
+    if isinstance(ratio, str) and "/" in ratio:
+        effective, available = ratio.split("/", 1)
+        try:
+            return int(available), int(effective)
+        except ValueError:
+            pass
+
+    score = snapshot.get("confirmation_score")
+    if isinstance(score, str) and "/" in score:
+        passed, available = score.split("/", 1)
         try:
             return int(available), int(passed)
         except ValueError:
             pass
+
+    effective = snapshot.get("effective_confirmation_score", score)
+    available = snapshot.get("available_confirmation_count")
+    if isinstance(effective, (int, float)) and not isinstance(effective, bool) and isinstance(available, int):
+        return available, int(effective)
     return None, None
 
 
@@ -85,6 +98,9 @@ class ReplayManifestRecord(BaseModel):
     entry_features: dict[str, Any] = Field(default_factory=dict)
     confirmation_available: int | None = None
     confirmation_passed: int | None = None
+    raw_confirmation_score: int | float | None = None
+    effective_confirmation_score: int | float | None = None
+    oi_wall_penalty: int | float | None = None
     confirmations: dict[str, Any] = Field(default_factory=dict)
 
     # Initial structure
@@ -96,6 +112,10 @@ class ReplayManifestRecord(BaseModel):
     initial_structural_stop: float
     initial_risk_points: float
     initial_risk_atr: float
+    box_high: float | None = None
+    box_low: float | None = None
+    atr_at_lock: float | None = None
+    consecutive_inside_box_closes: int | None = None
 
     # Exact PositionManager state immediately after entry
     current_trailing_stop: float
@@ -185,6 +205,10 @@ class ReplayManifestRecorder:
         adverse_health_counters: dict[str, int | float | bool],
         entry_bar_timestamp: datetime | str,
         last_managed_completed_bar_timestamp: datetime | str | None,
+        box_high: float | None = None,
+        box_low: float | None = None,
+        atr_at_lock: float | None = None,
+        consecutive_inside_box_closes: int | None = None,
     ) -> ReplayManifestRecord:
         """Store the exact entry/initial-state values supplied by the replay."""
         if signal.signal_id in self._records:
@@ -204,7 +228,13 @@ class ReplayManifestRecorder:
             entry_features=entry_features or signal.features_snapshot,
             confirmation_available=_confirmation_counts(signal.features_snapshot)[0],
             confirmation_passed=_confirmation_counts(signal.features_snapshot)[1],
-            confirmations=signal.features_snapshot.get("confirmations", {}),
+            raw_confirmation_score=signal.features_snapshot.get("raw_confirmation_score"),
+            effective_confirmation_score=signal.features_snapshot.get("effective_confirmation_score"),
+            oi_wall_penalty=signal.features_snapshot.get("oi_wall_penalty"),
+            confirmations=(
+                signal.features_snapshot.get("confirmations")
+                or signal.features_snapshot.get("confirmation_factors", {})
+            ),
             pullback_swing_low=pullback_swing_low,
             pullback_swing_high=pullback_swing_high,
             impulse_low=impulse_low,
@@ -213,6 +243,10 @@ class ReplayManifestRecorder:
             initial_structural_stop=initial_structural_stop,
             initial_risk_points=initial_risk_points,
             initial_risk_atr=initial_risk_atr,
+            box_high=box_high,
+            box_low=box_low,
+            atr_at_lock=atr_at_lock,
+            consecutive_inside_box_closes=consecutive_inside_box_closes,
             current_trailing_stop=current_trailing_stop,
             current_r=current_r,
             highest_favorable_price=highest_favorable_price,

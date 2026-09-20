@@ -69,10 +69,38 @@ def _state_snapshot(trade: ActiveTrade, timestamp: datetime) -> ReplayStateSnaps
 
 
 def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrade:
+    try:
+        strategy = StrategyName(record.strategy_id)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported replay strategy_id: {record.strategy_id}") from exc
+
+    strategy_b_state = {}
+    if strategy == StrategyName.VOLATILITY_BREAKOUT:
+        missing = [
+            name for name, value in {
+                "box_high": record.box_high,
+                "box_low": record.box_low,
+                "atr_at_lock": record.atr_at_lock,
+            }.items() if value is None
+        ]
+        if missing:
+            raise ValueError(
+                f"Strategy B replay record {record.replay_signal_id} is missing structural state: "
+                f"{', '.join(missing)}"
+            )
+        if record.atr_at_lock <= 0 or record.box_high <= record.box_low:
+            raise ValueError(f"Invalid Strategy B structural state for {record.replay_signal_id}")
+        strategy_b_state = {
+            "box_high": record.box_high,
+            "box_low": record.box_low,
+            "atr_at_lock": record.atr_at_lock,
+            "consecutive_inside_box_closes": record.consecutive_inside_box_closes or 0,
+        }
+
     return ActiveTrade(
         trade_id=record.replay_signal_id,
         mode=AutoTradingMode.PAPER,
-        strategy=StrategyName.TREND_PULLBACK,
+        strategy=strategy,
         direction=_direction(record.direction),
         option_type=OptionType.CALL if record.direction == "CALL" else OptionType.PUT,
         contract_symbol="HISTORICAL-SPOT",
@@ -89,6 +117,7 @@ def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrad
         initial_r_points=record.initial_risk_points,
         pullback_swing_low=record.pullback_swing_low,
         pullback_swing_high=record.pullback_swing_high,
+        **strategy_b_state,
         highest_close_since_entry=record.highest_favorable_price or record.simulated_entry_price,
         lowest_close_since_entry=record.lowest_favorable_price or record.simulated_entry_price,
         last_managed_bar=record.last_managed_completed_bar_timestamp,
@@ -279,7 +308,7 @@ class HistoricalPositionManagerReplayer:
         if entry_bar is None:
             self._finish(record, trade, status="UNRESOLVED", reason="ENTRY_CANDLE_NOT_FOUND")
             return
-        if not self._entry_resolution(record, trade, entry_bar):
+        if record.entry_occurred_intrabar and not self._entry_resolution(record, trade, entry_bar):
             return
 
         pm = PositionManager(self.risk_config, self.session_config)
