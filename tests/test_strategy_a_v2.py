@@ -8,12 +8,17 @@ from services.strategy.contract_selector import ContractSelector, trading_sessio
 from services.strategy.futures_signal import FuturesContractResolver, FuturesFeatureEngine, aggregate_completed_15m
 from services.strategy.models import (
     OptionSelectionConfig,
+    OptionType,
+    RiskConfig,
     SetupInvalidationState,
     StrategyDirection,
+    StrategyName,
     StrategySetup,
     StrategyState,
     StrategyStateSnapshot,
     StrategyTunablesConfig,
+    StrategySignal,
+    TradeDirection,
 )
 from services.strategy.option_execution_validation import ForwardOptionExecutionValidator
 from services.strategy.position_manager import UnderlyingRiskSizer
@@ -103,7 +108,29 @@ def test_replay_report_is_versioned_and_comparison_is_event_level():
 
 
 def test_forward_option_validation_keeps_underlying_and_option_states_separate():
-    assert ForwardOptionExecutionValidator().validate([], {}).total_underlying_signals == 0
+    timestamp = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    signal = StrategySignal(
+        signal_id="SIG-VALIDATION-1",
+        strategy=StrategyName.TREND_PULLBACK,
+        direction=TradeDirection.BULLISH,
+        option_type=OptionType.CALL,
+        timestamp=timestamp,
+        spot_reference_price=24000,
+        structural_stop=23990,
+        r_points=10,
+        derivatives_score=0,
+    )
+    chain = {"timestamp": timestamp.isoformat(), "strikes": [{"strike": 24000, "call": {"expiry": "2026-09-24", "instrument_id": "OPT-1", "bid": 100, "ask": 101, "delta": 0.625, "open_interest": 20000, "volume": 1000, "lot_size": 75}}]}
+    report = ForwardOptionExecutionValidator().validate([signal], {timestamp.isoformat(): chain}, option_outcomes_by_signal={signal.signal_id: True})
+    assert report.results[0].state == "OPTION_OUTCOME_OBSERVABLE"
+    assert report.results[0].state_history == ("UNDERLYING_VALID", "OPTION_CONTRACT_FOUND", "OPTION_EXECUTABLE", "OPTION_OUTCOME_OBSERVABLE")
+    assert report.executable_coverage == 1.0
+    assert report.observable_option_outcomes == 1
+    uncovered = ForwardOptionExecutionValidator().validate([signal], {})
+    assert uncovered.results[0].state == "UNDERLYING_VALID"
+    found_only = ForwardOptionExecutionValidator(risk_config=RiskConfig(max_trade_capital=5000)).validate([signal], {timestamp.isoformat(): chain})
+    assert found_only.results[0].state == "OPTION_CONTRACT_FOUND"
+    assert found_only.executable_coverage == 0.0
 
 
 def test_legacy_configuration_sentinel_propagates_without_hidden_defaults():

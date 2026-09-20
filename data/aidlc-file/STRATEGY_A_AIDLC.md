@@ -1554,7 +1554,7 @@ Known limitation: historical option fills and exact intrabar sequences remain da
 Status: `[?] Awaiting human review/approval`  
 Files added: `tests/STRATEGY_A_RULE_TEST_MATRIX.md`, `tests/test_strategy_a_v2.py`  
 Implementation decisions: boundary-focused tests cover contracts, look-ahead, aggregation, rollover, expiry, delta, sizing, replay comparison, and shared regressions; obsolete signal-count baselines were removed.  
-Tests: focused suites and retained shared/Strategy B suites passed; the complete suite recorded `179 passed, 24 warnings`.  
+Tests: focused suites and retained shared/Strategy B suites passed; the latest complete suite recorded `179 passed, 7 warnings`.  
 Acceptance-gate result: implementation evidence present; awaiting human review.  
 Known limitation: the full suite is green, but its dependency warnings remain environment/library-version dependent.  
 
@@ -1562,8 +1562,8 @@ Known limitation: the full suite is green, but its dependency warnings remain en
 
 Status: `[?] Awaiting human review/approval`  
 Files added: `services/strategy/option_execution_validation.py`  
-Implementation decisions: validation states distinguish underlying validity, contract selection, executability, and observable outcomes; chain data is looked up only at signal timestamp; no EOD quote is treated as an executable intraday quote.  
-Tests: forward-validation state separation and selector edge cases passed in focused suites.  
+Implementation decisions: validation states distinguish underlying validity, contract selection, executability, and observable outcomes; each result carries a state history; chain data is looked up only at signal timestamp; no EOD quote is treated as an executable intraday quote.  
+Tests: `.venv\Scripts\python.exe -m pytest -q tests/test_strategy_a_v2.py tests/test_forward_option_execution_validation.py` — `15 passed`; explicit coverage includes all four validation states.  
 Acceptance-gate result: implementation evidence present; awaiting human review.  
 Known limitation: no claim of executable coverage is made without a captured-chain coverage run; the utility reports zero/available coverage explicitly.
 
@@ -1618,6 +1618,7 @@ OMS/risk tests, and generic replay infrastructure.
 | 2026-09-20 | 4, 7, 8 | `.venv\Scripts\python.exe -m pytest -q tests/test_strategy_simulation.py tests/test_strategy_b_replay_lifecycle.py tests/test_volatility_breakout_fixed.py` | 48 passed, 1 warning |
 | 2026-09-20 | all | `python -m compileall -q services libs tests` | passed |
 | 2026-09-20 | all | `.venv\Scripts\python.exe -m pytest -q tests` | 179 passed, 24 warnings |
+| 2026-09-21 | 9, all | `.venv\Scripts\python.exe -m pytest -q tests/test_strategy_a_v2.py tests/test_forward_option_execution_validation.py`; `.venv\Scripts\python.exe -m pytest -q tests` | 15 passed; 179 passed, 7 warnings |
 
 ## Final handoff
 
