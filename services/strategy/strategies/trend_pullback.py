@@ -404,11 +404,15 @@ class TrendPullbackStrategy:
                     f"{self.config.minimum_stop_distance_atr:.2f}-{self.config.maximum_stop_distance_atr:.2f} ATR "
                     f"stop; room>={self.config.minimum_room_to_opposing_sr_r:.2f}R"
                 ),
-                status=("PASSED" if risk_ok else "PENDING" if risk_applicable else "N/A"),
+                status="PASSED" if risk_ok else "PENDING",
                 gap_description=(risk_reason or "STRUCTURAL_RISK_OK" if risk_applicable else "WAITING_FOR_SETUP_PREREQUISITES"),
             ),
         ]
-        applicable = [condition for condition in conditions if condition.status != "N/A"]
+        # Keep the public TriggerCondition status contract binary
+        # (PASSED/PENDING). Structural risk is displayed as pending until its
+        # prerequisites exist, but it is not included in readiness arithmetic
+        # before trend/confirmation/confluence have qualified.
+        applicable = conditions if risk_applicable else [condition for condition in conditions if condition.id != "risk"]
         passed = sum(condition.status == "PASSED" for condition in applicable)
         total = len(applicable)
         return StrategyTriggerDiagnostics(
