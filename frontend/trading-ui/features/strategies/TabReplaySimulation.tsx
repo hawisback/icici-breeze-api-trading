@@ -58,7 +58,6 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const [showOverrides, setShowOverrides] = useState<boolean>(false);
   const [adxThreshold, setAdxThreshold] = useState<number>(20.0);
   const [rvolThreshold, setRvolThreshold] = useState<number>(1.20);
-  const [stratAMinConf, setStratAMinConf] = useState<number>(2);
   const [stratBMinConf, setStratBMinConf] = useState<number>(3);
   const [boxMaxHeightAtr, setBoxMaxHeightAtr] = useState<number>(1.30);
   const [premiumCap, setPremiumCap] = useState<number>(70.0);
@@ -93,7 +92,6 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
         overrides: {
           adx_threshold: Number(adxThreshold),
           rvol_threshold: Number(rvolThreshold),
-          min_confirmation_score: Number(stratAMinConf),
           strat_b_min_confirmation: Number(stratBMinConf),
           box_max_height_atr: Number(boxMaxHeightAtr),
           max_option_premium_cap: Number(premiumCap),
@@ -120,15 +118,27 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const hasNetPnl = netPnl !== null && netPnl !== undefined;
   const replayDiagnostics = result?.replay_metadata?.strategy_a_replay_diagnostics as
     | {
-        evaluations?: number;
+        directional_evaluations?: number;
+        completed_bar_checks?: number;
+        ready_direction_checks?: number;
         blocker_counts?: Record<string, number>;
+        data_quality_counts?: Record<string, number>;
+        event_counts?: Record<string, number>;
+        setup_count?: number;
         signal_count?: number;
         resolved_trade_count?: number;
         unresolved_trade_count?: number;
         ambiguous_trade_count?: number;
+        futures_entry_window_coverage?: {
+          expected_15m_bars?: number;
+          available_15m_bars?: number;
+          coverage_pct?: number;
+          missing_15m_bar_ends_ist?: string[];
+        };
       }
     | undefined;
   const blockerEntries = Object.entries(replayDiagnostics?.blocker_counts || {}).slice(0, 5);
+  const dataQualityEntries = Object.entries(replayDiagnostics?.data_quality_counts || {});
   const replayData = result?.replay_metadata?.data_fingerprint as
     | { missing_data?: string[]; source_diagnostics?: Record<string, any> }
     | undefined;
@@ -281,21 +291,13 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               />
             </div>
 
-            {/* Strategy A Confirmation */}
-            <div>
-              <div className="flex justify-between text-xs mb-1">
-                <span className="text-slate-300 font-medium">Strat A Required Confirmation</span>
-                <span className="font-bold text-cyan-400">{stratAMinConf} / 6 pts</span>
+            {/* Strategy A V2 confirmation contract */}
+            <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-2.5">
+              <div className="text-xs text-slate-300 font-medium">Strategy A V2 Confirmation</div>
+              <div className="text-[10px] text-slate-400 mt-1">
+                Fixed contract: body ≥ 40%, directional close location ≤ 30%, range ≤ 1.50 ATR.
+                The legacy confirmation-score slider does not apply to Strategy A V2.
               </div>
-              <input
-                type="range"
-                min="1"
-                max="5"
-                step="1"
-                value={stratAMinConf}
-                onChange={(e) => setStratAMinConf(Number(e.target.value))}
-                className="w-full h-1.5 bg-slate-800 rounded-lg cursor-pointer accent-cyan-400"
-              />
             </div>
 
             {/* Strategy B Confirmation */}
@@ -365,26 +367,36 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
           <div className="bg-slate-900/95 border border-slate-800 rounded-xl p-4">
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
               <div>
-                <span className="text-slate-400">Qualified signals:</span>{" "}
-                <span className="font-mono font-bold text-cyan-300">{replayDiagnostics?.signal_count ?? result.replay_manifests?.length ?? 0}</span>
+                <span className="text-slate-400">15m bars checked:</span>{" "}
+                <span className="font-mono font-bold text-slate-200">{replayDiagnostics?.completed_bar_checks ?? 0}</span>
               </div>
               <div>
-                <span className="text-slate-400">Resolved trades:</span>{" "}
-                <span className="font-mono font-bold text-slate-200">{replayDiagnostics?.resolved_trade_count ?? result.total_trades}</span>
+                <span className="text-slate-400">Directional checks:</span>{" "}
+                <span className="font-mono font-bold text-slate-200">{replayDiagnostics?.directional_evaluations ?? 0}</span>
               </div>
               <div>
-                <span className="text-slate-400">Unresolved:</span>{" "}
-                <span className="font-mono font-bold text-amber-300">{replayDiagnostics?.unresolved_trade_count ?? 0}</span>
+                <span className="text-slate-400">Setups created:</span>{" "}
+                <span className="font-mono font-bold text-cyan-300">{replayDiagnostics?.setup_count ?? 0}</span>
               </div>
               <div>
-                <span className="text-slate-400">Strategy A evaluations:</span>{" "}
-                <span className="font-mono font-bold text-slate-200">{replayDiagnostics?.evaluations ?? 0}</span>
+                <span className="text-slate-400">Qualified Strategy A signals:</span>{" "}
+                <span className="font-mono font-bold text-cyan-300">{replayDiagnostics?.signal_count ?? 0}</span>
+              </div>
+              <div>
+                <span className="text-slate-400">Resolved Strategy A trades:</span>{" "}
+                <span className="font-mono font-bold text-slate-200">{replayDiagnostics?.resolved_trade_count ?? 0}</span>
+              </div>
+              <div>
+                <span className="text-slate-400">Futures 15m coverage:</span>{" "}
+                <span className={`font-mono font-bold ${(replayDiagnostics?.futures_entry_window_coverage?.coverage_pct ?? 0) >= 100 ? "text-emerald-300" : "text-amber-300"}`}>
+                  {replayDiagnostics?.futures_entry_window_coverage?.coverage_pct ?? 0}%
+                </span>
               </div>
             </div>
             {blockerEntries.length > 0 && (
               <div className="mt-3">
                 <div className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-1.5">
-                  Top Strategy A blockers
+                  Strategy A market-condition blockers
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {blockerEntries.map(([reason, count]) => (
@@ -393,6 +405,25 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                     </span>
                   ))}
                 </div>
+              </div>
+            )}
+            {dataQualityEntries.length > 0 && (
+              <div className="mt-3">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-1.5">
+                  Historical data quality
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {dataQualityEntries.map(([reason, count]) => (
+                    <span key={reason} className="px-2 py-1 rounded bg-rose-500/10 border border-rose-500/25 text-rose-300 text-[10px] font-mono">
+                      {reason}: {count}
+                    </span>
+                  ))}
+                </div>
+                {(replayDiagnostics?.futures_entry_window_coverage?.missing_15m_bar_ends_ist?.length ?? 0) > 0 && (
+                  <div className="text-[10px] text-slate-500 mt-1">
+                    Missing 15m bar ends: {replayDiagnostics?.futures_entry_window_coverage?.missing_15m_bar_ends_ist?.join(", ")}
+                  </div>
+                )}
               </div>
             )}
             {(replayData?.missing_data?.length ?? 0) > 0 && (

@@ -451,6 +451,54 @@ class SimulationEngine:
         }] if active_instrument and contract else []
         return active_instrument, selected
 
+    def _strategy_a_config_for_replay(self, overrides: ThresholdOverrides) -> Any:
+        """Apply only Strategy A V2 overrides that the replay actually supports.
+
+        This keeps the replay configuration snapshot honest: an ADX override
+        shown in the UI must affect the Strategy A evaluator, not just metadata.
+        Legacy confirmation-score knobs are intentionally not mapped onto the
+        V2 candle-confirmation contract.
+        """
+        updates: dict[str, Any] = {}
+        if overrides.adx_threshold is not None:
+            updates["adx_threshold"] = float(overrides.adx_threshold)
+        return self.tunables.model_copy(update=updates) if updates else self.tunables
+
+    def _strategy_a_futures_coverage(
+        self,
+        date_str: str,
+        futures_history: list[Candle],
+        instrument_id: str | None,
+    ) -> dict[str, Any]:
+        """Measure completed 15m futures coverage during Strategy A's entry window."""
+        target = datetime.strptime(date_str, "%Y-%m-%d").date()
+        start_h, start_m = map(int, self.tunables.entry_session_start.split(":"))
+        end_h, end_m = map(int, self.tunables.entry_session_end.split(":"))
+        first_end = datetime(target.year, target.month, target.day, start_h, start_m, tzinfo=IST)
+        last_end = datetime(target.year, target.month, target.day, end_h, end_m, tzinfo=IST)
+        expected: list[datetime] = []
+        cursor = first_end
+        while cursor <= last_end:
+            expected.append(cursor)
+            cursor += timedelta(minutes=15)
+
+        aggregated = self.resample_to_15m(
+            futures_history,
+            instrument_id or "INST-NIFTY-FUT-REPLAY",
+        )
+        available = {
+            candle.end_time.astimezone(IST).replace(second=0, microsecond=0)
+            for candle in aggregated
+            if candle.end_time.astimezone(IST).date() == target
+        }
+        missing = [value for value in expected if value not in available]
+        return {
+            "expected_15m_bars": len(expected),
+            "available_15m_bars": len(expected) - len(missing),
+            "coverage_pct": round((len(expected) - len(missing)) / len(expected) * 100, 2) if expected else 100.0,
+            "missing_15m_bar_ends_ist": [value.isoformat() for value in missing],
+        }
+
     async def run_day_simulation(self, request: SimulationRequest) -> SimulationResult:
         """Replay actual bars without inventing historical option fills or PnL."""
         date_str = request.date or datetime.now(IST).strftime("%Y-%m-%d")
@@ -494,7 +542,8 @@ class SimulationEngine:
         if bypass_entry_window:
             overrides = overrides.model_copy(update={"bypass_entry_window": True})
         cfg = self.tunables
-        strat_a = TrendPullbackStrategy(config=cfg, allow_session_bypass=True)
+        strategy_a_cfg = self._strategy_a_config_for_replay(overrides)
+        strat_a = TrendPullbackStrategy(config=strategy_a_cfg, allow_session_bypass=True)
         strat_b = VolatilityBreakoutStrategy(rvol_threshold=cfg.rvol_threshold, adx_threshold=cfg.strategy_b_adx_threshold,
                                              min_confirmation_score=cfg.strat_b_min_confirmation,
                                              box_max_height_atr=cfg.box_max_height_atr,
@@ -510,6 +559,12 @@ class SimulationEngine:
             missing_data.append("spot")
         if source_diagnostics["futures"]["missing_selected_source"] or not futures_history:
             missing_data.append("futures")
+        futures_coverage = self._strategy_a_futures_coverage(
+            date_str,
+            futures_history,
+            active_instrument,
+        )
+        source_diagnostics["futures"]["strategy_a_entry_window_coverage"] = futures_coverage
         config_snapshot = build_configuration_snapshot(
             start_date=date_str,
             end_date=date_str,
@@ -543,6 +598,8 @@ class SimulationEngine:
         timeline, logs = [], []
         replay_trigger_diagnostics: list[dict[str, Any]] = []
         replay_diagnostic_keys: set[tuple[str, str]] = set()
+        strategy_a_event_keys: set[tuple[str, str, str | None]] = set()
+        strategy_a_event_counts: Counter[str] = Counter()
         replay_manifest_recorder = self.replay_manifest_recorder or ReplayManifestRecorder()
         replay_manifest_recorder.set_replay_metadata(replay_metadata)
         running = list(warmup)
@@ -569,11 +626,13 @@ class SimulationEngine:
             event, details = None, None
             effective_diags_a = diags_a
             sig_a = None
+            strategy_a_event = None
             if (futures and in_window) or (features.data_ready or features.breakout_data_ready) and in_window:
                 if cfg.trend_pullback_enabled and futures:
                     # Strategy A replay calls the exact production state
                     # machine.  There is no replay-only trigger evaluator.
                     sig_a = strat_a.evaluate(features, running, macro, futures, overrides)
+                    strategy_a_event = strat_a.last_event
                     effective_diags_a = strat_a.diagnose(features, running, macro, overrides=overrides, futures_candles=futures)
                     if sig_a is not None:
                         snapshot = sig_a.features_snapshot
@@ -626,25 +685,36 @@ class SimulationEngine:
                 strat_a.reset(bar.end_time)
                 strat_b.reset(bar.end_time)
                 details = features.data_reason if not features.data_ready else "Outside entry window"
-            for diag in effective_diags_a:
-                completed_ts = str((diag.phase_summary or {}).get("completed_candle_timestamp") or bar.end_time.isoformat())
-                key = (diag.direction.value, completed_ts)
-                if key in replay_diagnostic_keys:
-                    continue
-                replay_diagnostic_keys.add(key)
-                replay_trigger_diagnostics.append({
-                    "timestamp": bar.end_time.isoformat(),
-                    "completed_futures_candle": completed_ts,
-                    "strategy": diag.strategy.value,
-                    "direction": diag.direction.value,
-                    "option_type": diag.option_type.value,
-                    "phase_state": diag.phase_state,
-                    "key_blocker": diag.key_blocker,
-                    "passed_count": diag.passed_count,
-                    "total_count": diag.total_count,
-                    "ready_pct": diag.ready_pct,
-                    "conditions": [item.model_dump(mode="json") for item in diag.conditions],
-                })
+            strategy_a_summary_window = bypass_entry_window or a_window
+            if strategy_a_summary_window:
+                if strategy_a_event is not None and strategy_a_event.event != "DUPLICATE_IGNORED":
+                    event_key = (
+                        strategy_a_event.event,
+                        strategy_a_event.timestamp.isoformat(),
+                        strategy_a_event.reason,
+                    )
+                    if event_key not in strategy_a_event_keys:
+                        strategy_a_event_keys.add(event_key)
+                        strategy_a_event_counts[strategy_a_event.event] += 1
+                for diag in effective_diags_a:
+                    completed_ts = str((diag.phase_summary or {}).get("completed_candle_timestamp") or bar.end_time.isoformat())
+                    key = (diag.direction.value, completed_ts)
+                    if key in replay_diagnostic_keys:
+                        continue
+                    replay_diagnostic_keys.add(key)
+                    replay_trigger_diagnostics.append({
+                        "timestamp": bar.end_time.isoformat(),
+                        "completed_futures_candle": completed_ts,
+                        "strategy": diag.strategy.value,
+                        "direction": diag.direction.value,
+                        "option_type": diag.option_type.value,
+                        "phase_state": diag.phase_state,
+                        "key_blocker": diag.key_blocker,
+                        "passed_count": diag.passed_count,
+                        "total_count": diag.total_count,
+                        "ready_pct": diag.ready_pct,
+                        "conditions": [item.model_dump(mode="json") for item in diag.conditions],
+                    })
             timeline.append(SimulationBarSnapshot(
                 bar_index=idx, timestamp=bar.end_time.isoformat(), ist_time=clock.strftime("%H:%M"),
                 open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, spot=bar.close,
@@ -719,22 +789,64 @@ class SimulationEngine:
         option_complete = bool(resolved_records) and all(
             record.option_data_status == "AVAILABLE" for record in resolved_records
         )
+        data_quality_reasons = {"STALE_FUTURES_DATA", "FUTURES_DATA_UNAVAILABLE", "INCOMPLETE_FUTURES_DATA"}
         blocker_counts = Counter(
-            item["key_blocker"] for item in replay_trigger_diagnostics if item.get("key_blocker")
+            item["key_blocker"]
+            for item in replay_trigger_diagnostics
+            if item.get("key_blocker")
+            and item["key_blocker"] not in data_quality_reasons
+            and item["key_blocker"] != "READY"
         )
+        data_quality_counts = Counter(
+            item["key_blocker"]
+            for item in replay_trigger_diagnostics
+            if item.get("key_blocker") in data_quality_reasons
+        )
+        ready_count = sum(item.get("key_blocker") == "READY" for item in replay_trigger_diagnostics)
+        completed_bar_checks = len({
+            item["completed_futures_candle"]
+            for item in replay_trigger_diagnostics
+            if item.get("completed_futures_candle")
+        })
+        strategy_a_records = [
+            record for record in replay_manifest_recorder.records()
+            if record.strategy_id == StrategyName.TREND_PULLBACK.value
+        ]
+        strategy_a_resolved = sum(
+            record.lifecycle_status == "RESOLVED" and record.realized_r is not None
+            for record in strategy_a_records
+        )
+        strategy_a_unresolved = sum(record.lifecycle_status == "UNRESOLVED" for record in strategy_a_records)
+        strategy_a_ambiguous = sum(record.lifecycle_status == "AMBIGUOUS" for record in strategy_a_records)
         replay_metadata["strategy_a_replay_diagnostics"] = {
-            "evaluations": len(replay_trigger_diagnostics),
+            "directional_evaluations": len(replay_trigger_diagnostics),
+            "completed_bar_checks": completed_bar_checks,
+            "ready_direction_checks": ready_count,
             "blocker_counts": dict(blocker_counts.most_common()),
-            "signal_count": len(replay_manifest_recorder.records()),
-            "resolved_trade_count": lifecycle_report["resolved"],
-            "unresolved_trade_count": lifecycle_report["unresolved"],
-            "ambiguous_trade_count": lifecycle_report["ambiguous"],
+            "data_quality_counts": dict(data_quality_counts.most_common()),
+            "event_counts": dict(strategy_a_event_counts),
+            "setup_count": int(strategy_a_event_counts.get("SETUP_CREATED", 0)),
+            "signal_count": len(strategy_a_records),
+            "resolved_trade_count": strategy_a_resolved,
+            "unresolved_trade_count": strategy_a_unresolved,
+            "ambiguous_trade_count": strategy_a_ambiguous,
+            "futures_entry_window_coverage": futures_coverage,
         }
         if not replay_manifest_recorder.records():
             top = ", ".join(f"{name}={count}" for name, count in blocker_counts.most_common(5))
+            quality = ", ".join(f"{name}={count}" for name, count in data_quality_counts.most_common())
+            detail_parts = []
+            if top:
+                detail_parts.append(f"Top Strategy A market-condition blockers: {top}.")
+            if quality:
+                detail_parts.append(f"Historical futures data-quality issues: {quality}.")
+            if strategy_a_event_counts.get("SETUP_CREATED", 0):
+                detail_parts.append(
+                    f"Strategy A created {strategy_a_event_counts['SETUP_CREATED']} setup(s), but no trigger signal qualified."
+                )
             limitation = (
                 "No strategy signals qualified on this replay session. "
-                + (f"Top Strategy A blockers: {top}." if top else "See replay data diagnostics for missing market inputs.")
+                + (" ".join(detail_parts) if detail_parts else "See replay diagnostics for the evaluated conditions.")
             )
         elif lifecycle_report["resolved"] == 0:
             limitation = (

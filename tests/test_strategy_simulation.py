@@ -410,3 +410,34 @@ async def test_replay_seeds_and_resolves_futures_for_target_date_not_today():
     assert ensure.await_args.kwargs["today"].isoformat() == "2026-09-17"
     assert contracts[0]["expiry"] == "2026-09-29"
     assert diagnostics["futures_contract"]["status"] == "RESOLVED"
+
+
+def test_strategy_a_replay_adx_override_changes_effective_v2_config():
+    engine = SimulationEngine()
+    overrides = ThresholdOverrides(adx_threshold=17.0)
+    config = engine._strategy_a_config_for_replay(overrides)
+    assert config.adx_threshold == 17.0
+    assert config.confirmation_min_body_ratio == engine.tunables.confirmation_min_body_ratio
+
+
+def test_strategy_a_futures_coverage_reports_missing_entry_window_bar():
+    engine = SimulationEngine()
+    ist = timezone(timedelta(hours=5, minutes=30))
+    target = datetime(2026, 9, 15, 9, 30, tzinfo=ist)
+    candles = []
+    # Build all 5m bars required for 09:45 and 10:00, but intentionally omit
+    # the 09:50 bar so the completed 10:00 15m bucket is unavailable.
+    for minute in (30, 35, 40, 45, 55):
+        start = target.replace(hour=9, minute=minute)
+        candles.append(Candle(
+            instrument_id="INST-NIFTY-FUT-2026-09-29", interval="5m",
+            start_time=start.astimezone(timezone.utc),
+            end_time=(start + timedelta(minutes=5)).astimezone(timezone.utc),
+            open=100, high=102, low=99, close=101, volume=100, source="BREEZE",
+        ))
+    coverage = engine._strategy_a_futures_coverage(
+        "2026-09-15", candles, "INST-NIFTY-FUT-2026-09-29"
+    )
+    assert coverage["expected_15m_bars"] > 0
+    assert coverage["coverage_pct"] < 100
+    assert any(value.startswith("2026-09-15T10:00:00") for value in coverage["missing_15m_bar_ends_ist"])
