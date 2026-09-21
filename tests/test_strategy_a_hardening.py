@@ -777,7 +777,7 @@ def test_strategy_a_diagnostics_expose_stale_futures_instead_of_unavailable():
     diagnostics = strategy.diagnose(
         SimpleNamespace(timestamp=stale_as_of), [], [], futures_candles=[candle]
     )
-    assert all(item.primary_reason == "STALE_FUTURES_DATA" for item in diagnostics)
+    assert all(item.key_blocker == "STALE_FUTURES_DATA" for item in diagnostics)
 
 
 def test_strategy_a_after_force_exit_does_not_require_post_1515_futures_bar():
