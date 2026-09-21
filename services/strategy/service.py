@@ -45,7 +45,7 @@ from services.strategy.models import (
     TradeLifecycleState,
     TriggerDiagnosticsResponse,
 )
-from services.strategy.position_manager import PositionManager, UnderlyingRiskSizer
+from services.strategy.position_manager import PositionManager, UnderlyingRiskSizer, calculate_realized_trade_r, underlying_r_for_price
 from services.strategy.repository import StrategyRepository
 from services.strategy.simulation import SimulationEngine
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
@@ -163,11 +163,25 @@ class StrategyService:
             ema20=features.ema20_15m, ema50=features.ema50_15m, adx=features.adx_15m,
             plus_di=features.plus_di_15m, minus_di=features.minus_di_15m, atr=features.atr_15m,
             vwap=features.futures_vwap, option_contract=trade.contract_instrument_id,
-            expiry=trade.expiry, delta=trade.selected_option_delta, gamma=trade.selected_option_gamma,
+            expiry=trade.expiry, quote_timestamp=(trade.current_quote_timestamp.isoformat() if trade.current_quote_timestamp else None),
+            quote_freshness_seconds=trade.current_quote_freshness_seconds,
+            delta=trade.selected_option_delta, gamma=trade.selected_option_gamma,
             delta_source=trade.selected_option_delta_source, gamma_source=trade.selected_option_gamma_source,
             bid=trade.current_bid, ask=trade.current_ask,
             spread=(trade.current_ask - trade.current_bid if trade.current_ask and trade.current_bid else None),
-            position_size=trade.quantity, entry_fill=trade.underlying_entry_price,
+            position_size=trade.quantity, lot_size=trade.lot_size, lots=trade.lots,
+            risk_budget=trade.risk_budget,
+            estimated_option_loss_at_structural_stop=trade.estimated_option_loss_at_structural_stop,
+            entry_fill=trade.underlying_entry_price, option_entry_fill=trade.entry_executable_price,
+            slippage_points=(
+                trade.partial_exit_slippage_points if event == "PARTIAL_EXIT"
+                else trade.entry_slippage_points if event in ("POSITION_SIZED", "ENTRY_OPENED")
+                else (trade.slippage_cost / max(1, (trade.initial_quantity or trade.quantity) + trade.partial_exit_filled_quantity + (trade.final_exit_quantity or 0)) if event == "CLOSED" and trade.slippage_cost is not None else trade.slippage_cost)
+            ),
+            partial_exit_quantity=trade.partial_exit_filled_quantity,
+            final_exit_quantity=trade.final_exit_quantity,
+            transaction_costs=trade.transaction_costs,
+            execution_order_count=trade.execution_order_count,
             structural_stop=trade.underlying_structural_stop, underlying_r=trade.current_r,
             strategy_state=trade.state.value, rejection_or_invalidation_reason=reason,
             management_event=event, exit_reason=trade.exit_reason, realized_r=trade.realized_r,
@@ -724,6 +738,16 @@ class StrategyService:
                 logger.exception("Passive option-chain snapshot capture failed")
 
         if not selected_contract:
+            if is_strategy_a:
+                await self._persist_strategy_a_telemetry(StrategyAEvaluationRecord(
+                    timestamp=features.timestamp.isoformat(),
+                    futures_contract=signal.features_snapshot.get("futures_contract", "UNAVAILABLE"),
+                    completed_candle_timestamp=signal.features_snapshot.get("completed_candle_timestamp", features.timestamp.isoformat()),
+                    trigger=signal.features_snapshot.get("trigger"), structural_stop=signal.structural_stop,
+                    underlying_r=signal.r_points, strategy_state=self.strategy_a.snapshot.state.value,
+                    rejection_or_invalidation_reason=rejection_reason,
+                    management_event="CONTRACT_SELECTION_REJECTED",
+                ))
             await self._log_decision(
                 category="CONTRACT_SELECTION",
                 strategy=signal.strategy.value,
@@ -738,6 +762,21 @@ class StrategyService:
             message=f"Selected {selected_contract.symbol} @ ₹{selected_contract.ask_price} (Cap: ₹{self.config.option_selection.max_option_premium})",
             details=selected_contract.model_dump(mode="json"),
         )
+        if is_strategy_a:
+            await self._persist_strategy_a_telemetry(StrategyAEvaluationRecord(
+                timestamp=features.timestamp.isoformat(),
+                futures_contract=signal.features_snapshot.get("futures_contract", "UNAVAILABLE"),
+                completed_candle_timestamp=signal.features_snapshot.get("completed_candle_timestamp", features.timestamp.isoformat()),
+                trigger=signal.features_snapshot.get("trigger"), structural_stop=signal.structural_stop,
+                underlying_r=signal.r_points, strategy_state=self.strategy_a.snapshot.state.value,
+                option_contract=selected_contract.instrument_id, expiry=selected_contract.expiry,
+                delta=selected_contract.delta, gamma=selected_contract.gamma,
+                delta_source=selected_contract.greek_source,
+                quote_timestamp=selected_contract.quote_timestamp.isoformat() if selected_contract.quote_timestamp else None,
+                quote_freshness_seconds=selected_contract.quote_freshness_seconds,
+                bid=selected_contract.bid_price, ask=selected_contract.ask_price,
+                spread=selected_contract.spread_pct, management_event="CONTRACT_SELECTED",
+            ))
 
         # 11. Position Sizing
         if self._is_strategy_a(signal.strategy):
@@ -758,6 +797,21 @@ class StrategyService:
             )
 
         if lots < 1:
+            if is_strategy_a:
+                await self._persist_strategy_a_telemetry(StrategyAEvaluationRecord(
+                    timestamp=features.timestamp.isoformat(),
+                    futures_contract=signal.features_snapshot.get("futures_contract", "UNAVAILABLE"),
+                    completed_candle_timestamp=signal.features_snapshot.get("completed_candle_timestamp", features.timestamp.isoformat()),
+                    trigger=signal.features_snapshot.get("trigger"), structural_stop=signal.structural_stop,
+                    underlying_r=signal.r_points, strategy_state=self.strategy_a.snapshot.state.value,
+                    option_contract=selected_contract.instrument_id, expiry=selected_contract.expiry,
+                    delta=selected_contract.delta, delta_source=selected_contract.greek_source,
+                    position_size=0, lot_size=selected_contract.lot_size, lots=0,
+                    risk_budget=sizing.risk_budget if is_strategy_a else None,
+                    estimated_option_loss_at_structural_stop=sizing.option_loss_per_lot if is_strategy_a else None,
+                    rejection_or_invalidation_reason=sizing.rejection_reason or "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET",
+                    management_event="SIZING_REJECTED",
+                ))
             await self._log_decision(
                 category="RISK",
                 strategy=signal.strategy.value,
@@ -851,11 +905,13 @@ class StrategyService:
             selected_option_delta_source=selected_contract.greek_source,
             selected_option_gamma=selected_contract.gamma,
             selected_option_gamma_source=selected_contract.greek_source,
-            risk_budget=self.config.risk.account_equity * self.config.risk.risk_per_trade_pct_of_account / 100.0,
-            estimated_option_loss_at_structural_stop=(sizing.option_loss_per_lot * lots if self._is_strategy_a(signal.strategy) else None),
+            risk_budget=sizing.risk_budget if is_strategy_a else None,
+            estimated_option_loss_at_structural_stop=(sizing.option_loss_per_lot * lots if is_strategy_a else None),
         )
 
         await self.repo.save_trade(new_trade)
+        if is_strategy_a:
+            await self._record_strategy_a_lifecycle_event(new_trade, features, "POSITION_SIZED")
         await self._record_execution({
             "trade_id": new_trade.trade_id,
             "side": "BUY",
@@ -870,6 +926,8 @@ class StrategyService:
             "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
             "reason": "PAPER_OR_SHADOW_ENTRY",
         })
+        if is_strategy_a:
+            await self._record_strategy_a_lifecycle_event(new_trade, features, "ENTRY_OPENED")
         self._active_trades_cache.append(new_trade)
 
         await self._log_decision(
@@ -971,14 +1029,81 @@ class StrategyService:
         quote = await self._resolve_option_quote(trade)
         self._apply_quote_to_trade(trade, quote)
         current_option_price = quote.get("ltp") or quote.get("bid")
+        self.position_manager.bull_derivatives_threshold = self._active_overrides.bull_derivatives_score if self._active_overrides.bull_derivatives_score is not None else 2
+        self.position_manager.bear_derivatives_threshold = self._active_overrides.bear_derivatives_score if self._active_overrides.bear_derivatives_score is not None else 2
+
+        if self._is_strategy_a(trade.strategy):
+            quote_valid = quote.get("status") == "VALID" and quote.get("bid") and float(quote["bid"]) > 0
+            current_option_price = round(float(current_option_price), 2) if current_option_price and float(current_option_price) > 0 else None
+            # A prior futures decision is authoritative. Never reevaluate it
+            # merely because an option quote is still unavailable.
+            if trade.pending_exit_reason:
+                if not quote_valid:
+                    await self.repo.save_trade(trade)
+                    return
+                sell_price = max(0.0, round(float(quote["bid"]) - self._paper_slippage(), 2))
+                if sell_price <= 0:
+                    await self.repo.save_trade(trade)
+                    return
+                if trade.mode == AutoTradingMode.LIVE:
+                    trade.option_data_status = "LIVE_TRADING_DISABLED"
+                    await self.repo.save_trade(trade)
+                    return
+                await self._close_trade(trade, features, sell_price, trade.pending_exit_reason, quote=quote)
+                return
+
+            previous_peak_r = trade.peak_r
+            previous_state = trade.state
+            updated_trade, underlying_event = self.position_manager.update_position(
+                trade, current_option_price, features, as_of=features.timestamp
+            )
+            if updated_trade.peak_r >= self.position_manager.strategy_config.trailing_activation_r and previous_peak_r < self.position_manager.strategy_config.trailing_activation_r:
+                await self._record_strategy_a_lifecycle_event(updated_trade, features, "TRAIL_ACTIVATED")
+            if updated_trade.state == TradeLifecycleState.RUNNER_MODE and previous_state != TradeLifecycleState.RUNNER_MODE:
+                await self._record_strategy_a_lifecycle_event(updated_trade, features, "RUNNER_MODE")
+            if underlying_event == "T1_PARTIAL_EXIT":
+                if trade.partial_exit_reason != "T1_REACHED_PARTIAL_EXIT":
+                    await self._record_strategy_a_lifecycle_event(trade, features, "T1_REACHED", "T1_PARTIAL_EXIT")
+                if quote_valid and trade.mode != AutoTradingMode.LIVE:
+                    await self._execute_strategy_a_partial_exit(trade, features, quote)
+                else:
+                    trade.t1_exit_pending = True
+                    await self.repo.save_trade(trade)
+                return
+            if underlying_event == "T1_REACHED_NO_PARTIAL_ONE_LOT":
+                await self._record_strategy_a_lifecycle_event(trade, features, "T1_REACHED", underlying_event)
+                await self.repo.save_trade(trade)
+                return
+            if underlying_event:
+                trade.pending_exit_reason = underlying_event
+                trade.underlying_exit_reason = underlying_event
+                trade.underlying_exit_time = features.timestamp
+                trade.pending_underlying_exit_time = features.timestamp
+                trade.underlying_exit_price = features.futures_price if features.futures_price > 0 else trade.underlying_current_price
+                await self._record_strategy_a_lifecycle_event(trade, features, "UNDERLYING_EXIT_DECIDED", underlying_event)
+                if not quote_valid:
+                    await self._record_strategy_a_lifecycle_event(trade, features, "OPTION_EXIT_PENDING", underlying_event)
+                    await self.repo.save_trade(updated_trade)
+                    return
+                if trade.mode == AutoTradingMode.LIVE:
+                    trade.option_data_status = "LIVE_TRADING_DISABLED"
+                    await self.repo.save_trade(trade)
+                    return
+                sell_price = max(0.0, round(float(quote["bid"]) - self._paper_slippage(), 2))
+                if sell_price <= 0:
+                    await self._record_strategy_a_lifecycle_event(trade, features, "OPTION_EXIT_PENDING", underlying_event)
+                    await self.repo.save_trade(trade)
+                    return
+                await self._close_trade(updated_trade, features, sell_price, underlying_event, quote=quote)
+                return
+            await self.repo.save_trade(updated_trade)
+            return
+
+        # Strategy B preserves its established quote-gated management path.
         if quote.get("status") != "VALID" or not current_option_price or float(current_option_price) <= 0:
-            # A quote gap is an incomplete validation observation, not a
-            # synthetic mark and never an executable exit.
             await self.repo.save_trade(trade)
             return
         current_option_price = round(float(current_option_price), 2)
-        self.position_manager.bull_derivatives_threshold = self._active_overrides.bull_derivatives_score if self._active_overrides.bull_derivatives_score is not None else 2
-        self.position_manager.bear_derivatives_threshold = self._active_overrides.bear_derivatives_score if self._active_overrides.bear_derivatives_score is not None else 2
         updated_trade, exit_reason = self.position_manager.update_position(
             trade, current_option_price, features, as_of=features.timestamp
         )
@@ -990,7 +1115,7 @@ class StrategyService:
                 trade.option_data_status = "LIVE_TRADING_DISABLED"
                 await self.repo.save_trade(trade)
                 return
-            await self._execute_strategy_a_partial_exit(trade, features, float(quote["bid"]), quote)
+            await self._execute_strategy_a_partial_exit(trade, features, quote)
             return
         if exit_reason == "T1_REACHED_NO_PARTIAL_ONE_LOT":
             await self._record_strategy_a_lifecycle_event(trade, features, "T1_REACHED_NO_PARTIAL_ONE_LOT", exit_reason)
@@ -1032,24 +1157,34 @@ class StrategyService:
         self,
         trade: ActiveTrade,
         features: MarketFeatures,
-        price: float,
         quote: dict[str, Any],
     ) -> None:
         quantity = trade.t1_exit_quantity
         if quantity <= 0 or quantity % trade.lot_size != 0:
             raise ValueError("Strategy A partial exit quantity must be a positive whole-lot quantity")
-        trade.partial_exit_filled_quantity += quantity
-        trade.partial_exit_price = round(price, 2)
-        trade.partial_exit_reason = "T1_REACHED_PARTIAL_EXIT"
+        raw_bid = float(quote.get("bid") or 0)
+        slippage = self._paper_slippage()
+        price = max(0.0, round(raw_bid - slippage, 2))
+        if raw_bid <= 0 or price <= 0:
+            trade.t1_exit_pending = True
+            await self.repo.save_trade(trade)
+            return
+        self.position_manager.apply_t1_partial_fill(
+            trade,
+            raw_bid=raw_bid,
+            executable_price=price,
+            slippage_points=slippage,
+            filled_at=features.timestamp,
+        )
         await self._record_execution({
             "trade_id": trade.trade_id,
             "side": "SELL",
             "timestamp": features.timestamp.isoformat(),
-            "raw_bid": quote.get("bid"),
+            "raw_bid": raw_bid,
             "raw_ask": quote.get("ask"),
             "raw_ltp": quote.get("ltp"),
             "executable_price": price,
-            "slippage_points": self._paper_slippage(),
+            "slippage_points": slippage,
             "quantity": quantity,
             "source": quote.get("source", "UNKNOWN"),
             "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
@@ -1063,7 +1198,10 @@ class StrategyService:
         trade.state = TradeLifecycleState.CLOSED
         trade.exit_time = utc_now()
         trade.exit_option_price = price
-        exit_underlying = (features.futures_price if features and features.futures_price > 0 else trade.underlying_current_price or trade.current_spot_price)
+        exit_underlying = (
+            trade.underlying_exit_price
+            or (features.futures_price if features and features.futures_price > 0 else trade.underlying_current_price or trade.current_spot_price)
+        )
         trade.exit_spot_price = exit_underlying
         trade.underlying_exit_price = exit_underlying
         trade.exit_reason = reason
@@ -1073,23 +1211,42 @@ class StrategyService:
             trade.underlying_exit_reason = "OPTION_HARD_STOP_PREEMPTED_UNDERLYING"
             trade.underlying_exit_time = None
         else:
-            trade.underlying_exit_reason = reason
-            trade.underlying_exit_time = trade.exit_time
+            trade.underlying_exit_reason = trade.underlying_exit_reason or reason
+            trade.underlying_exit_time = trade.underlying_exit_time or trade.exit_time
 
         raw_entry = float(trade.entry_raw_ask or trade.entry_option_price)
         raw_exit = float((quote or {}).get("bid") or price)
         partial_quantity = trade.partial_exit_filled_quantity
         partial_price = trade.partial_exit_price or 0.0
-        trade.raw_gross_option_pnl = round((raw_exit - raw_entry) * trade.quantity + (partial_price - raw_entry) * partial_quantity, 2)
-        trade.gross_pnl = round((price - trade.entry_option_price) * trade.quantity + (partial_price - trade.entry_option_price) * partial_quantity, 2)
-        entry_slip = abs(float(trade.entry_executable_price or trade.entry_option_price) - raw_entry)
-        exit_slip = abs(raw_exit - float(price))
-        trade.slippage_cost = round((entry_slip + exit_slip) * trade.quantity, 2)
-        turnover = (float(trade.entry_option_price) + float(price)) * trade.quantity + 2 * float(trade.entry_option_price) * partial_quantity
-        buy_turnover = float(trade.entry_option_price) * (trade.quantity + partial_quantity)
+        partial_raw_price = trade.partial_exit_raw_bid or partial_price
+        original_quantity = trade.initial_quantity or (trade.quantity + partial_quantity)
+        final_quantity = max(0, trade.quantity)
+        trade.final_exit_quantity = final_quantity
+        trade.execution_order_count = 1 + (1 if partial_quantity > 0 else 0) + (1 if final_quantity > 0 else 0)
+        trade.raw_gross_option_pnl = round(
+            (raw_exit - raw_entry) * final_quantity
+            + (partial_raw_price - raw_entry) * partial_quantity,
+            2,
+        )
+        trade.gross_pnl = round(
+            (price - trade.entry_option_price) * final_quantity
+            + (partial_price - trade.entry_option_price) * partial_quantity,
+            2,
+        )
+        entry_slip = abs(float(trade.entry_executable_price or trade.entry_option_price) - raw_entry) * original_quantity
+        partial_slip = (abs(partial_price - float(trade.partial_exit_raw_bid)) * partial_quantity
+                        if partial_quantity and trade.partial_exit_raw_bid else 0.0)
+        final_slip = abs(raw_exit - float(price)) * final_quantity
+        trade.slippage_cost = round(entry_slip + partial_slip + final_slip, 2)
+        turnover = (
+            float(trade.entry_option_price) * original_quantity
+            + partial_price * partial_quantity
+            + float(price) * final_quantity
+        )
+        buy_turnover = float(trade.entry_option_price) * original_quantity
         sell_turnover = float(price) * trade.quantity + float(partial_price) * partial_quantity
         r = self.config.risk
-        trade.brokerage = round(2 * r.paper_brokerage_per_order, 2)
+        trade.brokerage = round(trade.execution_order_count * r.paper_brokerage_per_order, 2)
         trade.exchange_charges = round(turnover * r.paper_exchange_charge_rate, 2)
         trade.stt = round(sell_turnover * r.paper_stt_sell_rate, 2)
         trade.sebi_charges = round(turnover * r.paper_sebi_charge_rate, 2)
@@ -1102,7 +1259,22 @@ class StrategyService:
         trade.net_pnl = round(trade.gross_pnl - trade.transaction_costs, 2)
         trade.return_on_premium_pct = round((trade.net_pnl / buy_turnover) * 100, 4) if buy_turnover else None
         trade.cost_assumption_version = r.paper_cost_assumption_version
-        trade.realized_r = trade.current_r
+        underlying_entry = trade.underlying_entry_price or trade.entry_spot_price
+        risk_points = trade.underlying_r or trade.initial_r_points
+        exits: list[tuple[int, float]] = []
+        if partial_quantity and trade.t1_decision_underlying_price:
+            exits.append((partial_quantity, trade.t1_decision_underlying_price))
+            trade.t1_realized_r = underlying_r_for_price(
+                trade.direction, underlying_entry, risk_points, trade.t1_decision_underlying_price
+            )
+        if final_quantity and exit_underlying:
+            exits.append((final_quantity, exit_underlying))
+            trade.runner_realized_r = underlying_r_for_price(
+                trade.direction, underlying_entry, risk_points, exit_underlying
+            )
+        trade.realized_r = calculate_realized_trade_r(
+            trade.direction, underlying_entry, risk_points, original_quantity, exits
+        )
         if trade.gross_pnl < 0:
             self._last_loss_exit_time = trade.exit_time
         self.strategy_a.on_exit(trade.direction, trade.exit_time)
@@ -1110,6 +1282,8 @@ class StrategyService:
         self._active_trades_cache = [t for t in self._active_trades_cache if t.trade_id != trade.trade_id]
         await self._save_runtime()
         await self.repo.save_trade(trade)
+        if self._is_strategy_a(trade.strategy):
+            await self._record_strategy_a_lifecycle_event(trade, features, "CLOSED", reason)
         await self._record_execution({
             "trade_id": trade.trade_id,
             "side": "SELL",
@@ -1119,7 +1293,7 @@ class StrategyService:
             "raw_ltp": (quote or {}).get("ltp"),
             "executable_price": price,
             "slippage_points": self._paper_slippage(),
-            "quantity": trade.quantity,
+            "quantity": final_quantity,
             "source": (quote or {}).get("source", "UNKNOWN"),
             "cost_assumption_version": r.paper_cost_assumption_version,
             "reason": reason,

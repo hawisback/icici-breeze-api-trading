@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 from datetime import datetime, timedelta, timezone
 
 from services.strategy.models import (
@@ -39,6 +39,36 @@ class StructuralRiskEstimate:
     quantity: int
     method: str
     rejection_reason: str | None = None
+
+
+def underlying_r_for_price(
+    direction: TradeDirection,
+    entry_price: float,
+    risk_points: float,
+    exit_price: float,
+) -> float:
+    """Return the underlying R multiple for one completed exit fill."""
+    if entry_price <= 0 or risk_points <= 0 or exit_price <= 0:
+        return 0.0
+    favorable = exit_price - entry_price if direction == TradeDirection.BULLISH else entry_price - exit_price
+    return round(favorable / risk_points, 6)
+
+
+def calculate_realized_trade_r(
+    direction: TradeDirection,
+    entry_price: float,
+    risk_points: float,
+    original_quantity: int,
+    exits: Sequence[tuple[int, float]],
+) -> float:
+    """Calculate weighted underlying R across all executed exit quantities."""
+    if original_quantity <= 0:
+        return 0.0
+    weighted = sum(
+        quantity * underlying_r_for_price(direction, entry_price, risk_points, price)
+        for quantity, price in exits if quantity > 0
+    )
+    return round(weighted / original_quantity, 4)
 
 
 class UnderlyingRiskSizer:
@@ -114,7 +144,7 @@ class PositionManager:
         self,
         trade: ActiveTrade,
         current_underlying_price: float,
-        current_option_price: float,
+        current_option_price: float | None,
         as_of=None,
     ) -> tuple[ActiveTrade, Optional[str]]:
         """Manage Strategy A from futures structural R only."""
@@ -125,7 +155,9 @@ class PositionManager:
         trade.underlying_entry_price = entry_price
         trade.underlying_current_price = current_underlying_price
         trade.current_spot_price = current_underlying_price
-        trade.current_option_price = current_option_price
+        option_price = float(current_option_price or 0.0)
+        if option_price > 0:
+            trade.current_option_price = option_price
         trade.current_r = round(
             (current_underlying_price - entry_price) / initial_r
             if trade.direction == TradeDirection.BULLISH
@@ -133,10 +165,11 @@ class PositionManager:
             4,
         )
         trade.peak_r = max(trade.peak_r, trade.current_r)
-        trade.unrealized_pnl = round((current_option_price - trade.entry_option_price) * trade.quantity, 2)
+        if option_price > 0:
+            trade.unrealized_pnl = round((option_price - trade.entry_option_price) * trade.quantity, 2)
         if as_of is not None and self.is_strategy_a_force_exit_time(as_of):
             return trade, "SESSION_FORCE_SQUARE_OFF_1515"
-        if current_option_price > 0 and current_option_price <= trade.option_hard_stop_price:
+        if option_price > 0 and option_price <= trade.option_hard_stop_price:
             return trade, "OPTION_EMERGENCY_STOP"
 
         # The protective stop is monotonic.  Before activation it is the
@@ -172,19 +205,55 @@ class PositionManager:
             original_lots = max(1, original_quantity // trade.lot_size)
             partial_lots = original_lots // 2
             if partial_lots < 1:
-                trade.remaining_quantity = trade.quantity
+                trade.remaining_quantity = original_quantity
                 trade.partial_exit_reason = "T1_REACHED_NO_PARTIAL_ONE_LOT"
                 return trade, "T1_REACHED_NO_PARTIAL_ONE_LOT"
             partial_quantity = partial_lots * trade.lot_size
             trade.t1_exit_quantity = partial_quantity
-            trade.remaining_quantity = trade.quantity - partial_quantity
-            trade.quantity = trade.remaining_quantity
-            trade.lots = trade.remaining_quantity // trade.lot_size
+            trade.remaining_quantity = original_quantity - trade.partial_exit_filled_quantity
+            trade.t1_exit_pending = True
+            trade.t1_decision_underlying_price = current_underlying_price
+            trade.t1_decision_r = trade.current_r
             trade.partial_exit_reason = "T1_PARTIAL_EXIT"
+            return trade, "T1_PARTIAL_EXIT"
+        if trade.t1_exit_pending and trade.t1_exit_quantity > trade.partial_exit_filled_quantity:
             return trade, "T1_PARTIAL_EXIT"
         if trade.peak_r >= self.strategy_config.runner_target_reference_r:
             trade.state = TradeLifecycleState.RUNNER_MODE
         return trade, None
+
+    def apply_t1_partial_fill(
+        self,
+        trade: ActiveTrade,
+        *,
+        raw_bid: float,
+        executable_price: float,
+        slippage_points: float,
+        filled_at: datetime,
+    ) -> ActiveTrade:
+        """Apply a confirmed T1 option fill; the decision itself never mutates quantity."""
+        quantity = trade.t1_exit_quantity
+        original_quantity = trade.initial_quantity or trade.quantity
+        if quantity <= 0 or quantity % trade.lot_size != 0:
+            raise ValueError("Strategy A partial exit quantity must be a positive whole-lot quantity")
+        if trade.partial_exit_filled_quantity + quantity > original_quantity:
+            raise ValueError("Strategy A partial exit exceeds original quantity")
+        if raw_bid <= 0 or executable_price <= 0:
+            raise ValueError("Strategy A partial exit requires a valid executable bid")
+        if trade.partial_exit_filled_quantity > 0:
+            return trade
+        trade.partial_exit_filled_quantity = quantity
+        trade.partial_exit_raw_bid = round(raw_bid, 2)
+        trade.partial_exit_price = round(executable_price, 2)
+        trade.partial_exit_slippage_points = round(slippage_points, 4)
+        trade.partial_exit_time = filled_at
+        trade.partial_exit_reason = "T1_REACHED_PARTIAL_EXIT"
+        trade.t1_exit_pending = False
+        trade.remaining_quantity = original_quantity - quantity
+        trade.quantity = trade.remaining_quantity
+        trade.lots = trade.remaining_quantity // trade.lot_size
+        trade.t1_realized_r = trade.t1_decision_r
+        return trade
 
     def calculate_position_size(
         self,
@@ -324,7 +393,7 @@ class PositionManager:
     def update_position(
         self,
         trade: ActiveTrade,
-        current_option_price: float,
+        current_option_price: float | None,
         features: MarketFeatures,
         as_of=None,
     ) -> tuple[ActiveTrade, Optional[str]]:
@@ -342,7 +411,8 @@ class PositionManager:
         trade.current_option_price = current_option_price
 
         # Update PnL
-        unrealized = (current_option_price - trade.entry_option_price) * trade.quantity
+        option_price = float(current_option_price or 0.0)
+        unrealized = (option_price - trade.entry_option_price) * trade.quantity
         trade.unrealized_pnl = round(unrealized, 2)
 
         # 1. R Multiple tracking
@@ -404,7 +474,7 @@ class PositionManager:
                     trade.consecutive_inside_box_closes = 0
 
         # 3. Check Emergency Option Hard Stop (-25% default) — only when option price is valid
-        if current_option_price > 0 and current_option_price <= trade.option_hard_stop_price:
+        if option_price > 0 and option_price <= trade.option_hard_stop_price:
             return trade, f"OPTION_HARD_STOP_HIT (LTP {current_option_price} <= SL {trade.option_hard_stop_price})"
 
         # 4. Check Structural Spot Stop — only when spot price is valid (not 0 / stale)

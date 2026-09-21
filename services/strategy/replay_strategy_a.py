@@ -9,9 +9,9 @@ from typing import Any, Iterable, Sequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from libs.contracts.models import Candle
-from services.strategy.futures_signal import completed_futures_candles
+from services.strategy.futures_signal import canonical_active_futures_stream, completed_futures_candles
 from services.strategy.models import ActiveTrade, AutoTradingMode, OptionType, StrategyName, StrategySignal, StrategyTunablesConfig, TradeDirection, TradeLifecycleState
-from services.strategy.position_manager import PositionManager
+from services.strategy.position_manager import PositionManager, calculate_realized_trade_r
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 
 
@@ -70,7 +70,7 @@ class StrategyAReplayEngine:
             strategy=StrategyName.TREND_PULLBACK, direction=signal.direction,
             option_type=signal.option_type, contract_symbol="UNDERLYING-REPLAY",
             contract_instrument_id=signal.features_snapshot.get("futures_contract", "UNKNOWN"),
-            expiry="REPLAY", strike=0.0, quantity=1, lot_size=1, lots=1,
+            expiry="REPLAY", strike=0.0, quantity=2, lot_size=1, lots=2,
             entry_time=signal.timestamp, entry_option_price=100.0,
             entry_spot_price=entry, initial_structural_stop=signal.structural_stop,
             initial_r_points=signal.r_points, current_option_price=100.0,
@@ -79,7 +79,7 @@ class StrategyAReplayEngine:
             futures_contract_id=signal.features_snapshot.get("futures_contract"),
             underlying_entry_price=entry, underlying_current_price=entry,
             underlying_structural_stop=signal.structural_stop, underlying_r=signal.r_points,
-            initial_quantity=1, remaining_quantity=1,
+            initial_quantity=2, remaining_quantity=2,
         )
 
     @staticmethod
@@ -91,8 +91,21 @@ class StrategyAReplayEngine:
             drawdown = max(drawdown, peak - equity)
         return round(drawdown, 4)
 
+    @staticmethod
+    def _realized_r(trade: ActiveTrade, final_price: float) -> float:
+        entry = trade.underlying_entry_price or trade.entry_spot_price
+        risk = trade.underlying_r or trade.initial_r_points
+        exits: list[tuple[int, float]] = []
+        if trade.partial_exit_filled_quantity and trade.t1_decision_underlying_price:
+            exits.append((trade.partial_exit_filled_quantity, trade.t1_decision_underlying_price))
+        if trade.quantity > 0:
+            exits.append((trade.quantity, final_price))
+        return calculate_realized_trade_r(
+            trade.direction, entry, risk, trade.initial_quantity or trade.quantity, exits
+        )
+
     def replay(self, futures_candles: Sequence[Candle]) -> StrategyAReplayReport:
-        bars = completed_futures_candles(futures_candles, interval="15m")
+        bars = canonical_active_futures_stream(futures_candles, interval="15m")
         if not bars:
             bars = completed_futures_candles(futures_candles, interval="5m")
         strategy = TrendPullbackStrategy(config=self.config)
@@ -144,22 +157,25 @@ class StrategyAReplayEngine:
                 # a favorable excursion are present, resolve the stop first.
                 if stop_hit:
                     exit_price = bar.open if ((bar.open <= stop) if active_trade.direction is TradeDirection.BULLISH else (bar.open >= stop)) else stop
-                    r_value = ((exit_price - active_trade.underlying_entry_price) if active_trade.direction is TradeDirection.BULLISH else (active_trade.underlying_entry_price - exit_price)) / active_trade.initial_r_points
-                    r_results.append(round(r_value, 4))
+                    r_results.append(self._realized_r(active_trade, exit_price))
                     exit_reasons["UNDERLYING_TRAILING_STOP" if active_trade.peak_r >= self.config.trailing_activation_r else "UNDERLYING_STRUCTURAL_STOP"] += 1
                     strategy.on_exit(active_trade.direction, bar.end_time)
                     active_trade = None
                 else:
                     if favorable_hit:
-                        manager.update_strategy_a_position(active_trade, favorable, 100.0, as_of=bar.end_time)
+                        _, favorable_reason = manager.update_strategy_a_position(active_trade, favorable, 100.0, as_of=bar.end_time)
+                        if favorable_reason == "T1_PARTIAL_EXIT":
+                            manager.apply_t1_partial_fill(active_trade, raw_bid=100.0, executable_price=100.0, slippage_points=0.0, filled_at=bar.end_time)
                     _, reason = manager.update_strategy_a_position(active_trade, bar.close, 100.0, as_of=bar.end_time)
+                    if reason == "T1_PARTIAL_EXIT":
+                        manager.apply_t1_partial_fill(active_trade, raw_bid=100.0, executable_price=100.0, slippage_points=0.0, filled_at=bar.end_time)
+                        _, reason = manager.update_strategy_a_position(active_trade, bar.close, 100.0, as_of=bar.end_time)
                     if reason and reason.startswith("SESSION_FORCE_SQUARE_OFF"):
                         exit_price = bar.close
-                        r_value = ((exit_price - active_trade.underlying_entry_price) if active_trade.direction is TradeDirection.BULLISH else (active_trade.underlying_entry_price - exit_price)) / active_trade.initial_r_points
-                        r_results.append(round(r_value, 4)); exit_reasons[reason] += 1
+                        r_results.append(self._realized_r(active_trade, exit_price)); exit_reasons[reason] += 1
                         strategy.on_exit(active_trade.direction, bar.end_time); active_trade = None
                     elif reason in {"UNDERLYING_STRUCTURAL_STOP", "UNDERLYING_TRAILING_STOP"}:
-                        r_results.append(round(active_trade.current_r, 4)); exit_reasons[reason] += 1
+                        r_results.append(self._realized_r(active_trade, bar.close)); exit_reasons[reason] += 1
                         strategy.on_exit(active_trade.direction, bar.end_time); active_trade = None
             setup = strategy.snapshot.setup
             decisions.append(ReplayDecision(

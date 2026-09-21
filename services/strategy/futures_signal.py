@@ -124,6 +124,31 @@ class FuturesContractResolver:
         return [c for c in _ordered(candles) if c.instrument_id == instrument_id]
 
 
+def canonical_active_futures_stream(
+    candles: Iterable[Candle], *, as_of: datetime | None = None, interval: str = "15m"
+) -> list[Candle]:
+    """Return one active completed futures candle per timestamp.
+
+    Contract selection is performed at each candle timestamp using the same
+    nearest non-expired policy as runtime metadata resolution.  This prevents
+    overlapping near/next-month inputs from alternating contract IDs during
+    replay or feature construction.
+    """
+    completed = completed_futures_candles(candles, as_of=as_of, interval=interval)
+    by_timestamp: dict[datetime, list[Candle]] = {}
+    for candle in completed:
+        by_timestamp.setdefault(candle.end_time, []).append(candle)
+    resolver = FuturesContractResolver()
+    result: list[Candle] = []
+    for timestamp in sorted(by_timestamp):
+        candidates = by_timestamp[timestamp]
+        selected_id = resolver.resolve(candidates, as_of=timestamp)
+        selected = [c for c in _ordered(candidates) if c.instrument_id == selected_id]
+        if selected:
+            result.append(selected[0])
+    return result
+
+
 def resolve_active_futures_instrument(instruments: Iterable[object], *, as_of: datetime) -> str | None:
     """Resolve the same nearest non-expired contract policy from instrument metadata."""
     _aware(as_of, "as_of")
@@ -149,10 +174,7 @@ def resolve_completed_futures_contract(
     candles: Iterable[Candle], *, as_of: datetime, interval: str = "15m"
 ) -> list[Candle]:
     """Canonical completed-bar contract selection shared by runtime and replay."""
-    completed = completed_futures_candles(candles, as_of=as_of, interval=interval)
-    if not completed:
-        return []
-    return FuturesContractResolver().select(completed, as_of=as_of)
+    return canonical_active_futures_stream(candles, as_of=as_of, interval=interval)
 
 
 class ConfirmedPivot(BaseModel):
@@ -304,14 +326,9 @@ class FuturesFeatureEngine:
 
     @classmethod
     def build(cls, candles: Sequence[Candle], *, as_of: datetime | None = None) -> FuturesFeatureSnapshot:
-        bars = completed_futures_candles(candles, as_of=as_of, interval="15m")
+        bars = canonical_active_futures_stream(candles, as_of=as_of, interval="15m")
         if not bars:
             raise ValueError("at least one completed 15m futures candle is required")
-        selection_time = as_of or bars[-1].end_time
-        bars = FuturesContractResolver().select(bars, as_of=selection_time)
-        contracts = {bar.instrument_id for bar in bars}
-        if len(contracts) != 1:
-            raise ValueError("Strategy A feature calculation cannot splice futures contracts")
         last = bars[-1]
         pivots = [p for p in cls.confirmed_pivots(bars) if p.confirmed_at <= last.end_time]
         supports = [p.price for p in pivots if p.kind == "SUPPORT" and p.price <= last.close]

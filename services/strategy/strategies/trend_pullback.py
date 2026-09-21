@@ -18,6 +18,7 @@ from services.strategy.futures_signal import (
     FuturesFeatureEngine,
     FuturesFeatureSnapshot,
     aggregate_completed_15m,
+    canonical_active_futures_stream,
     completed_futures_candles,
     resolve_completed_futures_contract,
 )
@@ -139,10 +140,10 @@ class TrendPullbackStrategy:
         selection_time = as_of or (max(c.end_time for c in futures_candles) if futures_candles else None)
         if selection_time is None:
             raise ValueError("no futures timestamp available")
-        raw = resolve_completed_futures_contract(futures_candles, as_of=selection_time, interval="15m")
+        raw = canonical_active_futures_stream(futures_candles, as_of=selection_time, interval="15m")
         if not raw:
             raw = aggregate_completed_15m(futures_candles, as_of=as_of)
-            raw = resolve_completed_futures_contract(raw, as_of=selection_time, interval="15m") if raw else []
+            raw = canonical_active_futures_stream(raw, as_of=selection_time, interval="15m") if raw else []
         if not raw:
             raise ValueError("no completed futures 15m candles")
         return raw, FuturesFeatureEngine.build(raw, as_of=as_of)
