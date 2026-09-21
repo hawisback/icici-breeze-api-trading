@@ -52,5 +52,6 @@ the original matrix:
 | Confirmation body/close-location/zero-range/1.50 ATR boundaries | `::test_phase8_confirmation_exact_body_close_location_zero_range_and_range_boundaries`; `test_strategy_a_review_fixes.py::test_phase8_confirmation_matrix` |
 | S/R, pivot/confluence and outside-zone cases | `::test_phase8_confluence_explicit_ema_vwap_sr_and_pivot_confirmation_cases`; `test_strategy_a_review_fixes.py::test_phase8_confluence_and_structural_stop_use_confirmed_extremes_and_room` |
 | Structural-R 0.80/1.50 and room 1.50R boundaries; pivot confirmation; duplicate/session lifecycle | `::test_phase8_structural_r_and_opposing_room_exact_boundaries`; `::test_phase8_pivot_confirmation_trigger_duplicate_and_session_boundaries_are_explicit` |
+| Trigger validity first/second bar, gap/open fill, expiry and chase boundaries | `::test_phase8_trigger_validity_gap_fill_two_bars_expiry_and_chase_boundaries` |
 | Lifecycle telemetry and full summary metrics | `::test_strategy_a_telemetry_summary_counts_selection_sizing_execution_and_discrepancies`; `test_strategy_a_review_fixes.py::test_telemetry_comparison_is_exact_and_restart_persistence_shape_is_structured` |
 | Strategy A LIVE remains blocked | `test_strategy_a_review_fixes.py::test_live_safety_has_no_strategy_a_order_path_in_review_fixes`; `tests/test_live_gate.py` |

@@ -8,7 +8,7 @@ from libs.contracts.models import Candle
 from services.strategy.futures_signal import canonical_active_futures_stream, FuturesFeatureEngine, FuturesFeatureSnapshot
 from services.strategy.models import (
     ActiveTrade, AutoTradingMode, MarketFeatures, OptionType, StrategyDirection,
-    StrategyName, StrategyTunablesConfig, TradeDirection, TradeLifecycleState,
+    StrategyName, StrategyState, StrategyStateSnapshot, StrategySetup, StrategyTunablesConfig, TradeDirection, TradeLifecycleState,
 )
 from services.strategy.position_manager import PositionManager, calculate_realized_trade_r
 from services.strategy.replay_strategy_a import StrategyAReplayEngine
@@ -195,6 +195,8 @@ def test_phase8_confirmation_exact_body_close_location_zero_range_and_range_boun
     base = dict(contract_id="FUT", candle_timestamp=datetime(2026, 9, 21, 10, 0, tzinfo=UTC), candle_start=datetime(2026, 9, 21, 9, 45, tzinfo=UTC), open=100, high=104, low=94, close=104, ema20=100, ema50=90, adx14=30, plus_di14=30, minus_di14=10, atr14=10, session_vwap=100, bar_index=10)
     assert strategy._confirmation_ok(FuturesFeatureSnapshot(**base), StrategyDirection.CALL)[0]
     assert not strategy._confirmation_ok(FuturesFeatureSnapshot(**{**base, "close": 103.99}), StrategyDirection.CALL)[0]
+    assert not strategy._confirmation_ok(FuturesFeatureSnapshot(**{**base, "high": 115, "low": 100, "open": 104, "close": 110}), StrategyDirection.CALL)[0]
+    assert strategy._confirmation_ok(FuturesFeatureSnapshot(**{**base, "high": 115, "low": 100, "open": 104.5, "close": 110.5}), StrategyDirection.CALL)[0]
     assert not strategy._confirmation_ok(FuturesFeatureSnapshot(**{**base, "high": 100, "low": 100, "close": 100}), StrategyDirection.CALL)[0]
     assert strategy._confirmation_ok(FuturesFeatureSnapshot(**{**base, "high": 115, "low": 100, "close": 115}), StrategyDirection.CALL)[0]
     assert not strategy._confirmation_ok(FuturesFeatureSnapshot(**{**base, "high": 115.01, "low": 100, "close": 115.01}), StrategyDirection.CALL)[0]
@@ -204,6 +206,7 @@ def test_phase8_confluence_explicit_ema_vwap_sr_and_pivot_confirmation_cases():
     strategy = TrendPullbackStrategy()
     base = dict(contract_id="FUT", candle_timestamp=datetime(2026, 9, 21, 10, 0, tzinfo=UTC), candle_start=datetime(2026, 9, 21, 9, 45, tzinfo=UTC), open=100, high=110, low=100, close=100, ema20=100, ema50=90, adx14=30, plus_di14=30, minus_di14=10, atr14=10, session_vwap=100, support=100, bar_index=10)
     assert strategy._confluence(FuturesFeatureSnapshot(**base), StrategyDirection.CALL)[0]
+    assert strategy._confluence(FuturesFeatureSnapshot(**{**base, "session_vwap": 120}), StrategyDirection.CALL)[0]  # EMA20 only
     assert strategy._confluence(FuturesFeatureSnapshot(**{**base, "ema20": 120}), StrategyDirection.CALL)[0]
     assert strategy._confluence(FuturesFeatureSnapshot(**{**base, "ema20": 120, "session_vwap": 120}), StrategyDirection.CALL)[0] is False
     assert strategy._confluence(FuturesFeatureSnapshot(**{**base, "support": None}), StrategyDirection.CALL)[3] == "NO_CONFIRMED_SR"
@@ -240,6 +243,42 @@ def test_phase8_pivot_confirmation_trigger_duplicate_and_session_boundaries_are_
     assert not strategy._entry_allowed(datetime(2026, 9, 21, 14, 46, tzinfo=IST), None)
     assert not strategy._forced_exit(datetime(2026, 9, 21, 15, 14, tzinfo=IST))
     assert strategy._forced_exit(datetime(2026, 9, 21, 15, 15, tzinfo=IST))
+
+
+def test_phase8_trigger_validity_gap_fill_two_bars_expiry_and_chase_boundaries():
+    setup_time = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    setup = StrategySetup(direction=StrategyDirection.CALL, setup_timestamp=setup_time,
+                          confirmation_bar_timestamp=setup_time, confirmation_high=100,
+                          confirmation_low=95, trigger_price=100, structural_stop=90,
+                          initial_underlying_r=10, relevant_support_resistance_level=95,
+                          confluence_references=("CONFIRMED_SR",),
+                          setup_expiry_timestamp=setup_time + timedelta(minutes=30), setup_expiry_bar_index=2)
+
+    def run(feature):
+        strategy = TrendPullbackStrategy()
+        strategy.snapshot = StrategyStateSnapshot().transition(StrategyState.SETUP, setup=setup)
+        strategy.active_contract_id = feature.contract_id
+        strategy._features_for_input = lambda *_args, **_kwargs: ([Candle(instrument_id=feature.contract_id, interval="15m", start_time=feature.candle_start, end_time=feature.candle_timestamp, open=feature.open, high=feature.high, low=feature.low, close=feature.close, volume=100, source="BREEZE")], feature)
+        signal = strategy.evaluate(SimpleNamespace(timestamp=feature.candle_timestamp), [], [], futures_candles=[])
+        return strategy, signal
+
+    base = dict(contract_id="NIFTY-FUT-2026-09-24", candle_timestamp=setup_time + timedelta(minutes=15), candle_start=setup_time, open=99, high=99, low=95, close=98, ema20=100, ema50=90, adx14=30, plus_di14=30, minus_di14=10, atr14=10, session_vwap=100, bar_index=1)
+    strategy, signal = run(FuturesFeatureSnapshot(**{**base, "high": 100}))
+    assert signal is not None and signal.underlying_entry_price == 100 and strategy.last_event.reason == "TRIGGER_CROSSED"
+    _, gap_signal = run(FuturesFeatureSnapshot(**{**base, "open": 102, "high": 103}))
+    assert gap_signal is not None and gap_signal.underlying_entry_price == 102
+    first, first_signal = run(FuturesFeatureSnapshot(**{**base, "bar_index": 1}))
+    assert first_signal is None
+    first.snapshot = first.snapshot.transition(StrategyState.ARMED) if first.snapshot.state is StrategyState.SETUP else first.snapshot
+    first._features_for_input = lambda *_args, **_kwargs: ([Candle(instrument_id=base["contract_id"], interval="15m", start_time=setup_time + timedelta(minutes=15), end_time=setup_time + timedelta(minutes=30), open=99, high=100, low=95, close=98, volume=100, source="BREEZE")], FuturesFeatureSnapshot(**{**base, "candle_timestamp": setup_time + timedelta(minutes=30), "candle_start": setup_time + timedelta(minutes=15), "bar_index": 2, "high": 100}))
+    second_signal = first.evaluate(SimpleNamespace(timestamp=setup_time + timedelta(minutes=30)), [], [], futures_candles=[])
+    assert second_signal is not None
+    expired, expired_signal = run(FuturesFeatureSnapshot(**{**base, "bar_index": 3}))
+    assert expired_signal is None and expired.last_event.event == "EXPIRED"
+    _, exact_chase = run(FuturesFeatureSnapshot(**{**base, "open": 102.5, "high": 103}))
+    assert exact_chase is not None
+    _, too_much_chase = run(FuturesFeatureSnapshot(**{**base, "open": 102.51, "high": 103}))
+    assert too_much_chase is None
 
 
 def test_strategy_a_telemetry_summary_counts_selection_sizing_execution_and_discrepancies():
