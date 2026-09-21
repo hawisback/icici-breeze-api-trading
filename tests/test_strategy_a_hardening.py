@@ -720,3 +720,27 @@ async def test_real_service_success_persists_trade_before_confirming_entered():
     assert service.strategy_a.last_event.reason == "OPTION_EXECUTION_CONFIRMED"
     assert repo.save_runtime.await_count >= 2
 
+
+
+@pytest.mark.asyncio
+async def test_gather_features_requests_authoritative_15m_futures_bars():
+    service = _service(None)
+    future = SimpleNamespace(
+        instrument_id="INST-NIFTY-FUT-2026-09-29",
+        segment="FUTURES",
+        tradable=True,
+        expiry="2026-09-29",
+    )
+    service.chain_svc = SimpleNamespace(
+        inst_svc=SimpleNamespace(
+            ensure_current_nifty_futures=AsyncMock(return_value=[]),
+            repo=SimpleNamespace(search=AsyncMock(return_value=[future])),
+        ),
+        broker_gateway=SimpleNamespace(active_broker_name="breeze"),
+    )
+    service._get_recent_candles = AsyncMock(return_value=[])
+    service._get_option_chain = AsyncMock(return_value={"source": "UNAVAILABLE", "strikes": []})
+    await service._gather_features()
+    calls = service._get_recent_candles.await_args_list
+    assert call("15m", "INST-NIFTY-FUT-2026-09-29") in calls
+    assert call("5m", "INST-NIFTY-FUT-2026-09-29") not in calls

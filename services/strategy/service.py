@@ -1448,14 +1448,27 @@ class StrategyService:
             if callable(ensure_futures):
                 await ensure_futures()
             instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
+            futures_instruments = [item for item in instruments if getattr(item, "segment", None) == "FUTURES"]
+            logger.info(
+                "Strategy A futures metadata: total_nifty=%d futures=%d ids=%s",
+                len(instruments), len(futures_instruments),
+                [getattr(item, "instrument_id", None) for item in futures_instruments],
+            )
             active_instrument = resolve_active_futures_instrument(instruments, as_of=utc_now())
             if active_instrument:
-                futures = await self._get_recent_candles("5m", active_instrument)
+                logger.info("Strategy A resolved active futures instrument: %s", active_instrument)
+                futures = await self._get_recent_candles("15m", active_instrument)
+                logger.info(
+                    "Strategy A futures history: instrument=%s interval=15m candles=%d",
+                    active_instrument, len(futures),
+                )
             elif getattr(getattr(self.chain_svc, "broker_gateway", None), "active_broker_name", None) == "kite":
                 # The local instrument seed contains spot/options only. Kite's
                 # adapter resolves this virtual ID to the nearest NIFTY future
                 # from the live NFO instrument master.
-                futures = await self._get_recent_candles("5m", "INST-NIFTY-FUT-NEAREST")
+                logger.info("Strategy A resolving nearest Kite NIFTY futures instrument")
+                futures = await self._get_recent_candles("15m", "INST-NIFTY-FUT-NEAREST")
+                logger.info("Strategy A futures history: instrument=INST-NIFTY-FUT-NEAREST interval=15m candles=%d", len(futures))
         self._market_snapshot = (candles_5m, candles_15m, futures)
         chain = await self._get_option_chain()
         spot = candles_5m[-1].close if candles_5m else 0.0
