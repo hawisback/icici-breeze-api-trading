@@ -4,6 +4,7 @@ Enables full-session backtesting and walk-forward replay against historical cand
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 import logging
 import math
@@ -307,50 +308,76 @@ class SimulationEngine:
         source_diagnostics: dict[str, Any],
         role: str,
     ) -> tuple[list[Candle], list[Candle]]:
-        """Retrieves warm-up candles and session candles for the given date.
-        
-        Returns:
-            (warmup_candles, session_candles)
+        """Load a deterministic replay window for one instrument.
+
+        Cache is read directly first, then the broker is asked for the exact
+        requested historical window.  This avoids the previous bug where a
+        replay for an old date refreshed only "the last 7 days from now".
         """
-        # Parse date in IST
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         session_start_ist = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST)
         session_end_ist = datetime(target_date.year, target_date.month, target_date.day, 15, 30, tzinfo=IST)
-
         session_start_utc = session_start_ist.astimezone(timezone.utc)
         session_end_utc = session_end_ist.astimezone(timezone.utc)
-        warmup_start_utc = session_start_utc - timedelta(days=7)  # enough real 15m bars to initialize EMA50
+        warmup_start_utc = session_start_utc - timedelta(days=7)
+        fetch_end_utc = min(utc_now(), session_end_utc)
 
         all_candles: list[Candle] = []
-
-        # 1. Try fetching from HistoricalService / Breeze
-        if self.hist_svc:
+        fetched_count = 0
+        if self.hist_svc and hasattr(self.hist_svc, "repo"):
             try:
-                # If breeze is available, proactively fetch to refresh cache
-                if (
-                    getattr(self.hist_svc, "broker_gateway", None)
-                    and historical_source in (HistoricalReplaySource.BREEZE, HistoricalReplaySource.MIXED)
-                ):
-                    await self.hist_svc.fetch_candles_from_breeze(instrument_id, interval="5m", days_back=7)
+                cached = await self.hist_svc.repo.get_candles(
+                    instrument_id,
+                    "5m",
+                    start_time=warmup_start_utc,
+                    end_time=session_end_utc,
+                    limit=2000,
+                )
+                all_candles.extend(cached)
+            except Exception as exc:
+                logger.warning("Replay cache query failed for %s: %s", instrument_id, exc)
 
+            targeted_fetch = getattr(self.hist_svc, "fetch_candles_from_provider_window", None)
+            if callable(targeted_fetch) and fetch_end_utc >= warmup_start_utc:
+                try:
+                    fetched = await targeted_fetch(
+                        instrument_id,
+                        interval="5m",
+                        start_time=warmup_start_utc,
+                        end_time=fetch_end_utc,
+                        requested_source=historical_source.value,
+                    )
+                    fetched_count = len(fetched)
+                    all_candles.extend(fetched)
+                except Exception as exc:
+                    logger.warning(
+                        "Targeted replay historical fetch failed for %s on %s: %s",
+                        instrument_id, date_str, exc,
+                    )
+        elif self.hist_svc:
+            # Compatibility path for isolated test doubles without a repository.
+            try:
                 candles = await self.hist_svc.get_candles(
                     instrument_id=instrument_id,
                     interval="5m",
                     start_time=warmup_start_utc,
                     end_time=session_end_utc,
-                    limit=1000,
+                    limit=2000,
                     requested_source=historical_source.value,
                     allow_provider_fallback=False,
                     allow_synthetic_fallback=False,
                 )
-                if candles:
-                    all_candles = sorted(
-                        (c for c in candles if c.source in ("BREEZE", "KITE", "LIVE")
-                         and c.end_time <= min(utc_now(), session_end_utc)),
-                        key=lambda c: c.start_time,
-                    )
-            except Exception as ex:
-                logger.warning("Historical service query error: %s", ex)
+                all_candles.extend(candles)
+            except Exception as exc:
+                logger.warning("Historical service query error: %s", exc)
+
+        # De-duplicate cached/fetched copies by source and start time.
+        deduped = {
+            (c.source, c.start_time): c
+            for c in all_candles
+            if c.source in {"BREEZE", "KITE", "LIVE"} and c.end_time <= fetch_end_utc
+        }
+        all_candles = sorted(deduped.values(), key=lambda c: c.start_time)
 
         available_counts: dict[str, int] = {}
         for candle in all_candles:
@@ -366,25 +393,63 @@ class SimulationEngine:
             selected_counts[candle.source] = selected_counts.get(candle.source, 0) + 1
         source_diagnostics[role] = {
             "requested_source": historical_source.value,
+            "window_start": warmup_start_utc.isoformat(),
+            "window_end": fetch_end_utc.isoformat(),
+            "targeted_fetch_count": fetched_count,
             "available_before_filter": dict(sorted(available_counts.items())),
             "selected_after_filter": dict(sorted(selected_counts.items())),
             "selected_count": len(selected_candles),
             "missing_selected_source": len(selected_candles) == 0,
         }
-        all_candles = selected_candles
 
-        # 2. Separate into warm-up vs session candles
         warmup_candles: list[Candle] = []
         session_candles: list[Candle] = []
-
-        for c in all_candles:
-            c_ist = c.start_time.astimezone(IST)
-            if c_ist.date() < target_date or (c_ist.date() == target_date and c_ist.time() < session_start_ist.time()):
-                warmup_candles.append(c)
-            elif c_ist.date() == target_date and session_start_ist.time() <= c_ist.time() <= session_end_ist.time():
-                session_candles.append(c)
-
+        for candle in selected_candles:
+            candle_ist = candle.start_time.astimezone(IST)
+            if candle_ist.date() < target_date or (
+                candle_ist.date() == target_date and candle_ist.time() < session_start_ist.time()
+            ):
+                warmup_candles.append(candle)
+            elif candle_ist.date() == target_date and session_start_ist.time() <= candle_ist.time() < session_end_ist.time():
+                session_candles.append(candle)
         return warmup_candles, session_candles
+
+    async def _resolve_replay_futures_instrument(
+        self,
+        date_str: str,
+        *,
+        source_diagnostics: dict[str, Any],
+    ) -> tuple[str | None, list[dict[str, str | None]]]:
+        """Resolve the nearest futures contract as it existed on replay date."""
+        inst_svc = getattr(self.hist_svc, "instrument_service", None)
+        if not inst_svc:
+            source_diagnostics["futures_contract"] = {"status": "UNAVAILABLE", "reason": "instrument service unavailable"}
+            return None, []
+
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        ensure = getattr(inst_svc, "ensure_current_nifty_futures", None)
+        if callable(ensure):
+            # Seed metadata for the replay date, not today's date. This is
+            # essential when replaying a prior monthly contract with Breeze.
+            await ensure(today=target_date)
+        instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
+        as_of = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST)
+        active_instrument = resolve_active_futures_instrument(instruments, as_of=as_of)
+        contract = next(
+            (item for item in instruments if getattr(item, "instrument_id", None) == active_instrument),
+            None,
+        )
+        source_diagnostics["futures_contract"] = {
+            "status": "RESOLVED" if active_instrument else "UNAVAILABLE",
+            "instrument_id": active_instrument,
+            "expiry": getattr(contract, "expiry", None) if contract else None,
+            "as_of": as_of.isoformat(),
+        }
+        selected = [{
+            "instrument_id": active_instrument,
+            "expiry": getattr(contract, "expiry", None),
+        }] if active_instrument and contract else []
+        return active_instrument, selected
 
     async def run_day_simulation(self, request: SimulationRequest) -> SimulationResult:
         """Replay actual bars without inventing historical option fills or PnL."""
@@ -403,29 +468,20 @@ class SimulationEngine:
             source_diagnostics=source_diagnostics,
             role="spot",
         )
-        futures_history = []
-        selected_contracts: list[dict[str, str | None]] = []
-        inst_svc = getattr(self.hist_svc, "instrument_service", None)
-        if inst_svc:
-            instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
-            active_instrument = resolve_active_futures_instrument(
-                instruments,
-                as_of=datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=IST),
+        futures_history: list[Candle] = []
+        active_instrument, selected_contracts = await self._resolve_replay_futures_instrument(
+            date_str,
+            source_diagnostics=source_diagnostics,
+        )
+        if active_instrument:
+            warm_fut, day_fut = await self._fetch_session_candles(
+                date_str,
+                active_instrument,
+                historical_source=historical_source,
+                source_diagnostics=source_diagnostics,
+                role="futures",
             )
-            contracts = [i for i in instruments if getattr(i, "instrument_id", None) == active_instrument]
-            if active_instrument and contracts:
-                selected_contracts = [{
-                    "instrument_id": active_instrument,
-                    "expiry": contracts[0].expiry,
-                }]
-                warm_fut, day_fut = await self._fetch_session_candles(
-                    date_str,
-                    active_instrument,
-                    historical_source=historical_source,
-                    source_diagnostics=source_diagnostics,
-                    role="futures",
-                )
-                futures_history = warm_fut + day_fut
+            futures_history = warm_fut + day_fut
         if "futures" not in source_diagnostics:
             source_diagnostics["futures"] = {
                 "requested_source": historical_source.value,
@@ -486,6 +542,7 @@ class SimulationEngine:
         }
         timeline, logs = [], []
         replay_trigger_diagnostics: list[dict[str, Any]] = []
+        replay_diagnostic_keys: set[tuple[str, str]] = set()
         replay_manifest_recorder = self.replay_manifest_recorder or ReplayManifestRecorder()
         replay_manifest_recorder.set_replay_metadata(replay_metadata)
         running = list(warmup)
@@ -569,6 +626,25 @@ class SimulationEngine:
                 strat_a.reset(bar.end_time)
                 strat_b.reset(bar.end_time)
                 details = features.data_reason if not features.data_ready else "Outside entry window"
+            for diag in effective_diags_a:
+                completed_ts = str((diag.phase_summary or {}).get("completed_candle_timestamp") or bar.end_time.isoformat())
+                key = (diag.direction.value, completed_ts)
+                if key in replay_diagnostic_keys:
+                    continue
+                replay_diagnostic_keys.add(key)
+                replay_trigger_diagnostics.append({
+                    "timestamp": bar.end_time.isoformat(),
+                    "completed_futures_candle": completed_ts,
+                    "strategy": diag.strategy.value,
+                    "direction": diag.direction.value,
+                    "option_type": diag.option_type.value,
+                    "phase_state": diag.phase_state,
+                    "key_blocker": diag.key_blocker,
+                    "passed_count": diag.passed_count,
+                    "total_count": diag.total_count,
+                    "ready_pct": diag.ready_pct,
+                    "conditions": [item.model_dump(mode="json") for item in diag.conditions],
+                })
             timeline.append(SimulationBarSnapshot(
                 bar_index=idx, timestamp=bar.end_time.isoformat(), ist_time=clock.strftime("%H:%M"),
                 open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, spot=bar.close,
@@ -643,14 +719,39 @@ class SimulationEngine:
         option_complete = bool(resolved_records) and all(
             record.option_data_status == "AVAILABLE" for record in resolved_records
         )
-        limitation = (
-            "Real Breeze historical option OHLC completed-candle close marks used for entry/exit PNL; "
-            "these are not executable fills, historical bid/ask and point-in-time option-chain "
-            "selection are unavailable."
-            if option_complete else
-            "Real completed spot/futures candles only. Historical completed option candles were "
-            "unavailable for one or more resolved trades."
+        blocker_counts = Counter(
+            item["key_blocker"] for item in replay_trigger_diagnostics if item.get("key_blocker")
         )
+        replay_metadata["strategy_a_replay_diagnostics"] = {
+            "evaluations": len(replay_trigger_diagnostics),
+            "blocker_counts": dict(blocker_counts.most_common()),
+            "signal_count": len(replay_manifest_recorder.records()),
+            "resolved_trade_count": lifecycle_report["resolved"],
+            "unresolved_trade_count": lifecycle_report["unresolved"],
+            "ambiguous_trade_count": lifecycle_report["ambiguous"],
+        }
+        if not replay_manifest_recorder.records():
+            top = ", ".join(f"{name}={count}" for name, count in blocker_counts.most_common(5))
+            limitation = (
+                "No strategy signals qualified on this replay session. "
+                + (f"Top Strategy A blockers: {top}." if top else "See replay data diagnostics for missing market inputs.")
+            )
+        elif lifecycle_report["resolved"] == 0:
+            limitation = (
+                f"{len(replay_manifest_recorder.records())} signal(s) were identified, but no lifecycle "
+                "could be resolved from the available post-entry historical bars."
+            )
+        elif option_complete:
+            limitation = (
+                "Real historical option OHLC completed-candle close marks used for entry/exit PNL; "
+                "these are not executable fills, historical bid/ask and point-in-time option-chain "
+                "selection are unavailable."
+            )
+        else:
+            limitation = (
+                "Real completed spot/futures candles used. Historical completed option candles were "
+                "unavailable for one or more resolved trades."
+            )
         lifecycle_report["manifest_validation"] = replay_manifest_recorder.validate_complete(expected_count=len(replay_manifest_recorder.records()))
         replay_lifecycle = lifecycle_report
         return SimulationResult(

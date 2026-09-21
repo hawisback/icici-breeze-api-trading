@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -12,6 +13,7 @@ from services.strategy.models import (
     SimulatedTradeRecord,
     SimulationRequest,
     SimulationResult,
+    HistoricalReplaySource,
     RiskConfig,
     ThresholdOverrides,
 )
@@ -359,3 +361,52 @@ async def test_simulation_rest_endpoints():
         assert sim_json["total_trades"] == len(sim_json["trades"])
 
     await container.strategy_svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_replay_fetches_exact_target_window_instead_of_days_back_from_now(tmp_path):
+    repository = HistoricalRepository(tmp_path / "historical.db")
+    await repository.initialize()
+    target_start = datetime(2026, 9, 17, 9, 15, tzinfo=timezone(timedelta(hours=5, minutes=30))).astimezone(timezone.utc)
+    replay_candle = Candle(
+        instrument_id="INST-NIFTY-INDEX", interval="5m",
+        start_time=target_start, end_time=target_start + timedelta(minutes=5),
+        open=100, high=102, low=99, close=101, volume=1000, source="BREEZE",
+    )
+    fetch = AsyncMock(return_value=[replay_candle])
+    hist = SimpleNamespace(repo=repository, fetch_candles_from_provider_window=fetch)
+    engine = SimulationEngine(historical_service=hist)
+    diagnostics = {}
+    warmup, session = await engine._fetch_session_candles(
+        "2026-09-17", "INST-NIFTY-INDEX",
+        historical_source=HistoricalReplaySource.BREEZE,
+        source_diagnostics=diagnostics, role="spot",
+    )
+    assert warmup == []
+    assert session == [replay_candle]
+    kwargs = fetch.await_args.kwargs
+    assert kwargs["requested_source"] == "BREEZE"
+    assert kwargs["start_time"].astimezone(timezone(timedelta(hours=5, minutes=30))).date().isoformat() == "2026-09-10"
+    assert kwargs["end_time"].astimezone(timezone(timedelta(hours=5, minutes=30))).date().isoformat() == "2026-09-17"
+    assert diagnostics["spot"]["targeted_fetch_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_replay_seeds_and_resolves_futures_for_target_date_not_today():
+    future = SimpleNamespace(
+        instrument_id="INST-NIFTY-FUT-2026-09-29", segment="FUTURES",
+        tradable=True, expiry="2026-09-29",
+    )
+    ensure = AsyncMock(return_value=[future])
+    repo = SimpleNamespace(search=AsyncMock(return_value=[future]))
+    hist = SimpleNamespace(instrument_service=SimpleNamespace(ensure_current_nifty_futures=ensure, repo=repo))
+    engine = SimulationEngine(historical_service=hist)
+    diagnostics = {}
+    instrument_id, contracts = await engine._resolve_replay_futures_instrument(
+        "2026-09-17", source_diagnostics=diagnostics
+    )
+    assert instrument_id == "INST-NIFTY-FUT-2026-09-29"
+    ensure.assert_awaited_once()
+    assert ensure.await_args.kwargs["today"].isoformat() == "2026-09-17"
+    assert contracts[0]["expiry"] == "2026-09-29"
+    assert diagnostics["futures_contract"]["status"] == "RESOLVED"

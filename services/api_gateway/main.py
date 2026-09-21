@@ -42,6 +42,7 @@ from libs.config import get_platform_settings, update_env_variable
 from libs.observability.logger import setup_logging
 from services.strategy.models import (
     AutoTradingConfig,
+    HistoricalReplaySource,
     OptionType,
     SimulationRequest,
     StrategyName,
@@ -1183,10 +1184,12 @@ async def run_strategy_simulation(req: SimulationRequest):
 
 
 @app.get("/api/v1/strategies/simulate/available-dates")
-async def get_simulation_available_dates():
+async def get_simulation_available_dates(
+    historical_source: HistoricalReplaySource = Query(default=HistoricalReplaySource.BREEZE),
+):
     try:
         services = get_services()
-        dates = await services.strategy_svc.get_available_simulation_dates()
+        dates = await services.strategy_svc.get_available_simulation_dates(historical_source)
         return {"dates": dates}
     except Exception as exc:
         logger.exception("Failed to load available simulation dates")

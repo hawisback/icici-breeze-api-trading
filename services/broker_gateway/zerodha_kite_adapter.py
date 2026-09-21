@@ -7,7 +7,7 @@ run in a worker thread and never blocks the asyncio event loop.
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import logging
 import re
 from typing import Any, Optional
@@ -401,37 +401,50 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         interval: str = "5m",
         days_back: int = 5,
     ) -> list[Candle]:
-        """Fetch candles using Kite's instrument token and historical API."""
-        if not self.is_active:
+        """Fetch a recent rolling window using Kite's historical API."""
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=days_back)
+        return await self.fetch_historical_candles_window(
+            instrument_id=instrument_id,
+            interval=interval,
+            start_time=start,
+            end_time=end,
+        )
+
+    async def fetch_historical_candles_window(
+        self,
+        instrument_id: str,
+        interval: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[Candle]:
+        """Fetch the exact replay window instead of a window relative to now."""
+        if not self.is_active or end_time < start_time:
             return []
         token = await self._find_instrument_token(instrument_id)
         if not token:
             logger.warning("No Kite instrument token found for %s", instrument_id)
             return []
-        from datetime import timedelta
-
-        end = datetime.now(timezone.utc)
-        start = end - timedelta(days=days_back)
         rows = await self._run(
             lambda: self._kite.historical_data(
                 instrument_token=token,
-                from_date=start,
-                to_date=end,
+                from_date=start_time,
+                to_date=end_time,
                 interval=_kite_interval(interval),
                 oi=True,
             )
         )
-        step_minutes = {"1minute": 1, "5minute": 5, "15minute": 15, "30minute": 30, "day": 1440}.get(
+        step_minutes = {"minute": 1, "5minute": 5, "15minute": 15, "30minute": 30, "day": 1440}.get(
             _kite_interval(interval), 5
         )
         candles_by_time: dict[datetime, Candle] = {}
         for row in rows:
-            start_time = _parse_datetime(row.get("date"))
-            candles_by_time[start_time] = Candle(
+            candle_start = _parse_datetime(row.get("date"))
+            candle = Candle(
                 instrument_id=instrument_id,
                 interval=interval,
-                start_time=start_time,
-                end_time=start_time + timedelta(minutes=step_minutes),
+                start_time=candle_start,
+                end_time=candle_start + timedelta(minutes=step_minutes),
                 open=float(row.get("open") or 0),
                 high=float(row.get("high") or 0),
                 low=float(row.get("low") or 0),
@@ -440,6 +453,8 @@ class ZerodhaKiteAdapter(BrokerAdapter):
                 open_interest=int(row.get("oi") or 0),
                 source="KITE",
             )
+            if candle.low <= min(candle.open, candle.close) <= max(candle.open, candle.close) <= candle.high:
+                candles_by_time[candle_start] = candle
         return [candles_by_time[key] for key in sorted(candles_by_time)]
 
     async def _find_instrument_token(self, instrument_id: str) -> Optional[int]:
@@ -458,15 +473,18 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         underlying = "BANKNIFTY" if "BANK" in instrument_id.upper() else "NIFTY"
         match = re.search(r"FUT-(\d{4}-\d{2}-\d{2})", instrument_id.upper())
         requested_expiry = match.group(1) if match else None
-        today = date.today().isoformat()
-        futures = [row for row in self._nfo_instruments or []
-                   if str(row.get("name", "")).upper() == underlying
-                   and str(row.get("instrument_type", "")).upper() == "FUT"
-                   and str(row.get("expiry", ""))[:10] >= today]
-        futures.sort(key=lambda row: str(row.get("expiry", ""))[:10])
+        all_futures = [row for row in self._nfo_instruments or []
+                       if str(row.get("name", "")).upper() == underlying
+                       and str(row.get("instrument_type", "")).upper() == "FUT"]
         if requested_expiry:
-            exact = next((row for row in futures if str(row.get("expiry", ""))[:10] == requested_expiry), None)
+            exact = next(
+                (row for row in all_futures if str(row.get("expiry", ""))[:10] == requested_expiry),
+                None,
+            )
             return int(exact["instrument_token"]) if exact else None
+        today = date.today().isoformat()
+        futures = [row for row in all_futures if str(row.get("expiry", ""))[:10] >= today]
+        futures.sort(key=lambda row: str(row.get("expiry", ""))[:10])
         return int(futures[0]["instrument_token"]) if futures else None
 
     async def _run(self, callback):

@@ -104,6 +104,56 @@ class HistoricalService:
             return candles
         return []
 
+    async def fetch_candles_from_provider_window(
+        self,
+        instrument_id: str,
+        *,
+        interval: str,
+        start_time: datetime,
+        end_time: datetime,
+        requested_source: str,
+    ) -> list[Candle]:
+        """Fetch an exact historical window for deterministic replay.
+
+        Replay must never translate a historical session into "days back from
+        now".  The requested source is explicit so Breeze and Kite remain
+        isolated even when both sessions have existed in the same database.
+        """
+        source = str(requested_source or "").upper()
+        if source == "MIXED":
+            active_name, _ = self._active_provider()
+            source = active_name.upper()
+        if source == "BREEZE":
+            candles = await self.fetch_candles_from_breeze_window(
+                instrument_id,
+                interval=interval,
+                start_time=start_time,
+                end_time=end_time,
+            )
+        elif source == "KITE":
+            gateway = self.broker_gateway
+            adapter = getattr(gateway, "kite_adapter", None) if gateway else None
+            if adapter is None and gateway and str(getattr(gateway, "active_broker_name", "")).lower() == "kite":
+                adapter = getattr(gateway, "active_adapter", None)
+            fetch = getattr(adapter, "fetch_historical_candles_window", None)
+            if not adapter or not getattr(adapter, "is_active", False) or not callable(fetch):
+                return []
+            try:
+                candles = await fetch(
+                    instrument_id=instrument_id,
+                    interval=interval,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
+            except Exception as exc:
+                logger.warning("Kite targeted historical fetch failed for %s: %s", instrument_id, exc)
+                return []
+            if candles:
+                await self.repo.save_candles(candles)
+        else:
+            return []
+        return sorted(candles, key=lambda candle: candle.start_time)
+
     def _map_instrument_to_breeze(self, instrument_id: str) -> tuple[str, str, str]:
         """Map platform instrument ID to Breeze stock_code, exchange_code, and product_type."""
         inst_upper = instrument_id.upper()

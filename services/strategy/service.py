@@ -2125,9 +2125,12 @@ class StrategyService:
         """Runs a complete walk-forward intraday simulation against historical data."""
         return await self.simulation_engine.run_day_simulation(request)
 
-    async def get_available_simulation_dates(self) -> list[str]:
-        """Returns dates available for historical simulation."""
-        return await self.simulation_engine.get_available_dates()
+    async def get_available_simulation_dates(
+        self,
+        historical_source: HistoricalReplaySource = HistoricalReplaySource.BREEZE,
+    ) -> list[str]:
+        """Returns replay dates available for the requested broker source."""
+        return await self.simulation_engine.get_available_dates(historical_source)
 
     async def list_instances(self) -> list[dict[str, Any]]:
         return await self.repo.list_instances()
