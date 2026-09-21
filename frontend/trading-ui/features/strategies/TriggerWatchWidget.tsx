@@ -27,6 +27,7 @@ import {
 import {
   StrategyTriggerDiagnosticsData,
   TriggerDiagnosticsResponseData,
+  StrategyStatusData,
 } from "../../lib/api";
 import { OverrideModal } from "./OverrideModal";
 
@@ -34,12 +35,14 @@ interface TriggerWatchWidgetProps {
   diagnostics?: TriggerDiagnosticsResponseData | null;
   onRefresh: () => void;
   defaultCap?: number;
+  marketData?: StrategyStatusData["market_data"];
 }
 
 export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
   diagnostics,
   onRefresh,
   defaultCap = 70.0,
+  marketData,
 }) => {
   const [selectedStrategyIndex, setSelectedStrategyIndex] = useState<number>(0);
   const [isOverrideModalOpen, setIsOverrideModalOpen] = useState<boolean>(false);
@@ -130,6 +133,31 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
           )}
         </div>
       </div>
+
+      {currentStrategy.strategy === "TREND_PULLBACK" &&
+        (currentStrategy.key_blocker.includes("FUTURES") || marketData?.last_error) && (
+        <div className="px-5 pb-2">
+          <div className="rounded-lg border border-slate-700/80 bg-slate-950/70 p-3 text-[11px]">
+            <div className="font-bold uppercase tracking-wider text-cyan-300 mb-2">
+              Strategy A Futures Data Path
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-slate-400">
+              <div>Provider: <span className="text-slate-200 font-mono">{(marketData?.provider || "unknown").toUpperCase()}</span></div>
+              <div>Session: <span className={marketData?.provider_active ? "text-emerald-400" : "text-rose-400"}>{marketData?.provider_active ? "ACTIVE" : "INACTIVE"}</span></div>
+              <div>Contract: <span className="text-slate-200 font-mono">{marketData?.futures_instrument || "UNRESOLVED"}</span></div>
+              <div>15m bars: <span className="text-slate-200 font-mono">{marketData?.futures_candle_count ?? 0}</span></div>
+            </div>
+            <div className="mt-2 text-slate-400">
+              Latest completed bar: <span className="text-slate-200 font-mono">{marketData?.latest_futures_candle || "NONE"}</span>
+            </div>
+            {marketData?.last_error && (
+              <div className="mt-1 text-amber-300">
+                Data-path status: <span className="font-mono font-bold">{marketData.last_error}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* 3. System Gatekeeper Micro-Bar */}
       <div className="px-5 py-3">
@@ -285,7 +313,7 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
 
           <div className="text-right sm:text-right">
             <div className="text-[11px] text-slate-400">
-              Current Spot: <span className="font-mono text-slate-200 font-bold">₹{currentStrategy.current_spot.toFixed(2)}</span>
+              {currentStrategy.strategy === "TREND_PULLBACK" ? "Current Futures" : "Current Spot"}: <span className="font-mono text-slate-200 font-bold">₹{currentStrategy.current_spot.toFixed(2)}</span>
               {currentStrategy.target_entry_level && (
                 <span className="ml-2">
                   Target: <span className="font-mono text-cyan-300 font-bold">₹{currentStrategy.target_entry_level.toFixed(2)}</span>

@@ -365,6 +365,7 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
         diagnostics={status.trigger_diagnostics}
         onRefresh={onRefresh}
         defaultCap={config.option_selection.max_option_premium}
+        marketData={status.market_data}
       />
 
       {/* 3. Market Regime & Derivatives Flow Vector */}

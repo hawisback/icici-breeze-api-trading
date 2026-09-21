@@ -50,7 +50,8 @@ export const StrategyDashboard: React.FC = () => {
     if (!status) return;
     const targetArmed = !status.config.system_armed;
     if (targetArmed && status.config.mode === "LIVE") {
-      if (!confirm("WARNING: Arming the system in LIVE mode allows real ICICI Breeze order routing. Are you sure?")) {
+      const broker = status.market_data?.provider === "kite" ? "Zerodha Kite" : status.market_data?.provider === "breeze" ? "ICICI Breeze" : "the configured live broker";
+      if (!confirm(`WARNING: Arming the system in LIVE mode allows real ${broker} order routing. Are you sure?`)) {
         return;
       }
     }
