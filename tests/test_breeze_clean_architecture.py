@@ -653,7 +653,7 @@ async def test_breeze_market_adapter_maps_official_offer_volume_and_oi_change_fi
         {"Status": 200, "Success": [], "Error": None},
     ]
     client = BreezeClientManager(custom_sdk_instance=sdk)
-    client.is_active = True
+    client._status = SessionStatus.ACTIVE
     adapter = BreezeMarketDataAdapter(client_manager=client)
     snapshot = await adapter.get_option_chain("NIFTY", date(2026, 9, 22))
     assert len(snapshot.contracts) == 1
@@ -678,7 +678,7 @@ async def test_breeze_quote_maps_best_offer_as_ask() -> None:
         "Error": None,
     }
     client = BreezeClientManager(custom_sdk_instance=sdk)
-    client.is_active = True
+    client._status = SessionStatus.ACTIVE
     adapter = BreezeMarketDataAdapter(client_manager=client)
     instrument = BrokerInstrumentRef(
         internal_instrument_id=uuid.uuid4(),

@@ -217,12 +217,19 @@ class HistoricalService:
         to_dt = now_ist.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
         try:
+            rate_limiter = getattr(breeze_adapter, "rate_limiter", None)
+            if rate_limiter is not None and hasattr(rate_limiter, "acquire_read"):
+                await rate_limiter.acquire_read()
             sdk = client_mgr.get_sdk_client()
             logger.info(
-                "Fetching real historical candles from Breeze: stock=%s exch=%s interval=%s range=[%s to %s]",
+                "Fetching real historical candles from Breeze: instrument=%s stock=%s exch=%s "
+                "product=%s interval=%s contract=%s range=[%s to %s]",
+                instrument_id,
                 stock_code,
                 exchange,
+                product_type,
                 breeze_interval,
+                contract_args,
                 from_dt,
                 to_dt,
             )
@@ -254,27 +261,36 @@ class HistoricalService:
                 dt_str = row.get("datetime")
                 if not dt_str:
                     continue
-
-                # Parse Breeze IST datetime string
-                dt_ist = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ist_tz)
-                c_start = dt_ist.astimezone(timezone.utc)
-                c_end = c_start + timedelta(minutes=5 if interval == "15m" else step_min)
-
-                candles.append(
-                    Candle(
+                try:
+                    try:
+                        parsed = datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
+                    except ValueError:
+                        parsed = datetime.strptime(str(dt_str), "%Y-%m-%d %H:%M:%S")
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=ist_tz)
+                    c_start = parsed.astimezone(timezone.utc)
+                    c_end = c_start + timedelta(minutes=5 if interval == "15m" else step_min)
+                    volume = int(float(row.get("volume") or row.get("total_quantity_traded") or 0))
+                    open_interest = int(float(row.get("open_interest") or row.get("oi") or 0))
+                    candle = Candle(
                         instrument_id=instrument_id,
                         interval="5m" if interval == "15m" else interval,
                         start_time=c_start,
                         end_time=c_end,
-                        open=float(row.get("open", 0.0)),
-                        high=float(row.get("high", 0.0)),
-                        low=float(row.get("low", 0.0)),
-                        close=float(row.get("close", 0.0)),
-                        volume=int(row.get("volume", 0)),
-                        open_interest=int(row.get("open_interest") or 0),
+                        open=float(row.get("open") or 0.0),
+                        high=float(row.get("high") or 0.0),
+                        low=float(row.get("low") or 0.0),
+                        close=float(row.get("close") or 0.0),
+                        volume=volume,
+                        open_interest=open_interest,
                         source="BREEZE",
                     )
-                )
+                    if candle.low <= min(candle.open, candle.close) <= max(candle.open, candle.close) <= candle.high and candle.low > 0:
+                        candles.append(candle)
+                    else:
+                        logger.warning("Skipping invalid Breeze candle for %s at %s: %s", instrument_id, dt_str, row)
+                except (TypeError, ValueError) as row_exc:
+                    logger.warning("Skipping malformed Breeze candle for %s at %s: %s", instrument_id, dt_str, row_exc)
 
             if interval == "15m":
                 candles = self._resample_to_15m(candles, instrument_id)

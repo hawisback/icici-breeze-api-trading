@@ -342,3 +342,53 @@ def test_kite_configuration_does_not_use_connected_breeze_session():
     )
     service = MarketDataService(broker_gateway=gateway)
     assert service._live_broker_active() is False
+
+
+@pytest.mark.asyncio
+async def test_breeze_futures_history_end_to_end_resamples_real_5m_rows_to_15m(tmp_path):
+    repo = HistoricalRepository(db_path=tmp_path / "historical.db")
+    await repo.initialize()
+    instrument = SimpleNamespace(
+        segment="FUTURES", underlying="NIFTY", exchange="NFO",
+        expiry="2026-09-29", option_right=None, strike=None,
+    )
+    instrument_service = SimpleNamespace(get_instrument=AsyncMock(return_value=instrument))
+
+    rows = []
+    for minute, close in [(15, 23410.0), (20, 23420.0), (25, 23430.0)]:
+        rows.append({
+            "datetime": f"2026-09-21 09:{minute:02d}:00",
+            "open": str(close - 5), "high": str(close + 5),
+            "low": str(close - 10), "close": str(close),
+            "volume": "100.0", "open_interest": "123456.0",
+        })
+
+    sdk = MagicMock()
+    sdk.get_historical_data_v2.return_value = {"Success": rows, "Status": 200, "Error": None}
+    runner = SimpleNamespace(run=AsyncMock(side_effect=lambda fn, timeout_sec: fn()))
+    client = SimpleNamespace(is_active=True, get_sdk_client=Mock(return_value=sdk), sdk_runner=runner)
+    gateway = SimpleNamespace(
+        active_broker_name="breeze",
+        active_adapter=SimpleNamespace(),
+        breeze_adapter=SimpleNamespace(client_manager=client, rate_limiter=SimpleNamespace(acquire_read=AsyncMock())),
+    )
+    service = HistoricalService(
+        repository=repo, broker_gateway=gateway, instrument_service=instrument_service
+    )
+
+    candles = await service.fetch_candles_from_breeze("INST-NIFTY-FUT-2026-09-29", "15m", 1)
+
+    assert len(candles) == 1
+    candle = candles[0]
+    assert candle.interval == "15m"
+    assert candle.source == "BREEZE"
+    assert candle.open == 23405.0
+    assert candle.close == 23430.0
+    assert candle.volume == 300
+    assert candle.open_interest == 123456
+    kwargs = sdk.get_historical_data_v2.call_args.kwargs
+    assert kwargs["exchange_code"] == "NFO"
+    assert kwargs["product_type"] == "futures"
+    assert kwargs["expiry_date"] == "2026-09-29T07:00:00.000Z"
+    assert kwargs["right"] == "others"
+    assert kwargs["strike_price"] == "0"
