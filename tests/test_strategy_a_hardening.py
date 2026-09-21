@@ -78,7 +78,7 @@ def _quote(timestamp, bid=100.0):
 @pytest.mark.parametrize("direction", [TradeDirection.BULLISH, TradeDirection.BEARISH])
 async def test_real_position_manager_option_emergency_stop_closes_without_fake_underlying_exit(direction):
     at = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
-    service, _ = _service(_quote(at, 89), slippage=2.0)
+    service, _ = _service(_quote(datetime.now(UTC), 89), slippage=2.0)
     trade = _trade(lots=1, direction=direction).model_copy(update={"option_hard_stop_price": 95})
     await service._evaluate_active_trade(trade, _features(100, at))
     assert trade.state is TradeLifecycleState.CLOSED
@@ -101,11 +101,11 @@ async def test_real_position_manager_option_emergency_stop_closes_without_fake_u
 @pytest.mark.parametrize("direction", [TradeDirection.BULLISH, TradeDirection.BEARISH])
 async def test_option_emergency_stop_after_t1_preserves_t1_r_but_runner_r_is_unresolved(direction):
     first = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
-    service, _ = _service(_quote(first, 100), slippage=2.0)
+    service, _ = _service(_quote(datetime.now(UTC), 100), slippage=2.0)
     trade = _trade(lots=2, direction=direction).model_copy(update={"option_hard_stop_price": 95})
     await service._evaluate_active_trade(trade, _features(115 if direction is TradeDirection.BULLISH else 85, first))
     assert trade.partial_exit_filled_quantity == 75
-    service.mkt_svc.get_latest_quote.return_value = _quote(first + timedelta(minutes=5), 89)
+    service.mkt_svc.get_latest_quote.return_value = _quote(datetime.now(UTC), 89)
     await service._evaluate_active_trade(trade, _features(115 if direction is TradeDirection.BULLISH else 85, first + timedelta(minutes=5)))
     assert trade.exit_reason == OPTION_EMERGENCY_STOP
     assert trade.t1_realized_r == 1.5
@@ -119,7 +119,7 @@ async def test_option_emergency_stop_with_missing_bid_is_pending_without_synthet
     at = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
     missing_bid = SimpleNamespace(
         source="BREEZE", instrument_id="OPT-HARDEN", symbol="NIFTY-HARDEN",
-        last_price=89, best_bid=0, best_ask=90, volume=1000, open_interest=50000, timestamp=at,
+        last_price=89, best_bid=0, best_ask=90, volume=1000, open_interest=50000, timestamp=datetime.now(UTC),
     )
     service, repo = _service(missing_bid, slippage=2.0)
     trade = _trade(lots=1).model_copy(update={"option_hard_stop_price": 95})
@@ -133,7 +133,7 @@ async def test_option_emergency_stop_with_missing_bid_is_pending_without_synthet
 @pytest.mark.asyncio
 async def test_exit_precedence_pending_then_forced_then_option_stop_then_underlying_stop_then_t1():
     at = datetime(2026, 9, 21, 15, 15, tzinfo=IST)
-    service, _ = _service(_quote(at, 89), slippage=2.0)
+    service, _ = _service(_quote(datetime.now(UTC), 89), slippage=2.0)
     trade = _trade(lots=1).model_copy(update={"option_hard_stop_price": 95})
     await service._evaluate_active_trade(trade, _features(100, at))
     assert trade.exit_reason == "SESSION_FORCE_SQUARE_OFF_1515"
@@ -150,7 +150,7 @@ async def test_strategy_a_structural_stop_is_decided_without_option_quote_and_la
     assert trade.state is not TradeLifecycleState.CLOSED
     assert not repo.save_execution_ledger.await_args_list
 
-    service.mkt_svc.get_latest_quote.return_value = _quote(decision_time + timedelta(minutes=5), 100)
+    service.mkt_svc.get_latest_quote.return_value = _quote(datetime.now(UTC), 100)
     await service._evaluate_active_trade(trade, _features(120, decision_time + timedelta(minutes=5)))
     assert trade.state is TradeLifecycleState.CLOSED
     assert trade.exit_reason == "UNDERLYING_STRUCTURAL_STOP"
@@ -185,7 +185,7 @@ async def test_strategy_a_t1_decision_without_quote_preserves_quantity_then_fill
     assert trade.quantity == 150
     assert trade.partial_exit_filled_quantity == 0
 
-    service.mkt_svc.get_latest_quote.return_value = _quote(at + timedelta(minutes=5), 100)
+    service.mkt_svc.get_latest_quote.return_value = _quote(datetime.now(UTC), 100)
     await service._evaluate_active_trade(trade, _features(115, at + timedelta(minutes=5)))
     assert trade.partial_exit_filled_quantity == 75
     assert trade.quantity == 75
