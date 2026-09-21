@@ -15,6 +15,8 @@ from services.strategy.contract_selector import ContractSelector
 from services.strategy.features import FeatureEngine
 from services.strategy.futures_signal import (
     FuturesContractResolver,
+    aggregate_completed_15m,
+    canonical_active_futures_stream,
     contract_expiry,
     resolve_active_futures_instrument,
 )
@@ -429,6 +431,95 @@ class SimulationEngine:
                 session_candles.append(candle)
         return warmup_candles, session_candles
 
+    async def _fetch_cached_futures_universe(
+        self,
+        date_str: str,
+        *,
+        historical_source: HistoricalReplaySource,
+        source_diagnostics: dict[str, Any],
+    ) -> list[Candle]:
+        """Load cached NIFTY futures across contract rollovers for Strategy A.
+
+        Strategy A's feature engine resolves the active contract independently
+        at each completed timestamp.  Replaying only the contract active on the
+        target date discards valid pre-roll warmup bars and can change EMA/ADX,
+        pivots, confluence, and ultimately signal discovery immediately after
+        expiry.  This helper is cache-only: the normal active-contract fetch
+        remains responsible for targeted provider refreshes.
+        """
+        repo = getattr(self.hist_svc, "repo", None)
+        engine = getattr(repo, "engine", None)
+        if engine is None:
+            return []
+
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        session_start_ist = datetime(
+            target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST
+        )
+        session_end_ist = datetime(
+            target_date.year, target_date.month, target_date.day, 15, 30, tzinfo=IST
+        )
+        warmup_start_utc = session_start_ist.astimezone(timezone.utc) - timedelta(days=7)
+        fetch_end_utc = min(utc_now(), session_end_ist.astimezone(timezone.utc))
+
+        if historical_source == HistoricalReplaySource.MIXED:
+            source_clause = "source IN ('BREEZE', 'KITE', 'LIVE')"
+            params: tuple[Any, ...] = (
+                warmup_start_utc.isoformat(),
+                fetch_end_utc.isoformat(),
+            )
+        else:
+            source_clause = "source = ?"
+            params = (
+                warmup_start_utc.isoformat(),
+                fetch_end_utc.isoformat(),
+                historical_source.value,
+            )
+
+        async with engine.connect() as conn:
+            cursor = await conn.execute(
+                f"""
+                SELECT instrument_id, interval, start_time, end_time,
+                       open, high, low, close, volume, open_interest, source
+                FROM historical_candles
+                WHERE interval = '5m'
+                  AND instrument_id LIKE 'INST-NIFTY-FUT-%'
+                  AND start_time >= ?
+                  AND start_time <= ?
+                  AND {source_clause}
+                ORDER BY start_time ASC, instrument_id ASC
+                """,
+                params,
+            )
+            rows = await cursor.fetchall()
+
+        candles = [
+            Candle(
+                instrument_id=row["instrument_id"],
+                interval=row["interval"],
+                start_time=datetime.fromisoformat(row["start_time"]),
+                end_time=datetime.fromisoformat(row["end_time"]),
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=int(row["volume"]),
+                open_interest=int(row["open_interest"]),
+                source=row["source"],
+            )
+            for row in rows
+        ]
+        contracts = sorted({c.instrument_id for c in candles})
+        source_diagnostics.setdefault("futures", {})["strategy_a_canonical_history"] = {
+            "selected_count": len(candles),
+            "contracts": contracts,
+            "contract_count": len(contracts),
+            "window_start": warmup_start_utc.isoformat(),
+            "window_end": fetch_end_utc.isoformat(),
+            "cache_only": True,
+        }
+        return candles
+
     async def _resolve_replay_futures_instrument(
         self,
         date_str: str,
@@ -566,9 +657,17 @@ class SimulationEngine:
             expected.append(cursor)
             cursor += timedelta(minutes=15)
 
-        aggregated = self.resample_to_15m(
+        coverage_as_of = datetime(
+            target.year, target.month, target.day, 15, 30, tzinfo=IST
+        )
+        aggregated_all = aggregate_completed_15m(
             futures_history,
-            instrument_id or "INST-NIFTY-FUT-REPLAY",
+            as_of=coverage_as_of,
+        )
+        aggregated = canonical_active_futures_stream(
+            aggregated_all,
+            as_of=coverage_as_of,
+            interval="15m",
         )
         available = {
             candle.end_time.astimezone(IST).replace(second=0, microsecond=0)
@@ -615,6 +714,40 @@ class SimulationEngine:
                 role="futures",
             )
             futures_history = warm_fut + day_fut
+        strategy_a_futures_history = list(futures_history)
+        cached_futures_universe = await self._fetch_cached_futures_universe(
+            date_str,
+            historical_source=historical_source,
+            source_diagnostics=source_diagnostics,
+        )
+        if cached_futures_universe:
+            merged = {
+                (c.instrument_id, c.start_time): c
+                for c in cached_futures_universe + futures_history
+            }
+            strategy_a_futures_history = sorted(
+                merged.values(),
+                key=lambda candle: (candle.start_time, candle.instrument_id),
+            )
+            contracts = {
+                candle.instrument_id: contract_expiry(candle.instrument_id)
+                for candle in strategy_a_futures_history
+                if "NIFTY-FUT-" in candle.instrument_id.upper()
+            }
+            selected_contracts = [
+                {
+                    "instrument_id": instrument_id,
+                    "expiry": expiry.isoformat() if expiry else None,
+                }
+                for instrument_id, expiry in sorted(
+                    contracts.items(),
+                    key=lambda item: (
+                        item[1] is None,
+                        item[1] or datetime.max.date(),
+                        item[0],
+                    ),
+                )
+            ]
         if "futures" not in source_diagnostics:
             source_diagnostics["futures"] = {
                 "requested_source": historical_source.value,
@@ -642,11 +775,11 @@ class SimulationEngine:
         missing_data: list[str] = []
         if source_diagnostics["spot"]["missing_selected_source"] or not session:
             missing_data.append("spot")
-        if source_diagnostics["futures"]["missing_selected_source"] or not futures_history:
+        if source_diagnostics["futures"]["missing_selected_source"] or not strategy_a_futures_history:
             missing_data.append("futures")
         futures_coverage = self._strategy_a_futures_coverage(
             date_str,
-            futures_history,
+            strategy_a_futures_history,
             active_instrument,
         )
         source_diagnostics["futures"]["strategy_a_entry_window_coverage"] = futures_coverage
@@ -667,7 +800,7 @@ class SimulationEngine:
             start_date=date_str,
             end_date=date_str,
             spot_candles=warmup + session,
-            futures_candles=futures_history,
+            futures_candles=strategy_a_futures_history,
             source_diagnostics=source_diagnostics,
             futures_contracts=selected_contracts,
             missing_data=missing_data,
@@ -692,9 +825,18 @@ class SimulationEngine:
             running.append(bar)
             macro = self.resample_to_15m(running, request.instrument_id)
             futures = [c for c in futures_history if c.end_time <= bar.end_time]
+            strategy_a_futures = [
+                c for c in strategy_a_futures_history if c.end_time <= bar.end_time
+            ]
             features = FeatureEngine.compute_all_features(running, macro, futures,
                                                           spot_price=bar.close, as_of=bar.end_time)
-            diags_a = strat_a.diagnose(features, running, macro, overrides=overrides, futures_candles=futures)
+            diags_a = strat_a.diagnose(
+                features,
+                running,
+                macro,
+                overrides=overrides,
+                futures_candles=strategy_a_futures,
+            )
             diags_b = strat_b.diagnose(features, running, overrides=overrides)
             clock = bar.end_time.astimezone(IST)
             minutes = clock.hour*60+clock.minute
@@ -712,11 +854,18 @@ class SimulationEngine:
             effective_diags_a = diags_a
             sig_a = None
             strategy_a_event = None
-            if (futures and in_window) or (features.data_ready or features.breakout_data_ready) and in_window:
-                if cfg.trend_pullback_enabled and futures:
+            if (strategy_a_futures and in_window) or (features.data_ready or features.breakout_data_ready) and in_window:
+                if cfg.trend_pullback_enabled and strategy_a_futures:
                     # Strategy A replay calls the exact production state
-                    # machine.  There is no replay-only trigger evaluator.
-                    sig_a = strat_a.evaluate(features, running, macro, futures, overrides)
+                    # machine over the canonical multi-contract futures stream.
+                    # There is no replay-only trigger evaluator.
+                    sig_a = strat_a.evaluate(
+                        features,
+                        running,
+                        macro,
+                        strategy_a_futures,
+                        overrides,
+                    )
                     strategy_a_event = strat_a.last_event
                     effective_diags_a = strat_a.diagnose(features, running, macro, overrides=overrides, futures_candles=futures)
                     if sig_a is not None:
@@ -750,7 +899,7 @@ class SimulationEngine:
                             running,
                             macro,
                             overrides=overrides,
-                            futures_candles=futures,
+                            futures_candles=strategy_a_futures,
                         )
                 sig_b = strat_b.evaluate(features, running, overrides=overrides) if cfg.volatility_breakout_enabled else None
                 if sig_b is not None:
