@@ -34,7 +34,13 @@ def _create_db(path: Path) -> None:
     conn.close()
 
 
-def _insert_session(path: Path, day: date, *, omit_future_minute: int | None = None) -> None:
+def _insert_session(
+    path: Path,
+    day: date,
+    *,
+    omit_future_minute: int | None = None,
+    futures_contract: str = "INST-NIFTY-FUT-2026-09-29",
+) -> None:
     conn = sqlite3.connect(path)
     cursor = datetime.combine(day, time(9, 15), tzinfo=IST)
     last = datetime.combine(day, time(15, 25), tzinfo=IST)
@@ -42,7 +48,7 @@ def _insert_session(path: Path, day: date, *, omit_future_minute: int | None = N
     while cursor <= last:
         for instrument_id, base in (
             ("INST-NIFTY-INDEX", 23000.0),
-            ("INST-NIFTY-FUT-2026-09-29", 23100.0),
+            (futures_contract, 23100.0),
         ):
             if (
                 instrument_id.startswith("INST-NIFTY-FUT-")
@@ -128,3 +134,32 @@ def test_strategy_a_data_audit_recommends_refetch_when_warmup_is_insufficient(tm
     assert "EMA50_WARMUP_INSUFFICIENT" in session["reasons"]
     assert report["refetch_recommended"] is True
     assert report["refetch_dates"] == ["2026-09-17"]
+
+
+def test_strategy_a_data_audit_uses_canonical_warmup_across_rollover(tmp_path):
+    db_path = tmp_path / "historical.db"
+    _create_db(db_path)
+    _insert_session(
+        db_path,
+        date(2026, 7, 27),
+        futures_contract="INST-NIFTY-FUT-2026-07-28",
+    )
+    _insert_session(
+        db_path,
+        date(2026, 7, 28),
+        futures_contract="INST-NIFTY-FUT-2026-07-28",
+    )
+    _insert_session(
+        db_path,
+        date(2026, 7, 29),
+        futures_contract="INST-NIFTY-FUT-2026-08-25",
+    )
+
+    report = audit_database(db_path, sessions=1, source="BREEZE")
+
+    session = report["sessions"][0]
+    assert session["active_futures_contract"] == "INST-NIFTY-FUT-2026-08-25"
+    assert session["strategy_a_input_readiness"]["warmup_15m_bars_at_first_decision"] >= 50
+    assert "EMA50_WARMUP_INSUFFICIENT" not in session["reasons"]
+    assert "ADX14_WARMUP_INSUFFICIENT" not in session["reasons"]
+    assert report["refetch_recommended"] is False
