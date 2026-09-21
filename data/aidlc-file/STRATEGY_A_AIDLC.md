@@ -1790,3 +1790,67 @@ Final hardening status: `[?] Awaiting human review/approval`. Remaining
 limitations are intrabar ordering in OHLC replay, historical option quote
 coverage, future paper/shadow observation-period evidence, and the injected
 holiday-calendar limitation. No unrestricted Strategy A LIVE path was added.
+
+## Final approval patch reconciliation — review base `3a4ebcbf`
+
+All phase headings remain `[?] Awaiting human review/approval`. This targeted
+patch preserves the preceding lifecycle evidence and records only the final
+production correctness findings.
+
+### Decision Register additions
+
+| ID | Decision | Status |
+|---|---|---|
+| D-015 | `OPTION_EMERGENCY_STOP` is the canonical Strategy A catastrophic option-stop reason. `OPTION_HARD_STOP_HIT` is accepted only as a legacy compatibility alias; Strategy B's existing reason remains unchanged. | Implemented |
+| D-016 | A catastrophic option stop preempts the futures thesis: `underlying_exit_reason=OPTION_HARD_STOP_PREEMPTED_UNDERLYING`, no underlying exit timestamp/price, `underlying_outcome_status=PREEMPTED_BY_OPTION_EMERGENCY_STOP`, and complete `realized_r=None`. Any realized T1 contribution remains separately recorded; runner R remains unresolved. | Implemented |
+| D-017 | Active futures contract selection is resolved from the full contract universe at each timestamp. A missing expected active-contract candle is `ACTIVE_FUTURES_CANDLE_MISSING`; the next contract is never substituted before policy rollover. | Implemented |
+| D-018 | Exit precedence is deterministic: persisted pending exit, 15:15 forced exit, catastrophic option protection, underlying protective stop, then T1/runner transitions. | Implemented |
+
+### Emergency option-stop semantics
+
+The real Strategy A position manager now emits `OPTION_EMERGENCY_STOP` and the
+service closes it as an execution/risk event, not as a futures thesis exit.
+Paper/shadow execution still requires a real bid and applies configured
+slippage once. A real option LTP with a missing bid can persist a pending
+emergency decision; it cannot create a synthetic fill. Final telemetry records
+`CLOSED`, the canonical option reason, `PREEMPTED_BY_OPTION_EMERGENCY_STOP`,
+and unresolved underlying R. Emergency-stop tests cover before-T1 and after-T1
+CALL/PUT paths plus missing-bid pending behavior.
+
+### Canonical futures data-gap semantics
+
+The canonical futures stream first resolves the expected nearest non-expired
+contract from the complete universe, then looks up that exact contract's
+completed candle. If it is absent, the timestamp is skipped and reported as
+`ACTIVE_FUTURES_CANDLE_MISSING`; a present next contract cannot cause a false
+rollover. Replay exposes the count in `data_quality_counts`, while genuine
+expiry-policy changes still produce exactly one `FUTURES_ROLLOVER_RESET`.
+Runtime metadata resolution and replay use the same expiry-ranking policy.
+
+### Final approval patch evidence
+
+Concrete matrix additions cover real emergency-stop service execution,
+preemption telemetry, active-candle gaps, no false rollover, genuine rollover,
+runtime/replay resolver parity, and explicit 0/1/2-right-bar pivot
+confirmation. The existing Strategy B file remains unchanged and LIVE remains
+blocked. The injected holiday-calendar, historical option quote, 15m intrabar,
+and paper/shadow observation limitations remain open as previously documented.
+
+Exact final command results and final SHA are appended below after the final
+repository test run and push.
+
+### Final approval patch command ledger
+
+| Command | Result |
+|---|---|
+| `python -m pytest -q tests/test_strategy_a_hardening.py tests/test_forward_option_execution_validation.py` | 30 passed |
+| `python -m pytest -q tests/test_strategy_a_v2.py tests/test_strategy_a_review_fixes.py tests/test_strategy_a_hardening.py tests/test_contracts.py tests/test_forward_option_execution_validation.py tests/test_strategy_simulation.py tests/test_live_gate.py` | 104 passed, 2 warnings |
+| `python -m pytest -q tests/test_strategy_b_forward_validation.py tests/test_strategy_b_replay_lifecycle.py tests/test_volatility_breakout_fixed.py` | 40 passed |
+| `python -m compileall -q services libs tests` | passed |
+| `python -m pytest -q tests` | 243 passed, 23 warnings |
+| Baseline smoke at detached review base `3a4ebcbf` with the two new regression tests | 2 expected failures: canonical option-stop preemption and missing active-contract data-gap policy |
+
+The final implementation/test evidence commit is `7cc136b`. The documentation
+commit follows this ledger; the pushed repository HEAD is recorded in the final
+handoff. Strategy B production files remain unchanged, Strategy A LIVE remains
+blocked, and all phase headings remain `[?]`.
