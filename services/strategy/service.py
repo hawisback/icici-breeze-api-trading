@@ -2024,32 +2024,9 @@ class StrategyService:
         active_trades = await self.repo.get_active_trades()
         features = self._last_features or MarketFeatures(timestamp=utc_now(), data_reason="Awaiting first completed evaluation")
 
-        # Dynamically refresh active trades so UI reflects live market movement every 1.5s
-        for trade in active_trades:
-            if trade.state in (
-                TradeLifecycleState.OPEN_INITIAL_RISK,
-                TradeLifecycleState.PROTECTED_BREAKEVEN,
-                TradeLifecycleState.PROFIT_LOCKED,
-                TradeLifecycleState.RUNNER_MODE,
-            ):
-                # Fix 2a: patch stale spot so stops don't fire on spot=0 outside market hours
-                safe_features = features
-                if features.spot_price <= 0:
-                    safe_features = features.model_copy(update={
-                        "spot_price": trade.current_spot_price or trade.entry_spot_price,
-                        "closed_5m_time": None,
-                        "closed_5m_price": None,
-                    })
-                quote = await self._resolve_option_quote(trade)
-                self._apply_quote_to_trade(trade, quote)
-                cur_price = quote.get("ltp") or quote.get("bid")
-                if quote.get("status") == "VALID" and cur_price and float(cur_price) > 0:
-                    updated_trade, _ = self.position_manager.update_position(trade, round(float(cur_price), 2), safe_features, as_of=safe_features.timestamp)
-                    await self.repo.save_trade(updated_trade)
-                else:
-                    # Preserve the data-quality gap and do not let a stale or
-                    # missing quote manufacture a lifecycle mark/fill.
-                    await self.repo.save_trade(trade)
+        # Position lifecycle updates run only inside evaluate_cycle().
+        # Keeping this endpoint read-only prevents UI polling from racing the
+        # scheduler or changing Strategy A state with a different snapshot.
 
         active_trades = await self.repo.get_active_trades()
         self._active_trades_cache = active_trades
