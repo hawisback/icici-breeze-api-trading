@@ -61,3 +61,7 @@ the original matrix:
 | Runtime metadata/replay contract parity | `::test_runtime_metadata_and_replay_contract_resolution_are_identical` |
 | Pivot absent before 2 right-side confirmation bars | `::test_pivot_is_absent_until_two_right_confirmation_bars_and_confirmed_at_second_right_bar` |
 | Exit precedence is explicit | `::test_exit_precedence_pending_then_forced_then_option_stop_then_underlying_stop_then_t1` |
+| Trigger vs execution acceptance | `test_strategy_a_trigger_is_not_entered_until_execution_confirmation_and_rejection_recovers`, `test_service_execution_rejection_cannot_leave_strategy_a_entered` |
+| Strategy A manual force-entry prohibition | `test_strategy_a_force_entry_is_disabled_and_cannot_create_validation_trade`, API endpoint coverage in `test_strategy_api_endpoints.py` |
+| Production session window cannot be bypassed | `test_production_strategy_a_cannot_bypass_entry_window_but_simulation_can_opt_in` |
+| Futures freshness and historical as-of parity | `test_stale_futures_data_is_machine_readable_and_does_not_advance_state`, `test_historical_as_of_accepts_the_expected_completed_futures_bar` |

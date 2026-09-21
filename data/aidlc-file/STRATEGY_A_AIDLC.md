@@ -1854,3 +1854,40 @@ The final implementation/test evidence commit is `7cc136b`. The documentation
 commit follows this ledger; the pushed repository HEAD is recorded in the final
 handoff. Strategy B production files remain unchanged, Strategy A LIVE remains
 blocked, and all phase headings remain `[?]`.
+
+---
+
+## Lifecycle-integrity implementation patch — 2026-09-21
+
+**Review base:** `3aafa65b2e5535a4059cda7170e87dbd378f94b8`
+
+All phase headings remain `[?] Awaiting human review/approval`. This patch records
+implementation changes only; tests were intentionally not executed in this editing
+session and require local verification before human approval.
+
+### Decisions
+
+| ID | Decision | Status |
+|---|---|---|
+| D-019 | A futures trigger emits a Strategy A signal while the state remains `ARMED`; `ENTERED` is confirmed only after the corresponding `ActiveTrade` has been persisted. Downstream contract/sizing rejection consumes the attempt into deterministic cooldown instead of leaving a phantom entry. | Implemented; tests pending local run |
+| D-020 | Synthetic/manual `force_entry` is prohibited for `TREND_PULLBACK`. Strategy A validation trades must originate from the futures TrendPullback state machine and may not be manufactured from a parallel stop/R formula. | Implemented; tests pending local run |
+| D-021 | Production Strategy A never honors `bypass_entry_window`; the 09:45–14:45 IST contract remains mandatory. Historical simulation may opt in explicitly to bypass behavior. | Implemented; tests pending local run |
+| D-022 | Strategy A requires the latest expected completed 15m futures bar, with a two-minute broker-arrival grace after quarter-hour boundaries. Older data is rejected as `STALE_FUTURES_DATA`; historical `as_of` uses the same deterministic rule. | Implemented; tests pending local run |
+| D-023 | Restart reconciliation repairs legacy phantom `ENTERED` state with no Strategy A trade and confirms an `ARMED` state when its Strategy A trade was persisted before runtime-state confirmation. | Implemented; tests pending local run |
+
+### Files changed
+
+- `services/strategy/strategies/trend_pullback.py`
+- `services/strategy/service.py`
+- `services/strategy/simulation.py`
+- `services/strategy/replay_strategy_a.py`
+- `tests/test_strategy_a_hardening.py`
+- `tests/test_strategy_api_endpoints.py`
+- `tests/STRATEGY_A_RULE_TEST_MATRIX.md`
+
+### Local verification still required
+
+Run the targeted Strategy A/API suites, replay/simulation suites, Strategy B
+regressions, LIVE safety tests, full `tests` suite, and `compileall`. Do not
+convert any phase to `[x]` until those results and the implementation receive
+human approval.

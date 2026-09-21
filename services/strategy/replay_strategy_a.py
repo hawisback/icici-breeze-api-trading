@@ -143,6 +143,7 @@ class StrategyAReplayEngine:
                 directions[signal.option_type.value] += 1
                 if active_trade is None:
                     active_trade = self._trade(signal)
+                    strategy.confirm_entry(signal.timestamp)
             if event and event.reason and event.event in {"REJECTED", "INVALIDATED", "EXPIRED"}:
                 rejections[event.reason] += 1
             if active_trade is not None and active_trade.entry_time < bar.end_time:

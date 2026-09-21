@@ -66,8 +66,15 @@ class TrendPullbackStrategy:
     contiguous bars are available.
     """
 
-    def __init__(self, config: StrategyTunablesConfig | None = None, **legacy_kwargs: Any) -> None:
+    def __init__(
+        self,
+        config: StrategyTunablesConfig | None = None,
+        *,
+        allow_session_bypass: bool = False,
+        **legacy_kwargs: Any,
+    ) -> None:
         self.config = config or StrategyTunablesConfig()
+        self.allow_session_bypass = bool(allow_session_bypass)
         mapping = {
             "adx_threshold": "adx_threshold",
             "breakout_buffer_atr": "trigger_buffer_atr",
@@ -119,13 +126,45 @@ class TrendPullbackStrategy:
         self.snapshot = StrategyStateSnapshot().transition(StrategyState.COOLDOWN, cooldown_until=at + timedelta(minutes=10))
         self.last_event = StrategyEvent(event="COOLDOWN", timestamp=at, reason="POSITION_EXIT")
 
+    def confirm_entry(self, at: datetime) -> None:
+        """Confirm ENTERED only after the downstream Strategy A trade exists."""
+        if self.snapshot.state is not StrategyState.ARMED or self.snapshot.setup is None:
+            raise ValueError("Strategy A entry confirmation requires an ARMED setup")
+        self.snapshot = self.snapshot.transition(StrategyState.ENTERED, entry_timestamp=at)
+        self.last_event = StrategyEvent(
+            event="ENTERED",
+            timestamp=at,
+            reason="OPTION_EXECUTION_CONFIRMED",
+        )
+
+    def on_execution_rejected(self, at: datetime, reason: str) -> None:
+        """Consume a triggered attempt without leaving a phantom ENTERED state."""
+        if self.snapshot.state not in {
+            StrategyState.SETUP,
+            StrategyState.ARMED,
+            StrategyState.ENTERED,
+        }:
+            return
+        self.snapshot = StrategyStateSnapshot().transition(
+            StrategyState.COOLDOWN,
+            cooldown_until=at + timedelta(minutes=10),
+        )
+        self._setup_confirmation_key = None
+        self.last_event = StrategyEvent(
+            event="EXECUTION_REJECTED",
+            timestamp=at,
+            reason=reason,
+        )
+
     @staticmethod
     def _time_minutes(value: datetime) -> int:
         local = value.astimezone(IST)
         return local.hour * 60 + local.minute
 
     def _entry_allowed(self, timestamp: datetime, overrides: ThresholdOverrides | None) -> bool:
-        if overrides and overrides.bypass_entry_window:
+        # Production Strategy A cannot bypass its 09:45-14:45 contract.
+        # Historical simulation opts in explicitly via allow_session_bypass.
+        if self.allow_session_bypass and overrides and overrides.bypass_entry_window:
             return True
         start_h, start_m = map(int, self.config.entry_session_start.split(":"))
         end_h, end_m = map(int, self.config.entry_session_end.split(":"))
@@ -146,6 +185,26 @@ class TrendPullbackStrategy:
             raw = canonical_active_futures_stream(raw, as_of=selection_time, interval="15m") if raw else []
         if not raw:
             raise ValueError("no completed futures 15m candles")
+        if as_of is not None:
+            # Require the latest expected completed 15m bar. Around a quarter-hour
+            # boundary allow two minutes for the newly completed broker candle to
+            # arrive; after that, the previous bar is stale and must not advance
+            # the Strategy A state machine.
+            local = selection_time.astimezone(IST)
+            boundary_local = local.replace(
+                minute=(local.minute // 15) * 15,
+                second=0,
+                microsecond=0,
+            )
+            expected_end = boundary_local.astimezone(timezone.utc)
+            if (local - boundary_local).total_seconds() <= 120:
+                expected_end -= timedelta(minutes=15)
+            if raw[-1].end_time < expected_end:
+                raise ValueError(
+                    "STALE_FUTURES_DATA: "
+                    f"latest={raw[-1].end_time.isoformat()} "
+                    f"expected_at_least={expected_end.isoformat()}"
+                )
         return raw, FuturesFeatureEngine.build(raw, as_of=as_of)
 
     def _trend_ok(self, feature: FuturesFeatureSnapshot, direction: StrategyDirection) -> tuple[bool, str]:
@@ -311,7 +370,14 @@ class TrendPullbackStrategy:
         try:
             _, feature = self._features_for_input(source, as_of)
         except ValueError as exc:
-            self.last_event = StrategyEvent(event="REJECTED", timestamp=as_of or datetime.now(timezone.utc), reason="INCOMPLETE_FUTURES_DATA", details={"error": str(exc)})
+            message = str(exc)
+            reason = "STALE_FUTURES_DATA" if message.startswith("STALE_FUTURES_DATA:") else "INCOMPLETE_FUTURES_DATA"
+            self.last_event = StrategyEvent(
+                event="REJECTED",
+                timestamp=as_of or datetime.now(timezone.utc),
+                reason=reason,
+                details={"error": message},
+            )
             return None
         if self.active_contract_id is not None and feature.contract_id != self.active_contract_id:
             previous_contract = self.active_contract_id
@@ -354,8 +420,15 @@ class TrendPullbackStrategy:
             chase = entry_price - setup.trigger_price if setup.direction is StrategyDirection.CALL else setup.trigger_price - entry_price
             if triggered and chase <= self.config.maximum_chase_atr * feature.atr14 + 1e-9 and self._entry_allowed(feature.candle_timestamp, overrides):
                 signal = self._signal(setup, feature, entry_price)
-                self.snapshot = self.snapshot.transition(StrategyState.ENTERED, entry_timestamp=feature.candle_timestamp)
-                self.last_event = StrategyEvent(event="ENTERED", timestamp=feature.candle_timestamp, reason="TRIGGER_CROSSED", details={"entry_price": entry_price})
+                # The futures thesis has triggered, but option execution has not
+                # been accepted yet. Service/replay confirms ENTERED only after
+                # the corresponding trade/manifest is persisted.
+                self.last_event = StrategyEvent(
+                    event="TRIGGERED",
+                    timestamp=feature.candle_timestamp,
+                    reason="TRIGGER_CROSSED",
+                    details={"entry_price": entry_price},
+                )
                 return signal
             if triggered and chase > self.config.maximum_chase_atr * feature.atr14 + 1e-9:
                 self.snapshot = StrategyStateSnapshot()

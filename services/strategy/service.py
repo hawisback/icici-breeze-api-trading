@@ -40,6 +40,7 @@ from services.strategy.models import (
     SimulationResult,
     StrategyName,
     StrategySignal,
+    StrategyState,
     ThresholdOverrides,
     TradeDirection,
     TradeLifecycleState,
@@ -122,6 +123,13 @@ class StrategyService:
     def _reset_setups(self, at):
         self.strategy_a.reset(at)
         self.strategy_b.reset(at)
+
+    async def _reject_strategy_a_execution(self, signal: StrategySignal, reason: str) -> None:
+        """Recover a triggered Strategy A setup when downstream execution rejects."""
+        if not self._is_strategy_a(signal.strategy):
+            return
+        self.strategy_a.on_execution_rejected(signal.timestamp, reason)
+        await self._save_runtime()
 
     async def _persist_strategy_a_telemetry(self, record: StrategyAEvaluationRecord) -> None:
         self.strategy_a_telemetry.append(record)
@@ -226,6 +234,27 @@ class StrategyService:
         self.strategy_a.restore_state(await self.repo.get_runtime())
         self.strategy_b.restore_state(await self.repo.get_runtime("volatility_breakout"))
         self._active_trades_cache = await self.repo.get_active_trades()
+
+        # Repair the only two crash-consistency mismatches permitted by older
+        # builds: phantom ENTERED without a trade, or an ARMED signal whose
+        # trade was persisted immediately before runtime-state confirmation.
+        strategy_a_trades = [
+            trade for trade in self._active_trades_cache
+            if self._is_strategy_a(trade.strategy)
+        ]
+        runtime_reconciled = False
+        if self.strategy_a.snapshot.state is StrategyState.ENTERED and not strategy_a_trades:
+            self.strategy_a.on_execution_rejected(
+                utc_now(),
+                "RECOVERED_PHANTOM_ENTERED_STATE",
+            )
+            runtime_reconciled = True
+        elif self.strategy_a.snapshot.state is StrategyState.ARMED and strategy_a_trades:
+            self.strategy_a.confirm_entry(min(trade.entry_time for trade in strategy_a_trades))
+            runtime_reconciled = True
+        if runtime_reconciled:
+            await self._save_runtime()
+
         await self._seed_default_strategy()
 
         # Start background evaluation loop if enabled
@@ -721,6 +750,7 @@ class StrategyService:
         is_strategy_a = self._is_strategy_a(signal.strategy)
         if is_strategy_a and signal.underlying_entry_price is None:
             await self._log_decision("RISK", signal.strategy.value, "Strategy A signal missing authoritative futures entry", signal.model_dump(mode="json"))
+            await self._reject_strategy_a_execution(signal, "EXECUTION_REJECTED_INVALID_ENTRY_REFERENCE")
             return {"status": "INVALID_STRATEGY_A_ENTRY_REFERENCE"}
         underlying_entry = signal.underlying_entry_price if is_strategy_a else signal.spot_reference_price
         selector_underlying = underlying_entry
@@ -769,6 +799,8 @@ class StrategyService:
                 message=f"Contract selection failed: {rejection_reason}",
                 details={"candidates_checked": len(candidates), "cap": self.config.option_selection.max_option_premium},
             )
+            if is_strategy_a:
+                await self._reject_strategy_a_execution(signal, "EXECUTION_REJECTED_CONTRACT_SELECTION")
             return {"status": "CONTRACT_SELECTION_FAILED", "reason": rejection_reason}
 
         await self._log_decision(
@@ -833,6 +865,8 @@ class StrategyService:
                 message="Position sizing rejected: calculated lots < 1",
                 details={"capital_cap": self.config.risk.max_trade_capital, "premium": selected_contract.ask_price},
             )
+            if is_strategy_a:
+                await self._reject_strategy_a_execution(signal, "EXECUTION_REJECTED_SIZING")
             return {"status": "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"}
 
         # 12. Check LIVE Arming Gate for non-Strategy-A compatibility paths.
@@ -926,6 +960,10 @@ class StrategyService:
 
         await self.repo.save_trade(new_trade)
         if is_strategy_a:
+            # ENTERED is confirmed only after a real Strategy A trade record
+            # exists, eliminating the trigger->selector crash window.
+            self.strategy_a.confirm_entry(signal.timestamp)
+            await self._save_runtime()
             await self._record_strategy_a_lifecycle_event(new_trade, features, "POSITION_SIZED")
         await self._record_execution({
             "trade_id": new_trade.trade_id,
@@ -1687,11 +1725,17 @@ class StrategyService:
         option_type: Optional[OptionType] = None,
         override_premium_cap: Optional[float] = None,
     ) -> dict[str, Any]:
-        """Manually force a strategy trade setup entry immediately.
-        
-        Performs automated contract selection, position sizing, risk guardrail enforcement,
-        and registers the trade with hard stop (-25%) and trailing ladder targets (+1R, +1.5R, +2R).
+        """Manually force a non-Strategy-A trade setup entry immediately.
+
+        Strategy A cannot be synthesized here because that would bypass its
+        futures-only TrendPullback state machine and contaminate validation.
         """
+        if strategy == StrategyName.TREND_PULLBACK:
+            return {
+                "status": "STRATEGY_A_FORCE_ENTRY_DISABLED",
+                "reason": "Strategy A entries must originate from the validated futures TrendPullback state machine",
+            }
+
         now = utc_now()
         features = self._last_features or await self._gather_features()
 

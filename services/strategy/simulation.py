@@ -438,7 +438,7 @@ class SimulationEngine:
         if bypass_entry_window:
             overrides = overrides.model_copy(update={"bypass_entry_window": True})
         cfg = self.tunables
-        strat_a = TrendPullbackStrategy(config=cfg)
+        strat_a = TrendPullbackStrategy(config=cfg, allow_session_bypass=True)
         strat_b = VolatilityBreakoutStrategy(rvol_threshold=cfg.rvol_threshold, adx_threshold=cfg.strategy_b_adx_threshold,
                                              min_confirmation_score=cfg.strat_b_min_confirmation,
                                              box_max_height_atr=cfg.box_max_height_atr,
@@ -542,6 +542,14 @@ class SimulationEngine:
                             runner_mode_active=False, current_ladder_stage="OPEN_INITIAL_RISK", reversal_score=0,
                             adverse_health_counters={}, entry_bar_timestamp=bar.end_time,
                             last_managed_completed_bar_timestamp=None,
+                        )
+                        strat_a.confirm_entry(sig_a.timestamp)
+                        effective_diags_a = strat_a.diagnose(
+                            features,
+                            running,
+                            macro,
+                            overrides=overrides,
+                            futures_candles=futures,
                         )
                 sig_b = strat_b.evaluate(features, running, overrides=overrides) if cfg.volatility_breakout_enabled else None
                 if sig_b is not None:

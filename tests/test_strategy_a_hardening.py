@@ -16,7 +16,8 @@ from services.strategy.reason_codes import (
 )
 from services.strategy.models import (
     ActiveTrade, AutoTradingMode, MarketFeatures, OptionType, StrategyDirection,
-    StrategyName, StrategyState, StrategyStateSnapshot, StrategySetup, StrategyTunablesConfig, TradeDirection, TradeLifecycleState,
+    StrategyName, StrategyState, StrategyStateSnapshot, StrategySetup, StrategyTunablesConfig,
+    ThresholdOverrides, TradeDirection, TradeLifecycleState,
 )
 from services.strategy.position_manager import PositionManager, calculate_realized_trade_r
 from services.strategy.replay_strategy_a import StrategyAReplayEngine
@@ -433,3 +434,152 @@ def test_strategy_a_telemetry_summary_counts_selection_sizing_execution_and_disc
     assert summary["forced_exits"] == 1
     assert summary["option_pnl_total"] == 1
     assert summary["runtime_replay_discrepancy_count"] == 1
+
+def _armed_execution_strategy(at):
+    setup_at = at - timedelta(minutes=15)
+    setup = StrategySetup(
+        direction=StrategyDirection.CALL,
+        setup_timestamp=setup_at,
+        confirmation_bar_timestamp=setup_at,
+        confirmation_high=100,
+        confirmation_low=90,
+        trigger_price=100,
+        structural_stop=90,
+        initial_underlying_r=10,
+        relevant_support_resistance_level=92,
+        confluence_references=("CONFIRMED_SR", "EMA20"),
+        setup_expiry_timestamp=at + timedelta(minutes=15),
+        setup_expiry_bar_index=3,
+    )
+    strategy = TrendPullbackStrategy()
+    strategy.snapshot = (
+        StrategyStateSnapshot()
+        .transition(StrategyState.SETUP, setup=setup)
+        .transition(StrategyState.ARMED)
+    )
+    feature = FuturesFeatureSnapshot(
+        contract_id="INST-NIFTY-FUT-2026-09-24",
+        candle_timestamp=at,
+        candle_start=at - timedelta(minutes=15),
+        open=100,
+        high=101,
+        low=95,
+        close=100,
+        ema20=99,
+        ema50=95,
+        adx14=30,
+        plus_di14=30,
+        minus_di14=10,
+        atr14=10,
+        session_vwap=99,
+        support=92,
+        resistance=120,
+        bar_index=2,
+    )
+    strategy._features_for_input = lambda *_args, **_kwargs: ([], feature)
+    return strategy
+
+
+def test_strategy_a_trigger_is_not_entered_until_execution_confirmation_and_rejection_recovers():
+    at = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    strategy = _armed_execution_strategy(at)
+    signal = strategy.evaluate(SimpleNamespace(timestamp=at), [], [], futures_candles=[])
+    assert signal is not None
+    assert strategy.snapshot.state is StrategyState.ARMED
+    assert strategy.last_event.event == "TRIGGERED"
+
+    strategy.confirm_entry(signal.timestamp)
+    assert strategy.snapshot.state is StrategyState.ENTERED
+    assert strategy.last_event.reason == "OPTION_EXECUTION_CONFIRMED"
+
+    rejected = _armed_execution_strategy(at)
+    rejected_signal = rejected.evaluate(SimpleNamespace(timestamp=at), [], [], futures_candles=[])
+    assert rejected_signal is not None
+    rejected.on_execution_rejected(rejected_signal.timestamp, "EXECUTION_REJECTED_CONTRACT_SELECTION")
+    assert rejected.snapshot.state is StrategyState.COOLDOWN
+    assert rejected.last_event.reason == "EXECUTION_REJECTED_CONTRACT_SELECTION"
+
+
+@pytest.mark.asyncio
+async def test_service_execution_rejection_cannot_leave_strategy_a_entered():
+    at = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    service, repo = _service(None)
+    strategy = _armed_execution_strategy(at)
+    signal = strategy.evaluate(SimpleNamespace(timestamp=at), [], [], futures_candles=[])
+    service.strategy_a = strategy
+
+    await service._reject_strategy_a_execution(signal, "EXECUTION_REJECTED_SIZING")
+
+    assert service.strategy_a.snapshot.state is StrategyState.COOLDOWN
+    assert service.strategy_a.snapshot.state is not StrategyState.ENTERED
+    assert repo.save_runtime.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_strategy_a_force_entry_is_disabled_and_cannot_create_validation_trade():
+    service, repo = _service(None)
+    result = await service.force_entry(
+        strategy=StrategyName.TREND_PULLBACK,
+        direction=TradeDirection.BULLISH,
+        option_type=OptionType.CALL,
+    )
+    assert result["status"] == "STRATEGY_A_FORCE_ENTRY_DISABLED"
+    assert repo.save_trade.await_count == 0
+
+
+def test_production_strategy_a_cannot_bypass_entry_window_but_simulation_can_opt_in():
+    before_open = datetime(2026, 9, 21, 9, 44, tzinfo=IST)
+    override = ThresholdOverrides(bypass_entry_window=True)
+    production = TrendPullbackStrategy()
+    simulation = TrendPullbackStrategy(allow_session_bypass=True)
+
+    assert production._entry_allowed(before_open, override) is False
+    assert simulation._entry_allowed(before_open, override) is True
+
+
+def test_stale_futures_data_is_machine_readable_and_does_not_advance_state():
+    end = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    stale_as_of = datetime(2026, 9, 21, 10, 20, tzinfo=IST)
+    candle = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-24",
+        interval="15m",
+        start_time=end - timedelta(minutes=15),
+        end_time=end,
+        open=100,
+        high=102,
+        low=98,
+        close=101,
+        volume=100,
+        source="BREEZE",
+    )
+    strategy = TrendPullbackStrategy()
+    signal = strategy.evaluate(
+        SimpleNamespace(timestamp=stale_as_of),
+        [],
+        [],
+        futures_candles=[candle],
+    )
+    assert signal is None
+    assert strategy.snapshot.state is StrategyState.FLAT
+    assert strategy.last_event.reason == "STALE_FUTURES_DATA"
+
+
+def test_historical_as_of_accepts_the_expected_completed_futures_bar():
+    end = datetime(2026, 9, 21, 10, 15, tzinfo=IST)
+    candle = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-24",
+        interval="15m",
+        start_time=end - timedelta(minutes=15),
+        end_time=end,
+        open=100,
+        high=102,
+        low=98,
+        close=101,
+        volume=100,
+        source="BREEZE",
+    )
+    strategy = TrendPullbackStrategy()
+    bars, feature = strategy._features_for_input([candle], end)
+    assert bars[-1].end_time == end
+    assert feature.candle_timestamp == end
+
