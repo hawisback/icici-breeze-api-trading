@@ -27,7 +27,7 @@ import json
 import math
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any, Iterable, Sequence
@@ -107,8 +107,8 @@ def _load_canonical_stream(
     ) + timedelta(minutes=5)
     rows_5m = _load_rows(
         conn,
-        start_utc=warmup_start.astimezone(history_end.tzinfo),
-        end_utc=history_end.astimezone(history_end.tzinfo),
+        start_utc=warmup_start.astimezone(timezone.utc),
+        end_utc=history_end.astimezone(timezone.utc),
         source=source,
         instrument_like="INST-NIFTY-FUT-%",
     )
@@ -561,15 +561,15 @@ def _trigger_label(
 
         # Conservative ordering for OHLC ambiguity: protective stop wins when
         # the same 15m bar contains both stop and favorable target.
-        if stop_hit and not hit_t1:
-            stop_before_t1 = True
+        if stop_hit:
+            if not hit_t1:
+                stop_before_t1 = True
             break
         hit_1r = hit_1r or one_hit
-        if t1_hit:
-            hit_t1 = True
-            hit_runner = hit_runner or runner_hit
-            break
+        hit_t1 = hit_t1 or t1_hit
         hit_runner = hit_runner or runner_hit
+        if hit_runner:
+            break
 
     last_close = post[-1].close if post else entry_bar.close
     if direction is StrategyDirection.CALL:
@@ -620,6 +620,17 @@ def build_candidates(
                     "reason": "NO_CANONICAL_FUTURES_STREAM",
                 })
                 continue
+            first_decision = datetime.combine(day, ENTRY_FIRST_END, tzinfo=IST)
+            warmup_count = sum(
+                bar.end_time.astimezone(IST) <= first_decision
+                for bar in stream
+            )
+            if warmup_count < 50:
+                skipped_sessions.append({
+                    "date": day.isoformat(),
+                    "reason": "INSUFFICIENT_50_BAR_FEATURE_WARMUP",
+                })
+                continue
             features = _feature_map(stream)
             session_bars = [
                 bar for bar in stream
@@ -629,6 +640,12 @@ def build_candidates(
                 bar for bar in session_bars
                 if _in_decision_window(bar.end_time)
             ]
+            if len(decision_bars) != 21:
+                skipped_sessions.append({
+                    "date": day.isoformat(),
+                    "reason": f"INCOMPLETE_DECISION_WINDOW:{len(decision_bars)}/21",
+                })
+                continue
             for bar in decision_bars:
                 feature = features[bar.end_time]
                 future = [
