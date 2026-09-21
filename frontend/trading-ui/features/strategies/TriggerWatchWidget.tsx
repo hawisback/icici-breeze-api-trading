@@ -441,110 +441,66 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
               </div>
             </div>
           ) : (
-            /* Strategy A Pipeline: Regime -> Impulse -> Pullback -> Trigger -> Confirmation -> Risk */
+            /* Strategy A V2 Pipeline: broker data -> trend -> confluence -> confirmation -> trigger -> risk */
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
-              {/* Phase 1: Macro Regime */}
-              <div className={`p-2.5 rounded-lg border text-xs ${
-                currentStrategy.phase_summary.regime?.status === "QUALIFIED"
-                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
-                  : "bg-slate-950/80 border-slate-800 text-slate-300"
-              }`}>
-                <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">1. Regime</div>
-                <div className="font-bold">{currentStrategy.phase_summary.regime?.status || "WAITING"}</div>
-                <div className="text-[10px] text-slate-400 mt-1">
-                  {currentStrategy.phase_summary.regime?.qualified ? "Qualified" : "Not qualified"} | {currentStrategy.phase_summary.regime?.direction_score} | ADX {currentStrategy.phase_summary.regime?.adx}
+              <div className="p-2.5 rounded-lg border border-cyan-500/30 bg-cyan-500/5 text-xs text-slate-300">
+                <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">1. Futures Data</div>
+                <div className="font-bold text-cyan-300 truncate" title={currentStrategy.phase_summary.strategy_a_v2?.data.contract}>
+                  {currentStrategy.phase_summary.strategy_a_v2?.data.contract || "UNRESOLVED"}
                 </div>
-                <div className="text-[10px] text-slate-500 mt-1 truncate" title={currentStrategy.phase_summary.regime?.qualified_since || ""}>
-                  {currentStrategy.phase_summary.setup_cutoff_event || "NONE"} cutoff · {currentStrategy.phase_summary.regime_first_qualified_at || "not established"}
+                <div className="text-[10px] text-slate-400 mt-1">
+                  Close ₹{currentStrategy.phase_summary.strategy_a_v2?.data.close?.toFixed(2) ?? "-"}
                 </div>
               </div>
 
-              {/* Phase 2: Impulse */}
-              <div className={`p-2.5 rounded-lg border text-xs ${
-                currentStrategy.phase_summary.impulse?.found
-                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
-                  : "bg-slate-950/80 border-slate-800 text-slate-300"
-              }`}>
-                <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">2. Impulse</div>
-                <div className="font-bold">{currentStrategy.phase_summary.impulse?.found ? "FOUND (YES)" : "PENDING"}</div>
+              <div className={`p-2.5 rounded-lg border text-xs ${currentStrategy.phase_summary.strategy_a_v2?.trend.passed ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-slate-950/80 border-slate-800 text-slate-300"}`}>
+                <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">2. Trend Regime</div>
+                <div className="font-bold">{currentStrategy.phase_summary.strategy_a_v2?.trend.passed ? "PASSED" : "WAITING"}</div>
                 <div className="text-[10px] text-slate-400 mt-1">
-                  {currentStrategy.phase_summary.impulse?.height_atr ? `${currentStrategy.phase_summary.impulse.height_atr} ATR` : "Waiting for swing"}
+                  EMA {currentStrategy.phase_summary.strategy_a_v2?.trend.ema20?.toFixed(1) ?? "-"} / {currentStrategy.phase_summary.strategy_a_v2?.trend.ema50?.toFixed(1) ?? "-"} · ADX {currentStrategy.phase_summary.strategy_a_v2?.trend.adx?.toFixed(1) ?? "-"}
                 </div>
-                <div className="text-[10px] text-slate-500 mt-1 space-y-0.5">
-                  <div>
-                    Search: {currentStrategy.phase_summary.impulse_search?.pre_cutoff_candles_included ?? 0} pre-cutoff / {currentStrategy.phase_summary.impulse_search?.post_cutoff_candles_searched ?? 0} post-cutoff candles
-                  </div>
-                  <div className="truncate">
-                    Cutoff: {currentStrategy.phase_summary.impulse_search?.setup_cutoff_timestamp || "none"} · Start: {currentStrategy.phase_summary.impulse_search?.search_start_timestamp || "none"}
-                  </div>
-                  <div>
-                    Age: {currentStrategy.phase_summary.setup_age_seconds != null ? `${Math.round(currentStrategy.phase_summary.setup_age_seconds / 60)}m` : "-"} · {currentStrategy.phase_summary.completed_5m_candles_since_cutoff ?? 0} completed 5m candles since cutoff
-                  </div>
-                  {currentStrategy.phase_summary.impulse?.impulse_start && (
-                    <div className="truncate">
-                      {currentStrategy.phase_summary.impulse.impulse_direction} {currentStrategy.phase_summary.impulse.impulse_points?.toFixed(1)} pts · {currentStrategy.phase_summary.impulse.impulse_start} → {currentStrategy.phase_summary.impulse.impulse_end} · {currentStrategy.phase_summary.impulse.impulse_crossed_setup_cutoff ? "crossed cutoff" : "after cutoff"}
-                    </div>
-                  )}
-                  {!currentStrategy.phase_summary.impulse?.found && currentStrategy.phase_summary.impulse_rejection_reason && (
-                    <div className="text-amber-400 truncate" title={currentStrategy.phase_summary.impulse_rejection_reason}>
-                      {currentStrategy.phase_summary.impulse_rejection_reason}
-                    </div>
-                  )}
+                <div className="text-[10px] text-slate-500 mt-1">{currentStrategy.phase_summary.strategy_a_v2?.trend.reason}</div>
+              </div>
+
+              <div className={`p-2.5 rounded-lg border text-xs ${currentStrategy.phase_summary.strategy_a_v2?.confluence.passed ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-slate-950/80 border-slate-800 text-slate-300"}`}>
+                <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">3. Pullback Confluence</div>
+                <div className="font-bold">{currentStrategy.phase_summary.strategy_a_v2?.confluence.passed ? "PASSED" : "WAITING"}</div>
+                <div className="text-[10px] text-slate-400 mt-1">
+                  Level {currentStrategy.phase_summary.strategy_a_v2?.confluence.level?.toFixed(1) ?? "-"} · VWAP {currentStrategy.phase_summary.strategy_a_v2?.confluence.vwap?.toFixed(1) ?? "-"}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-1">{currentStrategy.phase_summary.strategy_a_v2?.confluence.reason}</div>
+              </div>
+
+              <div className={`p-2.5 rounded-lg border text-xs ${currentStrategy.phase_summary.strategy_a_v2?.confirmation.passed ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-amber-500/10 border-amber-500/30 text-amber-300"}`}>
+                <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">4. Confirmation</div>
+                <div className="font-bold">{currentStrategy.phase_summary.strategy_a_v2?.confirmation.passed ? "PASSED" : "WAITING"}</div>
+                <div className="text-[10px] text-slate-400 mt-1">
+                  Body {(currentStrategy.phase_summary.strategy_a_v2?.confirmation.body_ratio ?? 0).toFixed(2)} · Range {(currentStrategy.phase_summary.strategy_a_v2?.confirmation.range_atr ?? 0).toFixed(2)} ATR
+                </div>
+                <div className="text-[10px] text-amber-300 mt-1">{currentStrategy.phase_summary.strategy_a_v2?.confirmation.reason}</div>
+              </div>
+
+              <div className="p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 text-xs text-slate-300">
+                <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">5. Trigger State</div>
+                <div className="font-bold text-cyan-300">{currentStrategy.phase_summary.strategy_a_v2?.trigger.state || currentStrategy.phase_state || "FLAT"}</div>
+                <div className="text-[10px] text-slate-400 mt-1">
+                  {currentStrategy.phase_summary.strategy_a_v2?.trigger.trigger_price != null
+                    ? `Trigger ₹${currentStrategy.phase_summary.strategy_a_v2.trigger.trigger_price.toFixed(2)} · gap ${(currentStrategy.phase_summary.strategy_a_v2.trigger.distance_pts ?? 0).toFixed(1)}`
+                    : "No active setup/trigger"}
                 </div>
               </div>
 
-              {/* Phase 3: Pullback */}
-              <div className={`p-2.5 rounded-lg border text-xs ${
-                currentStrategy.phase_summary.pullback?.state === "QUALIFIED"
-                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
-                  : "bg-slate-950/80 border-slate-800 text-slate-300"
-              }`}>
-                <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">3. Pullback</div>
-                <div className="font-bold">{currentStrategy.phase_summary.pullback?.state || "WAITING"}</div>
-                <div className="text-[10px] text-slate-400 mt-1">
-                  {currentStrategy.phase_summary.pullback?.bars ?? 0} bars | {currentStrategy.phase_summary.pullback?.depth_pct ?? 0}%
-                </div>
-                <div className="text-[10px] text-cyan-300 mt-1">
-                  Required pullback depth: {currentStrategy.phase_summary.pullback?.depth_range || "configured range"}
-                </div>
-              </div>
-
-              {/* Phase 4: Trigger */}
-              <div className={`p-2.5 rounded-lg border text-xs ${
-                currentStrategy.phase_summary.trigger?.gap_pts === 0
-                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
-                  : "bg-amber-500/10 border-amber-500/30 text-amber-300"
-              }`}>
-                <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">4. Trigger</div>
-                <div className="font-bold truncate">{currentStrategy.phase_summary.trigger?.waiting_for || "Awaiting"}</div>
-                <div className="text-[10px] text-slate-400 mt-1">
-                  {currentStrategy.phase_summary.trigger?.gap_pts ? `${currentStrategy.phase_summary.trigger.gap_pts} pts gap` : "Triggered"}
-                </div>
-              </div>
-
-              {/* Phase 5: Confirmation */}
-              <div className={`p-2.5 rounded-lg border text-xs ${
-                (currentStrategy.phase_summary.confirmation?.score ?? 0) >= (currentStrategy.phase_summary.confirmation?.required ?? 2)
-                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
-                  : "bg-slate-950/80 border-slate-800 text-slate-300"
-              }`}>
-                <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">5. Confirmation</div>
-                <div className="font-bold">
-                  {currentStrategy.phase_summary.confirmation?.score ?? 0} / {currentStrategy.phase_summary.confirmation?.required ?? 2} pts
-                </div>
-                <div className="text-[10px] text-slate-400 mt-1">
-                  {(currentStrategy.phase_summary.confirmation?.score ?? 0) >= (currentStrategy.phase_summary.confirmation?.required ?? 2) ? "Sufficient" : "Pending factors"}
-                </div>
-              </div>
-
-              {/* Phase 6: Structural Risk */}
               <div className="p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 text-xs text-slate-300">
                 <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">6. Structural Risk</div>
                 <div className="font-bold text-cyan-300">
-                  {currentStrategy.phase_summary.risk?.initial_r_atr ? `${currentStrategy.phase_summary.risk.initial_r_atr} ATR` : "Band OK"}
+                  {currentStrategy.phase_summary.strategy_a_v2?.risk.initial_r_points != null
+                    ? `${currentStrategy.phase_summary.strategy_a_v2.risk.initial_r_points.toFixed(1)} pts R`
+                    : "Not established"}
                 </div>
-                <div className="text-[10px] text-slate-400 mt-1 truncate">
-                  SL: ₹{currentStrategy.phase_summary.risk?.stop ?? "-"}
+                <div className="text-[10px] text-slate-400 mt-1">
+                  SL: {currentStrategy.phase_summary.strategy_a_v2?.risk.structural_stop != null
+                    ? `₹${currentStrategy.phase_summary.strategy_a_v2.risk.structural_stop.toFixed(2)}`
+                    : "-"}
                 </div>
               </div>
             </div>

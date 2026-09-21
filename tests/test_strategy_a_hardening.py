@@ -888,3 +888,23 @@ async def test_strategy_a_does_not_use_calendar_futures_when_breeze_session_is_i
     assert resolved is None
     assert service._market_data_status["last_error"] == "BROKER_SESSION_INACTIVE"
     inst_svc.ensure_current_nifty_futures.assert_not_awaited()
+
+
+def test_strategy_a_diagnostics_keep_passed_trend_when_confirmation_is_blocker():
+    at = datetime(2026, 9, 21, 12, 0, tzinfo=IST)
+    strategy = TrendPullbackStrategy()
+    feature = __import__("services.strategy.futures_signal", fromlist=["FuturesFeatureSnapshot"]).FuturesFeatureSnapshot(
+        contract_id="INST-NIFTY-FUT-2026-09-29",
+        candle_timestamp=at,
+        candle_start=at - timedelta(minutes=15),
+        open=100.0, high=110.0, low=99.0, close=101.0,
+        ema20=105.0, ema50=100.0, adx14=30.0, plus_di14=28.0, minus_di14=12.0,
+        atr14=10.0, session_vwap=103.0, support=100.0, resistance=120.0, bar_index=20,
+    )
+    diag = strategy._diagnostic(feature, __import__("services.strategy.strategies.trend_pullback", fromlist=["StrategyDirection"]).StrategyDirection.CALL, "CONFIRMATION_BODY_TOO_WEAK")
+    by_id = {item.id: item for item in diag.conditions}
+    assert by_id["trend"].status == "PASSED"
+    assert by_id["trend"].gap_description == "TREND_CONFIRMED"
+    assert by_id["confirmation"].status == "PENDING"
+    assert by_id["confirmation"].gap_description == "CONFIRMATION_BODY_TOO_WEAK"
+    assert diag.phase_summary["strategy_a_v2"]["trend"]["passed"] is True

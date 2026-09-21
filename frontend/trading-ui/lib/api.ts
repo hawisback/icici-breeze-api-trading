@@ -446,6 +446,14 @@ export interface StrategyTriggerDiagnosticsData {
     extension?: { status: string; extension_atr: number; max_allowed_atr: number };
     confirmation?: { score: number; required: number; passed_factors?: string[] };
     risk?: { initial_r_atr: number; stop: number };
+    strategy_a_v2?: {
+      data: { contract: string; completed_candle_timestamp: string; close: number };
+      trend: { passed: boolean; reason: string; ema20: number; ema50: number; adx: number; plus_di: number; minus_di: number };
+      confluence: { passed: boolean; reason: string; references: string[]; level?: number | null; support?: number | null; resistance?: number | null; vwap: number };
+      confirmation: { passed: boolean; reason: string; body_ratio: number; range_atr: number };
+      trigger: { state: string; trigger_price?: number | null; distance_pts?: number | null };
+      risk: { structural_stop?: number | null; initial_r_points?: number | null };
+    };
   };
   passed_count: number;
   total_count: number;

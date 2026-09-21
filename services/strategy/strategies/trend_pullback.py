@@ -350,11 +350,43 @@ class TrendPullbackStrategy:
 
     def _diagnostic(self, feature: FuturesFeatureSnapshot, direction: StrategyDirection, reason: str, setup: StrategySetup | None = None) -> StrategyTriggerDiagnostics:
         option = OptionType.CALL if direction is StrategyDirection.CALL else OptionType.PUT
-        conditions = [
-            TriggerCondition(id="trend", name="Futures trend regime", current_value=feature.trend, target_threshold="directional EMA/DI/ADX", status="PASSED" if reason == "TREND_CONFIRMED" else "PENDING", gap_description=reason),
-            TriggerCondition(id="sr", name="Confirmed support/resistance", current_value=str(feature.support if direction is StrategyDirection.CALL else feature.resistance), target_threshold="confirmed pivot", status="PASSED" if (feature.support if direction is StrategyDirection.CALL else feature.resistance) is not None else "PENDING", gap_description=reason),
-        ]
+        trend_ok, trend_reason = self._trend_ok(feature, direction)
+        confirmation_ok, confirmation_reason = self._confirmation_ok(feature, direction)
+        confluence_ok, references, level, confluence_reason = self._confluence(feature, direction)
+        range_points = max(0.0, feature.high - feature.low)
+        body_ratio = abs(feature.close - feature.open) / range_points if range_points > 0 else 0.0
+        range_atr = range_points / feature.atr14 if feature.atr14 > 0 else 0.0
         target = setup.trigger_price if setup else None
+        distance = abs(feature.close - target) if target is not None else None
+        conditions = [
+            TriggerCondition(
+                id="trend",
+                name="Futures trend regime",
+                current_value=feature.trend,
+                target_threshold="directional EMA20/EMA50 + DI + ADX",
+                status="PASSED" if trend_ok else "PENDING",
+                gap_description=trend_reason,
+            ),
+            TriggerCondition(
+                id="confluence",
+                name="Pullback confluence",
+                current_value=str(level) if level is not None else "NONE",
+                target_threshold="confirmed S/R + EMA20 or session VWAP",
+                status="PASSED" if confluence_ok else "PENDING",
+                gap_description=confluence_reason,
+            ),
+            TriggerCondition(
+                id="confirmation",
+                name="Confirmation candle",
+                current_value=f"body={body_ratio:.2f}; range={range_atr:.2f} ATR",
+                target_threshold=(
+                    f"body>={self.config.confirmation_min_body_ratio:.2f}; "
+                    f"directional close; range<={self.config.confirmation_max_range_atr:.2f} ATR"
+                ),
+                status="PASSED" if confirmation_ok else "PENDING",
+                gap_description=confirmation_reason,
+            ),
+        ]
         passed = sum(c.status == "PASSED" for c in conditions)
         return StrategyTriggerDiagnostics(
             strategy=StrategyName.TREND_PULLBACK,
@@ -364,9 +396,48 @@ class TrendPullbackStrategy:
             overall_status="READY_TO_TRIGGER" if self.snapshot.state is StrategyState.ARMED else "WAITING",
             passed_count=passed, total_count=len(conditions), ready_pct=round(passed / len(conditions) * 100, 2),
             key_blocker=reason, target_entry_level=target, current_spot=feature.close,
-            distance_pts=abs(feature.close - target) if target is not None else None,
+            distance_pts=distance,
             phase_state=self.snapshot.state.value,
-            phase_summary={"futures_contract": feature.contract_id, "completed_candle_timestamp": feature.candle_timestamp.isoformat(), "ema20": feature.ema20, "ema50": feature.ema50, "adx": feature.adx14, "plus_di": feature.plus_di14, "minus_di": feature.minus_di14, "atr": feature.atr14, "vwap": feature.session_vwap, "active_support": feature.support, "active_resistance": feature.resistance, "rejection_reason": reason},
+            phase_summary={
+                "futures_contract": feature.contract_id,
+                "completed_candle_timestamp": feature.candle_timestamp.isoformat(),
+                "ema20": feature.ema20, "ema50": feature.ema50, "adx": feature.adx14,
+                "plus_di": feature.plus_di14, "minus_di": feature.minus_di14,
+                "atr": feature.atr14, "vwap": feature.session_vwap,
+                "active_support": feature.support, "active_resistance": feature.resistance,
+                "rejection_reason": reason,
+                "strategy_a_v2": {
+                    "data": {
+                        "contract": feature.contract_id,
+                        "completed_candle_timestamp": feature.candle_timestamp.isoformat(),
+                        "close": feature.close,
+                    },
+                    "trend": {
+                        "passed": trend_ok, "reason": trend_reason,
+                        "ema20": feature.ema20, "ema50": feature.ema50,
+                        "adx": feature.adx14, "plus_di": feature.plus_di14, "minus_di": feature.minus_di14,
+                    },
+                    "confluence": {
+                        "passed": confluence_ok, "reason": confluence_reason,
+                        "references": references, "level": level,
+                        "support": feature.support, "resistance": feature.resistance,
+                        "vwap": feature.session_vwap,
+                    },
+                    "confirmation": {
+                        "passed": confirmation_ok, "reason": confirmation_reason,
+                        "body_ratio": body_ratio, "range_atr": range_atr,
+                    },
+                    "trigger": {
+                        "state": self.snapshot.state.value,
+                        "trigger_price": target,
+                        "distance_pts": distance,
+                    },
+                    "risk": {
+                        "structural_stop": setup.structural_stop if setup else None,
+                        "initial_r_points": setup.initial_underlying_r if setup else None,
+                    },
+                },
+            },
             conditions=conditions,
         )
 
