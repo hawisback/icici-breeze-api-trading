@@ -474,6 +474,18 @@ def _trigger_label(
         if not (gap_triggered or touched):
             continue
 
+        local_trigger_time = bar.end_time.astimezone(IST)
+        start_h, start_m = map(int, config.entry_session_start.split(":"))
+        end_h, end_m = map(int, config.entry_session_end.split(":"))
+        trigger_minutes = local_trigger_time.hour * 60 + local_trigger_time.minute
+        if not (
+            start_h * 60 + start_m
+            <= trigger_minutes
+            <= end_h * 60 + end_m
+        ):
+            trigger_status = "ENTRY_SESSION_CLOSED"
+            break
+
         candidate_entry = bar.open if gap_triggered else float(trigger)
         chase = (
             candidate_entry - float(trigger)
