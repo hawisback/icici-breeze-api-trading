@@ -1,10 +1,24 @@
-name: Python tests
+name: Backend tests
 
 on:
   push:
     branches:
       - strategy-a-trend-pullback-v2
+    paths:
+      - "services/**"
+      - "libs/**"
+      - "tests/**"
+      - "requirements.txt"
+      - "pytest.ini"
+      - ".github/workflows/python-tests.yml"
   pull_request:
+    paths:
+      - "services/**"
+      - "libs/**"
+      - "tests/**"
+      - "requirements.txt"
+      - "pytest.ini"
+      - ".github/workflows/python-tests.yml"
   workflow_dispatch:
 
 permissions:
