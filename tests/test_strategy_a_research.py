@@ -1,6 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
 from libs.contracts.models import Candle
+from services.historical.strategy_a_entry_timing import (
+    build_entry_timing_report,
+    enrich_rows,
+)
 from services.historical.strategy_a_research import (
     ResearchVariant,
     _row_passes,
@@ -210,3 +214,94 @@ def test_research_label_rejects_trigger_after_entry_window():
     assert after_close.end_time.minute == 30
     assert label["trigger_status"] == "ENTRY_SESSION_CLOSED"
     assert label["entry_price"] is None
+
+
+def test_entry_timing_enrichment_is_backward_looking_and_measures_momentum_decay():
+    components = {
+        "ema_order": True,
+        "di_direction": True,
+        "adx": True,
+        "ema_separation": True,
+        "confirmation_direction": True,
+        "confirmation_body": True,
+        "confirmation_close_location": True,
+        "confirmation_range": True,
+        "sr_present": True,
+        "sr_touch": True,
+        "ema_or_vwap_near": True,
+        "minimum_stop_distance": True,
+        "maximum_stop_distance": True,
+        "opposing_sr_room": True,
+    }
+    first = {
+        **_research_row(),
+        "timestamp": "2026-09-21T05:00:00+00:00",
+        "close": 101.0,
+        "ema20": 100.0,
+        "session_vwap": 99.5,
+        "atr14": 2.0,
+        "adx14": 26.0,
+        "plus_di14": 35.0,
+        "minus_di14": 15.0,
+        "baseline_components": components,
+        "baseline_pass": True,
+    }
+    second = {
+        **first,
+        "timestamp": "2026-09-21T05:15:00+00:00",
+        "close": 101.2,
+        "ema20": 100.1,
+        "adx14": 24.0,
+        "plus_di14": 30.0,
+        "minus_di14": 18.0,
+        "label": {
+            **first["label"],
+            "trigger_timestamp": "2026-09-21T05:30:00+00:00",
+        },
+    }
+
+    enriched = enrich_rows([first, second])
+    later = next(row for row in enriched if row["timestamp"].endswith("05:15:00+00:00"))
+    timing = later["timing"]
+
+    assert timing["adx_delta_1bar"] == -2.0
+    assert timing["directional_di_spread_delta_1bar"] < 0
+    assert timing["ema20_directional_slope_atr_1bar"] > 0
+    assert timing["trend_streak_bars"] == 2
+    assert timing["trigger_delay_bars"] == 1
+
+
+def test_entry_timing_report_keeps_pre_risk_and_baseline_cohorts_separate():
+    row = {
+        **_research_row(),
+        "close": 101.0,
+        "ema20": 100.0,
+        "session_vwap": 99.5,
+        "atr14": 2.0,
+        "adx14": 25.0,
+        "plus_di14": 30.0,
+        "minus_di14": 10.0,
+        "baseline_components": {
+            "ema_order": True,
+            "di_direction": True,
+            "adx": True,
+            "ema_separation": True,
+            "confirmation_direction": True,
+            "confirmation_body": True,
+            "confirmation_close_location": True,
+            "confirmation_range": True,
+            "sr_present": True,
+            "sr_touch": True,
+            "ema_or_vwap_near": True,
+            "minimum_stop_distance": False,
+            "maximum_stop_distance": True,
+            "opposing_sr_room": False,
+        },
+        "baseline_pass": False,
+    }
+    report = build_entry_timing_report({"source": "BREEZE", "rows": [row]})
+
+    assert report["cohorts"]["pre_risk"]["metrics"]["candidate_rows"] == 1
+    assert report["cohorts"]["baseline_ready"]["metrics"]["candidate_rows"] == 0
+    assert "adx_change_1bar" in report["cohorts"]["pre_risk"]["dimensions"]
+    assert "trigger_delay" in report["cohorts"]["pre_risk"]["dimensions"]
