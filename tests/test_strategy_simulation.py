@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -6,6 +6,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from libs.contracts.models import Candle
+from services.instrument.service import InstrumentService
 from services.api_gateway.main import app
 from services.api_gateway.service_container import initialize_services
 from services.historical.repository import HistoricalRepository
@@ -232,11 +233,11 @@ def test_historical_close_at_normalizes_aware_timezones():
 
 
 @pytest.mark.asyncio
-async def test_available_simulation_dates_returns_ordered_historical_sessions(tmp_path):
+async def test_available_simulation_dates_returns_only_sessions_with_futures(tmp_path):
     repository = HistoricalRepository(tmp_path / "historical.db")
     await repository.initialize()
     candles = []
-    for index, day in enumerate((15, 16, 17)):
+    for index, day in enumerate((15, 16, 17, 18)):
         start = datetime(2026, 9, day, 9, 15, tzinfo=timezone.utc)
         candles.append(
             Candle(
@@ -252,6 +253,25 @@ async def test_available_simulation_dates_returns_ordered_historical_sessions(tm
                 source="BREEZE",
             )
         )
+        # September 18 intentionally has spot only. Strategy A must not offer
+        # a replay date unless at least one complete 15m futures bucket exists.
+        if day != 18:
+            for offset in range(3):
+                future_start = start + timedelta(minutes=5 * offset)
+                candles.append(
+                    Candle(
+                        instrument_id="INST-NIFTY-FUT-2026-09-29",
+                        interval="5m",
+                        start_time=future_start,
+                        end_time=future_start + timedelta(minutes=5),
+                        open=200.0 + index,
+                        high=201.0 + index,
+                        low=199.0 + index,
+                        close=200.5 + index,
+                        volume=1000,
+                        source="BREEZE",
+                    )
+                )
     await repository.save_candles(candles)
 
     engine = SimulationEngine(historical_service=SimpleNamespace(repo=repository))
@@ -398,7 +418,7 @@ async def test_replay_seeds_and_resolves_futures_for_target_date_not_today():
         tradable=True, expiry="2026-09-29",
     )
     ensure = AsyncMock(return_value=[future])
-    repo = SimpleNamespace(search=AsyncMock(return_value=[future]))
+    repo = SimpleNamespace(search=AsyncMock(side_effect=[[], [future]]))
     hist = SimpleNamespace(instrument_service=SimpleNamespace(ensure_current_nifty_futures=ensure, repo=repo))
     engine = SimulationEngine(historical_service=hist)
     diagnostics = {}
@@ -410,6 +430,61 @@ async def test_replay_seeds_and_resolves_futures_for_target_date_not_today():
     assert ensure.await_args.kwargs["today"].isoformat() == "2026-09-17"
     assert contracts[0]["expiry"] == "2026-09-29"
     assert diagnostics["futures_contract"]["status"] == "RESOLVED"
+    assert diagnostics["futures_contract"]["resolution_source"] == "DETERMINISTIC_FALLBACK"
+
+
+@pytest.mark.asyncio
+async def test_replay_prefers_actual_historical_futures_contract_over_seeded_metadata(tmp_path):
+    repository = HistoricalRepository(tmp_path / "historical.db")
+    await repository.initialize()
+    start = datetime(2025, 1, 15, 9, 15, tzinfo=timezone.utc)
+    await repository.save_candles([
+        Candle(
+            instrument_id="INST-NIFTY-FUT-2025-01-30",
+            interval="5m",
+            start_time=start + timedelta(minutes=5 * offset),
+            end_time=start + timedelta(minutes=5 * (offset + 1)),
+            open=200.0,
+            high=201.0,
+            low=199.0,
+            close=200.5,
+            volume=1000,
+            source="BREEZE",
+        )
+        for offset in range(3)
+    ])
+    wrong_seed = SimpleNamespace(
+        instrument_id="INST-NIFTY-FUT-2025-01-28", segment="FUTURES",
+        tradable=True, expiry="2025-01-28",
+    )
+    ensure = AsyncMock(return_value=[wrong_seed])
+    instrument_repo = SimpleNamespace(search=AsyncMock(return_value=[wrong_seed]))
+    hist = SimpleNamespace(
+        repo=repository,
+        instrument_service=SimpleNamespace(ensure_current_nifty_futures=ensure, repo=instrument_repo),
+    )
+    engine = SimulationEngine(historical_service=hist)
+    diagnostics = {}
+
+    instrument_id, contracts = await engine._resolve_replay_futures_instrument(
+        "2025-01-15",
+        source_diagnostics=diagnostics,
+        historical_source=HistoricalReplaySource.BREEZE,
+    )
+
+    assert instrument_id == "INST-NIFTY-FUT-2025-01-30"
+    assert contracts == [{
+        "instrument_id": "INST-NIFTY-FUT-2025-01-30",
+        "expiry": "2025-01-30",
+    }]
+    assert diagnostics["futures_contract"]["resolution_source"] == "HISTORICAL_STORAGE"
+    ensure.assert_not_awaited()
+    instrument_repo.search.assert_not_awaited()
+
+
+def test_nifty_monthly_expiry_fallback_respects_2025_weekday_transition():
+    assert InstrumentService._monthly_expiry(2025, 8) == date(2025, 8, 28)
+    assert InstrumentService._monthly_expiry(2025, 9) == date(2025, 9, 30)
 
 
 def test_strategy_a_replay_adx_override_changes_effective_v2_config():

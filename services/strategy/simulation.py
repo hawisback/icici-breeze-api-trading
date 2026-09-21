@@ -13,7 +13,11 @@ from typing import Any, Optional
 from libs.contracts.models import Candle, utc_now
 from services.strategy.contract_selector import ContractSelector
 from services.strategy.features import FeatureEngine
-from services.strategy.futures_signal import resolve_active_futures_instrument
+from services.strategy.futures_signal import (
+    FuturesContractResolver,
+    contract_expiry,
+    resolve_active_futures_instrument,
+)
 from services.strategy.models import (
     ActiveTrade,
     AutoTradingMode,
@@ -264,22 +268,33 @@ class SimulationEngine:
         self,
         historical_source: HistoricalReplaySource = HistoricalReplaySource.BREEZE,
     ) -> list[str]:
-        """Discovers distinct trading session dates available in historical storage."""
+        """Discover replay dates with both spot and usable Strategy A futures data."""
         dates: set[str] = set()
         if self.hist_svc and hasattr(self.hist_svc, "repo"):
             try:
                 async with self.hist_svc.repo.engine.connect() as conn:
                     if historical_source == HistoricalReplaySource.MIXED:
-                        source_clause = "source IN ('BREEZE', 'KITE', 'LIVE')"
+                        spot_source_clause = "spot.source IN ('BREEZE', 'KITE', 'LIVE')"
+                        futures_source_clause = "fut.source IN ('BREEZE', 'KITE', 'LIVE')"
                         params: tuple[Any, ...] = ()
                     else:
-                        source_clause = "source = ?"
-                        params = (historical_source.value,)
+                        spot_source_clause = "spot.source = ?"
+                        futures_source_clause = "fut.source = ?"
+                        params = (historical_source.value, historical_source.value)
                     cursor = await conn.execute(f"""
-                        SELECT DISTINCT substr(start_time, 1, 10) as day
-                        FROM historical_candles
-                        WHERE instrument_id = 'INST-NIFTY-INDEX' AND interval = '5m'
-                        AND {source_clause}
+                        SELECT DISTINCT substr(spot.start_time, 1, 10) AS day
+                        FROM historical_candles AS spot
+                        WHERE spot.instrument_id = 'INST-NIFTY-INDEX'
+                          AND spot.interval = '5m'
+                          AND {spot_source_clause}
+                          AND (
+                              SELECT COUNT(*)
+                              FROM historical_candles AS fut
+                              WHERE fut.interval = '5m'
+                                AND fut.instrument_id LIKE 'INST-NIFTY-FUT-%'
+                                AND substr(fut.start_time, 1, 10) = substr(spot.start_time, 1, 10)
+                                AND {futures_source_clause}
+                          ) >= 3
                         ORDER BY day DESC
                         LIMIT 120;
                     """, params)
@@ -419,35 +434,104 @@ class SimulationEngine:
         date_str: str,
         *,
         source_diagnostics: dict[str, Any],
+        historical_source: HistoricalReplaySource = HistoricalReplaySource.BREEZE,
     ) -> tuple[str | None, list[dict[str, str | None]]]:
-        """Resolve the nearest futures contract as it existed on replay date."""
+        """Resolve the actual nearest futures contract for the replay session.
+
+        Historical storage is authoritative when it already contains futures
+        for the requested source/date. The instrument master is the fallback;
+        deterministic seeding is used only when neither source can resolve a
+        contract.
+        """
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        as_of = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST)
+
+        historical_repo = getattr(self.hist_svc, "repo", None)
+        historical_engine = getattr(historical_repo, "engine", None)
+        if historical_engine is not None:
+            try:
+                async with historical_engine.connect() as conn:
+                    if historical_source == HistoricalReplaySource.MIXED:
+                        source_clause = "source IN ('BREEZE', 'KITE', 'LIVE')"
+                        params: tuple[Any, ...] = (date_str,)
+                    else:
+                        source_clause = "source = ?"
+                        params = (date_str, historical_source.value)
+                    cursor = await conn.execute(f"""
+                        SELECT DISTINCT instrument_id
+                        FROM historical_candles
+                        WHERE interval = '5m'
+                          AND instrument_id LIKE 'INST-NIFTY-FUT-%'
+                          AND substr(start_time, 1, 10) = ?
+                          AND {source_clause}
+                        ORDER BY instrument_id;
+                    """, params)
+                    rows = await cursor.fetchall()
+                stored_contracts: dict[str, Any] = {}
+                for row in rows:
+                    instrument_id = str(row[0])
+                    expiry = contract_expiry(instrument_id)
+                    if expiry is not None:
+                        stored_contracts[instrument_id] = expiry
+                active_instrument = (
+                    FuturesContractResolver.resolve_contracts(stored_contracts, as_of=as_of)
+                    if stored_contracts else None
+                )
+                if active_instrument:
+                    expiry = stored_contracts[active_instrument].isoformat()
+                    source_diagnostics["futures_contract"] = {
+                        "status": "RESOLVED",
+                        "instrument_id": active_instrument,
+                        "expiry": expiry,
+                        "as_of": as_of.isoformat(),
+                        "resolution_source": "HISTORICAL_STORAGE",
+                    }
+                    return active_instrument, [{
+                        "instrument_id": active_instrument,
+                        "expiry": expiry,
+                    }]
+            except Exception as exc:
+                logger.warning(
+                    "Replay futures contract lookup from historical storage failed for %s: %s",
+                    date_str,
+                    exc,
+                )
+
         inst_svc = getattr(self.hist_svc, "instrument_service", None)
         if not inst_svc:
-            source_diagnostics["futures_contract"] = {"status": "UNAVAILABLE", "reason": "instrument service unavailable"}
+            source_diagnostics["futures_contract"] = {
+                "status": "UNAVAILABLE",
+                "reason": "no historical futures contract and instrument service unavailable",
+                "as_of": as_of.isoformat(),
+            }
             return None, []
 
-        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        ensure = getattr(inst_svc, "ensure_current_nifty_futures", None)
-        if callable(ensure):
-            # Seed metadata for the replay date, not today's date. This is
-            # essential when replaying a prior monthly contract with Breeze.
-            await ensure(today=target_date)
         instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
-        as_of = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST)
         active_instrument = resolve_active_futures_instrument(instruments, as_of=as_of)
+        resolution_source = "INSTRUMENT_MASTER"
+        if active_instrument is None:
+            ensure = getattr(inst_svc, "ensure_current_nifty_futures", None)
+            if callable(ensure):
+                await ensure(today=target_date)
+                instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
+                active_instrument = resolve_active_futures_instrument(instruments, as_of=as_of)
+                resolution_source = "DETERMINISTIC_FALLBACK"
+
         contract = next(
             (item for item in instruments if getattr(item, "instrument_id", None) == active_instrument),
             None,
         )
+        expiry = getattr(contract, "expiry", None) if contract else None
         source_diagnostics["futures_contract"] = {
             "status": "RESOLVED" if active_instrument else "UNAVAILABLE",
             "instrument_id": active_instrument,
-            "expiry": getattr(contract, "expiry", None) if contract else None,
+            "expiry": expiry,
             "as_of": as_of.isoformat(),
+            "resolution_source": resolution_source if active_instrument else None,
         }
         selected = [{
             "instrument_id": active_instrument,
-            "expiry": getattr(contract, "expiry", None),
+            "expiry": expiry,
         }] if active_instrument and contract else []
         return active_instrument, selected
 
@@ -520,6 +604,7 @@ class SimulationEngine:
         active_instrument, selected_contracts = await self._resolve_replay_futures_instrument(
             date_str,
             source_diagnostics=source_diagnostics,
+            historical_source=historical_source,
         )
         if active_instrument:
             warm_fut, day_fut = await self._fetch_session_candles(

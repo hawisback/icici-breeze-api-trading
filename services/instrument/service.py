@@ -99,15 +99,21 @@ class InstrumentService:
 
     @staticmethod
     def _monthly_expiry(year: int, month: int) -> date:
-        """Return the scheduled NIFTY monthly expiry (last Tuesday).
+        """Return the scheduled NIFTY monthly expiry for the historical regime.
 
-        Exchange-holiday adjustments should come from a broker instrument
-        master when one is available; this deterministic fallback keeps the
-        Breeze futures path usable with the local instrument repository.
+        NIFTY monthly futures used Thursday expiries through August 2025 and
+        Tuesday expiries from September 2025 onward. Exchange-holiday
+        adjustments should still come from a broker instrument master or
+        historical contract data when available; this is only the deterministic
+        fallback used to seed missing metadata.
         """
         last_day = monthrange(year, month)[1]
         value = date(year, month, last_day)
-        return value.fromordinal(value.toordinal() - ((value.weekday() - 1) % 7))
+        transition = date(2025, 9, 1)
+        target_weekday = 3 if date(year, month, 1) < transition else 1
+        return value.fromordinal(
+            value.toordinal() - ((value.weekday() - target_weekday) % 7)
+        )
 
     async def ensure_current_nifty_futures(self, today: Optional[date] = None) -> list[Instrument]:
         """Ensure near and next NIFTY monthly futures exist in persistent metadata."""

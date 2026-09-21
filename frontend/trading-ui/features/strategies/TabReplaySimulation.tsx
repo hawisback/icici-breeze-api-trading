@@ -56,7 +56,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
 
   // Overrides panel state
   const [showOverrides, setShowOverrides] = useState<boolean>(false);
-  const [adxThreshold, setAdxThreshold] = useState<number>(20.0);
+  const [adxThreshold, setAdxThreshold] = useState<number>(22.0);
   const [rvolThreshold, setRvolThreshold] = useState<number>(1.20);
   const [stratBMinConf, setStratBMinConf] = useState<number>(3);
   const [boxMaxHeightAtr, setBoxMaxHeightAtr] = useState<number>(1.30);
@@ -265,10 +265,14 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
         {/* Expandable What-If Overrides Panel */}
         {showOverrides && (
           <div className="mt-4 pt-4 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 bg-slate-950/60 p-4 rounded-lg border border-slate-800/80">
+            <div className="sm:col-span-2 lg:col-span-3 rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-3 py-2 text-[11px] text-slate-300">
+              Strategy A V2 signal override: only the ADX target below changes the V2 evaluator.
+              RVOL, Strategy B confirmation/box controls, and the premium cap do not change Strategy A V2 signal generation.
+            </div>
             {/* ADX Threshold */}
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-slate-300 font-medium">ADX Target (Trend Strength)</span>
+                <span className="text-slate-300 font-medium">Strategy A V2 ADX Target</span>
                 <span className="font-bold text-indigo-400">{adxThreshold} pts</span>
               </div>
               <input
@@ -285,7 +289,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
             {/* RVOL Threshold */}
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-slate-300 font-medium">RVOL Threshold</span>
+                <span className="text-slate-300 font-medium">Strategy B RVOL Threshold</span>
                 <span className="font-bold text-amber-400">{rvolThreshold}x</span>
               </div>
               <input
@@ -345,7 +349,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
             {/* Max Option Premium Cap */}
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-slate-300 font-medium">Option Premium Cap</span>
+                <span className="text-slate-300 font-medium">Option Premium Cap (not A V2 signal)</span>
                 <span className="font-bold text-amber-400">₹{premiumCap}</span>
               </div>
               <input
