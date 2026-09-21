@@ -46,6 +46,12 @@ from services.strategy.models import (
     TriggerDiagnosticsResponse,
 )
 from services.strategy.position_manager import PositionManager, UnderlyingRiskSizer, calculate_realized_trade_r, underlying_r_for_price
+from services.strategy.reason_codes import (
+    OPTION_EMERGENCY_STOP,
+    OPTION_EMERGENCY_STOP_OUTCOME_STATUS,
+    OPTION_EMERGENCY_STOP_UNDERLYING_REASON,
+    is_option_emergency_stop,
+)
 from services.strategy.repository import StrategyRepository
 from services.strategy.simulation import SimulationEngine
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
@@ -182,9 +188,12 @@ class StrategyService:
             final_exit_quantity=trade.final_exit_quantity,
             transaction_costs=trade.transaction_costs,
             execution_order_count=trade.execution_order_count,
-            structural_stop=trade.underlying_structural_stop, underlying_r=trade.current_r,
+            structural_stop=trade.underlying_structural_stop,
+            underlying_r=None if trade.underlying_outcome_status == OPTION_EMERGENCY_STOP_OUTCOME_STATUS else trade.current_r,
             strategy_state=trade.state.value, rejection_or_invalidation_reason=reason,
-            management_event=event, exit_reason=trade.exit_reason, realized_r=trade.realized_r,
+            management_event=event, exit_reason=trade.exit_reason,
+            underlying_outcome_status=trade.underlying_outcome_status,
+            realized_r=trade.realized_r,
             option_pnl=trade.net_pnl,
         )
         await self._persist_strategy_a_telemetry(record)
@@ -318,6 +327,7 @@ class StrategyService:
         """
         now = utc_now()
         reasons: list[str] = []
+        unusable_market_quote: dict[str, Any] | None = None
         if self.mkt_svc:
             q = self.mkt_svc.get_latest_quote(trade.contract_instrument_id)
             if q:
@@ -339,6 +349,8 @@ class StrategyService:
                         reasons.append("missing ask")
                     if quote["ask"] > 0 and quote["bid"] > quote["ask"]:
                         reasons.append("zero/invalid spread")
+                    if reasons:
+                        unusable_market_quote = {**quote, "status": "INVALID", "reason": "; ".join(dict.fromkeys(reasons))}
                     # Preserve the pre-existing live reconciliation path,
                     # which only requires a broker bid for a pending sell.
                     if trade.mode == AutoTradingMode.LIVE and quote["bid"] > 0 and (quote["ask"] <= 0 or quote["bid"] <= quote["ask"]):
@@ -399,6 +411,9 @@ class StrategyService:
 
         if not reasons:
             reasons.append("option quote unavailable after entry")
+        if unusable_market_quote is not None:
+            await self._record_option_quote(trade, unusable_market_quote)
+            return unusable_market_quote
         quote = {
             "quote_timestamp": now.isoformat(), "source": "UNAVAILABLE", "freshness_seconds": None,
             "bid": None, "ask": None, "ltp": None, "volume": None, "open_interest": None,
@@ -1061,6 +1076,29 @@ class StrategyService:
                 await self._record_strategy_a_lifecycle_event(updated_trade, features, "TRAIL_ACTIVATED")
             if updated_trade.state == TradeLifecycleState.RUNNER_MODE and previous_state != TradeLifecycleState.RUNNER_MODE:
                 await self._record_strategy_a_lifecycle_event(updated_trade, features, "RUNNER_MODE")
+            if is_option_emergency_stop(underlying_event):
+                trade.pending_exit_reason = OPTION_EMERGENCY_STOP
+                trade.option_exit_reason = OPTION_EMERGENCY_STOP
+                trade.underlying_exit_reason = OPTION_EMERGENCY_STOP_UNDERLYING_REASON
+                trade.underlying_exit_time = None
+                trade.underlying_exit_price = None
+                trade.underlying_outcome_status = OPTION_EMERGENCY_STOP_OUTCOME_STATUS
+                await self._record_strategy_a_lifecycle_event(trade, features, "OPTION_EMERGENCY_STOP_DECIDED", OPTION_EMERGENCY_STOP)
+                if not quote_valid:
+                    await self._record_strategy_a_lifecycle_event(trade, features, "OPTION_EXIT_PENDING", OPTION_EMERGENCY_STOP)
+                    await self.repo.save_trade(trade)
+                    return
+                if trade.mode == AutoTradingMode.LIVE:
+                    trade.option_data_status = "LIVE_TRADING_DISABLED"
+                    await self.repo.save_trade(trade)
+                    return
+                sell_price = max(0.0, round(float(quote["bid"]) - self._paper_slippage(), 2))
+                if sell_price <= 0:
+                    await self._record_strategy_a_lifecycle_event(trade, features, "OPTION_EXIT_PENDING", OPTION_EMERGENCY_STOP)
+                    await self.repo.save_trade(trade)
+                    return
+                await self._close_trade(trade, features, sell_price, OPTION_EMERGENCY_STOP, quote=quote)
+                return
             if underlying_event == "T1_PARTIAL_EXIT":
                 if trade.partial_exit_reason != "T1_REACHED_PARTIAL_EXIT":
                     await self._record_strategy_a_lifecycle_event(trade, features, "T1_REACHED", "T1_PARTIAL_EXIT")
@@ -1195,6 +1233,9 @@ class StrategyService:
         await self.repo.save_trade(trade)
 
     async def _close_trade(self, trade, features, price, reason, quote: Optional[dict[str, Any]] = None):
+        emergency_option_stop = self._is_strategy_a(trade.strategy) and is_option_emergency_stop(reason)
+        if emergency_option_stop:
+            reason = OPTION_EMERGENCY_STOP
         trade.state = TradeLifecycleState.CLOSED
         trade.exit_time = utc_now()
         trade.exit_option_price = price
@@ -1202,14 +1243,15 @@ class StrategyService:
             trade.underlying_exit_price
             or (features.futures_price if features and features.futures_price > 0 else trade.underlying_current_price or trade.current_spot_price)
         )
-        trade.exit_spot_price = exit_underlying
-        trade.underlying_exit_price = exit_underlying
+        trade.exit_spot_price = None if emergency_option_stop else exit_underlying
+        trade.underlying_exit_price = None if emergency_option_stop else exit_underlying
         trade.exit_reason = reason
         trade.option_exit_time = trade.exit_time
         trade.option_exit_reason = reason
-        if str(reason) == "OPTION_HARD_STOP_HIT":
-            trade.underlying_exit_reason = "OPTION_HARD_STOP_PREEMPTED_UNDERLYING"
+        if emergency_option_stop:
+            trade.underlying_exit_reason = OPTION_EMERGENCY_STOP_UNDERLYING_REASON
             trade.underlying_exit_time = None
+            trade.underlying_outcome_status = OPTION_EMERGENCY_STOP_OUTCOME_STATUS
         else:
             trade.underlying_exit_reason = trade.underlying_exit_reason or reason
             trade.underlying_exit_time = trade.underlying_exit_time or trade.exit_time
@@ -1267,12 +1309,12 @@ class StrategyService:
             trade.t1_realized_r = underlying_r_for_price(
                 trade.direction, underlying_entry, risk_points, trade.t1_decision_underlying_price
             )
-        if final_quantity and exit_underlying:
+        if final_quantity and exit_underlying and not emergency_option_stop:
             exits.append((final_quantity, exit_underlying))
             trade.runner_realized_r = underlying_r_for_price(
                 trade.direction, underlying_entry, risk_points, exit_underlying
             )
-        trade.realized_r = calculate_realized_trade_r(
+        trade.realized_r = None if emergency_option_stop else calculate_realized_trade_r(
             trade.direction, underlying_entry, risk_points, original_quantity, exits
         )
         if trade.gross_pnl < 0:
@@ -1969,9 +2011,9 @@ class StrategyService:
                 "contracts_selected": sum(bool(s.get("selected_contract")) for s in side_snapshots),
                 "selector_rejections": sum(not bool(s.get("selected_contract")) for s in side_snapshots),
                 "paper_shadow_trades": len(side_trades),
-                "option_hard_stop_exits": sum(t.option_exit_reason == "OPTION_HARD_STOP_HIT" for t in side_trades),
+                "option_hard_stop_exits": sum(is_option_emergency_stop(t.option_exit_reason) for t in side_trades),
                 "underlying_lifecycle_exits": sum(
-                    bool(t.underlying_exit_reason) and t.option_exit_reason != "OPTION_HARD_STOP_HIT" for t in side_trades
+                    bool(t.underlying_exit_reason) and not is_option_emergency_stop(t.option_exit_reason) for t in side_trades
                 ),
                 "winners": winners,
                 "losers": losers,

@@ -614,6 +614,7 @@ class ActiveTrade(BaseModel):
     # Underlying lifecycle and option execution are intentionally separate.
     underlying_exit_reason: Optional[str] = None
     underlying_exit_time: Optional[datetime] = None
+    underlying_outcome_status: Optional[str] = None
     option_exit_reason: Optional[str] = None
     option_exit_time: Optional[datetime] = None
     # Explicit cost ledger values.

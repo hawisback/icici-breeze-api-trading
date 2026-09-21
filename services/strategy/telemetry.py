@@ -57,6 +57,7 @@ class StrategyAEvaluationRecord(BaseModel):
     execution_order_count: int | None = None
     management_event: str | None = None
     exit_reason: str | None = None
+    underlying_outcome_status: str | None = None
     realized_r: float | None = None
     option_pnl: float | None = None
 
@@ -127,7 +128,7 @@ def compare_telemetry_to_replay(runtime: Iterable[StrategyAEvaluationRecord], re
     left = {identity(row): row for row in runtime}
     right = {identity(row): row for row in replay}
     differences: list[dict[str, Any]] = []
-    fields = ("strategy_state", "management_event", "futures_contract", "trigger", "entry_fill", "structural_stop", "underlying_r", "rejection_or_invalidation_reason", "option_contract", "exit_reason")
+    fields = ("strategy_state", "management_event", "futures_contract", "trigger", "entry_fill", "structural_stop", "underlying_r", "underlying_outcome_status", "rejection_or_invalidation_reason", "option_contract", "exit_reason")
     for key in sorted(set(left) | set(right)):
         a, b = left.get(key), right.get(key)
         if a is None or b is None:

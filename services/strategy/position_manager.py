@@ -23,6 +23,7 @@ from services.strategy.models import (
     TradeLifecycleState,
     utc_now,
 )
+from services.strategy.reason_codes import OPTION_EMERGENCY_STOP
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -170,7 +171,7 @@ class PositionManager:
         if as_of is not None and self.is_strategy_a_force_exit_time(as_of):
             return trade, "SESSION_FORCE_SQUARE_OFF_1515"
         if option_price > 0 and option_price <= trade.option_hard_stop_price:
-            return trade, "OPTION_EMERGENCY_STOP"
+            return trade, OPTION_EMERGENCY_STOP
 
         # The protective stop is monotonic.  Before activation it is the
         # initial structural stop; at +1R it tightens to breakeven plus the
