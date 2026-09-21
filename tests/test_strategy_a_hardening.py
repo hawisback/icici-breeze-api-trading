@@ -921,7 +921,7 @@ def test_strategy_a_diagnostics_surface_structural_risk_rejection():
         contract_id="INST-NIFTY-FUT-2026-09-29",
         candle_timestamp=at,
         candle_start=at - timedelta(minutes=15),
-        open=108.0, high=112.0, low=104.0, close=111.0,
+        open=107.0, high=112.0, low=104.0, close=111.0,
         ema20=108.0, ema50=105.0, adx14=30.0, plus_di14=28.0, minus_di14=12.0,
         atr14=4.0, session_vwap=104.5, support=104.0, resistance=130.0, bar_index=20,
     )
