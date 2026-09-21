@@ -1780,11 +1780,11 @@ Final hardening evidence:
 
 | Command | Result |
 |---|---|
-| `python -m pytest -q tests/test_strategy_a_hardening.py tests/test_strategy_a_review_fixes.py tests/test_forward_option_execution_validation.py` | 58 passed |
+| `python -m pytest -q tests/test_strategy_a_hardening.py tests/test_strategy_a_review_fixes.py tests/test_forward_option_execution_validation.py` | 59 passed |
 | Required focused matrix | 94 passed |
 | `python -m pytest -q tests/test_strategy_b_forward_validation.py tests/test_strategy_b_replay_lifecycle.py tests/test_volatility_breakout_fixed.py tests/test_live_gate.py` | 48 passed |
 | `python -m compileall -q services libs tests` | passed |
-| Full `python -m pytest -q tests` | 232 passed, 6 warnings (final rerun after the additional explicit Phase 8 cases) |
+| Full `python -m pytest -q tests` | 233 passed, 6 warnings (final rerun after the additional explicit Phase 8 cases) |
 
 Final hardening status: `[?] Awaiting human review/approval`. Remaining
 limitations are intrabar ordering in OHLC replay, historical option quote
