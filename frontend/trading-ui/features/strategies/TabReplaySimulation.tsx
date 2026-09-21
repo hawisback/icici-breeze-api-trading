@@ -135,10 +135,15 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
           coverage_pct?: number;
           missing_15m_bar_ends_ist?: string[];
         };
+        gate_funnel?: Record<string, { evaluated?: number; passed?: number; pass_pct?: number }>;
+        component_funnel?: Record<string, { evaluated?: number; passed?: number; pass_pct?: number }>;
       }
     | undefined;
   const blockerEntries = Object.entries(replayDiagnostics?.blocker_counts || {}).slice(0, 5);
   const dataQualityEntries = Object.entries(replayDiagnostics?.data_quality_counts || {});
+  const gateFunnelEntries = Object.entries(replayDiagnostics?.gate_funnel || {});
+  const trendComponentEntries = Object.entries(replayDiagnostics?.component_funnel || {})
+    .filter(([name]) => name.startsWith("trend."));
   const replayData = result?.replay_metadata?.data_fingerprint as
     | { missing_data?: string[]; source_diagnostics?: Record<string, any> }
     | undefined;
@@ -396,6 +401,37 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 </span>
               </div>
             </div>
+            {gateFunnelEntries.length > 0 && (
+              <div className="mt-3">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-1.5">
+                  Strategy A independent rule funnel
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  {gateFunnelEntries.map(([gate, stats]) => (
+                    <div key={gate} className="rounded border border-slate-700 bg-slate-950/60 px-2 py-1.5">
+                      <div className="text-[10px] uppercase text-slate-400">{gate}</div>
+                      <div className="text-xs font-mono font-bold text-cyan-300">
+                        {stats.passed ?? 0}/{stats.evaluated ?? 0} · {(stats.pass_pct ?? 0).toFixed(1)}%
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {trendComponentEntries.length > 0 && (
+              <div className="mt-3">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-1.5">
+                  Trend-regime component pass rates
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {trendComponentEntries.map(([name, stats]) => (
+                    <span key={name} className="px-2 py-1 rounded bg-slate-950 border border-slate-700 text-slate-300 text-[10px] font-mono">
+                      {name.replace("trend.", "")}: {stats.passed ?? 0}/{stats.evaluated ?? 0} ({(stats.pass_pct ?? 0).toFixed(1)}%)
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
             {blockerEntries.length > 0 && (
               <div className="mt-3">
                 <div className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-1.5">
