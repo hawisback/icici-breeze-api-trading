@@ -12,6 +12,7 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import logging
+from time import monotonic
 from pathlib import Path
 from typing import Optional
 import uuid
@@ -84,6 +85,7 @@ class IciciBreezeAdapter(BrokerAdapter):
         self.session_token = session_token or ""
         self.timeout = timeout
         self._resolved_future_cache: dict[str, tuple[date, dict[str, object]]] = {}
+        self._future_resolution_retry_after: dict[str, float] = {}
 
         # Clean Architecture Components
         self.sdk_runner = SdkRunner()
@@ -186,6 +188,8 @@ class IciciBreezeAdapter(BrokerAdapter):
         cached = self._resolved_future_cache.get(key)
         if cached and cached[0] == today:
             return dict(cached[1])
+        if monotonic() < self._future_resolution_retry_after.get(key, 0.0):
+            return None
 
         months: list[tuple[int, int]] = []
         year, month = today.year, today.month
@@ -228,8 +232,10 @@ class IciciBreezeAdapter(BrokerAdapter):
                     "lot_size": 1, "tick_size": 0.05,
                 }
                 self._resolved_future_cache[key] = (today, resolved)
+                self._future_resolution_retry_after.pop(key, None)
                 logger.info("Resolved Breeze active %s future: expiry=%s", clean, expiry)
                 return dict(resolved)
+        self._future_resolution_retry_after[key] = monotonic() + 60.0
         logger.warning("Breeze could not validate an active %s futures contract", clean)
         return None
 

@@ -1,6 +1,6 @@
 """Unit tests for HistoricalService with ICICI Breeze historical candle integration."""
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from types import SimpleNamespace
@@ -323,3 +323,22 @@ async def test_runtime_history_does_not_cross_from_breeze_to_kite(tmp_path):
     assert candles and all(item.source == "BREEZE" for item in candles)
     service.fetch_candles_from_breeze.assert_awaited_once()
     kite.fetch_historical_candles.assert_not_awaited()
+
+
+def test_historical_expected_end_caps_at_exchange_close():
+    service = HistoricalService()
+    ist = timezone(timedelta(hours=5, minutes=30))
+    after_close = datetime(2026, 9, 21, 17, 0, tzinfo=ist)
+    expected = datetime(2026, 9, 21, 10, 0, tzinfo=timezone.utc)
+    assert service._expected_completed_end("15m", after_close) == expected
+    assert service._expected_completed_end("5m", after_close) == expected
+
+
+def test_kite_configuration_does_not_use_connected_breeze_session():
+    gateway = SimpleNamespace(
+        active_broker_name="kite",
+        active_adapter=SimpleNamespace(is_active=False),
+        breeze_adapter=SimpleNamespace(client_manager=SimpleNamespace(is_active=True)),
+    )
+    service = MarketDataService(broker_gateway=gateway)
+    assert service._live_broker_active() is False

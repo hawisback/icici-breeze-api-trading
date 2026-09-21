@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import logging
 import math
+from time import monotonic
 from typing import Any, Optional
 
 from libs.contracts.models import Candle, utc_now
@@ -26,6 +27,7 @@ class HistoricalService:
         self.repo = repository or HistoricalRepository()
         self.broker_gateway = broker_gateway
         self.instrument_service = instrument_service
+        self._provider_retry_after: dict[tuple[str, str, str], float] = {}
 
     def set_broker_gateway(self, broker_gateway: Any) -> None:
         """Inject broker gateway for live candle retrieval."""
@@ -57,8 +59,31 @@ class HistoricalService:
             return bool(client and getattr(client, "is_active", False))
         return False
 
+    @staticmethod
+    def _expected_completed_end(interval: str, now: datetime) -> Optional[datetime]:
+        ist = timezone(timedelta(hours=5, minutes=30))
+        local = now.astimezone(ist)
+        step = 15 if interval == "15m" else 5 if interval == "5m" else 1
+        session_open = local.replace(hour=9, minute=15, second=0, microsecond=0)
+        session_close = local.replace(hour=15, minute=30, second=0, microsecond=0)
+        if local.weekday() >= 5 or local < session_open:
+            day = local.date() - timedelta(days=1)
+            while day.weekday() >= 5:
+                day -= timedelta(days=1)
+            return datetime.combine(day, datetime.min.time(), tzinfo=ist).replace(hour=15, minute=30).astimezone(timezone.utc)
+        if local >= session_close:
+            return session_close.astimezone(timezone.utc)
+        elapsed = int((local - session_open).total_seconds() // 60)
+        boundary = session_open + timedelta(minutes=(elapsed // step) * step)
+        if (local - boundary).total_seconds() <= 120:
+            boundary -= timedelta(minutes=step)
+        return boundary.astimezone(timezone.utc) if boundary >= session_open else None
+
     async def fetch_candles_from_active_provider(self, instrument_id: str, interval: str = "5m", days_back: int = 5) -> list[Candle]:
         name, adapter = self._active_provider()
+        retry_key = (name, instrument_id, interval)
+        if monotonic() < self._provider_retry_after.get(retry_key, 0.0):
+            return []
         if name == "kite":
             if not adapter or not getattr(adapter, "is_active", False):
                 return []
@@ -66,12 +91,17 @@ class HistoricalService:
             if not callable(fetch):
                 return []
             try:
-                return await fetch(instrument_id=instrument_id, interval=interval, days_back=days_back)
+                candles = await fetch(instrument_id=instrument_id, interval=interval, days_back=days_back)
+                self._provider_retry_after.pop(retry_key, None) if candles else self._provider_retry_after.__setitem__(retry_key, monotonic() + 30.0)
+                return candles
             except Exception as exc:
                 logger.warning("Kite historical fetch failed for %s: %s", instrument_id, exc)
+                self._provider_retry_after[retry_key] = monotonic() + 30.0
                 return []
         if name == "breeze":
-            return await self.fetch_candles_from_breeze(instrument_id, interval, days_back)
+            candles = await self.fetch_candles_from_breeze(instrument_id, interval, days_back)
+            self._provider_retry_after.pop(retry_key, None) if candles else self._provider_retry_after.__setitem__(retry_key, monotonic() + 30.0)
+            return candles
         return []
 
     def _map_instrument_to_breeze(self, instrument_id: str) -> tuple[str, str, str]:
@@ -434,8 +464,9 @@ class HistoricalService:
         latest_matches = bool(latest_candle and expected_source and latest_candle.source == expected_source)
         attempted = False
 
+        expected_end = self._expected_completed_end(interval, utc_now())
         if provider_active and expected_source and source_allows_provider and (
-            not latest_matches or (utc_now() - latest_candle.end_time).total_seconds() >= (900 if interval == "15m" else 300)
+            not latest_matches or (expected_end is not None and latest_candle.end_time < expected_end)
         ):
             attempted = True
             fetched = await self.fetch_candles_from_active_provider(instrument_id, interval)

@@ -76,83 +76,71 @@ class MarketDataService:
         )
 
     def _live_broker_active(self) -> bool:
-        """Return whether the configured broker has an authenticated live session."""
+        """Return whether the configured market-data provider is active."""
         if not self.broker_gateway:
             return False
+        provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
         active_adapter = getattr(self.broker_gateway, "active_adapter", None)
-        if active_adapter and getattr(active_adapter, "is_active", False):
-            return True
+        if provider == "kite":
+            return bool(active_adapter and getattr(active_adapter, "is_active", False))
         breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
         client_mgr = getattr(breeze_adapter, "client_manager", None)
+        if provider == "breeze":
+            return bool(client_mgr and getattr(client_mgr, "is_active", False))
+        if active_adapter and getattr(active_adapter, "is_active", False):
+            return True
         return bool(client_mgr and getattr(client_mgr, "is_active", False))
 
     async def sync_quotes_from_broker(self) -> bool:
-        """Fetch latest real-time quotes from the configured live broker."""
+        """Fetch index quotes only from the configured provider."""
         if not self.broker_gateway:
             return False
-
+        provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
         active_adapter = getattr(self.broker_gateway, "active_adapter", None)
-        if active_adapter and getattr(active_adapter, "is_active", False) and hasattr(active_adapter, "get_index_quotes"):
+        if provider == "kite":
+            if not active_adapter or not getattr(active_adapter, "is_active", False):
+                return False
+            fetch = getattr(active_adapter, "get_index_quotes", None)
+            if not callable(fetch):
+                return False
             try:
-                quotes = await active_adapter.get_index_quotes()
+                quotes = await fetch()
                 for quote in quotes:
                     await self.ingest_quote(quote)
                 return bool(quotes)
             except Exception as exc:
-                logger.warning("%s live quote sync deferred: %s", getattr(self.broker_gateway, "active_broker_name", "broker"), exc)
+                logger.warning("Kite live quote sync deferred: %s", exc)
                 return False
 
         breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
-        if not breeze_adapter or not hasattr(breeze_adapter, "client_manager"):
+        client_mgr = getattr(breeze_adapter, "client_manager", None)
+        if provider not in {"", "breeze"} or not client_mgr or not client_mgr.is_active:
             return False
-
-        client_mgr = breeze_adapter.client_manager
-        if not client_mgr.is_active:
-            return False
-
         try:
             sdk = client_mgr.get_sdk_client()
             now = utc_now()
             synced_any = False
-
             for inst_id, symbol, code in [
                 ("INST-NIFTY-INDEX", "NIFTY 50", "NIFTY"),
                 ("INST-BANKNIFTY-INDEX", "NIFTY BANK", "CNXBAN"),
             ]:
                 raw_res = await client_mgr.sdk_runner.run(
-                    lambda c=code: sdk.get_quotes(
-                        stock_code=c,
-                        exchange_code="NSE",
-                        product_type="cash",
-                    ),
+                    lambda c=code: sdk.get_quotes(stock_code=c, exchange_code="NSE", product_type="cash"),
                     timeout_sec=5.0,
                 )
                 rows = raw_res.get("Success", []) if isinstance(raw_res, dict) else []
-                if rows and isinstance(rows, list) and len(rows) > 0:
+                if rows and isinstance(rows, list):
                     row = rows[0]
                     lp = float(row.get("ltp") or 0.0)
                     if lp > 0:
-                        op = float(row.get("open") or lp)
-                        hp = float(row.get("high") or lp)
-                        low_p = float(row.get("low") or lp)
-                        chg = float(row.get("ltp_percent_change") or 0.0)
-                        vol = int(row.get("total_quantity_traded") or 0)
-                        quote = Quote(
-                            source="BREEZE",
-                            instrument_id=inst_id,
-                            symbol=symbol,
-                            last_price=lp,
-                            open=op,
-                            high=hp,
-                            low=low_p,
-                            close=lp,
-                            volume=vol,
-                            change_pct=chg,
-                            timestamp=now,
-                        )
-                        await self.ingest_quote(quote)
+                        await self.ingest_quote(Quote(
+                            source="BREEZE", instrument_id=inst_id, symbol=symbol,
+                            last_price=lp, open=float(row.get("open") or lp),
+                            high=float(row.get("high") or lp), low=float(row.get("low") or lp),
+                            close=lp, volume=int(row.get("total_quantity_traded") or 0),
+                            change_pct=float(row.get("ltp_percent_change") or 0.0), timestamp=now,
+                        ))
                         synced_any = True
-                        logger.debug("Ingested live Breeze quote for %s: LTP=%.2f", symbol, lp)
                 await asyncio.sleep(0.3)
             return synced_any
         except Exception as exc:
