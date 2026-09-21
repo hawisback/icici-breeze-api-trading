@@ -111,7 +111,7 @@ def _audit_session(conn: Any, day: Any, *, source: str, config: StrategyTunables
         start_utc=warmup_start.astimezone(session_start_utc.tzinfo),
         end_utc=session_end_utc,
         source=source,
-        instrument_id=active_contract,
+        instrument_like="INST-NIFTY-FUT-%",
     )
 
     strategy = TrendPullbackStrategy(config=config, allow_session_bypass=False)
