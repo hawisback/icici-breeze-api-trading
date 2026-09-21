@@ -291,7 +291,11 @@ class FeatureEngine:
                            }.values(), key=lambda c: c.start_time)
         candles_5m = completed(candles_5m, "5m")
         candles_15m = completed(candles_15m, "15m")
-        futures_candles = completed(futures_candles, "5m")
+        # Strategy A V2 supplies authoritative completed 15m futures bars.
+        # Legacy Strategy B callers may still supply 5m futures, so preserve
+        # that compatibility without silently discarding Strategy A's input.
+        futures_interval = "15m" if any(c.interval == "15m" for c in (futures_candles or [])) else "5m"
+        futures_candles = completed(futures_candles, futures_interval)
         closes_5m = [c.close for c in candles_5m] if candles_5m else [spot_price]
         closes_15m = [c.close for c in candles_15m] if candles_15m else [spot_price]
 
@@ -394,14 +398,13 @@ class FeatureEngine:
         swing_highs = [candles_5m[i].high for i in range(1, len(candles_5m)-1)
                        if candles_5m[i].high > candles_5m[i-1].high and candles_5m[i].high >= candles_5m[i+1].high]
         ready = (len(candles_5m) >= 29 and len(candles_15m) >= 50 and len(futures_candles) >= 15
-                 and candles_5m[-1].end_time == futures_candles[-1].end_time
                  and 0 <= (now - candles_5m[-1].end_time).total_seconds() < 300
                  and 0 <= (now - candles_15m[-1].end_time).total_seconds() < 900
                  and atr_5m > 0 and atr_15m > 0 and fut_vwap > 0)
         return MarketFeatures(
             breakout_data_ready=(len(candles_5m) >= 40 and atr_5m > 0
                 and 0 <= (now-candles_5m[-1].end_time).total_seconds() < 300
-                and (not futures_candles or (len(futures_candles) >= 15 and candles_5m[-1].end_time == futures_candles[-1].end_time))),
+                and (not futures_candles or len(futures_candles) >= 15)),
             breakout_bull_derivatives_score=b_bull,
             breakout_bear_derivatives_score=b_bear,
             bullish_oi_wall=bull_wall,

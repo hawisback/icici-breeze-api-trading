@@ -1484,7 +1484,13 @@ class StrategyService:
         if not self.hist_svc:
             return []
         try:
-            candles = await self.hist_svc.get_candles(instrument_id=instrument_id, interval=interval)
+            candles = await self.hist_svc.get_candles(
+                instrument_id=instrument_id,
+                interval=interval,
+                requested_source="MIXED",
+                allow_provider_fallback=True,
+                allow_synthetic_fallback=False,
+            )
             now = utc_now()
             expected_sec = 900 if "15" in interval else 300
             return sorted({c.start_time: c for c in candles
@@ -1493,7 +1499,7 @@ class StrategyService:
                            and abs((c.end_time - c.start_time).total_seconds() - expected_sec) <= 5
                            }.values(), key=lambda c: c.start_time)
         except Exception:
-            logger.exception("Real candle retrieval failed")
+            logger.exception("Real candle retrieval failed: instrument=%s interval=%s", instrument_id, interval)
             return []
 
     async def _resolve_option_price(self, trade: ActiveTrade, features: Optional[MarketFeatures] = None) -> Optional[float]:

@@ -199,6 +199,14 @@ class TrendPullbackStrategy:
             expected_end = boundary_local.astimezone(timezone.utc)
             if (local - boundary_local).total_seconds() <= 120:
                 expected_end -= timedelta(minutes=15)
+            # Strategy A stops accepting entries at 14:45 and forcibly exits
+            # at 15:15. After that point a later wall-clock quarter must not
+            # manufacture a stale-data failure for an otherwise valid session.
+            session_validation_end = local.replace(
+                hour=15, minute=15, second=0, microsecond=0
+            ).astimezone(timezone.utc)
+            if expected_end > session_validation_end:
+                expected_end = session_validation_end
             if raw[-1].end_time < expected_end:
                 raise ValueError(
                     "STALE_FUTURES_DATA: "
@@ -475,7 +483,7 @@ class TrendPullbackStrategy:
     def diagnose(self, features: Any, candles_5m: Sequence[Candle], candles_15m: Sequence[Candle], overrides: ThresholdOverrides | None = None, futures_candles: Sequence[Candle] | None = None) -> list[StrategyTriggerDiagnostics]:
         try:
             _, feature = self._features_for_input(list(futures_candles or []), getattr(features, "timestamp", None))
-        except ValueError:
+        except ValueError as exc:
             timestamp = getattr(features, "timestamp", None)
             if not isinstance(timestamp, datetime) or timestamp.tzinfo is None or timestamp.utcoffset() is None:
                 timestamp = datetime.now(timezone.utc)
@@ -496,7 +504,12 @@ class TrendPullbackStrategy:
                 session_vwap=0.0,
                 bar_index=0,
             )
-            return [self._diagnostic(feature, direction, "FUTURES_DATA_UNAVAILABLE", self.snapshot.setup) for direction in (StrategyDirection.CALL, StrategyDirection.PUT)]
+            message = str(exc)
+            reason = (
+                "STALE_FUTURES_DATA" if message.startswith("STALE_FUTURES_DATA:")
+                else "FUTURES_DATA_UNAVAILABLE"
+            )
+            return [self._diagnostic(feature, direction, reason, self.snapshot.setup) for direction in (StrategyDirection.CALL, StrategyDirection.PUT)]
         result = []
         for direction in (StrategyDirection.CALL, StrategyDirection.PUT):
             trend_ok, trend_reason = self._trend_ok(feature, direction)

@@ -744,3 +744,51 @@ async def test_gather_features_requests_authoritative_15m_futures_bars():
     calls = service._get_recent_candles.await_args_list
     assert call("15m", "INST-NIFTY-FUT-2026-09-29") in calls
     assert call("5m", "INST-NIFTY-FUT-2026-09-29") not in calls
+
+
+def test_shared_feature_engine_preserves_strategy_a_15m_futures():
+    at = datetime(2026, 9, 21, 12, 0, tzinfo=IST)
+    futures = [
+        Candle(
+            instrument_id="INST-NIFTY-FUT-2026-09-29", interval="15m",
+            start_time=at - timedelta(minutes=15 * (20 - i)),
+            end_time=at - timedelta(minutes=15 * (19 - i)),
+            open=100+i, high=102+i, low=99+i, close=101+i,
+            volume=100, open_interest=1000+i, source="BREEZE",
+        )
+        for i in range(20)
+    ]
+    features = __import__("services.strategy.features", fromlist=["FeatureEngine"]).FeatureEngine.compute_all_features(
+        [], [], futures_candles=futures, option_chain={}, spot_price=100, as_of=at
+    )
+    assert features.futures_price == futures[-1].close
+    assert features.futures_vwap > 0
+
+
+def test_strategy_a_diagnostics_expose_stale_futures_instead_of_unavailable():
+    end = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    stale_as_of = datetime(2026, 9, 21, 10, 20, tzinfo=IST)
+    candle = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-29", interval="15m",
+        start_time=end - timedelta(minutes=15), end_time=end,
+        open=100, high=102, low=98, close=101, volume=100, source="BREEZE",
+    )
+    strategy = TrendPullbackStrategy()
+    diagnostics = strategy.diagnose(
+        SimpleNamespace(timestamp=stale_as_of), [], [], futures_candles=[candle]
+    )
+    assert all(item.primary_reason == "STALE_FUTURES_DATA" for item in diagnostics)
+
+
+def test_strategy_a_after_force_exit_does_not_require_post_1515_futures_bar():
+    end = datetime(2026, 9, 21, 15, 15, tzinfo=IST)
+    after_close = datetime(2026, 9, 21, 16, 30, tzinfo=IST)
+    candle = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-29", interval="15m",
+        start_time=end - timedelta(minutes=15), end_time=end,
+        open=100, high=102, low=98, close=101, volume=100, source="BREEZE",
+    )
+    strategy = TrendPullbackStrategy()
+    bars, feature = strategy._features_for_input([candle], after_close)
+    assert bars[-1].end_time == end
+    assert feature.candle_timestamp == end
