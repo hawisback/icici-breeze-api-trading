@@ -98,26 +98,39 @@ def contract_expiry(instrument_id: str) -> date | None:
 class FuturesContractResolver:
     """Resolve one active NIFTY futures contract without splicing contracts."""
 
-    def resolve(self, candles: Sequence[Candle], *, as_of: datetime) -> str:
+    @staticmethod
+    def resolve_contracts(
+        contracts: dict[str, date | None], *, as_of: datetime
+    ) -> str | None:
         _aware(as_of, "as_of")
-        candidates: dict[str, list[Candle]] = {}
-        for candle in candles:
-            if candle.instrument_id.upper().find("NIFTY-FUT-") < 0:
-                continue
-            candidates.setdefault(candle.instrument_id, []).append(candle)
-        if not candidates:
-            raise ValueError("no NIFTY futures candles available")
         local_day = as_of.astimezone(IST).date()
         ranked = sorted(
-            candidates,
+            contracts,
             key=lambda instrument_id: (
-                contract_expiry(instrument_id) is None,
-                contract_expiry(instrument_id) or date.max,
+                contracts[instrument_id] is None,
+                contracts[instrument_id] or date.max,
                 instrument_id,
             ),
         )
-        non_expired = [x for x in ranked if (contract_expiry(x) or date.max) >= local_day]
-        return (non_expired or ranked)[0]
+        non_expired = [
+            instrument_id for instrument_id in ranked
+            if (contracts[instrument_id] or date.max) >= local_day
+        ]
+        return non_expired[0] if non_expired else None
+
+    def resolve(self, candles: Sequence[Candle], *, as_of: datetime) -> str:
+        _aware(as_of, "as_of")
+        contracts: dict[str, date | None] = {}
+        for candle in candles:
+            if candle.instrument_id.upper().find("NIFTY-FUT-") < 0:
+                continue
+            contracts[candle.instrument_id] = contract_expiry(candle.instrument_id)
+        if not contracts:
+            raise ValueError("no NIFTY futures candles available")
+        selected = self.resolve_contracts(contracts, as_of=as_of)
+        if selected is None:
+            raise ValueError("no non-expired NIFTY futures contract available")
+        return selected
 
     def select(self, candles: Sequence[Candle], *, as_of: datetime) -> list[Candle]:
         instrument_id = self.resolve(candles, as_of=as_of)
@@ -134,26 +147,51 @@ def canonical_active_futures_stream(
     overlapping near/next-month inputs from alternating contract IDs during
     replay or feature construction.
     """
+    result, _ = canonical_active_futures_stream_with_diagnostics(candles, as_of=as_of, interval=interval)
+    return result
+
+
+@dataclass(frozen=True)
+class FuturesDataGap:
+    timestamp: datetime
+    expected_contract: str | None
+    reason: str = "ACTIVE_FUTURES_CANDLE_MISSING"
+
+
+def canonical_active_futures_stream_with_diagnostics(
+    candles: Iterable[Candle], *, as_of: datetime | None = None, interval: str = "15m"
+) -> tuple[list[Candle], list[FuturesDataGap]]:
+    """Resolve expected contracts from the full universe before candle lookup.
+
+    A missing near-contract candle is a data gap; a present next contract is
+    never substituted until the expiry policy actually selects it.
+    """
     completed = completed_futures_candles(candles, as_of=as_of, interval=interval)
     by_timestamp: dict[datetime, list[Candle]] = {}
     for candle in completed:
         by_timestamp.setdefault(candle.end_time, []).append(candle)
     resolver = FuturesContractResolver()
+    contracts = {
+        candle.instrument_id: contract_expiry(candle.instrument_id)
+        for candle in completed
+        if "NIFTY-FUT-" in candle.instrument_id.upper()
+    }
     result: list[Candle] = []
+    gaps: list[FuturesDataGap] = []
     for timestamp in sorted(by_timestamp):
-        candidates = by_timestamp[timestamp]
-        selected_id = resolver.resolve(candidates, as_of=timestamp)
-        selected = [c for c in _ordered(candidates) if c.instrument_id == selected_id]
+        selected_id = resolver.resolve_contracts(contracts, as_of=timestamp) if contracts else None
+        selected = [c for c in _ordered(by_timestamp[timestamp]) if c.instrument_id == selected_id]
         if selected:
             result.append(selected[0])
-    return result
+        else:
+            gaps.append(FuturesDataGap(timestamp=timestamp, expected_contract=selected_id))
+    return result, gaps
 
 
 def resolve_active_futures_instrument(instruments: Iterable[object], *, as_of: datetime) -> str | None:
     """Resolve the same nearest non-expired contract policy from instrument metadata."""
     _aware(as_of, "as_of")
-    local_day = as_of.astimezone(IST).date()
-    candidates: list[tuple[date, str]] = []
+    candidates: dict[str, date | None] = {}
     for instrument in instruments:
         if getattr(instrument, "segment", None) != "FUTURES" or not getattr(instrument, "tradable", False):
             continue
@@ -165,9 +203,8 @@ def resolve_active_futures_instrument(instruments: Iterable[object], *, as_of: d
             expiry = date.fromisoformat(str(expiry_value)[:10])
         except ValueError:
             continue
-        if expiry >= local_day:
-            candidates.append((expiry, str(instrument_id)))
-    return min(candidates, key=lambda item: (item[0], item[1]))[1] if candidates else None
+        candidates[str(instrument_id)] = expiry
+    return FuturesContractResolver.resolve_contracts(candidates, as_of=as_of) if candidates else None
 
 
 def resolve_completed_futures_contract(

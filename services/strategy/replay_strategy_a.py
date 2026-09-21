@@ -9,7 +9,7 @@ from typing import Any, Iterable, Sequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from libs.contracts.models import Candle
-from services.strategy.futures_signal import canonical_active_futures_stream, completed_futures_candles
+from services.strategy.futures_signal import canonical_active_futures_stream_with_diagnostics, completed_futures_candles
 from services.strategy.models import ActiveTrade, AutoTradingMode, OptionType, StrategyName, StrategySignal, StrategyTunablesConfig, TradeDirection, TradeLifecycleState
 from services.strategy.position_manager import PositionManager, calculate_realized_trade_r
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
@@ -46,6 +46,7 @@ class StrategyAReplayReport(BaseModel):
     max_drawdown_r: float = 0.0
     exit_reasons: dict[str, int] = Field(default_factory=dict)
     unresolved_trades: int = 0
+    data_quality_counts: dict[str, int] = Field(default_factory=dict)
     data_quality_limitations: list[str] = Field(default_factory=list)
     decisions: list[ReplayDecision] = Field(default_factory=list)
 
@@ -105,7 +106,7 @@ class StrategyAReplayEngine:
         )
 
     def replay(self, futures_candles: Sequence[Candle]) -> StrategyAReplayReport:
-        bars = canonical_active_futures_stream(futures_candles, interval="15m")
+        bars, data_gaps = canonical_active_futures_stream_with_diagnostics(futures_candles, interval="15m")
         if not bars:
             bars = completed_futures_candles(futures_candles, interval="5m")
         strategy = TrendPullbackStrategy(config=self.config)
@@ -198,6 +199,8 @@ class StrategyAReplayEngine:
             "When a 15m bar touches both a favorable level and a protective stop, the stop is resolved first.",
             "Unresolved trades are retained at session end rather than marked profitable or losing.",
         ]
+        if data_gaps:
+            limitation.append("Active futures candle gaps are skipped and reported as data quality, never treated as contract rollovers.")
         timestamps = [bar.end_time.astimezone(timezone.utc).isoformat() for bar in bars]
         expectancy = round(sum(r_results) / len(r_results), 4) if r_results else None
         gains = sum(r for r in r_results if r > 0)
@@ -210,7 +213,9 @@ class StrategyAReplayEngine:
             r_results=r_results, expectancy_r=expectancy,
             profit_factor=round(gains / losses, 4) if losses else (None if not gains else None),
             max_drawdown_r=self._drawdown(r_results), exit_reasons=dict(sorted(exit_reasons.items())),
-            unresolved_trades=unresolved, data_quality_limitations=limitation, decisions=decisions,
+            unresolved_trades=unresolved,
+            data_quality_counts={"ACTIVE_FUTURES_CANDLE_MISSING": len(data_gaps)} if data_gaps else {},
+            data_quality_limitations=limitation, decisions=decisions,
         )
 
 
