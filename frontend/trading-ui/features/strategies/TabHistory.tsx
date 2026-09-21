@@ -115,7 +115,8 @@ export const TabHistory: React.FC = () => {
                   <th className="py-2.5 px-4">QTY</th>
                   <th className="py-2.5 px-4">ENTRY</th>
                   <th className="py-2.5 px-4">EXIT</th>
-                  <th className="py-2.5 px-4">EXIT REASON</th>
+                  <th className="py-2.5 px-4">LIFECYCLE / EXIT</th>
+                  <th className="py-2.5 px-4">A EVIDENCE</th>
                   <th className="py-2.5 px-4 text-right">R-MULTIPLE</th>
                   <th className="py-2.5 px-4 text-right">NET PnL</th>
                 </tr>
@@ -167,8 +168,12 @@ export const TabHistory: React.FC = () => {
                         {trade.exit_option_price ? `₹${trade.exit_option_price.toFixed(2)}` : "—"}
                       </td>
 
-                      <td className="py-2.5 px-4 font-sans text-slate-400 max-w-xs truncate">
-                        {trade.exit_reason || (isClosed ? "CLOSED" : "ACTIVE")}
+                      <td className="py-2.5 px-4 font-sans text-slate-400 max-w-xs">
+                        <div className="truncate">{trade.pending_exit_reason || trade.exit_reason || (isClosed ? "CLOSED" : "ACTIVE")}</div>
+                        {trade.strategy === "TREND_PULLBACK" && trade.underlying_outcome_status && <div className="text-[10px] text-cyan-400 truncate">{trade.underlying_outcome_status}</div>}
+                      </td>
+                      <td className="py-2.5 px-4 font-sans text-[10px] text-slate-400">
+                        {trade.strategy === "TREND_PULLBACK" ? <><div>FUT {(trade.underlying_entry_price ?? trade.entry_spot_price).toFixed(1)} → {trade.underlying_exit_price?.toFixed(1) ?? "…"}</div><div>T1 {trade.t1_reached ? "✓" : "—"} · rem {trade.remaining_quantity ?? 0} · data {trade.option_data_status || "—"}</div></> : "—"}
                       </td>
 
                       <td className="py-2.5 px-4 text-right font-bold">

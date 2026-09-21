@@ -39,7 +39,7 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
 
   // Overrides form state
   const [premiumCap, setPremiumCap] = useState<number>(defaultCap);
-  const [adxThreshold, setAdxThreshold] = useState<number>(20.0);
+  const [adxThreshold, setAdxThreshold] = useState<number>(22.0);
   const [rvolThreshold, setRvolThreshold] = useState<number>(1.20);
   const [minConfirmationScore, setMinConfirmationScore] = useState<number>(2);
   const [stratBMinConfirmation, setStratBMinConfirmation] = useState<number>(3);
@@ -50,7 +50,7 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
   const [bypassWindow, setBypassWindow] = useState<boolean>(false);
 
   // Force trigger setup state
-  const [forceStrategy, setForceStrategy] = useState<"TREND_PULLBACK" | "VOLATILITY_BREAKOUT">("TREND_PULLBACK");
+  const forceStrategy = "VOLATILITY_BREAKOUT" as const;
   const [forceDirection, setForceDirection] = useState<"BULLISH" | "BEARISH">("BULLISH");
   const [forceLoading, setForceLoading] = useState(false);
 
@@ -155,8 +155,8 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
     const isCall = forceDirection === "BULLISH";
     const confirmed = confirm(
       `Force trigger immediate ${forceDirection} (${isCall ? "CALL / CE" : "PUT / PE"}) entry using ${
-        forceStrategy === "TREND_PULLBACK" ? "Trend Pullback" : "Volatility Breakout"
-      }?\n\nAutomated contract selection under premium cap (₹${premiumCap}), position sizing, -25% hard stop, and trailing stop ladder (+1R -> +1.5R -> +2R) will be applied.`
+        "Volatility Breakout"
+      }?\n\nAutomated contract selection under premium cap (₹${premiumCap}), position sizing, -25% hard stop, and the configured Strategy B protections will be applied.`
     );
     if (!confirmed) return;
 
@@ -412,7 +412,7 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
               </div>
             </div>
 
-            {/* Bypass Entry Window Toggle */}
+            {/* Bypass Entry Window (Strategy B / simulation only) Toggle */}
             <div className="mt-3 bg-slate-950/80 p-3.5 rounded-lg border border-slate-800 flex items-center justify-between">
               <div>
                 <span className="text-xs font-semibold text-slate-200 block">
@@ -466,7 +466,7 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
               <div className="flex items-center gap-2 mb-2">
                 <Flame className="w-4 h-4 text-amber-400" />
                 <h4 className="text-xs font-bold text-amber-300 uppercase tracking-wider">
-                  1-Click Force Setup Trigger
+                  Strategy B Manual Force Entry
                 </h4>
               </div>
               <p className="text-xs text-slate-400 mb-4">
@@ -480,7 +480,7 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
                   <label className="text-[11px] font-semibold text-slate-300 block mb-1">Strategy Rulebook</label>
                   <select
                     value={forceStrategy}
-                    onChange={(e: any) => setForceStrategy(e.target.value)}
+                    disabled
                     className="w-full bg-slate-900 border border-slate-700 text-xs text-slate-200 rounded-lg p-2 focus:ring-1 focus:ring-amber-400 outline-none"
                   >
                     <option value="TREND_PULLBACK">Strategy A: Trend Pullback</option>

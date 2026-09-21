@@ -81,7 +81,7 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
               }`}
             />
             <span className="text-sm font-semibold text-slate-200">
-              {in_trading_window ? "ACTIVE (09:30-14:45)" : "CLOSED / SQUARE-OFF"}
+              {in_trading_window ? `ACTIVE (A: ${config.tunables.entry_session_start}–${config.tunables.entry_session_end})` : "CLOSED / NO NEW A ENTRY"}
             </span>
           </div>
         </div>
@@ -207,14 +207,14 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
                 <div>
                   <div className="text-[11px] text-slate-400">ENTRY PREMIUM</div>
                   <div className="text-base font-bold text-slate-200">₹{activeTrade.entry_option_price.toFixed(2)}</div>
-                  <div className="text-xs text-slate-400">Spot: {activeTrade.entry_spot_price.toFixed(1)}</div>
+                  <div className="text-xs text-slate-400">{activeTrade.strategy === "TREND_PULLBACK" ? "Futures" : "Spot"}: {(activeTrade.underlying_entry_price ?? activeTrade.entry_spot_price).toFixed(1)}</div>
                 </div>
 
                 <div>
                   <div className="text-[11px] text-slate-400">CURRENT PREMIUM</div>
                   <div className="text-base font-bold text-cyan-300">₹{activeTrade.current_option_price.toFixed(2)}</div>
                   <div className="text-xs text-slate-400">Bid {activeTrade.current_bid?.toFixed(2) ?? "--"} / Ask {activeTrade.current_ask?.toFixed(2) ?? "--"}</div>
-                  <div className="text-xs text-slate-400">LTP {activeTrade.current_ltp?.toFixed(2) ?? "--"} • Spot: {activeTrade.current_spot_price.toFixed(1)}</div>
+                  <div className="text-xs text-slate-400">LTP {activeTrade.current_ltp?.toFixed(2) ?? "--"} • {activeTrade.strategy === "TREND_PULLBACK" ? "Futures" : "Spot"}: {(activeTrade.underlying_current_price ?? activeTrade.current_spot_price).toFixed(1)}</div>
                 </div>
 
                 <div>
@@ -232,7 +232,7 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
                 </div>
 
                 <div>
-                  <div className="text-[11px] text-slate-400">STRUCTURAL SPOT STOP</div>
+                  <div className="text-[11px] text-slate-400">STRUCTURAL UNDERLYING STOP</div>
                   <div className="text-base font-bold text-amber-300">
                     {activeTrade.current_trailing_stop.toFixed(1)}
                   </div>
@@ -272,10 +272,18 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
                 </div>
               </div>
 
-              {/* Multi-Level Trailing Stop Visual Progress Bar */}
+              {activeTrade.strategy === "TREND_PULLBACK" && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                  <div className="bg-slate-950/70 border border-slate-800 rounded p-3"><div className="text-[10px] uppercase text-slate-500">Futures Contract</div><div className="font-mono text-cyan-300 truncate">{activeTrade.futures_contract_id || "Not recorded"}</div></div>
+                  <div className="bg-slate-950/70 border border-slate-800 rounded p-3"><div className="text-[10px] uppercase text-slate-500">Underlying R</div><div className="font-bold text-slate-200">{(activeTrade.underlying_r ?? activeTrade.current_r).toFixed(2)}R</div></div>
+                  <div className="bg-slate-950/70 border border-slate-800 rounded p-3"><div className="text-[10px] uppercase text-slate-500">T1 / Remaining</div><div className="font-bold text-slate-200">{activeTrade.t1_exit_pending ? "T1 EXIT PENDING" : activeTrade.t1_reached ? "T1 REACHED" : "T1 PENDING"} · {activeTrade.remaining_quantity ?? activeTrade.quantity} qty</div></div>
+                  <div className="bg-slate-950/70 border border-slate-800 rounded p-3"><div className="text-[10px] uppercase text-slate-500">Option Data / Exit</div><div className={`font-bold ${activeTrade.pending_exit_reason || activeTrade.option_data_status === "DEGRADED" ? "text-amber-300" : "text-emerald-300"}`}>{activeTrade.pending_exit_reason || activeTrade.option_data_status || "OK"}</div></div>
+                </div>
+              )}
+                            {/* Multi-Level Trailing Stop Visual Progress Bar */}
               <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-4">
                 <div className="text-xs font-semibold text-slate-300 mb-3 flex items-center justify-between">
-                  <span>TRAILING STOP MULTI-LEVEL LADDER (+1R Breakeven → +1.5R Lock → +2R Runner)</span>
+                  <span>STRATEGY A R LIFECYCLE (+1R trail activation → +1.5R T1 → +2.5R runner reference)</span>
                   <span className="text-cyan-400">Lifecycle State: {activeTrade.state}</span>
                 </div>
 
@@ -316,24 +324,24 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
                         : "bg-slate-900 border-slate-800 text-slate-500"
                     }`}
                   >
-                    <div className="font-bold">+1.5R Lock Profit</div>
+                    <div className="font-bold">+1.5R T1 Partial Exit</div>
                     <div className="text-[10px] mt-1">
-                      {rMultiple >= 1.5 ? "Stop locked at +0.50R profit" : "Awaiting +1.5R move"}
+                      {activeTrade.t1_reached ? `T1 reached · ${activeTrade.t1_exit_quantity ?? 0} qty target` : "Awaiting +1.5R T1"}
                     </div>
-                    <div className="text-[10px]">Guaranteed win</div>
+                    <div className="text-[10px]">Partial realization; runner remains managed</div>
                   </div>
 
                   {/* Step 4 */}
                   <div
                     className={`p-2.5 rounded border transition-all ${
-                      rMultiple >= 2.0
+                      rMultiple >= 2.5
                         ? "bg-cyan-950/60 border-cyan-400 text-cyan-200 shadow-sm"
                         : "bg-slate-900 border-slate-800 text-slate-500"
                     }`}
                   >
-                    <div className="font-bold">+2.0R Runner Trail</div>
+                    <div className="font-bold">+2.5R Runner Reference</div>
                     <div className="text-[10px] mt-1">
-                      {rMultiple >= 2.0 ? "Dynamic trailing by EMA9 & ATR" : "Awaiting +2.0R move"}
+                      {rMultiple >= 2.5 ? "Dynamic trailing by EMA9 & ATR" : "Awaiting +2.0R move"}
                     </div>
                     <div className="text-[10px]">Riding trend runner</div>
                   </div>
@@ -345,7 +353,7 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
               <CheckCircle2 className="w-8 h-8 text-slate-600 mx-auto mb-2" />
               <div className="text-sm font-semibold text-slate-300">No Open Positions Currently</div>
               <div className="text-xs text-slate-500 max-w-md mx-auto mt-1">
-                The auto-trading engine is continuously evaluating closed 5-minute candles against Strategy A & B entry conditions.
+                Strategy A evaluates completed 15-minute NIFTY futures bars; Strategy B keeps its existing data path.
               </div>
             </div>
           )}
@@ -430,7 +438,7 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
           <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
             <div>
               <div className="text-xs font-bold text-indigo-400 uppercase tracking-wider">Strategy A (Primary)</div>
-              <h4 className="text-base font-bold text-slate-100">Trend Pullback Continuation</h4>
+              <h4 className="text-base font-bold text-slate-100">NIFTY Trend-Pullback Confluence</h4>
             </div>
             <div className="text-right">
               <span
@@ -446,21 +454,21 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
           </div>
 
           <p className="text-xs text-slate-400 mb-4">
-            Waits for a controlled 2-9 bar pullback inside a qualified 15m trend. Requires a completed resumption close, one momentum confirmation, and at least two of six entry confirmations.
+            Uses completed 15-minute NIFTY futures bars only for signal and structure. A qualified EMA20/EMA50 + ADX trend must form a confluence pullback, confirmation bar and buffered trigger before option execution can confirm ENTERED.
           </p>
 
           <div className="space-y-2 text-xs">
             <div className="flex items-center justify-between p-2 bg-slate-950/60 rounded border border-slate-800/60">
-              <span className="text-slate-300">15m Trend Regime (EMA20 &gt; EMA50 & Slope &gt; 0)</span>
+              <span className="text-slate-300">15m Futures Trend Regime (EMA20 / EMA50)</span>
               <span className={features.ema20_15m > features.ema50_15m ? "text-emerald-400 font-bold" : "text-slate-500"}>
                 {features.ema20_15m > features.ema50_15m ? "BULLISH PASS" : "NEUTRAL/BEAR"}
               </span>
             </div>
 
             <div className="flex items-center justify-between p-2 bg-slate-950/60 rounded border border-slate-800/60">
-              <span className="text-slate-300">15m Trend Strength (ADX &gt;= 20 & +DI &gt; -DI)</span>
-              <span className={features.adx_15m >= 20 ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                ADX {features.adx_15m} (PASS)
+              <span className="text-slate-300">15m Futures Trend Strength (ADX14 ≥ {config.tunables.adx_threshold})</span>
+              <span className={features.adx_15m >= config.tunables.adx_threshold ? "text-emerald-400 font-bold" : "text-slate-500"}>
+                ADX {features.adx_15m} ({features.adx_15m >= config.tunables.adx_threshold ? "PASS" : "WAIT"})
               </span>
             </div>
 

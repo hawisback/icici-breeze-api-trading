@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { Check, Clock, DollarSign, Layers, RotateCcw, Save, ShieldAlert, Sliders } from "lucide-react";
+import { Check, Clock, DollarSign, Layers, RotateCcw, Save, ShieldAlert, Sliders, TrendingUp } from "lucide-react";
 import { StrategyStatusData, updateStrategyConfig } from "../../lib/api";
 
 interface TabParametersProps {
@@ -445,67 +445,24 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
           </p>
         </div>
 
-        {/* 4. Strategy A — Trend Pullback Parameters */}
-        <div className="bg-slate-900/90 border border-cyan-800/40 rounded-xl p-5 shadow-lg space-y-4">
-          <div className="flex items-center gap-2 pb-2 border-b border-slate-800 text-cyan-400 text-sm font-bold uppercase tracking-wider">
-            <Sliders className="w-4 h-4" />
-            Strategy A — Trend Pullback Parameters
+        {/* Strategy A V2 — authoritative completed-15m futures contract */}
+        <div className="bg-slate-900/90 border border-cyan-900/60 rounded-xl p-5 shadow-lg space-y-4">
+          <div className="flex items-center gap-2 pb-2 border-b border-slate-800 text-cyan-400 text-sm font-bold uppercase tracking-wider"><TrendingUp className="w-4 h-4" />Strategy A — NIFTY Trend-Pullback Confluence</div>
+          <p className="text-[11px] text-slate-400">Signal and structural-risk settings use completed 15-minute NIFTY futures bars. These are the authoritative V2 hypothesis parameters; options are execution-only.</p>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            {([
+              ["ema_fast_period","Fast EMA",1,100,1],["ema_slow_period","Slow EMA",2,200,1],["adx_period","ADX period",1,50,1],["adx_threshold","ADX threshold",0,100,1],["atr_period","ATR period",1,50,1],
+              ["ema_separation_min_atr","Min EMA separation (ATR)",0,2,0.01],["confluence_distance_atr","Confluence tolerance (ATR)",0,2,0.01],["sr_zone_atr","S/R tolerance (ATR)",0,2,0.01],
+              ["confirmation_min_body_ratio","Confirmation min body ratio",0,1,0.05],["confirmation_close_location_pct","Directional close location",0,0.5,0.05],["confirmation_max_range_atr","Max confirmation range (ATR)",0.1,5,0.05],
+              ["trigger_buffer_atr","Trigger buffer (ATR)",0,1,0.01],["trigger_validity_bars","Trigger validity (bars)",1,10,1],["maximum_chase_atr","Max chase (ATR)",0,2,0.01],
+              ["structural_stop_buffer_atr","Structural stop buffer (ATR)",0,2,0.01],["minimum_stop_distance_atr","Minimum stop (ATR)",0.1,5,0.05],["maximum_stop_distance_atr","Maximum stop (ATR)",0.1,5,0.05],
+              ["minimum_room_to_opposing_sr_r","Minimum room to S/R (R)",0.1,10,0.1],["t1_r","T1 (R)",0.1,10,0.1],["runner_target_reference_r","Runner reference (R)",0.1,10,0.1],["trailing_activation_r","Trailing activation (R)",0.1,10,0.1],
+            ] as const).map(([key,label,min,max,step]) => <label key={key} className="text-xs text-slate-400">{label}<input type="number" min={min} max={max} step={step} value={form.tunables[key]} onChange={e => setForm({...form, tunables: {...form.tunables, [key]: Number(e.target.value)}})} className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-100" /></label>)}
           </div>
-          <p className="text-[11px] text-slate-500 -mt-1">
-            Controls impulse detection sensitivity, confirmation bar requirements, and position sizing equity base for Strategy A.
-          </p>
-
-          <div className="grid grid-cols-1 gap-4">
-            <label className="block">
-              <span className="text-xs text-slate-400 font-medium">Account equity for position sizing (₹)</span>
-              <span className="block text-[10px] text-slate-600 mb-1">Used to compute lot size relative to max capital per trade.</span>
-              <input type="number" min="1" value={form.risk.account_equity ?? 500000}
-                onChange={e => setForm({...form, risk: {...form.risk, account_equity: Number(e.target.value)}})}
-                className="block w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" />
-            </label>
-
-            <label className="block">
-              <span className="text-xs text-slate-400 font-medium">Normalized EMA slope threshold</span>
-              <span className="block text-[10px] text-slate-600 mb-1">Minimum EMA slope (0–1 normalised) to confirm bullish/bearish impulse. Lower = more signals. Default: 0.10.</span>
-              <input type="number" min="0.01" max="1" step="0.01" value={form.tunables.ema_slope_threshold ?? 0.10}
-                onChange={e => setForm({...form, tunables: {...form.tunables, ema_slope_threshold: Number(e.target.value)}})}
-                className="block w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" />
-            </label>
-
-            <label className="block">
-              <span className="text-xs text-slate-400 font-medium">Required confirmation score (of 6)</span>
-              <span className="block text-[10px] text-slate-600 mb-1">Minimum number of confirmation checklist items that must pass before entry. Lower = easier entry. Default: 2.</span>
-              <input type="number" min="1" max="6" step="1" value={form.tunables.min_confirmation_score ?? 2}
-                onChange={e => setForm({...form, tunables: {...form.tunables, min_confirmation_score: Number(e.target.value)}})}
-                className="block w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" />
-            </label>
-
-            <label className="block">
-              <span className="text-xs text-slate-400 font-medium">CALL pullback range</span>
-              <span className="block text-[10px] text-slate-600 mb-1">Existing Strategy A range; maximum is inclusive.</span>
-              <div className="grid grid-cols-2 gap-2">
-                <input type="number" min="0" max="1" step="0.01" value={form.tunables.call_pullback_min_depth ?? 0.08}
-                  onChange={e => setForm({...form, tunables: {...form.tunables, call_pullback_min_depth: Number(e.target.value)}})}
-                  className="bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" aria-label="CALL pullback minimum" />
-                <input type="number" min="0" max="1" step="0.01" value={form.tunables.call_pullback_max_depth ?? 0.70}
-                  onChange={e => setForm({...form, tunables: {...form.tunables, call_pullback_max_depth: Number(e.target.value)}})}
-                  className="bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" aria-label="CALL pullback maximum" />
-              </div>
-            </label>
-
-            <label className="block">
-              <span className="text-xs text-slate-400 font-medium">PUT pullback range</span>
-              <span className="block text-[10px] text-cyan-400 mb-1">Frozen candidate: 40% inclusive to &lt;60% exclusive.</span>
-              <div className="grid grid-cols-2 gap-2">
-                <input type="number" min="0" max="1" step="0.01" value={form.tunables.put_pullback_min_depth ?? 0.40}
-                  onChange={e => setForm({...form, tunables: {...form.tunables, put_pullback_min_depth: Number(e.target.value)}})}
-                  className="bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" aria-label="PUT pullback minimum" />
-                <input type="number" min="0" max="1" step="0.01" value={form.tunables.put_pullback_max_depth ?? 0.60}
-                  onChange={e => setForm({...form, tunables: {...form.tunables, put_pullback_max_depth: Number(e.target.value)}})}
-                  className="bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs text-slate-100" aria-label="PUT pullback maximum" />
-              </div>
-            </label>
+          <div className="grid grid-cols-3 gap-3">
+            {([["entry_session_start","Entry start (IST)"],["entry_session_end","Entry end (IST)"],["forced_exit_time","Forced exit (IST)"]] as const).map(([key,label]) => <label key={key} className="text-xs text-slate-400">{label}<input type="time" value={form.tunables[key]} onChange={e => setForm({...form, tunables: {...form.tunables, [key]: e.target.value}})} className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-100" /></label>)}
           </div>
+          <div className="text-[10px] text-amber-300 bg-amber-500/5 border border-amber-500/20 rounded p-2">Production Strategy A cannot bypass its entry session and cannot be force-entered. Triggered setups remain ARMED until option execution is persisted and confirmed.</div>
         </div>
 
         <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
