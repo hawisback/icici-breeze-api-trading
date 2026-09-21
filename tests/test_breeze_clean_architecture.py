@@ -693,3 +693,34 @@ async def test_breeze_quote_maps_best_offer_as_ask() -> None:
     quote = await adapter.get_quote(instrument)
     assert quote.best_ask_price == Decimal("100.5")
     assert quote.best_ask_qty == 65
+
+
+def test_breeze_security_master_resolves_nearest_future_without_calendar_guessing() -> None:
+    sdk = MagicMock()
+    sdk.stock_script_dict_list = [{}, {}, {}, {}, {
+        "FUT-NIFTY-29-Sep-2026": "50123",
+        "FUT-NIFTY-27-Oct-2026": "50124",
+        "OPT-NIFTY-22-Sep-2026-23400-CE": "60123",
+    }]
+    result = IciciBreezeAdapter._future_from_security_master(
+        sdk, "NIFTY", date(2026, 9, 21)
+    )
+    assert result is not None
+    assert result["expiry"] == date(2026, 9, 29)
+    assert result["broker_token"] == "50123"
+
+
+@pytest.mark.asyncio
+async def test_breeze_resolve_nearest_future_prefers_security_master() -> None:
+    sdk = MagicMock()
+    sdk.stock_script_dict_list = [{}, {}, {}, {}, {
+        "FUT-NIFTY-29-Sep-2026": "50123",
+        "FUT-NIFTY-27-Oct-2026": "50124",
+    }]
+    adapter = IciciBreezeAdapter(custom_sdk_instance=sdk)
+    adapter.client_manager._status = SessionStatus.ACTIVE
+    resolved = await adapter.resolve_nearest_future("NIFTY")
+    assert resolved is not None
+    assert resolved["expiry"] == "2026-09-29"
+    assert resolved["broker_token"] == "50123"
+    sdk.get_quotes.assert_not_called()

@@ -178,6 +178,44 @@ class IciciBreezeAdapter(BrokerAdapter):
         return values
 
     @staticmethod
+    def _future_from_security_master(
+        sdk: object, stock_code: str, today: date
+    ) -> Optional[dict[str, object]]:
+        """Resolve nearest NFO future from Breeze's loaded security master.
+
+        BreezeConnect loads the NFO security master during generate_session()
+        into stock_script_dict_list[4], keyed as FUT-<underlying>-<expiry>.
+        Prefer that authoritative contract universe over guessing exchange
+        expiry dates. The quote-probe path below remains a compatibility
+        fallback for custom/older SDK clients that do not expose the master.
+        """
+        masters = getattr(sdk, "stock_script_dict_list", None)
+        if not isinstance(masters, list) or len(masters) <= 4 or not isinstance(masters[4], dict):
+            return None
+        aliases = {stock_code.upper()}
+        if stock_code.upper() == "CNXBAN":
+            aliases.add("BANKNIFTY")
+        candidates: list[tuple[date, str]] = []
+        for contract_name, token in masters[4].items():
+            parts = str(contract_name).strip().split("-")
+            if len(parts) < 5 or parts[0].upper() != "FUT" or parts[1].upper() not in aliases:
+                continue
+            raw_expiry = "-".join(parts[2:5])
+            expiry: Optional[date] = None
+            for fmt in ("%d-%b-%Y", "%d-%b-%y", "%Y-%m-%d"):
+                try:
+                    expiry = datetime.strptime(raw_expiry, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if expiry is not None and expiry >= today:
+                candidates.append((expiry, str(token)))
+        if not candidates:
+            return None
+        expiry, token = min(candidates, key=lambda item: (item[0], item[1]))
+        return {"expiry": expiry, "broker_token": token}
+
+    @staticmethod
     def _is_valid_futures_quote(row: dict[str, object]) -> bool:
         product = str(row.get("product_type", "")).strip().lower()
         return (
@@ -210,6 +248,24 @@ class IciciBreezeAdapter(BrokerAdapter):
             year, month = (year + 1, 1) if month == 12 else (year, month + 1)
 
         sdk = self.client_manager.get_sdk_client()
+        master_contract = self._future_from_security_master(sdk, clean, today)
+        if master_contract:
+            expiry = master_contract["expiry"]
+            resolved: dict[str, object] = {
+                "underlying": "BANKNIFTY" if clean == "CNXBAN" else "NIFTY",
+                "expiry": expiry.isoformat(), "stock_code": clean, "symbol": clean,
+                "exchange": "NFO", "broker": "ICICI_BREEZE",
+                "broker_token": master_contract.get("broker_token"),
+                "lot_size": 1, "tick_size": 0.05,
+            }
+            self._resolved_future_cache[key] = (today, resolved)
+            self._future_resolution_retry_after.pop(key, None)
+            logger.info(
+                "Resolved Breeze active %s future from security master: expiry=%s token=%s",
+                clean, expiry, master_contract.get("broker_token"),
+            )
+            return dict(resolved)
+
         for year, month in months:
             for expiry in self._monthly_expiry_candidates(year, month):
                 if expiry < today:

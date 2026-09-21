@@ -731,12 +731,26 @@ async def test_gather_features_requests_authoritative_15m_futures_bars():
         tradable=True,
         expiry="2026-09-29",
     )
+    inst_svc = SimpleNamespace(
+        upsert_futures_contract=AsyncMock(return_value=future),
+        ensure_current_nifty_futures=AsyncMock(return_value=[future]),
+        repo=SimpleNamespace(search=AsyncMock(return_value=[future])),
+    )
+    adapter = SimpleNamespace(
+        is_active=True,
+        resolve_nearest_future=AsyncMock(return_value={
+            "underlying": "NIFTY", "expiry": "2026-09-29",
+            "stock_code": "NIFTY", "broker": "ICICI_BREEZE",
+            "exchange": "NFO", "lot_size": 1, "tick_size": 0.05,
+            "broker_token": "50123",
+        }),
+        client_manager=SimpleNamespace(is_active=True),
+    )
     service.chain_svc = SimpleNamespace(
-        inst_svc=SimpleNamespace(
-            ensure_current_nifty_futures=AsyncMock(return_value=[]),
-            repo=SimpleNamespace(search=AsyncMock(return_value=[future])),
+        inst_svc=inst_svc,
+        broker_gateway=SimpleNamespace(
+            active_broker_name="breeze", active_adapter=adapter, breeze_adapter=adapter
         ),
-        broker_gateway=SimpleNamespace(active_broker_name="breeze"),
     )
     service._get_recent_candles = AsyncMock(return_value=[])
     service._get_option_chain = AsyncMock(return_value={"source": "UNAVAILABLE", "strikes": []})
