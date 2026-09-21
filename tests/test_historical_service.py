@@ -2,7 +2,7 @@
 
 from datetime import date, datetime, timedelta, timezone
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 from types import SimpleNamespace
 
 from libs.contracts.models import Candle
@@ -392,3 +392,28 @@ async def test_breeze_futures_history_end_to_end_resamples_real_5m_rows_to_15m(t
     assert kwargs["expiry_date"] == "2026-09-29T07:00:00.000Z"
     assert kwargs["right"] == "others"
     assert kwargs["strike_price"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_inactive_selected_provider_does_not_leak_other_broker_cache(tmp_path):
+    repo = HistoricalRepository(db_path=tmp_path / "historical.db")
+    await repo.initialize()
+    candle = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-29", interval="15m",
+        start_time=datetime(2026, 9, 21, 4, 0, tzinfo=timezone.utc),
+        end_time=datetime(2026, 9, 21, 4, 15, tzinfo=timezone.utc),
+        open=23400, high=23420, low=23390, close=23410,
+        volume=100, open_interest=1000, source="BREEZE",
+    )
+    await repo.save_candles([candle])
+    gateway = SimpleNamespace(
+        active_broker_name="kite",
+        active_adapter=SimpleNamespace(is_active=False),
+        breeze_adapter=SimpleNamespace(client_manager=SimpleNamespace(is_active=True)),
+    )
+    service = HistoricalService(repository=repo, broker_gateway=gateway)
+    candles = await service.get_candles(
+        candle.instrument_id, "15m", requested_source="MIXED",
+        allow_provider_fallback=True, allow_synthetic_fallback=False,
+    )
+    assert candles == []

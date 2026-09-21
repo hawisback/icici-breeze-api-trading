@@ -1481,7 +1481,7 @@ class StrategyService:
                 )
                 self._market_data_status.update({"futures_instrument": instrument.instrument_id, "last_error": None})
                 return instrument.instrument_id
-        if provider == "breeze":
+        if provider == "breeze" and active:
             fallback = await inst_svc.ensure_current_nifty_futures()
             if not fallback and getattr(inst_svc, "repo", None):
                 fallback = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
@@ -1490,7 +1490,10 @@ class StrategyService:
                 logger.warning("Using calendar fallback for Breeze futures contract: %s", active_id)
                 self._market_data_status.update({"futures_instrument": active_id, "last_error": "BROKER_CONTRACT_DISCOVERY_FALLBACK"})
                 return active_id
-        self._market_data_status["last_error"] = self._market_data_status.get("last_error") or "FUTURES_CONTRACT_UNAVAILABLE"
+        if not active and provider in {"breeze", "kite"}:
+            self._market_data_status["last_error"] = "BROKER_SESSION_INACTIVE"
+        else:
+            self._market_data_status["last_error"] = self._market_data_status.get("last_error") or "FUTURES_CONTRACT_UNAVAILABLE"
         return None
 
     async def _gather_features(self) -> MarketFeatures:

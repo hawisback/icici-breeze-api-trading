@@ -496,7 +496,11 @@ class HistoricalService:
         )
         if requested_source in ("BREEZE", "KITE"):
             candles = [x for x in candles if x.source == requested_source]
-        elif provider_active and expected_source and requested_source in (None, "MIXED"):
+        elif expected_source and requested_source in (None, "MIXED"):
+            # Provider identity is a configuration boundary, not merely a
+            # connectivity hint. Never serve cached Breeze candles to a Kite
+            # runtime (or vice versa), even while the selected broker session
+            # is temporarily inactive.
             candles = [x for x in candles if x.source == expected_source]
 
         if not candles and provider_active and expected_source and source_allows_provider and allow_provider_fallback and not attempted:

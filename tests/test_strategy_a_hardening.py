@@ -848,3 +848,29 @@ async def test_strategy_a_persists_broker_resolved_future_identity():
     assert resolved == "INST-NIFTY-FUT-2026-09-29"
     adapter.resolve_nearest_future.assert_awaited_once_with("NIFTY")
     inst_svc.upsert_futures_contract.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_strategy_a_does_not_use_calendar_futures_when_breeze_session_is_inactive():
+    service, _ = _service(None)
+    inst_svc = SimpleNamespace(
+        ensure_current_nifty_futures=AsyncMock(side_effect=AssertionError("must not fabricate runtime contract while disconnected")),
+        repo=SimpleNamespace(search=AsyncMock(return_value=[])),
+    )
+    breeze = SimpleNamespace(
+        is_active=False,
+        client_manager=SimpleNamespace(is_active=False),
+        resolve_nearest_future=AsyncMock(return_value=None),
+    )
+    service.chain_svc = SimpleNamespace(
+        inst_svc=inst_svc,
+        broker_gateway=SimpleNamespace(
+            active_broker_name="breeze",
+            active_adapter=breeze,
+            breeze_adapter=breeze,
+        ),
+    )
+    resolved = await service._resolve_strategy_a_futures_instrument()
+    assert resolved is None
+    assert service._market_data_status["last_error"] == "BROKER_SESSION_INACTIVE"
+    inst_svc.ensure_current_nifty_futures.assert_not_awaited()
