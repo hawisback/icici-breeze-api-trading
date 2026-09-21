@@ -116,6 +116,10 @@ class HistoricalService:
         active_adapter = getattr(self.broker_gateway, "active_adapter", None)
         from services.broker_gateway.service import BrokerGatewayService
 
+        # The generic adapter path is valid only when that adapter is the
+        # authenticated provider. With Breeze connected, active_adapter may
+        # still be a dormant/default adapter; falling through to the dedicated
+        # Breeze client is required for contract-specific NFO history.
         if (
             isinstance(self.broker_gateway, BrokerGatewayService)
             and active_adapter
@@ -130,7 +134,8 @@ class HistoricalService:
                 )
             except Exception as exc:
                 logger.warning("Configured broker historical fetch failed for %s: %s", instrument_id, exc)
-                return []
+                # Do not stop here: Breeze may be authenticated independently
+                # and can still satisfy the request below.
 
         breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
         if not breeze_adapter or not hasattr(breeze_adapter, "client_manager"):
@@ -190,7 +195,11 @@ class HistoricalService:
 
             rows = raw_res.get("Success", []) if isinstance(raw_res, dict) else []
             if not rows or not isinstance(rows, list):
-                logger.info("Breeze returned empty candle list for %s: %s", stock_code, raw_res)
+                logger.warning(
+                    "Breeze returned no historical candles for instrument=%s stock=%s exchange=%s "
+                    "product=%s contract=%s response=%s",
+                    instrument_id, stock_code, exchange, product_type, contract_args, raw_res,
+                )
                 return []
 
             candles: list[Candle] = []
