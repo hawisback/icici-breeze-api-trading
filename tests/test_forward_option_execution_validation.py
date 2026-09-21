@@ -116,12 +116,13 @@ async def test_entry_and_exit_use_ask_and_bid_with_configured_slippage():
 
 
 @pytest.mark.asyncio
-async def test_missing_quote_does_not_create_a_synthetic_fill_or_call_position_manager():
+async def test_missing_quote_does_not_create_synthetic_fill_but_manages_strategy_a_underlying():
     service, repo, _ = _service(None)
     trade = _trade()
-    service.position_manager.update_position = Mock()
+    service.position_manager.update_position = Mock(return_value=(trade, None))
     await service._evaluate_active_trade(trade, MarketFeatures(spot_price=24000))
-    service.position_manager.update_position.assert_not_called()
+    service.position_manager.update_position.assert_called_once()
+    assert service.position_manager.update_position.call_args.args[1] is None
     assert trade.state != TradeLifecycleState.CLOSED
     assert trade.option_data_status == "UNAVAILABLE"
     repo.save_trade.assert_awaited()

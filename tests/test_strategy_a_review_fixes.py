@@ -104,9 +104,11 @@ def test_strategy_a_t1_partial_exit_is_deterministic_whole_lots(lots, expected_p
     assert updated.t1_reached is True
     assert updated.state is TradeLifecycleState.PROFIT_LOCKED
     assert updated.t1_exit_quantity == expected_partial
-    assert updated.remaining_quantity == expected_remaining
-    assert updated.quantity == expected_remaining
-    assert updated.quantity % updated.lot_size == 0
+    assert updated.remaining_quantity == lots * updated.lot_size
+    assert updated.quantity == lots * 75  # quantity changes only after an executable fill
+    if expected_partial:
+        pm.apply_t1_partial_fill(updated, raw_bid=100, executable_price=99, slippage_points=1, filled_at=at)
+        assert updated.quantity == expected_remaining
     updated, repeated = pm.update_position(updated, 100, _features(115, at + timedelta(minutes=5)), as_of=at + timedelta(minutes=5))
     assert repeated is None
     assert updated.t1_exit_quantity == expected_partial
