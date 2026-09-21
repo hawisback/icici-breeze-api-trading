@@ -522,3 +522,52 @@ def test_available_dates_query_exposes_more_than_legacy_30_session_cap():
     import inspect
     source = inspect.getsource(SimulationEngine.get_available_dates)
     assert "LIMIT 120" in source
+
+
+@pytest.mark.asyncio
+async def test_strategy_a_replay_cached_futures_universe_preserves_rollover_warmup(tmp_path):
+    repository = HistoricalRepository(tmp_path / "historical.db")
+    await repository.initialize()
+
+    prior_contract = "INST-NIFTY-FUT-2026-06-30"
+    current_contract = "INST-NIFTY-FUT-2026-07-28"
+    prior_start = datetime(2026, 6, 30, 3, 45, tzinfo=timezone.utc)
+    current_start = datetime(2026, 7, 2, 3, 45, tzinfo=timezone.utc)
+
+    candles = []
+    for instrument_id, start, base in (
+        (prior_contract, prior_start, 24000.0),
+        (current_contract, current_start, 24100.0),
+    ):
+        for offset in range(3):
+            candle_start = start + timedelta(minutes=5 * offset)
+            candles.append(
+                Candle(
+                    instrument_id=instrument_id,
+                    interval="5m",
+                    start_time=candle_start,
+                    end_time=candle_start + timedelta(minutes=5),
+                    open=base + offset,
+                    high=base + offset + 2,
+                    low=base + offset - 2,
+                    close=base + offset + 1,
+                    volume=100,
+                    open_interest=1000,
+                    source="BREEZE",
+                )
+            )
+    await repository.save_candles(candles)
+
+    engine = SimulationEngine(historical_service=SimpleNamespace(repo=repository))
+    diagnostics = {}
+    history = await engine._fetch_cached_futures_universe(
+        "2026-07-02",
+        historical_source=HistoricalReplaySource.BREEZE,
+        source_diagnostics=diagnostics,
+    )
+
+    assert {c.instrument_id for c in history} == {prior_contract, current_contract}
+    canonical = diagnostics["futures"]["strategy_a_canonical_history"]
+    assert canonical["contract_count"] == 2
+    assert canonical["contracts"] == [prior_contract, current_contract]
+    assert canonical["cache_only"] is True
