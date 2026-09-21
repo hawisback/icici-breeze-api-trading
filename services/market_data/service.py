@@ -75,6 +75,17 @@ class MarketDataService:
             )
         )
 
+    def _live_broker_active(self) -> bool:
+        """Return whether the configured broker has an authenticated live session."""
+        if not self.broker_gateway:
+            return False
+        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
+        if active_adapter and getattr(active_adapter, "is_active", False):
+            return True
+        breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
+        client_mgr = getattr(breeze_adapter, "client_manager", None)
+        return bool(client_mgr and getattr(client_mgr, "is_active", False))
+
     async def sync_quotes_from_broker(self) -> bool:
         """Fetch latest real-time quotes from the configured live broker."""
         if not self.broker_gateway:
@@ -239,13 +250,15 @@ class MarketDataService:
             try:
                 # 1. Attempt sync from live broker
                 synced = False
-                if self.broker_gateway:
-                    active_adapter = getattr(self.broker_gateway, "active_adapter", None)
-                    if active_adapter and getattr(active_adapter, "is_active", False):
-                        synced = await self.sync_quotes_from_broker()
+                live_broker_active = self._live_broker_active()
+                if live_broker_active:
+                    synced = await self.sync_quotes_from_broker()
 
-                # 2. If not synced (broker offline), provide smooth micro-fluctuations
-                if not synced:
+                # 2. Synthetic ticks are an offline-only aid.  Never overwrite
+                # a failed/stale live broker read with a plausible fake quote:
+                # that previously made the UI show LIVE while pinning NIFTY to
+                # the old seeded close and corrupted the forming chart bar.
+                if not synced and not live_broker_active:
                     for inst_id in ["INST-NIFTY-INDEX", "INST-BANKNIFTY-INDEX"]:
                         q = self.get_latest_quote(inst_id)
                         if not q:

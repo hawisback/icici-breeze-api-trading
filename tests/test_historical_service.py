@@ -1,6 +1,6 @@
 """Unit tests for HistoricalService with ICICI Breeze historical candle integration."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from types import SimpleNamespace
@@ -8,6 +8,9 @@ from types import SimpleNamespace
 from libs.contracts.models import Candle
 from services.historical.repository import HistoricalRepository
 from services.historical.service import HistoricalService
+from services.instrument.repository import InstrumentRepository
+from services.instrument.service import InstrumentService
+from services.market_data.service import MarketDataService
 
 
 @pytest.mark.asyncio
@@ -203,3 +206,45 @@ async def test_historical_service_offline_fallback(tmp_path):
     candles = await service.get_candles("INST-NIFTY-INDEX", interval="5m", limit=10)
     assert len(candles) == 10
     assert candles[0].source == "SIMULATED"
+
+
+@pytest.mark.asyncio
+async def test_instrument_service_ensures_current_nifty_futures_even_when_seed_exists(tmp_path):
+    repo = InstrumentRepository(db_path=tmp_path / "instruments.db")
+    service = InstrumentService(repository=repo)
+    await service.initialize()
+    futures = await repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
+    futures = [item for item in futures if item.segment == "FUTURES"]
+    expiries = {item.expiry for item in futures}
+    assert "2026-09-29" in expiries or date.today().year != 2026
+    assert len(futures) >= 2
+    assert all(item.instrument_id.startswith("INST-NIFTY-FUT-") for item in futures)
+
+
+@pytest.mark.asyncio
+async def test_breeze_futures_contract_args_are_nfo_futures_with_expiry(tmp_path):
+    instrument_service = SimpleNamespace(
+        get_instrument=AsyncMock(return_value=SimpleNamespace(
+            segment="FUTURES", underlying="NIFTY", exchange="NFO",
+            expiry="2026-09-29",
+        ))
+    )
+    service = HistoricalService(instrument_service=instrument_service)
+    args = await service._breeze_contract_args("INST-NIFTY-FUT-2026-09-29")
+    assert args == {
+        "stock_code": "NIFTY",
+        "exchange_code": "NFO",
+        "product_type": "futures",
+        "expiry_date": "2026-09-29T07:00:00.000Z",
+        "right": "others",
+        "strike_price": "0",
+    }
+
+
+def test_live_breeze_session_is_detected_via_client_manager():
+    gateway = SimpleNamespace(
+        active_adapter=SimpleNamespace(),
+        breeze_adapter=SimpleNamespace(client_manager=SimpleNamespace(is_active=True)),
+    )
+    service = MarketDataService(broker_gateway=gateway)
+    assert service._live_broker_active() is True

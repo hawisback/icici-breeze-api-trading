@@ -97,7 +97,7 @@ class HistoricalService:
                 "stock_code": instrument.underlying,
                 "exchange_code": instrument.exchange or "NFO",
                 "product_type": "futures",
-                "expiry_date": f"{instrument.expiry}T00:00:00.000Z",
+                "expiry_date": f"{instrument.expiry}T07:00:00.000Z",
                 "right": "others",
                 "strike_price": "0",
             }

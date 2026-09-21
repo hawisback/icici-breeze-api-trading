@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from calendar import monthrange
+from datetime import date
 import logging
 from typing import Optional
 
@@ -21,6 +23,7 @@ class InstrumentService:
     async def initialize(self) -> None:
         await self.repo.initialize()
         await self.seed_default_instruments_if_empty()
+        await self.ensure_current_nifty_futures()
 
     async def seed_default_instruments_if_empty(self) -> None:
         """Seed NIFTY and BANKNIFTY contracts if no instruments exist."""
@@ -93,6 +96,46 @@ class InstrumentService:
                     )
                 )
         logger.info("Successfully seeded complete NIFTY & BANKNIFTY option strikes around spot.")
+
+    @staticmethod
+    def _monthly_expiry(year: int, month: int) -> date:
+        """Return the scheduled NIFTY monthly expiry (last Tuesday).
+
+        Exchange-holiday adjustments should come from a broker instrument
+        master when one is available; this deterministic fallback keeps the
+        Breeze futures path usable with the local instrument repository.
+        """
+        last_day = monthrange(year, month)[1]
+        value = date(year, month, last_day)
+        return value.fromordinal(value.toordinal() - ((value.weekday() - 1) % 7))
+
+    async def ensure_current_nifty_futures(self, today: Optional[date] = None) -> list[Instrument]:
+        """Ensure near and next NIFTY monthly futures exist in persistent metadata."""
+        today = today or date.today()
+        near = self._monthly_expiry(today.year, today.month)
+        if near < today:
+            year = today.year + (1 if today.month == 12 else 0)
+            month = 1 if today.month == 12 else today.month + 1
+            near = self._monthly_expiry(year, month)
+        year = near.year + (1 if near.month == 12 else 0)
+        month = 1 if near.month == 12 else near.month + 1
+        nxt = self._monthly_expiry(year, month)
+
+        result: list[Instrument] = []
+        for expiry in (near, nxt):
+            instrument = Instrument(
+                instrument_id=f"INST-NIFTY-FUT-{expiry.isoformat()}",
+                exchange="NFO",
+                segment="FUTURES",
+                underlying="NIFTY",
+                stock_code="NIFTY",
+                expiry=expiry.isoformat(),
+                lot_size=25,
+                tick_size=0.05,
+            )
+            await self.repo.save_instrument(instrument)
+            result.append(instrument)
+        return result
 
     async def get_instrument(self, instrument_id: str) -> Optional[Instrument]:
         return await self.repo.get_by_id(instrument_id)
