@@ -345,6 +345,8 @@ def audit_session(conn: sqlite3.Connection, day: date, *, source: str) -> dict[s
             or missing_entry_ends
             or _invalid_ohlc_count(futures)
             or not futures
+            or warmup_count < EMA50_MIN_BARS
+            or warmup_count < ADX14_MIN_BARS
         ),
         "reasons": reasons,
     }

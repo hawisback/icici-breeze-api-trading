@@ -115,3 +115,16 @@ def test_strategy_a_data_audit_recommends_targeted_refetch_for_entry_gap(tmp_pat
     assert "FUTURES_5M_GAPS" in session["reasons"]
     assert "STRATEGY_A_15M_ENTRY_WINDOW_GAPS" in session["reasons"]
     assert session["strategy_a_input_readiness"]["entry_window_coverage_pct"] < 100.0
+
+
+def test_strategy_a_data_audit_recommends_refetch_when_warmup_is_insufficient(tmp_path):
+    db_path = tmp_path / "historical.db"
+    _create_db(db_path)
+    _insert_session(db_path, date(2026, 9, 17))
+
+    report = audit_database(db_path, sessions=1, source="BREEZE")
+
+    session = report["sessions"][0]
+    assert "EMA50_WARMUP_INSUFFICIENT" in session["reasons"]
+    assert report["refetch_recommended"] is True
+    assert report["refetch_dates"] == ["2026-09-17"]
