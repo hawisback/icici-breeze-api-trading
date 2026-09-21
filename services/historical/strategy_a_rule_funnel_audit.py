@@ -118,7 +118,7 @@ def _audit_session(conn: Any, day: date, *, source: str, config: StrategyTunable
         start_utc=warmup_start.astimezone(session_start_utc.tzinfo),
         end_utc=history_end.astimezone(session_start_utc.tzinfo),
         source=source,
-        instrument_id=active_contract,
+        instrument_like="INST-NIFTY-FUT-%",
     )
 
     gate_rows: dict[str, dict[str, int]] = {}
