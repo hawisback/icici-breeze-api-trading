@@ -77,7 +77,7 @@ def _quote(timestamp, bid=100.0):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direction", [TradeDirection.BULLISH, TradeDirection.BEARISH])
 async def test_real_position_manager_option_emergency_stop_closes_without_fake_underlying_exit(direction):
-    at = datetime.now(IST)
+    at = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
     service, _ = _service(_quote(at, 89), slippage=2.0)
     trade = _trade(lots=1, direction=direction).model_copy(update={"option_hard_stop_price": 95})
     await service._evaluate_active_trade(trade, _features(100, at))
@@ -100,7 +100,7 @@ async def test_real_position_manager_option_emergency_stop_closes_without_fake_u
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direction", [TradeDirection.BULLISH, TradeDirection.BEARISH])
 async def test_option_emergency_stop_after_t1_preserves_t1_r_but_runner_r_is_unresolved(direction):
-    first = datetime.now(IST)
+    first = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
     service, _ = _service(_quote(first, 100), slippage=2.0)
     trade = _trade(lots=2, direction=direction).model_copy(update={"option_hard_stop_price": 95})
     await service._evaluate_active_trade(trade, _features(115 if direction is TradeDirection.BULLISH else 85, first))
@@ -116,7 +116,7 @@ async def test_option_emergency_stop_after_t1_preserves_t1_r_but_runner_r_is_unr
 
 @pytest.mark.asyncio
 async def test_option_emergency_stop_with_missing_bid_is_pending_without_synthetic_fill():
-    at = datetime.now(IST)
+    at = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
     missing_bid = SimpleNamespace(
         source="BREEZE", instrument_id="OPT-HARDEN", symbol="NIFTY-HARDEN",
         last_price=89, best_bid=0, best_ask=90, volume=1000, open_interest=50000, timestamp=at,
@@ -143,7 +143,7 @@ async def test_exit_precedence_pending_then_forced_then_option_stop_then_underly
 async def test_strategy_a_structural_stop_is_decided_without_option_quote_and_later_bid_closes_original_reason():
     service, repo = _service(None)
     trade = _trade(lots=1)
-    decision_time = datetime.now(IST)
+    decision_time = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
     await service._evaluate_active_trade(trade, _features(89, decision_time))
     assert trade.pending_exit_reason == "UNDERLYING_STRUCTURAL_STOP"
     assert trade.pending_underlying_exit_time == decision_time
@@ -178,7 +178,7 @@ async def test_strategy_a_trailing_stop_and_force_exit_are_pending_without_quote
 async def test_strategy_a_t1_decision_without_quote_preserves_quantity_then_fills_once_with_slippage():
     service, _ = _service(None, slippage=2.0)
     trade = _trade(lots=2)
-    at = datetime.now(IST)
+    at = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
     await service._evaluate_active_trade(trade, _features(115, at))
     assert trade.t1_exit_pending is True
     assert trade.t1_exit_quantity == 75
@@ -724,7 +724,7 @@ async def test_real_service_success_persists_trade_before_confirming_entered():
 
 @pytest.mark.asyncio
 async def test_gather_features_requests_authoritative_15m_futures_bars():
-    service = _service(None)
+    service, _ = _service(None)
     future = SimpleNamespace(
         instrument_id="INST-NIFTY-FUT-2026-09-29",
         segment="FUTURES",
