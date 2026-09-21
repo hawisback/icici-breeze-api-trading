@@ -1483,6 +1483,8 @@ class StrategyService:
                 return instrument.instrument_id
         if provider == "breeze":
             fallback = await inst_svc.ensure_current_nifty_futures()
+            if not fallback and getattr(inst_svc, "repo", None):
+                fallback = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
             active_id = resolve_active_futures_instrument(fallback, as_of=utc_now())
             if active_id:
                 logger.warning("Using calendar fallback for Breeze futures contract: %s", active_id)

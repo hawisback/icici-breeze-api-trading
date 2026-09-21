@@ -41,7 +41,7 @@ class HistoricalService:
             return "", None
         adapter = getattr(self.broker_gateway, "active_adapter", None)
         name = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
-        if not name:
+        if name not in {"breeze", "kite"}:
             breeze = getattr(self.broker_gateway, "breeze_adapter", None)
             client = getattr(breeze, "client_manager", None)
             if client and getattr(client, "is_active", False):
