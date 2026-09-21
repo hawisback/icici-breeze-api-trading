@@ -20,6 +20,7 @@ from libs.contracts.models import Candle
 from services.strategy.futures_signal import (
     FuturesContractResolver,
     aggregate_completed_15m,
+    canonical_active_futures_stream,
     contract_expiry,
 )
 
@@ -265,12 +266,17 @@ def audit_session(conn: sqlite3.Connection, day: date, *, source: str) -> dict[s
             start_utc=warmup_start.astimezone(UTC),
             end_utc=(first_decision + timedelta(minutes=5)).astimezone(UTC),
             source=source,
-            instrument_id=contract_id,
+            instrument_like="INST-NIFTY-FUT-%",
         )
         if contract_id
         else []
     )
-    warmup_15m = aggregate_completed_15m(warmup_futures, as_of=first_decision)
+    warmup_15m_all = aggregate_completed_15m(warmup_futures, as_of=first_decision)
+    warmup_15m = canonical_active_futures_stream(
+        warmup_15m_all,
+        as_of=first_decision,
+        interval="15m",
+    )
     warmup_count = len(warmup_15m)
 
     close_marker = datetime.combine(day, OPTIONAL_CLOSE_MARKER, tzinfo=IST)
