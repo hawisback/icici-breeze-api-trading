@@ -56,6 +56,17 @@ class OptionChainService:
 
         expiries = await self.inst_svc.get_expiries(clean_underlying)
         all_expiries = sorted(e for e in (expiries or []) if e >= date.today().isoformat())
+        active_provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower() if self.broker_gateway else ""
+        active_adapter = getattr(self.broker_gateway, "active_adapter", None) if self.broker_gateway else None
+        if active_provider == "kite" and active_adapter and getattr(active_adapter, "is_active", False):
+            get_expiries = getattr(active_adapter, "get_option_expiries", None)
+            if callable(get_expiries):
+                try:
+                    live_expiries = await get_expiries(clean_underlying)
+                    if live_expiries:
+                        all_expiries = live_expiries
+                except Exception as exc:
+                    logger.warning("Unable to refresh Kite option expiries: %s", exc)
         if not all_expiries:
             return {"underlying": clean_underlying, "source": "UNAVAILABLE", "strikes": []}
         selected_expiry = expiry if (expiry and expiry in all_expiries) else all_expiries[0]
@@ -73,7 +84,7 @@ class OptionChainService:
 
         # 2. Attempt to fetch live option chain directly from ICICI Breeze SDK
         breeze_active = False
-        if self.broker_gateway:
+        if self.broker_gateway and active_provider == "breeze":
             breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
             if breeze_adapter and hasattr(breeze_adapter, "client_manager"):
                 breeze_active = getattr(breeze_adapter.client_manager, "is_active", False)

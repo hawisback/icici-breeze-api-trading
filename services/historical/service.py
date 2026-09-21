@@ -34,6 +34,40 @@ class HistoricalService:
     async def initialize(self) -> None:
         await self.repo.initialize()
 
+    def _active_provider(self) -> tuple[str, Any | None]:
+        if not self.broker_gateway:
+            return "", None
+        return (
+            str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower(),
+            getattr(self.broker_gateway, "active_adapter", None),
+        )
+
+    def _provider_is_active(self) -> bool:
+        name, adapter = self._active_provider()
+        if name == "kite":
+            return bool(adapter and getattr(adapter, "is_active", False))
+        if name == "breeze":
+            client = getattr(getattr(self.broker_gateway, "breeze_adapter", None), "client_manager", None)
+            return bool(client and getattr(client, "is_active", False))
+        return False
+
+    async def fetch_candles_from_active_provider(self, instrument_id: str, interval: str = "5m", days_back: int = 5) -> list[Candle]:
+        name, adapter = self._active_provider()
+        if name == "kite":
+            if not adapter or not getattr(adapter, "is_active", False):
+                return []
+            fetch = getattr(adapter, "fetch_historical_candles", None)
+            if not callable(fetch):
+                return []
+            try:
+                return await fetch(instrument_id=instrument_id, interval=interval, days_back=days_back)
+            except Exception as exc:
+                logger.warning("Kite historical fetch failed for %s: %s", instrument_id, exc)
+                return []
+        if name == "breeze":
+            return await self.fetch_candles_from_breeze(instrument_id, interval, days_back)
+        return []
+
     def _map_instrument_to_breeze(self, instrument_id: str) -> tuple[str, str, str]:
         """Map platform instrument ID to Breeze stock_code, exchange_code, and product_type."""
         inst_upper = instrument_id.upper()
@@ -112,30 +146,6 @@ class HistoricalService:
         """Fetch official historical candle series directly from ICICI Direct Breeze API."""
         if not self.broker_gateway:
             return []
-
-        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
-        from services.broker_gateway.service import BrokerGatewayService
-
-        # The generic adapter path is valid only when that adapter is the
-        # authenticated provider. With Breeze connected, active_adapter may
-        # still be a dormant/default adapter; falling through to the dedicated
-        # Breeze client is required for contract-specific NFO history.
-        if (
-            isinstance(self.broker_gateway, BrokerGatewayService)
-            and active_adapter
-            and getattr(active_adapter, "is_active", False)
-            and callable(getattr(active_adapter, "fetch_historical_candles", None))
-        ):
-            try:
-                return await active_adapter.fetch_historical_candles(
-                    instrument_id=instrument_id,
-                    interval=interval,
-                    days_back=days_back,
-                )
-            except Exception as exc:
-                logger.warning("Configured broker historical fetch failed for %s: %s", instrument_id, exc)
-                # Do not stop here: Breeze may be authenticated independently
-                # and can still satisfy the request below.
 
         breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
         if not breeze_adapter or not hasattr(breeze_adapter, "client_manager"):
@@ -410,48 +420,42 @@ class HistoricalService:
         using the defaults; deterministic replay disables provider and
         synthetic fallback explicitly.
         """
-        breeze_active = False
-        if self.broker_gateway:
-            active_adapter = getattr(self.broker_gateway, "active_adapter", None)
-            breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
-            breeze_client = getattr(breeze_adapter, "client_manager", None)
-            breeze_active = bool(
-                (active_adapter and getattr(active_adapter, "is_active", False))
-                or (breeze_client and getattr(breeze_client, "is_active", False))
-            )
-
+        provider_name, _ = self._active_provider()
+        provider_active = self._provider_is_active()
+        expected_source = "KITE" if provider_name == "kite" else "BREEZE" if provider_name == "breeze" else None
+        source_allows_provider = requested_source in (None, "MIXED", expected_source)
         latest_candle = await self.repo.get_latest_candle(instrument_id, interval)
+        latest_matches = bool(latest_candle and expected_source and latest_candle.source == expected_source)
+        attempted = False
 
-        # Proactively fetch from Breeze if session is active and cached candles are missing or simulated
-        breeze_fetch_allowed = requested_source in (None, "BREEZE", "MIXED")
-        if breeze_active and breeze_fetch_allowed and (not latest_candle or latest_candle.source not in ("BREEZE", "KITE", "LIVE")
-                              or (utc_now() - latest_candle.end_time).total_seconds() >= (900 if interval == "15m" else 300)):
-            breeze_candles = await self.fetch_candles_from_breeze(instrument_id, interval)
-            if breeze_candles:
+        if provider_active and expected_source and source_allows_provider and (
+            not latest_matches or (utc_now() - latest_candle.end_time).total_seconds() >= (900 if interval == "15m" else 300)
+        ):
+            attempted = True
+            fetched = await self.fetch_candles_from_active_provider(instrument_id, interval)
+            if fetched:
                 await self.repo.purge_simulated_candles(instrument_id, interval)
-                await self.repo.save_candles(breeze_candles)
+                await self.repo.save_candles(fetched)
 
         candles = await self.repo.get_candles(
-            instrument_id=instrument_id,
-            interval=interval,
-            start_time=start_time,
-            end_time=end_time,
-            limit=limit,
+            instrument_id=instrument_id, interval=interval, start_time=start_time,
+            end_time=end_time, limit=limit,
         )
+        if requested_source in ("BREEZE", "KITE"):
+            candles = [x for x in candles if x.source == requested_source]
+        elif provider_active and expected_source and requested_source in (None, "MIXED"):
+            candles = [x for x in candles if x.source == expected_source]
 
-        has_only_simulated = bool(candles and all(c.source == "SIMULATED" for c in candles))
-        if (not candles or has_only_simulated) and breeze_active and breeze_fetch_allowed and allow_provider_fallback:
-            breeze_candles = await self.fetch_candles_from_breeze(instrument_id, interval)
-            if breeze_candles:
+        if not candles and provider_active and expected_source and source_allows_provider and allow_provider_fallback and not attempted:
+            fetched = await self.fetch_candles_from_active_provider(instrument_id, interval)
+            if fetched:
                 await self.repo.purge_simulated_candles(instrument_id, interval)
-                await self.repo.save_candles(breeze_candles)
-                return sorted(breeze_candles, key=lambda candle: candle.start_time)[-limit:]
+                await self.repo.save_candles(fetched)
+                return sorted(fetched, key=lambda x: x.start_time)[-limit:]
 
         if not candles and allow_synthetic_fallback:
-            # Fall back to realistic synthetic candles if offline
             candles = await self.generate_synthetic_candles(instrument_id, interval, count=min(limit, 100))
             await self.repo.save_candles(candles)
-
         return candles
 
     async def generate_synthetic_candles(

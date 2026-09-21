@@ -137,6 +137,21 @@ class InstrumentService:
             result.append(instrument)
         return result
 
+    async def upsert_futures_contract(
+        self, *, underlying: str, expiry: str, stock_code: str, broker: str,
+        exchange: str = "NFO", lot_size: int = 1, tick_size: float = 0.05,
+        broker_token: Optional[str] = None,
+    ) -> Instrument:
+        clean = "BANKNIFTY" if "BANK" in underlying.upper() else "NIFTY"
+        instrument = Instrument(
+            instrument_id=f"INST-{clean}-FUT-{expiry}", broker=broker,
+            exchange=exchange, segment="FUTURES", underlying=clean,
+            stock_code=stock_code, expiry=expiry, lot_size=max(1, int(lot_size or 1)),
+            tick_size=float(tick_size or 0.05), broker_token=broker_token or None,
+        )
+        await self.repo.save_instrument(instrument)
+        return instrument
+
     async def get_instrument(self, instrument_id: str) -> Optional[Instrument]:
         return await self.repo.get_by_id(instrument_id)
 

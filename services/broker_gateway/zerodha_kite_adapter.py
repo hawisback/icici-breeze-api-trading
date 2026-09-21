@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime, timezone
 import logging
+import re
 from typing import Any, Optional
 
 from pydantic import SecretStr
@@ -117,6 +118,41 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         self._kite = None
         self._nse_instruments = None
         self._nfo_instruments = None
+
+    async def resolve_nearest_future(self, underlying: str = "NIFTY") -> Optional[dict[str, object]]:
+        if not self.is_active:
+            return None
+        if self._nfo_instruments is None:
+            self._nfo_instruments = await self._run(lambda: self._kite.instruments("NFO"))
+        clean = "BANKNIFTY" if "BANK" in underlying.upper() else "NIFTY"
+        today = date.today().isoformat()
+        rows = [row for row in self._nfo_instruments or []
+                if str(row.get("name", "")).upper() == clean
+                and str(row.get("instrument_type", "")).upper() == "FUT"
+                and str(row.get("expiry", ""))[:10] >= today]
+        rows.sort(key=lambda row: str(row.get("expiry", ""))[:10])
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "underlying": clean, "expiry": str(row.get("expiry", ""))[:10],
+            "stock_code": str(row.get("tradingsymbol") or clean),
+            "symbol": str(row.get("tradingsymbol") or clean), "exchange": "NFO",
+            "broker": "ZERODHA_KITE", "broker_token": str(row.get("instrument_token") or ""),
+            "lot_size": int(row.get("lot_size") or 1), "tick_size": float(row.get("tick_size") or 0.05),
+        }
+
+    async def get_option_expiries(self, underlying: str = "NIFTY") -> list[str]:
+        if not self.is_active:
+            return []
+        if self._nfo_instruments is None:
+            self._nfo_instruments = await self._run(lambda: self._kite.instruments("NFO"))
+        clean = "BANKNIFTY" if "BANK" in underlying.upper() else "NIFTY"
+        today = date.today().isoformat()
+        return sorted({str(row.get("expiry", ""))[:10] for row in self._nfo_instruments or []
+                       if str(row.get("name", "")).upper() == clean
+                       and str(row.get("instrument_type", "")).upper() in {"CE", "PE"}
+                       and str(row.get("expiry", ""))[:10] >= today})
 
     async def get_funds(self) -> BrokerFunds:
         if not self.is_active:
@@ -420,17 +456,18 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         if self._nfo_instruments is None:
             self._nfo_instruments = await self._run(lambda: self._kite.instruments("NFO"))
         underlying = "BANKNIFTY" if "BANK" in instrument_id.upper() else "NIFTY"
+        match = re.search(r"FUT-(\d{4}-\d{2}-\d{2})", instrument_id.upper())
+        requested_expiry = match.group(1) if match else None
         today = date.today().isoformat()
-        futures = [
-            row for row in self._nfo_instruments or []
-            if str(row.get("name", "")).upper() == underlying
-            and str(row.get("instrument_type", "")).upper() == "FUT"
-            and str(row.get("expiry", ""))[:10] >= today
-        ]
-        futures.sort(key=lambda row: str(row.get("expiry", "")))
-        if futures:
-            return int(futures[0]["instrument_token"])
-        return None
+        futures = [row for row in self._nfo_instruments or []
+                   if str(row.get("name", "")).upper() == underlying
+                   and str(row.get("instrument_type", "")).upper() == "FUT"
+                   and str(row.get("expiry", ""))[:10] >= today]
+        futures.sort(key=lambda row: str(row.get("expiry", ""))[:10])
+        if requested_expiry:
+            exact = next((row for row in futures if str(row.get("expiry", ""))[:10] == requested_expiry), None)
+            return int(exact["instrument_token"]) if exact else None
+        return int(futures[0]["instrument_token"]) if futures else None
 
     async def _run(self, callback):
         return await asyncio.to_thread(callback)

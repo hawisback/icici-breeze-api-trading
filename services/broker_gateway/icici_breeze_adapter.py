@@ -8,7 +8,8 @@ BreezeTradingAdapter, BrokerRequestLedgerRepository, and ExecutionGuard).
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from calendar import monthrange
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import logging
 from pathlib import Path
@@ -82,6 +83,7 @@ class IciciBreezeAdapter(BrokerAdapter):
         self.secret_key = secret_key or ""
         self.session_token = session_token or ""
         self.timeout = timeout
+        self._resolved_future_cache: dict[str, tuple[date, dict[str, object]]] = {}
 
         # Clean Architecture Components
         self.sdk_runner = SdkRunner()
@@ -156,6 +158,80 @@ class IciciBreezeAdapter(BrokerAdapter):
         except Exception as exc:
             logger.error("Authentication failed for Breeze adapter: %s", exc)
             return False
+
+    @property
+    def is_active(self) -> bool:
+        return bool(self.client_manager.is_active)
+
+    @staticmethod
+    def _monthly_expiry_candidates(year: int, month: int) -> list[date]:
+        last = date(year, month, monthrange(year, month)[1])
+        nominal = last - timedelta(days=(last.weekday() - 1) % 7)
+        values: list[date] = []
+        cursor = nominal
+        while len(values) < 5:
+            if cursor.weekday() < 5:
+                values.append(cursor)
+            cursor -= timedelta(days=1)
+        return values
+
+    async def resolve_nearest_future(self, underlying: str = "NIFTY") -> Optional[dict[str, object]]:
+        """Resolve the actual live near-month future by asking Breeze."""
+        if not self.is_active:
+            return None
+        clean = "CNXBAN" if "BANK" in underlying.upper() else "NIFTY"
+        ist = timezone(timedelta(hours=5, minutes=30))
+        today = datetime.now(ist).date()
+        key = f"{clean}:{today.isoformat()}"
+        cached = self._resolved_future_cache.get(key)
+        if cached and cached[0] == today:
+            return dict(cached[1])
+
+        months: list[tuple[int, int]] = []
+        year, month = today.year, today.month
+        for _ in range(3):
+            months.append((year, month))
+            year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+
+        sdk = self.client_manager.get_sdk_client()
+        for year, month in months:
+            for expiry in self._monthly_expiry_candidates(year, month):
+                if expiry < today:
+                    continue
+                try:
+                    await self.rate_limiter.acquire_read()
+                    raw = await self.client_manager.sdk_runner.run(
+                        lambda e=expiry: sdk.get_quotes(
+                            stock_code=clean, exchange_code="NFO", product_type="futures",
+                            expiry_date=f"{e.isoformat()}T06:00:00.000Z",
+                            right="others", strike_price="0",
+                        ),
+                        timeout_sec=10.0,
+                    )
+                except Exception as exc:
+                    logger.debug("Breeze futures candidate %s failed: %s", expiry, exc)
+                    continue
+                rows = raw.get("Success", []) if isinstance(raw, dict) else []
+                if not isinstance(rows, list):
+                    continue
+                valid = next((row for row in rows
+                    if str(row.get("exchange_code", "")).upper() == "NFO"
+                    and str(row.get("product_type", "")).lower() == "futures"
+                    and (float(row.get("ltp") or 0) > 0 or str(row.get("ltt") or "").strip().upper() not in {"", "NA"})
+                ), None)
+                if valid is None:
+                    continue
+                resolved: dict[str, object] = {
+                    "underlying": "BANKNIFTY" if clean == "CNXBAN" else "NIFTY",
+                    "expiry": expiry.isoformat(), "stock_code": clean, "symbol": clean,
+                    "exchange": "NFO", "broker": "ICICI_BREEZE", "broker_token": None,
+                    "lot_size": 1, "tick_size": 0.05,
+                }
+                self._resolved_future_cache[key] = (today, resolved)
+                logger.info("Resolved Breeze active %s future: expiry=%s", clean, expiry)
+                return dict(resolved)
+        logger.warning("Breeze could not validate an active %s futures contract", clean)
+        return None
 
     async def get_funds(self) -> BrokerFunds:
         """Query funds balance via Account Adapter or return mock for test keys."""

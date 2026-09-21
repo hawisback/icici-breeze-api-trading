@@ -117,6 +117,11 @@ class StrategyService:
         self._evaluation_lock = asyncio.Lock()
         self._last_eval_time: datetime = datetime.min.replace(tzinfo=timezone.utc)  # epoch → forces first-call refresh
         self._last_eod_report_date: Optional[str] = None
+        self._market_data_status: dict[str, Any] = {
+            "provider": "unknown", "provider_active": False,
+            "futures_instrument": None, "futures_candle_count": 0,
+            "latest_futures_candle": None, "last_error": "Awaiting first evaluation",
+        }
         self.strategy_a_telemetry = StrategyATelemetryStore()
 
 
@@ -569,7 +574,6 @@ class StrategyService:
         while self._is_running:
             try:
                 interval = max(1, self.config.tunables.evaluation_interval_sec)
-                await asyncio.sleep(interval)
                 await self.evaluate_cycle()
                 ist_now = utc_now().astimezone(timezone(timedelta(hours=5, minutes=30)))
                 force_exit = datetime.strptime(self.config.session.force_exit_time, "%H:%M").time()
@@ -585,6 +589,7 @@ class StrategyService:
                         payload={"event": "STATUS_UPDATE", "data": st},
                     )
                 )
+                await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 break
             except Exception as ex:
@@ -1435,40 +1440,75 @@ class StrategyService:
             return target
 
     # --- Market Data & Chain Fetching ---
+    def _active_broker_context(self) -> tuple[str, Any | None, bool]:
+        gateway = getattr(self.chain_svc, "broker_gateway", None) or getattr(self.hist_svc, "broker_gateway", None)
+        if not gateway:
+            return "unknown", None, False
+        provider = str(getattr(gateway, "active_broker_name", "unknown") or "unknown").lower()
+        adapter = getattr(gateway, "active_adapter", None)
+        if provider == "breeze":
+            client = getattr(getattr(gateway, "breeze_adapter", None), "client_manager", None)
+            active = bool(client and getattr(client, "is_active", False))
+        else:
+            active = bool(adapter and getattr(adapter, "is_active", False))
+        return provider, adapter, active
+
+    async def _resolve_strategy_a_futures_instrument(self) -> Optional[str]:
+        inst_svc = getattr(self.chain_svc, "inst_svc", None)
+        provider, adapter, active = self._active_broker_context()
+        self._market_data_status.update({"provider": provider, "provider_active": active})
+        if not inst_svc:
+            self._market_data_status["last_error"] = "INSTRUMENT_SERVICE_UNAVAILABLE"
+            return None
+        resolver = getattr(adapter, "resolve_nearest_future", None)
+        if active and callable(resolver):
+            try:
+                contract = await resolver("NIFTY")
+            except Exception as exc:
+                logger.exception("%s futures contract resolution failed", provider)
+                contract = None
+                self._market_data_status["last_error"] = f"FUTURES_CONTRACT_RESOLUTION_FAILED:{type(exc).__name__}"
+            if contract:
+                instrument = await inst_svc.upsert_futures_contract(
+                    underlying=str(contract.get("underlying") or "NIFTY"),
+                    expiry=str(contract["expiry"]),
+                    stock_code=str(contract.get("stock_code") or contract.get("symbol") or "NIFTY"),
+                    broker=str(contract.get("broker") or provider.upper()),
+                    exchange=str(contract.get("exchange") or "NFO"),
+                    lot_size=int(contract.get("lot_size") or 1),
+                    tick_size=float(contract.get("tick_size") or 0.05),
+                    broker_token=str(contract.get("broker_token") or "") or None,
+                )
+                self._market_data_status.update({"futures_instrument": instrument.instrument_id, "last_error": None})
+                return instrument.instrument_id
+        if provider == "breeze":
+            fallback = await inst_svc.ensure_current_nifty_futures()
+            active_id = resolve_active_futures_instrument(fallback, as_of=utc_now())
+            if active_id:
+                logger.warning("Using calendar fallback for Breeze futures contract: %s", active_id)
+                self._market_data_status.update({"futures_instrument": active_id, "last_error": "BROKER_CONTRACT_DISCOVERY_FALLBACK"})
+                return active_id
+        self._market_data_status["last_error"] = self._market_data_status.get("last_error") or "FUTURES_CONTRACT_UNAVAILABLE"
+        return None
+
     async def _gather_features(self) -> MarketFeatures:
         candles_5m = await self._get_recent_candles("5m")
         candles_15m = await self._get_recent_candles("15m")
-        futures = []
-        inst_svc = getattr(self.chain_svc, "inst_svc", None)
-        if inst_svc:
-            # Existing installations can pre-date futures metadata. Repair it
-            # lazily here as well as at InstrumentService startup so Strategy A
-            # becomes usable immediately after an application upgrade.
-            ensure_futures = getattr(inst_svc, "ensure_current_nifty_futures", None)
-            if callable(ensure_futures):
-                await ensure_futures()
-            instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
-            futures_instruments = [item for item in instruments if getattr(item, "segment", None) == "FUTURES"]
-            logger.info(
-                "Strategy A futures metadata: total_nifty=%d futures=%d ids=%s",
-                len(instruments), len(futures_instruments),
-                [getattr(item, "instrument_id", None) for item in futures_instruments],
-            )
-            active_instrument = resolve_active_futures_instrument(instruments, as_of=utc_now())
-            if active_instrument:
-                logger.info("Strategy A resolved active futures instrument: %s", active_instrument)
-                futures = await self._get_recent_candles("15m", active_instrument)
-                logger.info(
-                    "Strategy A futures history: instrument=%s interval=15m candles=%d",
-                    active_instrument, len(futures),
-                )
-            elif getattr(getattr(self.chain_svc, "broker_gateway", None), "active_broker_name", None) == "kite":
-                # The local instrument seed contains spot/options only. Kite's
-                # adapter resolves this virtual ID to the nearest NIFTY future
-                # from the live NFO instrument master.
-                logger.info("Strategy A resolving nearest Kite NIFTY futures instrument")
-                futures = await self._get_recent_candles("15m", "INST-NIFTY-FUT-NEAREST")
-                logger.info("Strategy A futures history: instrument=INST-NIFTY-FUT-NEAREST interval=15m candles=%d", len(futures))
+        futures: list[Candle] = []
+        active_instrument = await self._resolve_strategy_a_futures_instrument()
+        if active_instrument:
+            futures = await self._get_recent_candles("15m", active_instrument)
+            logger.info("Strategy A futures history: provider=%s instrument=%s interval=15m candles=%d",
+                        self._market_data_status.get("provider"), active_instrument, len(futures))
+        self._market_data_status.update({
+            "futures_instrument": active_instrument,
+            "futures_candle_count": len(futures),
+            "latest_futures_candle": futures[-1].end_time.isoformat() if futures else None,
+        })
+        if active_instrument and not futures:
+            self._market_data_status["last_error"] = "FUTURES_HISTORY_UNAVAILABLE"
+        elif futures:
+            self._market_data_status["last_error"] = None
         self._market_snapshot = (candles_5m, candles_15m, futures)
         chain = await self._get_option_chain()
         spot = candles_5m[-1].close if candles_5m else 0.0
@@ -1674,7 +1714,7 @@ class StrategyService:
 
     async def get_trigger_diagnostics(self) -> TriggerDiagnosticsResponse:
         """Gathers granular condition diagnostics across all strategies and session gates."""
-        features = await self._gather_features()
+        features = self._last_features or MarketFeatures(timestamp=utc_now(), data_reason="Awaiting first completed evaluation")
         candles_5m, candles_15m, futures_candles = self._market_snapshot
 
         diag_a = self.strategy_a.diagnose(features, candles_5m, candles_15m, overrides=self._active_overrides, futures_candles=futures_candles)
@@ -1978,16 +2018,9 @@ class StrategyService:
 
     async def get_status(self) -> dict[str, Any]:
         """Status payload consumed by the Auto-Trading UI."""
-        # Fix 3: Ensure strategy diagnostics are fresh (trigger eval if >5s stale)
-        secs_since_eval = (utc_now() - self._last_eval_time).total_seconds()
-        if secs_since_eval >= 5:
-            try:
-                await asyncio.wait_for(self.evaluate_cycle(), timeout=3.0)
-            except Exception:
-                pass  # never fail the status call due to evaluation errors
-
+        # UI polling is read-only; only evaluate_cycle owns broker I/O.
         active_trades = await self.repo.get_active_trades()
-        features = self._last_features or await self._gather_features()
+        features = self._last_features or MarketFeatures(timestamp=utc_now(), data_reason="Awaiting first completed evaluation")
 
         # Dynamically refresh active trades so UI reflects live market movement every 1.5s
         for trade in active_trades:
@@ -2023,6 +2056,7 @@ class StrategyService:
 
         return {
             "config": self.config.model_dump(mode="json"),
+            "market_data": {**self._market_data_status, "last_evaluation_time": (self._last_eval_time.isoformat() if self._last_eval_time > datetime.min.replace(tzinfo=timezone.utc) else None)},
             "features": features.model_dump(mode="json"),
             "active_trades": [t.model_dump(mode="json") for t in active_trades],
             "signals": latest_signals,
