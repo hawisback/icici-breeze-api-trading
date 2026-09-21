@@ -867,7 +867,13 @@ class SimulationEngine:
                         overrides,
                     )
                     strategy_a_event = strat_a.last_event
-                    effective_diags_a = strat_a.diagnose(features, running, macro, overrides=overrides, futures_candles=futures)
+                    effective_diags_a = strat_a.diagnose(
+                        features,
+                        running,
+                        macro,
+                        overrides=overrides,
+                        futures_candles=strategy_a_futures,
+                    )
                     if sig_a is not None:
                         snapshot = sig_a.features_snapshot
                         replay_manifest_recorder.record_entry(
