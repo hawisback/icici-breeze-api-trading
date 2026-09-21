@@ -908,3 +908,24 @@ def test_strategy_a_diagnostics_keep_passed_trend_when_confirmation_is_blocker()
     assert by_id["confirmation"].status == "PENDING"
     assert by_id["confirmation"].gap_description == "CONFIRMATION_BODY_TOO_WEAK"
     assert diag.phase_summary["strategy_a_v2"]["trend"]["passed"] is True
+
+
+def test_strategy_a_diagnostics_surface_structural_risk_rejection():
+    at = datetime(2026, 9, 21, 12, 0, tzinfo=IST)
+    strategy = TrendPullbackStrategy()
+    feature_cls = __import__("services.strategy.futures_signal", fromlist=["FuturesFeatureSnapshot"]).FuturesFeatureSnapshot
+    direction_cls = __import__("services.strategy.strategies.trend_pullback", fromlist=["StrategyDirection"]).StrategyDirection
+    # Trend, confirmation, and confluence pass, but the structural stop is
+    # deliberately far enough away to exceed the configured 1.50 ATR maximum.
+    feature = feature_cls(
+        contract_id="INST-NIFTY-FUT-2026-09-29",
+        candle_timestamp=at,
+        candle_start=at - timedelta(minutes=15),
+        open=108.0, high=112.0, low=104.0, close=111.0,
+        ema20=108.0, ema50=105.0, adx14=30.0, plus_di14=28.0, minus_di14=12.0,
+        atr14=4.0, session_vwap=108.5, support=104.0, resistance=130.0, bar_index=20,
+    )
+    diag = strategy._diagnostic(feature, direction_cls.CALL, "STRUCTURAL_R_ABOVE_MAXIMUM")
+    risk = next(item for item in diag.conditions if item.id == "risk")
+    assert risk.status == "PENDING"
+    assert risk.gap_description == "STRUCTURAL_R_ABOVE_MAXIMUM"

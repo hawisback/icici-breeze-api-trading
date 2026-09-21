@@ -163,7 +163,10 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   return (
     <div className="space-y-6">
       <p className="text-sm text-amber-300">
-        {result?.limitation || `Replay uses real completed ${historicalSource} spot/futures candles.`} Missing market history produces no signals.
+        {result?.limitation || `Replay uses real completed ${historicalSource} spot/futures candles.`}
+        {((replayData?.missing_data?.length ?? 0) > 0 || dataQualityEntries.length > 0)
+          ? " Missing market history can suppress signals."
+          : ""}
       </p>
       <div className="text-[11px] text-slate-400">
         Historical source: <span className="font-mono font-bold text-cyan-300">{historicalSource}</span>
@@ -458,10 +461,10 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                   result.win_rate_pct >= 50.0 ? "text-emerald-400" : "text-amber-400"
                 }`}
               >
-                {result.win_rate_pct}%
+                {trades.length > 0 ? `${result.win_rate_pct}%` : "N/A"}
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
-                Profit Factor: <span className="font-bold text-slate-200">{result.profit_factor}</span>
+                Profit Factor: <span className="font-bold text-slate-200">{trades.length > 0 ? result.profit_factor : "N/A"}</span>
               </div>
             </div>
 

@@ -353,10 +353,17 @@ class TrendPullbackStrategy:
         trend_ok, trend_reason = self._trend_ok(feature, direction)
         confirmation_ok, confirmation_reason = self._confirmation_ok(feature, direction)
         confluence_ok, references, level, confluence_reason = self._confluence(feature, direction)
+        active_setup = setup if setup is not None and setup.direction is direction else None
+        prospective_setup = active_setup
+        risk_reason: str | None = None
+        if prospective_setup is None and trend_ok and confirmation_ok and confluence_ok and level is not None:
+            prospective_setup, risk_reason = self._build_setup(feature, direction, references, level)
+        risk_applicable = trend_ok and confirmation_ok and confluence_ok and level is not None
+        risk_ok = prospective_setup is not None if risk_applicable else False
         range_points = max(0.0, feature.high - feature.low)
         body_ratio = abs(feature.close - feature.open) / range_points if range_points > 0 else 0.0
         range_atr = range_points / feature.atr14 if feature.atr14 > 0 else 0.0
-        target = setup.trigger_price if setup else None
+        target = prospective_setup.trigger_price if prospective_setup else None
         distance = abs(feature.close - target) if target is not None else None
         conditions = [
             TriggerCondition(
@@ -386,15 +393,31 @@ class TrendPullbackStrategy:
                 status="PASSED" if confirmation_ok else "PENDING",
                 gap_description=confirmation_reason,
             ),
+            TriggerCondition(
+                id="risk",
+                name="Structural risk",
+                current_value=(
+                    f"R={prospective_setup.initial_underlying_r:.2f} pts"
+                    if prospective_setup is not None else "NOT_ESTABLISHED"
+                ),
+                target_threshold=(
+                    f"{self.config.minimum_stop_distance_atr:.2f}-{self.config.maximum_stop_distance_atr:.2f} ATR "
+                    f"stop; room>={self.config.minimum_room_to_opposing_sr_r:.2f}R"
+                ),
+                status=("PASSED" if risk_ok else "PENDING" if risk_applicable else "N/A"),
+                gap_description=(risk_reason or "STRUCTURAL_RISK_OK" if risk_applicable else "WAITING_FOR_SETUP_PREREQUISITES"),
+            ),
         ]
-        passed = sum(c.status == "PASSED" for c in conditions)
+        applicable = [condition for condition in conditions if condition.status != "N/A"]
+        passed = sum(condition.status == "PASSED" for condition in applicable)
+        total = len(applicable)
         return StrategyTriggerDiagnostics(
             strategy=StrategyName.TREND_PULLBACK,
             strategy_label="NIFTY Futures Trend-Pullback Confluence",
             direction=TradeDirection.BULLISH if direction is StrategyDirection.CALL else TradeDirection.BEARISH,
             option_type=option,
             overall_status="READY_TO_TRIGGER" if self.snapshot.state is StrategyState.ARMED else "WAITING",
-            passed_count=passed, total_count=len(conditions), ready_pct=round(passed / len(conditions) * 100, 2),
+            passed_count=passed, total_count=total, ready_pct=round(passed / total * 100, 2) if total else 0.0,
             key_blocker=reason, target_entry_level=target, current_spot=feature.close,
             distance_pts=distance,
             phase_state=self.snapshot.state.value,
@@ -433,8 +456,10 @@ class TrendPullbackStrategy:
                         "distance_pts": distance,
                     },
                     "risk": {
-                        "structural_stop": setup.structural_stop if setup else None,
-                        "initial_r_points": setup.initial_underlying_r if setup else None,
+                        "passed": risk_ok if risk_applicable else None,
+                        "reason": risk_reason or ("STRUCTURAL_RISK_OK" if risk_ok else "WAITING_FOR_SETUP_PREREQUISITES"),
+                        "structural_stop": prospective_setup.structural_stop if prospective_setup else None,
+                        "initial_r_points": prospective_setup.initial_underlying_r if prospective_setup else None,
                     },
                 },
             },
@@ -585,7 +610,25 @@ class TrendPullbackStrategy:
         for direction in (StrategyDirection.CALL, StrategyDirection.PUT):
             trend_ok, trend_reason = self._trend_ok(feature, direction)
             conf_ok, conf_reason = self._confirmation_ok(feature, direction)
-            confluence_ok, _, _, confluence_reason = self._confluence(feature, direction)
-            reason = "READY" if trend_ok and conf_ok and confluence_ok else next((r for r, ok in ((trend_reason, trend_ok), (conf_reason, conf_ok), (confluence_reason, confluence_ok)) if not ok), "NO_VALID_SETUP")
-            result.append(self._diagnostic(feature, direction, reason, self.snapshot.setup))
+            confluence_ok, references, level, confluence_reason = self._confluence(feature, direction)
+            prospective_setup = None
+            risk_reason = None
+            if trend_ok and conf_ok and confluence_ok and level is not None:
+                prospective_setup, risk_reason = self._build_setup(feature, direction, references, level)
+            if not trend_ok:
+                reason = trend_reason
+            elif not conf_ok:
+                reason = conf_reason
+            elif not confluence_ok:
+                reason = confluence_reason
+            elif prospective_setup is None:
+                reason = risk_reason or "STRUCTURAL_RISK_REJECTED"
+            else:
+                reason = "READY"
+            setup_for_direction = (
+                self.snapshot.setup
+                if self.snapshot.setup is not None and self.snapshot.setup.direction is direction
+                else prospective_setup
+            )
+            result.append(self._diagnostic(feature, direction, reason, setup_for_direction))
         return result
