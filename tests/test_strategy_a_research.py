@@ -183,3 +183,30 @@ def test_walk_forward_folds_are_strictly_chronological_and_non_overlapping_withi
     assert second_train == dates[3:9]
     assert second_test == dates[9:12]
     assert set(second_train).isdisjoint(second_test)
+
+
+def test_research_label_rejects_trigger_after_entry_window():
+    config = StrategyTunablesConfig()
+    # 14:45 IST is 09:15 UTC. A setup formed at 14:45 can only be tested by
+    # later bars; a 15:00 trigger must not be credited as a Strategy A entry.
+    start = datetime(2026, 9, 21, 9, 15, tzinfo=UTC)
+    after_close = _bar(start, open_=100.5, high=102.0, low=100.0, close=101.5)
+    row = {
+        "direction": "CALL",
+        "trigger": 101.0,
+        "stop": 99.0,
+        "risk_points": 2.0,
+        "atr14": 2.0,
+    }
+
+    label = _trigger_label(
+        row=row,
+        future_bars=[after_close],
+        future_features={after_close.end_time: _feature(after_close)},
+        config=config,
+    )
+
+    assert after_close.end_time.hour == 9
+    assert after_close.end_time.minute == 30
+    assert label["trigger_status"] == "ENTRY_SESSION_CLOSED"
+    assert label["entry_price"] is None
