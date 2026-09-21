@@ -825,8 +825,12 @@ export async function runStrategySimulation(req: SimulationRequestData = {}): Pr
   return res.json();
 }
 
-export async function fetchSimulationAvailableDates(): Promise<string[]> {
-  const res = await fetch(`${API_BASE}/strategies/simulate/available-dates`);
+export async function fetchSimulationAvailableDates(
+  historicalSource: "BREEZE" | "KITE" = "BREEZE",
+): Promise<string[]> {
+  const res = await fetch(
+    `${API_BASE}/strategies/simulate/available-dates?historical_source=${historicalSource}`,
+  );
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     const detail = typeof err?.detail === "string" ? err.detail : "";

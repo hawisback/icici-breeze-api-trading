@@ -38,7 +38,13 @@ const formatPnl = (value: number | null | undefined): string =>
 const formatAmount = (value: number | null | undefined): string =>
   value == null ? "N/A" : `\u20b9${value.toLocaleString()}`;
 
-export const TabReplaySimulation: React.FC = () => {
+interface TabReplaySimulationProps {
+  historicalSource?: "BREEZE" | "KITE";
+}
+
+export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
+  historicalSource = "BREEZE",
+}) => {
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>("");
   const [isRunning, setIsRunning] = useState<boolean>(false);
@@ -59,12 +65,13 @@ export const TabReplaySimulation: React.FC = () => {
   const [bypassWindow, setBypassWindow] = useState<boolean>(false);
 
   useEffect(() => {
+    setResult(null);
     loadDates();
-  }, []);
+  }, [historicalSource]);
 
   const loadDates = async () => {
     try {
-      const dates = await fetchSimulationAvailableDates();
+      const dates = await fetchSimulationAvailableDates(historicalSource);
       if (dates && dates.length > 0) {
         setAvailableDates(dates);
         setSelectedDate(dates[0]);
@@ -92,6 +99,7 @@ export const TabReplaySimulation: React.FC = () => {
           max_option_premium_cap: Number(premiumCap),
         },
         bypass_window: bypassWindow,
+        historical_source: historicalSource,
       });
       setResult(res);
       setSelectedBarIndex(0);
@@ -110,6 +118,20 @@ export const TabReplaySimulation: React.FC = () => {
   const netPnl = result?.net_pnl;
   const grossPnl = result?.total_pnl;
   const hasNetPnl = netPnl !== null && netPnl !== undefined;
+  const replayDiagnostics = result?.replay_metadata?.strategy_a_replay_diagnostics as
+    | {
+        evaluations?: number;
+        blocker_counts?: Record<string, number>;
+        signal_count?: number;
+        resolved_trade_count?: number;
+        unresolved_trade_count?: number;
+        ambiguous_trade_count?: number;
+      }
+    | undefined;
+  const blockerEntries = Object.entries(replayDiagnostics?.blocker_counts || {}).slice(0, 5);
+  const replayData = result?.replay_metadata?.data_fingerprint as
+    | { missing_data?: string[]; source_diagnostics?: Record<string, any> }
+    | undefined;
 
   const jumpToNextEvent = () => {
     if (!result?.timeline) return;
@@ -130,7 +152,12 @@ export const TabReplaySimulation: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <p className="text-sm text-amber-300">{result?.limitation || "Replay uses real completed Breeze spot/futures candles. Run a session to load historical option prices when available."} Missing market history produces no signals.</p>
+      <p className="text-sm text-amber-300">
+        {result?.limitation || `Replay uses real completed ${historicalSource} spot/futures candles.`} Missing market history produces no signals.
+      </p>
+      <div className="text-[11px] text-slate-400">
+        Historical source: <span className="font-mono font-bold text-cyan-300">{historicalSource}</span>
+      </div>
       {/* 1. Simulation Control & Session Selector */}
       <div className="bg-slate-900/95 border border-slate-800 rounded-xl p-5 shadow-xl">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -335,6 +362,46 @@ export const TabReplaySimulation: React.FC = () => {
       {/* 2. Simulation Results Cockpit */}
       {result && (
         <>
+          <div className="bg-slate-900/95 border border-slate-800 rounded-xl p-4">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+              <div>
+                <span className="text-slate-400">Qualified signals:</span>{" "}
+                <span className="font-mono font-bold text-cyan-300">{replayDiagnostics?.signal_count ?? result.replay_manifests?.length ?? 0}</span>
+              </div>
+              <div>
+                <span className="text-slate-400">Resolved trades:</span>{" "}
+                <span className="font-mono font-bold text-slate-200">{replayDiagnostics?.resolved_trade_count ?? result.total_trades}</span>
+              </div>
+              <div>
+                <span className="text-slate-400">Unresolved:</span>{" "}
+                <span className="font-mono font-bold text-amber-300">{replayDiagnostics?.unresolved_trade_count ?? 0}</span>
+              </div>
+              <div>
+                <span className="text-slate-400">Strategy A evaluations:</span>{" "}
+                <span className="font-mono font-bold text-slate-200">{replayDiagnostics?.evaluations ?? 0}</span>
+              </div>
+            </div>
+            {blockerEntries.length > 0 && (
+              <div className="mt-3">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-1.5">
+                  Top Strategy A blockers
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {blockerEntries.map(([reason, count]) => (
+                    <span key={reason} className="px-2 py-1 rounded bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[10px] font-mono">
+                      {reason}: {count}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {(replayData?.missing_data?.length ?? 0) > 0 && (
+              <div className="mt-2 text-[11px] text-rose-300">
+                Missing replay data: {replayData?.missing_data?.join(", ")}
+              </div>
+            )}
+          </div>
+
           {/* Performance Summary Cards */}
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
             {/* Total Trades */}
@@ -474,9 +541,13 @@ export const TabReplaySimulation: React.FC = () => {
             {trades.length === 0 ? (
               <div className="p-8 text-center text-slate-400 text-xs">
                 <AlertCircle className="w-6 h-6 text-amber-400 mx-auto mb-2" />
-                <span>No trades were triggered during this session under the active rules & thresholds.</span>
+                <span>
+                  {(replayDiagnostics?.signal_count ?? result.replay_manifests?.length ?? 0) > 0
+                    ? "Signals were identified, but none produced a resolved trade lifecycle with the available historical bars."
+                    : "No strategy signal qualified during this session."}
+                </span>
                 <p className="text-[11px] text-slate-500 mt-1">
-                  Try lowering the required confirmation score or ADX/RVOL thresholds in the What-If panel to test different setups.
+                  Review the blocker counts above before changing thresholds; a zero-trade session can be a valid strategy outcome.
                 </p>
               </div>
             ) : (

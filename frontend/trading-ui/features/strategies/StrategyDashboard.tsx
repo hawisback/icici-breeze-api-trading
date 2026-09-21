@@ -316,7 +316,11 @@ export const StrategyDashboard: React.FC = () => {
         )}
         {activeTab === "decision_log" && <TabDecisionLog />}
         {activeTab === "history" && <TabHistory />}
-        {activeTab === "simulation" && <TabReplaySimulation />}
+        {activeTab === "simulation" && (
+          <TabReplaySimulation
+            historicalSource={status?.market_data?.provider === "kite" ? "KITE" : "BREEZE"}
+          />
+        )}
       </div>
     </div>
   );

@@ -34,6 +34,7 @@ from services.strategy.models import (
     AutoTradingMode,
     DecisionLogEntry,
     GateBlockers,
+    HistoricalReplaySource,
     MarketFeatures,
     OptionType,
     SimulationRequest,
