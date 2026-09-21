@@ -1715,3 +1715,78 @@ Known limitations: intrabar ordering, historical option quote coverage, and pape
 Human approval: pending
 
 The tracker, repository and automated test evidence together determine progress. No phase is complete merely because code was written.
+
+## 2026-09-21 — Final hardening review reconciliation
+
+Review base: `1527e187ccc77bbec1c1165cd9f7c9909547e794`.
+All phase headings remain `[?] Awaiting human review/approval`; this section
+records correctness hardening evidence and does not promote any phase to
+`[x]`.
+
+Files changed in this hardening pass:
+
+- `services/strategy/models.py`, `position_manager.py`, and `service.py` —
+  Strategy A underlying decisions are evaluated from futures even when the
+  option quote is unavailable; option P&L and premium emergency-stop checks
+  remain quote-gated. Underlying exit decisions persist their original reason,
+  futures timestamp, and price as pending state until a real executable bid is
+  available. Strategy A LIVE remains blocked.
+- `services/strategy/futures_signal.py`, `strategies/trend_pullback.py`, and
+  `replay_strategy_a.py` — completed futures data is canonicalized once per
+  timestamp using the nearest non-expired contract policy. Replay uses the
+  same stream and records one reset only when the active contract really
+  changes.
+- `services/strategy/telemetry.py` — lifecycle, selection, sizing, entry,
+  partial, exit, cost, slippage, and runtime/replay comparison fields were
+  expanded; summary metrics now use lifecycle event denominators.
+- `tests/test_strategy_a_hardening.py` and
+  `tests/STRATEGY_A_RULE_TEST_MATRIX.md` — concrete regression and boundary
+  coverage was added without changing Strategy A hypothesis parameters or
+  `services/strategy/strategies/volatility_breakout.py`.
+
+T1 semantics are explicitly decision-versus-fill: the manager records a
+whole-lot requested quantity but does not reduce the position until a valid bid
+is filled. Paper/shadow execution uses `max(0, raw_bid - configured_slippage)`
+once, persisting raw bid, executable price, slippage, quantity, and time.
+Transaction costs use the actual BUY entry, T1 SELL, and final SELL legs;
+brokerage order count, turnover, exchange/STT/GST/SEBI/stamp charges and
+slippage are quantity-aware. One-lot trades have no T1 leg.
+
+Underlying realized R is canonical and direction-symmetric:
+
+`sum(exit_quantity × exit_underlying_R) / original_quantity`, rounded to four
+decimal places. Runtime close and replay use the same helper, so partial T1
+and runner outcomes feed `r_results`, expectancy, profit factor, and drawdown.
+
+Telemetry now reconstructs evaluation, setup, armed, trigger, contract
+selection, sizing, entry, T1, partial, trailing, runner, pending exit, forced
+exit, and close lifecycles. Final close records the original exit reason,
+underlying exit price, weighted R, option P&L, partial/final quantities,
+transaction costs, and execution order count. Selection rejection and sizing
+rejection are persisted as explicit events. Summary metrics include sessions,
+event-based selection/sizing rates, rejection distribution, execution counts,
+forced/structural/trailing exits, realized-R values, P&L, slippage, and
+runtime/replay discrepancy count.
+
+New focused tests include the quote-independent structural/trailing/15:15
+pending lifecycle, T1 pending/fill/slippage/no-repeat behavior, partial cost
+ledger, weighted R CALL/PUT examples, replay weighted R, overlapping-contract
+canonicalization, one actual rollover, telemetry summary, and named Phase 8
+trend/confirmation/confluence boundaries. The pre-existing holiday fixture
+and Strategy B regression suites remain unchanged. The configurable holiday
+injection limitation remains; no repository-owned NSE calendar was fabricated.
+
+Final hardening evidence:
+
+| Command | Result |
+|---|---|
+| `python -m pytest -q tests/test_strategy_a_hardening.py tests/test_strategy_a_review_fixes.py tests/test_forward_option_execution_validation.py` | 58 passed |
+| Required focused matrix | 94 passed |
+| `python -m pytest -q tests/test_strategy_b_forward_validation.py tests/test_strategy_b_replay_lifecycle.py tests/test_volatility_breakout_fixed.py tests/test_live_gate.py` | 48 passed |
+| `python -m compileall -q services libs tests` | passed |
+| Full `python -m pytest -q tests` | 232 passed, 6 warnings (final rerun after the additional explicit Phase 8 cases) |
+
+Final hardening status: `[?] Awaiting human review/approval`. Remaining
+limitations are intrabar ordering in OHLC replay, historical option quote
+coverage, future paper/shadow observation-period evidence, and the injected
+holiday-calendar limitation. No unrestricted Strategy A LIVE path was added.
