@@ -154,8 +154,16 @@ class HistoricalService:
         breeze_interval, step_min = self._map_interval_to_breeze(interval)
 
         now = utc_now()
-        from_dt = (now - timedelta(days=days_back)).strftime("%Y-%m-%dT09:15:00.000Z")
-        to_dt = now.strftime("%Y-%m-%dT15:30:00.000Z")
+        # Breeze's historical API uses exchange (IST) wall-clock values in
+        # ISO-shaped strings. Sending UTC dates/times shifts the requested
+        # session and is especially visible on intraday charts.
+        ist_tz = timezone(timedelta(hours=5, minutes=30))
+        now_ist = now.astimezone(ist_tz)
+        from_day = (now_ist - timedelta(days=days_back)).date()
+        from_dt = datetime.combine(from_day, datetime.min.time(), tzinfo=ist_tz).replace(
+            hour=9, minute=15
+        ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        to_dt = now_ist.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
         try:
             sdk = client_mgr.get_sdk_client()
@@ -185,7 +193,6 @@ class HistoricalService:
                 logger.info("Breeze returned empty candle list for %s: %s", stock_code, raw_res)
                 return []
 
-            ist_tz = timezone(timedelta(hours=5, minutes=30))
             candles: list[Candle] = []
 
             for row in rows:
@@ -397,8 +404,12 @@ class HistoricalService:
         breeze_active = False
         if self.broker_gateway:
             active_adapter = getattr(self.broker_gateway, "active_adapter", None)
-            if active_adapter and getattr(active_adapter, "is_active", False):
-                breeze_active = True
+            breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
+            breeze_client = getattr(breeze_adapter, "client_manager", None)
+            breeze_active = bool(
+                (active_adapter and getattr(active_adapter, "is_active", False))
+                or (breeze_client and getattr(breeze_client, "is_active", False))
+            )
 
         latest_candle = await self.repo.get_latest_candle(instrument_id, interval)
 

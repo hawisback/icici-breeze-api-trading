@@ -1441,6 +1441,12 @@ class StrategyService:
         futures = []
         inst_svc = getattr(self.chain_svc, "inst_svc", None)
         if inst_svc:
+            # Existing installations can pre-date futures metadata. Repair it
+            # lazily here as well as at InstrumentService startup so Strategy A
+            # becomes usable immediately after an application upgrade.
+            ensure_futures = getattr(inst_svc, "ensure_current_nifty_futures", None)
+            if callable(ensure_futures):
+                await ensure_futures()
             instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
             active_instrument = resolve_active_futures_instrument(instruments, as_of=utc_now())
             if active_instrument:

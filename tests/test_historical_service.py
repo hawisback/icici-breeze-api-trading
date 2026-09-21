@@ -248,3 +248,25 @@ def test_live_breeze_session_is_detected_via_client_manager():
     )
     service = MarketDataService(broker_gateway=gateway)
     assert service._live_broker_active() is True
+
+
+@pytest.mark.asyncio
+async def test_get_candles_recognizes_authenticated_breeze_client_manager(tmp_path):
+    repo = HistoricalRepository(db_path=tmp_path / "historical.db")
+    await repo.initialize()
+    gateway = SimpleNamespace(
+        active_adapter=SimpleNamespace(is_active=False),
+        breeze_adapter=SimpleNamespace(client_manager=SimpleNamespace(is_active=True)),
+    )
+    service = HistoricalService(repository=repo, broker_gateway=gateway)
+    service.fetch_candles_from_breeze = AsyncMock(return_value=[
+        Candle(
+            instrument_id="INST-NIFTY-INDEX", interval="5m",
+            start_time=datetime(2026, 9, 21, 4, 0, tzinfo=timezone.utc),
+            end_time=datetime(2026, 9, 21, 4, 5, tzinfo=timezone.utc),
+            open=23400, high=23420, low=23390, close=23410, volume=100, source="BREEZE",
+        )
+    ])
+    candles = await service.get_candles("INST-NIFTY-INDEX", "5m", allow_synthetic_fallback=False)
+    assert candles and candles[-1].close == 23410
+    assert service.fetch_candles_from_breeze.await_count >= 1
