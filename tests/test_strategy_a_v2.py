@@ -143,3 +143,41 @@ def test_legacy_configuration_sentinel_propagates_without_hidden_defaults():
     assert service.simulation_engine.tunables.legacy_strategy_a_adx_threshold == 27.0
     metadata = build_configuration_snapshot(start_date="2026-09-20", end_date="2026-09-20", instrument_id="INST-NIFTY-FUT-2026-09-24", historical_source=HistoricalReplaySource.BREEZE, bypass_entry_window=False, strategy_a_enabled=True, overrides=ThresholdOverrides(), tunables=config, session=SessionTimersConfig())
     assert metadata.strategy_a["compatibility_config"]["legacy_fields"]["adx_threshold"] == 27.0
+
+
+def test_wilder_adx14_matches_known_reference_sequence():
+    closes = [100,102,101,104,103,105,107,106,108,111,109,110,113,112,115,114,117,119,118,120,123,121,124,126,125,128,127,130,132,131,134,133,136,138,137,139,142,140,143,145]
+    start = datetime(2026, 9, 1, 9, 15, tzinfo=UTC)
+    bars = []
+    for i, close in enumerate(closes):
+        high = close + (2.0 if i % 3 == 0 else 1.5)
+        low = close - (1.8 if i % 4 == 0 else 1.2)
+        bars.append(Candle(
+            instrument_id="INST-NIFTY-FUT-2026-09-29",
+            interval="15m",
+            start_time=start + timedelta(minutes=15 * i),
+            end_time=start + timedelta(minutes=15 * (i + 1)),
+            open=close - 0.5, high=high, low=low, close=close,
+            volume=100, source="BREEZE",
+        ))
+    adx, plus_di, minus_di = FuturesFeatureEngine.adx_di(bars, 14)
+    assert adx == pytest.approx(58.431208797590045, rel=1e-10)
+    assert plus_di == pytest.approx(45.978952367492575, rel=1e-10)
+    assert minus_di == pytest.approx(9.823941329006823, rel=1e-10)
+
+
+def test_wilder_adx14_remains_unavailable_until_seed_is_complete():
+    start = datetime(2026, 9, 1, 9, 15, tzinfo=UTC)
+    bars = [
+        Candle(
+            instrument_id="INST-NIFTY-FUT-2026-09-29", interval="15m",
+            start_time=start + timedelta(minutes=15*i),
+            end_time=start + timedelta(minutes=15*(i+1)),
+            open=100+i, high=102+i, low=99+i, close=101+i,
+            volume=100, source="BREEZE",
+        )
+        for i in range(20)
+    ]
+    adx, plus_di, minus_di = FuturesFeatureEngine.adx_di(bars, 14)
+    assert adx == 0.0
+    assert plus_di > minus_di

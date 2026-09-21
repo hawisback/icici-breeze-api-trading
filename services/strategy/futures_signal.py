@@ -295,6 +295,12 @@ class FuturesFeatureEngine:
 
     @classmethod
     def adx_di(cls, candles: Sequence[Candle], period: int = 14) -> tuple[float, float, float]:
+        """Return canonical Wilder ADX, +DI and -DI for completed candles.
+
+        ADX is seeded from the first full period of DX observations and then
+        Wilder-smoothed. Until that seed exists, ADX is reported as 0.0 while
+        the latest DI values remain available.
+        """
         if len(candles) < 2:
             return 0.0, 0.0, 0.0
         tr: list[float] = []
@@ -303,28 +309,44 @@ class FuturesFeatureEngine:
         for previous, current in zip(candles, candles[1:]):
             up = current.high - previous.high
             down = previous.low - current.low
-            tr.append(max(current.high - current.low, abs(current.high - previous.close), abs(current.low - previous.close)))
+            tr.append(max(
+                current.high - current.low,
+                abs(current.high - previous.close),
+                abs(current.low - previous.close),
+            ))
             plus.append(up if up > down and up > 0 else 0.0)
             minus.append(down if down > up and down > 0 else 0.0)
         if len(tr) < period:
             return 0.0, 0.0, 0.0
+
         tr_s = sum(tr[:period])
         plus_s = sum(plus[:period])
         minus_s = sum(minus[:period])
-        dx: list[float] = []
         latest_plus = latest_minus = 0.0
-        for index in range(period - 1, len(tr)):
-            if index >= period:
-                tr_s = tr_s - tr_s / period + tr[index]
-                plus_s = plus_s - plus_s / period + plus[index]
-                minus_s = minus_s - minus_s / period + minus[index]
+        dx_values: list[float] = []
+
+        def append_dx() -> None:
+            nonlocal latest_plus, latest_minus
             latest_plus = 100.0 * plus_s / tr_s if tr_s else 0.0
             latest_minus = 100.0 * minus_s / tr_s if tr_s else 0.0
             denom = latest_plus + latest_minus
-            dx.append(100.0 * abs(latest_plus - latest_minus) / denom if denom else 0.0)
-        if not dx:
+            dx_values.append(
+                100.0 * abs(latest_plus - latest_minus) / denom if denom else 0.0
+            )
+
+        append_dx()
+        for index in range(period, len(tr)):
+            tr_s = tr_s - tr_s / period + tr[index]
+            plus_s = plus_s - plus_s / period + plus[index]
+            minus_s = minus_s - minus_s / period + minus[index]
+            append_dx()
+
+        if len(dx_values) < period:
             return 0.0, latest_plus, latest_minus
-        adx = sum(dx[-period:]) / min(period, len(dx))
+
+        adx = sum(dx_values[:period]) / period
+        for dx in dx_values[period:]:
+            adx = ((adx * (period - 1)) + dx) / period
         return adx, latest_plus, latest_minus
 
     @staticmethod
