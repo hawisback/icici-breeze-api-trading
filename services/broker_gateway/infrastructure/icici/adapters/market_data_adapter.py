@@ -94,8 +94,16 @@ class BreezeMarketDataAdapter(BrokerMarketDataPort):
             ltp=ltp,
             best_bid_price=_to_decimal("best_bid_price") or _to_decimal("bid_price"),
             best_bid_qty=_to_int("best_bid_quantity") or _to_int("bid_quantity"),
-            best_ask_price=_to_decimal("best_ask_price") or _to_decimal("ask_price"),
-            best_ask_qty=_to_int("best_ask_quantity") or _to_int("ask_quantity"),
+            best_ask_price=(
+                _to_decimal("best_offer_price")
+                or _to_decimal("best_ask_price")
+                or _to_decimal("ask_price")
+            ),
+            best_ask_qty=(
+                _to_int("best_offer_quantity")
+                or _to_int("best_ask_quantity")
+                or _to_int("ask_quantity")
+            ),
             open=_to_decimal("open"),
             high=_to_decimal("high"),
             low=_to_decimal("low"),
@@ -206,11 +214,23 @@ class BreezeMarketDataAdapter(BrokerMarketDataPort):
             right_raw = str(row.get("right", "")).lower()
             right = OptionRight.CALL if "call" in right_raw else OptionRight.PUT
             ltp = Decimal(str(row.get("ltp", "0")))
-            bid = Decimal(str(row["best_bid_price"])) if row.get("best_bid_price") else None
-            ask = Decimal(str(row["best_ask_price"])) if row.get("best_ask_price") else None
-            vol = int(row["volume"]) if row.get("volume") is not None else None
-            oi = int(row["open_interest"]) if row.get("open_interest") is not None else None
-            oi_change = int(row["change_in_oi"]) if row.get("change_in_oi") is not None else None
+            bid_raw = row.get("best_bid_price") or row.get("bid_price")
+            ask_raw = row.get("best_offer_price") or row.get("best_ask_price") or row.get("ask_price")
+            vol_raw = (
+                row.get("total_quantity_traded")
+                if row.get("total_quantity_traded") is not None
+                else row.get("volume")
+            )
+            oi_change_raw = (
+                row.get("chnge_oi")
+                if row.get("chnge_oi") is not None
+                else row.get("change_in_oi")
+            )
+            bid = Decimal(str(bid_raw)) if bid_raw not in (None, "") else None
+            ask = Decimal(str(ask_raw)) if ask_raw not in (None, "") else None
+            vol = int(vol_raw) if vol_raw not in (None, "") else None
+            oi = int(row["open_interest"]) if row.get("open_interest") not in (None, "") else None
+            oi_change = int(oi_change_raw) if oi_change_raw not in (None, "") else None
 
             if row.get("spot_price") and spot_price == Decimal("0"):
                 spot_price = Decimal(str(row["spot_price"]))

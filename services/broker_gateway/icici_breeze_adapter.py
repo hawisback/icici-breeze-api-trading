@@ -177,6 +177,18 @@ class IciciBreezeAdapter(BrokerAdapter):
             cursor -= timedelta(days=1)
         return values
 
+    @staticmethod
+    def _is_valid_futures_quote(row: dict[str, object]) -> bool:
+        product = str(row.get("product_type", "")).strip().lower()
+        return (
+            str(row.get("exchange_code", "")).strip().upper() == "NFO"
+            and product in {"future", "futures"}
+            and (
+                float(row.get("ltp") or 0) > 0
+                or str(row.get("ltt") or "").strip().upper() not in {"", "NA"}
+            )
+        )
+
     async def resolve_nearest_future(self, underlying: str = "NIFTY") -> Optional[dict[str, object]]:
         """Resolve the actual live near-month future by asking Breeze."""
         if not self.is_active:
@@ -218,11 +230,7 @@ class IciciBreezeAdapter(BrokerAdapter):
                 rows = raw.get("Success", []) if isinstance(raw, dict) else []
                 if not isinstance(rows, list):
                     continue
-                valid = next((row for row in rows
-                    if str(row.get("exchange_code", "")).upper() == "NFO"
-                    and str(row.get("product_type", "")).lower() == "futures"
-                    and (float(row.get("ltp") or 0) > 0 or str(row.get("ltt") or "").strip().upper() not in {"", "NA"})
-                ), None)
+                valid = next((row for row in rows if self._is_valid_futures_quote(row)), None)
                 if valid is None:
                     continue
                 resolved: dict[str, object] = {

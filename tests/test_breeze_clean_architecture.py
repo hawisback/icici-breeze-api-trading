@@ -64,6 +64,7 @@ from services.broker_gateway.domain.models.orders import (
 from services.broker_gateway.domain.models.session import SessionCredentials
 from services.broker_gateway.infrastructure.icici.adapters.account_adapter import BreezeAccountAdapter
 from services.broker_gateway.infrastructure.icici.adapters.market_data_adapter import BreezeMarketDataAdapter
+from services.broker_gateway.icici_breeze_adapter import IciciBreezeAdapter
 from services.broker_gateway.infrastructure.icici.adapters.session_adapter import BreezeSessionAdapter
 from services.broker_gateway.infrastructure.icici.adapters.trading_adapter import BreezeTradingAdapter
 from services.broker_gateway.infrastructure.icici.adapters.websocket_adapter import BreezeWebSocketAdapter
@@ -619,3 +620,76 @@ async def test_clean_architecture_service_orchestration(tmp_path: Path) -> None:
     assert orders[0].raw_status == "Executed"
     assert isinstance(orders[0].price, Decimal)
     assert orders[0].price == Decimal("175.50")
+
+
+def test_breeze_future_quote_accepts_official_singular_product_type() -> None:
+    row = {
+        "exchange_code": "NFO",
+        "product_type": "Future",
+        "stock_code": "NIFTY",
+        "expiry_date": "29-Sep-2026",
+        "ltp": 23480.25,
+        "ltt": "21-Sep-2026 15:29:59",
+    }
+    assert IciciBreezeAdapter._is_valid_futures_quote(row) is True
+    assert IciciBreezeAdapter._is_valid_futures_quote({**row, "product_type": "Futures"}) is True
+    assert IciciBreezeAdapter._is_valid_futures_quote({**row, "exchange_code": "NSE"}) is False
+
+
+@pytest.mark.asyncio
+async def test_breeze_market_adapter_maps_official_offer_volume_and_oi_change_fields() -> None:
+    sdk = MagicMock()
+    sdk.get_option_chain_quotes.side_effect = [
+        {
+            "Status": 200,
+            "Success": [{
+                "right": "Call", "strike_price": 23400.0, "ltp": 120.0,
+                "best_bid_price": 119.5, "best_offer_price": 120.5,
+                "total_quantity_traded": "12345", "open_interest": 45678.0,
+                "chnge_oi": 321.0, "spot_price": "23414.3",
+            }],
+            "Error": None,
+        },
+        {"Status": 200, "Success": [], "Error": None},
+    ]
+    client = BreezeClientManager(custom_sdk_instance=sdk)
+    client.is_active = True
+    adapter = BreezeMarketDataAdapter(client_manager=client)
+    snapshot = await adapter.get_option_chain("NIFTY", date(2026, 9, 22))
+    assert len(snapshot.contracts) == 1
+    contract = snapshot.contracts[0]
+    assert contract.bid == Decimal("119.5")
+    assert contract.ask == Decimal("120.5")
+    assert contract.volume == 12345
+    assert contract.open_interest == 45678
+    assert contract.oi_change == 321
+
+
+@pytest.mark.asyncio
+async def test_breeze_quote_maps_best_offer_as_ask() -> None:
+    sdk = MagicMock()
+    sdk.get_quotes.return_value = {
+        "Status": 200,
+        "Success": [{
+            "ltp": "100.0", "best_bid_price": "99.5",
+            "best_offer_price": "100.5", "best_offer_quantity": "65",
+            "datetime": "2026-09-21 10:00:00",
+        }],
+        "Error": None,
+    }
+    client = BreezeClientManager(custom_sdk_instance=sdk)
+    client.is_active = True
+    adapter = BreezeMarketDataAdapter(client_manager=client)
+    instrument = BrokerInstrumentRef(
+        internal_instrument_id=uuid.uuid4(),
+        exchange=Exchange.NFO,
+        stock_code="NIFTY",
+        product_type=ProductType.OPTIONS,
+        expiry=date(2026, 9, 22),
+        strike=Decimal("23400"),
+        option_right=OptionRight.CALL,
+        stock_token=None,
+    )
+    quote = await adapter.get_quote(instrument)
+    assert quote.best_ask_price == Decimal("100.5")
+    assert quote.best_ask_qty == 65
