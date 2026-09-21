@@ -281,7 +281,7 @@ class SimulationEngine:
                         WHERE instrument_id = 'INST-NIFTY-INDEX' AND interval = '5m'
                         AND {source_clause}
                         ORDER BY day DESC
-                        LIMIT 30;
+                        LIMIT 120;
                     """, params)
                     rows = await cursor.fetchall()
                     for r in rows:
@@ -714,6 +714,7 @@ class SimulationEngine:
                         "total_count": diag.total_count,
                         "ready_pct": diag.ready_pct,
                         "conditions": [item.model_dump(mode="json") for item in diag.conditions],
+                        "strategy_a_v2": (diag.phase_summary or {}).get("strategy_a_v2", {}),
                     })
             timeline.append(SimulationBarSnapshot(
                 bar_index=idx, timestamp=bar.end_time.isoformat(), ist_time=clock.strftime("%H:%M"),
@@ -803,6 +804,46 @@ class SimulationEngine:
             if item.get("key_blocker") in data_quality_reasons
         )
         ready_count = sum(item.get("key_blocker") == "READY" for item in replay_trigger_diagnostics)
+
+        gate_funnel: dict[str, dict[str, float | int]] = {}
+        for gate_id in ("trend", "confirmation", "confluence", "risk"):
+            evaluated = 0
+            passed_gate = 0
+            for item in replay_trigger_diagnostics:
+                condition = next(
+                    (condition for condition in item.get("conditions", []) if condition.get("id") == gate_id),
+                    None,
+                )
+                if condition is None:
+                    continue
+                if gate_id == "risk" and condition.get("gap_description") == "WAITING_FOR_SETUP_PREREQUISITES":
+                    continue
+                evaluated += 1
+                if condition.get("status") == "PASSED":
+                    passed_gate += 1
+            gate_funnel[gate_id] = {
+                "evaluated": evaluated,
+                "passed": passed_gate,
+                "pass_pct": round(passed_gate / evaluated * 100, 2) if evaluated else 0.0,
+            }
+
+        component_funnel: dict[str, dict[str, float | int]] = {}
+        for item in replay_trigger_diagnostics:
+            payload = item.get("strategy_a_v2") or {}
+            for section in ("trend", "confirmation", "confluence"):
+                for name, value in (payload.get(section, {}).get("components") or {}).items():
+                    key = f"{section}.{name}"
+                    row = component_funnel.setdefault(
+                        key, {"evaluated": 0, "passed": 0, "pass_pct": 0.0}
+                    )
+                    row["evaluated"] = int(row["evaluated"]) + 1
+                    if bool(value):
+                        row["passed"] = int(row["passed"]) + 1
+        for row in component_funnel.values():
+            evaluated = int(row["evaluated"])
+            passed_component = int(row["passed"])
+            row["pass_pct"] = round(passed_component / evaluated * 100, 2) if evaluated else 0.0
+
         completed_bar_checks = len({
             item["completed_futures_candle"]
             for item in replay_trigger_diagnostics
@@ -831,6 +872,8 @@ class SimulationEngine:
             "unresolved_trade_count": strategy_a_unresolved,
             "ambiguous_trade_count": strategy_a_ambiguous,
             "futures_entry_window_coverage": futures_coverage,
+            "gate_funnel": gate_funnel,
+            "component_funnel": component_funnel,
         }
         if not replay_manifest_recorder.records():
             top = ", ".join(f"{name}={count}" for name, count in blocker_counts.most_common(5))

@@ -441,3 +441,9 @@ def test_strategy_a_futures_coverage_reports_missing_entry_window_bar():
     assert coverage["expected_15m_bars"] > 0
     assert coverage["coverage_pct"] < 100
     assert any(value.startswith("2026-09-15T10:00:00") for value in coverage["missing_15m_bar_ends_ist"])
+
+
+def test_available_dates_query_exposes_more_than_legacy_30_session_cap():
+    import inspect
+    source = inspect.getsource(SimulationEngine.get_available_dates)
+    assert "LIMIT 120" in source

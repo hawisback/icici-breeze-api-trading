@@ -363,6 +363,26 @@ class TrendPullbackStrategy:
         range_points = max(0.0, feature.high - feature.low)
         body_ratio = abs(feature.close - feature.open) / range_points if range_points > 0 else 0.0
         range_atr = range_points / feature.atr14 if feature.atr14 > 0 else 0.0
+        if direction is StrategyDirection.CALL:
+            ema_order_ok = feature.ema20 > feature.ema50
+            di_ok = feature.plus_di14 > feature.minus_di14
+            candle_direction_ok = feature.close > feature.open
+            close_location_ok = range_points > 0 and (feature.high - feature.close) / range_points <= self.config.confirmation_close_location_pct
+        else:
+            ema_order_ok = feature.ema20 < feature.ema50
+            di_ok = feature.minus_di14 > feature.plus_di14
+            candle_direction_ok = feature.close < feature.open
+            close_location_ok = range_points > 0 and (feature.close - feature.low) / range_points <= self.config.confirmation_close_location_pct
+        adx_ok = feature.adx14 >= self.config.adx_threshold
+        ema_separation_ok = feature.atr14 > 0 and abs(feature.ema20 - feature.ema50) >= self.config.ema_separation_min_atr * feature.atr14
+        body_ok = range_points > 0 and body_ratio >= self.config.confirmation_min_body_ratio
+        range_ok = feature.atr14 > 0 and range_points <= self.config.confirmation_max_range_atr * feature.atr14
+        sr_present = level is not None
+        sr_zone = self.config.sr_zone_atr * feature.atr14 if feature.atr14 > 0 else 0.0
+        confluence_distance = self.config.confluence_distance_atr * feature.atr14 if feature.atr14 > 0 else 0.0
+        sr_touch_ok = bool(level is not None and feature.low - sr_zone <= level <= feature.high + sr_zone)
+        ema_near_ok = feature.atr14 > 0 and any(abs(value - feature.ema20) <= confluence_distance for value in (feature.low, feature.high, feature.close))
+        vwap_near_ok = feature.atr14 > 0 and any(abs(value - feature.session_vwap) <= confluence_distance for value in (feature.low, feature.high, feature.close))
         target = prospective_setup.trigger_price if prospective_setup else None
         distance = abs(feature.close - target) if target is not None else None
         conditions = [
@@ -443,16 +463,34 @@ class TrendPullbackStrategy:
                         "passed": trend_ok, "reason": trend_reason,
                         "ema20": feature.ema20, "ema50": feature.ema50,
                         "adx": feature.adx14, "plus_di": feature.plus_di14, "minus_di": feature.minus_di14,
+                        "components": {
+                            "ema_order": ema_order_ok,
+                            "di_direction": di_ok,
+                            "adx_threshold": adx_ok,
+                            "ema_separation": ema_separation_ok,
+                        },
                     },
                     "confluence": {
                         "passed": confluence_ok, "reason": confluence_reason,
                         "references": references, "level": level,
                         "support": feature.support, "resistance": feature.resistance,
                         "vwap": feature.session_vwap,
+                        "components": {
+                            "sr_present": sr_present,
+                            "sr_touch": sr_touch_ok,
+                            "ema_near": ema_near_ok,
+                            "vwap_near": vwap_near_ok,
+                        },
                     },
                     "confirmation": {
                         "passed": confirmation_ok, "reason": confirmation_reason,
                         "body_ratio": body_ratio, "range_atr": range_atr,
+                        "components": {
+                            "direction": candle_direction_ok,
+                            "body": body_ok,
+                            "close_location": close_location_ok,
+                            "range": range_ok,
+                        },
                     },
                     "trigger": {
                         "state": self.snapshot.state.value,
