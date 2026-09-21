@@ -1077,6 +1077,8 @@ def run_research(
     )
     ablation = build_ablation_report(candidates)
     robustness = build_robustness_report(candidates)
+    from services.historical.strategy_a_entry_timing import build_entry_timing_report
+    entry_timing = build_entry_timing_report(candidates)
 
     dates = sorted({row["date"] for row in candidates["rows"]})
     effective_train = train_sessions
@@ -1096,11 +1098,13 @@ def run_research(
         "ablation": output_dir / "strategy_a_rule_ablation.json",
         "robustness": output_dir / "strategy_a_parameter_robustness.json",
         "walk_forward": output_dir / "strategy_a_walk_forward.json",
+        "entry_timing": output_dir / "strategy_a_entry_timing.json",
     }
     _write_json(paths["candidates"], candidates)
     _write_json(paths["ablation"], ablation)
     _write_json(paths["robustness"], robustness)
     _write_json(paths["walk_forward"], walk_forward)
+    _write_json(paths["entry_timing"], entry_timing)
 
     baseline_variant = ResearchVariant("baseline", {})
     baseline_metrics = _summarize_rows(
