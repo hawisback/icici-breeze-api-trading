@@ -55,3 +55,9 @@ the original matrix:
 | Trigger validity first/second bar, gap/open fill, expiry and chase boundaries | `::test_phase8_trigger_validity_gap_fill_two_bars_expiry_and_chase_boundaries` |
 | Lifecycle telemetry and full summary metrics | `::test_strategy_a_telemetry_summary_counts_selection_sizing_execution_and_discrepancies`; `test_strategy_a_review_fixes.py::test_telemetry_comparison_is_exact_and_restart_persistence_shape_is_structured` |
 | Strategy A LIVE remains blocked | `test_strategy_a_review_fixes.py::test_live_safety_has_no_strategy_a_order_path_in_review_fixes`; `tests/test_live_gate.py` |
+| Real PositionManager option emergency stop uses service preemption semantics | `tests/test_strategy_a_hardening.py::test_real_position_manager_option_emergency_stop_closes_without_fake_underlying_exit`; `::test_option_emergency_stop_after_t1_preserves_t1_r_but_runner_r_is_unresolved` |
+| Missing emergency-stop bid remains pending without synthetic fill | `::test_option_emergency_stop_with_missing_bid_is_pending_without_synthetic_fill` |
+| Active futures candle gap is data quality, not rollover/substitution | `::test_missing_active_near_contract_is_data_gap_not_false_rollover_or_next_contract_substitution`; `::test_expired_near_contract_is_not_fallback_and_multiple_later_contracts_use_nearest_valid` |
+| Runtime metadata/replay contract parity | `::test_runtime_metadata_and_replay_contract_resolution_are_identical` |
+| Pivot absent before 2 right-side confirmation bars | `::test_pivot_is_absent_until_two_right_confirmation_bars_and_confirmed_at_second_right_bar` |
+| Exit precedence is explicit | `::test_exit_precedence_pending_then_forced_then_option_stop_then_underlying_stop_then_t1` |

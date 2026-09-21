@@ -94,7 +94,7 @@ async def test_actual_ltp_is_supplied_to_position_manager_and_option_hard_stop_c
     await service._evaluate_active_trade(trade, MarketFeatures(spot_price=24000))
     service.position_manager.update_position.assert_called_once()
     assert service.position_manager.update_position.call_args.args[1] == 74
-    assert trade.option_exit_reason == "OPTION_HARD_STOP_HIT"
+    assert trade.option_exit_reason == "OPTION_EMERGENCY_STOP"
     assert trade.underlying_exit_reason == "OPTION_HARD_STOP_PREEMPTED_UNDERLYING"
     oms.create_order_intent.assert_not_awaited()
     repo.save_execution_ledger.assert_awaited()

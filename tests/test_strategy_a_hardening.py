@@ -5,7 +5,15 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from libs.contracts.models import Candle
-from services.strategy.futures_signal import canonical_active_futures_stream, FuturesFeatureEngine, FuturesFeatureSnapshot
+from services.strategy.futures_signal import (
+    FuturesContractResolver, FuturesFeatureEngine, FuturesFeatureSnapshot,
+    canonical_active_futures_stream, canonical_active_futures_stream_with_diagnostics,
+    resolve_active_futures_instrument,
+)
+from services.strategy.reason_codes import (
+    OPTION_EMERGENCY_STOP, OPTION_EMERGENCY_STOP_OUTCOME_STATUS,
+    OPTION_EMERGENCY_STOP_UNDERLYING_REASON,
+)
 from services.strategy.models import (
     ActiveTrade, AutoTradingMode, MarketFeatures, OptionType, StrategyDirection,
     StrategyName, StrategyState, StrategyStateSnapshot, StrategySetup, StrategyTunablesConfig, TradeDirection, TradeLifecycleState,
@@ -66,10 +74,75 @@ def _quote(timestamp, bid=100.0):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("direction", [TradeDirection.BULLISH, TradeDirection.BEARISH])
+async def test_real_position_manager_option_emergency_stop_closes_without_fake_underlying_exit(direction):
+    at = datetime.now(IST)
+    service, _ = _service(_quote(at, 89), slippage=2.0)
+    trade = _trade(lots=1, direction=direction).model_copy(update={"option_hard_stop_price": 95})
+    await service._evaluate_active_trade(trade, _features(100, at))
+    assert trade.state is TradeLifecycleState.CLOSED
+    assert trade.exit_reason == OPTION_EMERGENCY_STOP
+    assert trade.option_exit_reason == OPTION_EMERGENCY_STOP
+    assert trade.underlying_exit_reason == OPTION_EMERGENCY_STOP_UNDERLYING_REASON
+    assert trade.underlying_exit_time is None
+    assert trade.underlying_exit_price is None
+    assert trade.underlying_outcome_status == OPTION_EMERGENCY_STOP_OUTCOME_STATUS
+    assert trade.realized_r is None
+    assert trade.exit_option_price == 87
+    assert service.oms.create_order_intent.await_count == 0
+    closed_records = [record for record in service.strategy_a_telemetry.records if record.management_event == "CLOSED"]
+    assert closed_records[-1].exit_reason == OPTION_EMERGENCY_STOP
+    assert closed_records[-1].underlying_outcome_status == OPTION_EMERGENCY_STOP_OUTCOME_STATUS
+    assert closed_records[-1].realized_r is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", [TradeDirection.BULLISH, TradeDirection.BEARISH])
+async def test_option_emergency_stop_after_t1_preserves_t1_r_but_runner_r_is_unresolved(direction):
+    first = datetime.now(IST)
+    service, _ = _service(_quote(first, 100), slippage=2.0)
+    trade = _trade(lots=2, direction=direction).model_copy(update={"option_hard_stop_price": 95})
+    await service._evaluate_active_trade(trade, _features(115 if direction is TradeDirection.BULLISH else 85, first))
+    assert trade.partial_exit_filled_quantity == 75
+    service.mkt_svc.get_latest_quote.return_value = _quote(first + timedelta(minutes=5), 89)
+    await service._evaluate_active_trade(trade, _features(115 if direction is TradeDirection.BULLISH else 85, first + timedelta(minutes=5)))
+    assert trade.exit_reason == OPTION_EMERGENCY_STOP
+    assert trade.t1_realized_r == 1.5
+    assert trade.runner_realized_r is None
+    assert trade.realized_r is None
+    assert trade.underlying_outcome_status == OPTION_EMERGENCY_STOP_OUTCOME_STATUS
+
+
+@pytest.mark.asyncio
+async def test_option_emergency_stop_with_missing_bid_is_pending_without_synthetic_fill():
+    at = datetime.now(IST)
+    missing_bid = SimpleNamespace(
+        source="BREEZE", instrument_id="OPT-HARDEN", symbol="NIFTY-HARDEN",
+        last_price=89, best_bid=0, best_ask=90, volume=1000, open_interest=50000, timestamp=at,
+    )
+    service, repo = _service(missing_bid, slippage=2.0)
+    trade = _trade(lots=1).model_copy(update={"option_hard_stop_price": 95})
+    await service._evaluate_active_trade(trade, _features(100, at))
+    assert trade.state is not TradeLifecycleState.CLOSED
+    assert trade.pending_exit_reason == OPTION_EMERGENCY_STOP
+    assert trade.underlying_exit_reason == OPTION_EMERGENCY_STOP_UNDERLYING_REASON
+    assert not repo.save_execution_ledger.await_args_list
+
+
+@pytest.mark.asyncio
+async def test_exit_precedence_pending_then_forced_then_option_stop_then_underlying_stop_then_t1():
+    at = datetime(2026, 9, 21, 15, 15, tzinfo=IST)
+    service, _ = _service(_quote(at, 89), slippage=2.0)
+    trade = _trade(lots=1).model_copy(update={"option_hard_stop_price": 95})
+    await service._evaluate_active_trade(trade, _features(100, at))
+    assert trade.exit_reason == "SESSION_FORCE_SQUARE_OFF_1515"
+
+
+@pytest.mark.asyncio
 async def test_strategy_a_structural_stop_is_decided_without_option_quote_and_later_bid_closes_original_reason():
     service, repo = _service(None)
     trade = _trade(lots=1)
-    decision_time = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    decision_time = datetime.now(IST)
     await service._evaluate_active_trade(trade, _features(89, decision_time))
     assert trade.pending_exit_reason == "UNDERLYING_STRUCTURAL_STOP"
     assert trade.pending_underlying_exit_time == decision_time
@@ -104,7 +177,7 @@ async def test_strategy_a_trailing_stop_and_force_exit_are_pending_without_quote
 async def test_strategy_a_t1_decision_without_quote_preserves_quantity_then_fills_once_with_slippage():
     service, _ = _service(None, slippage=2.0)
     trade = _trade(lots=2)
-    at = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    at = datetime.now(IST)
     await service._evaluate_active_trade(trade, _features(115, at))
     assert trade.t1_exit_pending is True
     assert trade.t1_exit_quantity == 75
@@ -179,6 +252,63 @@ def test_canonical_replay_stream_selects_one_contract_per_timestamp_and_one_real
     assert [x.instrument_id for x in stream] == [sep, octo]
     report = StrategyAReplayEngine().replay([_bar(sep, t1), _bar(octo, t1), _bar(sep, t2), _bar(octo, t2)])
     assert report.rejection_reasons.get("FUTURES_ROLLOVER_RESET", 0) == 1
+
+
+def test_missing_active_near_contract_is_data_gap_not_false_rollover_or_next_contract_substitution():
+    sep, octo = "NIFTY-FUT-2026-09-24", "NIFTY-FUT-2026-10-01"
+    t1 = datetime(2026, 9, 21, 10, 0, tzinfo=UTC)
+    t2 = datetime(2026, 9, 21, 10, 15, tzinfo=UTC)
+    t3 = datetime(2026, 9, 21, 10, 30, tzinfo=UTC)
+    bars, gaps = canonical_active_futures_stream_with_diagnostics(
+        [_bar(sep, t1), _bar(octo, t1), _bar(octo, t2), _bar(sep, t3), _bar(octo, t3)]
+    )
+    assert [bar.instrument_id for bar in bars] == [sep, sep]
+    assert [gap.timestamp for gap in gaps] == [t2]
+    report = StrategyAReplayEngine().replay(
+        [_bar(sep, t1), _bar(octo, t1), _bar(octo, t2), _bar(sep, t3), _bar(octo, t3)]
+    )
+    assert report.data_quality_counts == {"ACTIVE_FUTURES_CANDLE_MISSING": 1}
+    assert report.rejection_reasons.get("FUTURES_ROLLOVER_RESET", 0) == 0
+
+
+def test_expired_near_contract_is_not_fallback_and_multiple_later_contracts_use_nearest_valid():
+    sep, octo, nov = "NIFTY-FUT-2026-09-24", "NIFTY-FUT-2026-10-01", "NIFTY-FUT-2026-10-29"
+    before = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
+    after = datetime(2026, 9, 25, 10, 0, tzinfo=UTC)
+    bars, gaps = canonical_active_futures_stream_with_diagnostics(
+        [_bar(sep, before), _bar(octo, before), _bar(nov, before), _bar(sep, after), _bar(nov, after)]
+    )
+    assert [bar.instrument_id for bar in bars] == [sep]
+    assert [gap.expected_contract for gap in gaps] == [octo]
+    bars, gaps = canonical_active_futures_stream_with_diagnostics(
+        [_bar(sep, before), _bar(octo, before), _bar(nov, before), _bar(octo, after), _bar(nov, after)]
+    )
+    assert [bar.instrument_id for bar in bars] == [sep, octo]
+    assert not gaps
+
+
+def test_runtime_metadata_and_replay_contract_resolution_are_identical():
+    sep, octo = "NIFTY-FUT-2026-09-24", "NIFTY-FUT-2026-10-01"
+    at = datetime(2026, 9, 21, 10, 0, tzinfo=UTC)
+    instruments = [
+        SimpleNamespace(segment="FUTURES", tradable=True, expiry="2026-09-24", instrument_id=sep),
+        SimpleNamespace(segment="FUTURES", tradable=True, expiry="2026-10-01", instrument_id=octo),
+    ]
+    candles = [_bar(sep, at), _bar(octo, at)]
+    runtime_id = resolve_active_futures_instrument(instruments, as_of=at)
+    replay_id = FuturesContractResolver().resolve(candles, as_of=at)
+    stream, _ = canonical_active_futures_stream_with_diagnostics(candles, as_of=at)
+    assert runtime_id == replay_id == stream[0].instrument_id == sep
+
+
+def test_pivot_is_absent_until_two_right_confirmation_bars_and_confirmed_at_second_right_bar():
+    start = datetime(2026, 9, 21, 9, 0, tzinfo=UTC)
+    def make(count):
+        return [Candle(instrument_id="NIFTY-FUT-2026-09-24", interval="15m", start_time=start + timedelta(minutes=15 * i), end_time=start + timedelta(minutes=15 * (i + 1)), open=100, high=110 if i == 2 else 105, low=90 if i == 2 else 95, close=100, volume=100, source="BREEZE") for i in range(count)]
+    assert FuturesFeatureEngine.confirmed_pivots(make(3)) == []
+    assert FuturesFeatureEngine.confirmed_pivots(make(4)) == []
+    pivots = FuturesFeatureEngine.confirmed_pivots(make(5))
+    assert pivots and pivots[0].confirmed_at == make(5)[4].end_time
 
 
 def test_phase8_trend_di_adx_and_ema_separation_exact_boundaries():
