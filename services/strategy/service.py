@@ -5,6 +5,7 @@ Based on implementation/NIFTY_INTRADAY_OPTIONS_AUTO_TRADING_STRATEGIES.md.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime, timezone, timedelta
 import logging
 from typing import Any, Optional
@@ -26,6 +27,7 @@ from libs.config.settings import get_platform_settings
 from services.oms.service import OMSService
 from services.strategy.contract_selector import ContractSelector
 from services.strategy.features import FeatureEngine
+from services.strategy.futures_signal import resolve_active_futures_instrument
 from services.strategy.models import (
     ActiveTrade,
     AutoTradingConfig,
@@ -115,14 +117,28 @@ class StrategyService:
         self.strategy_a.reset(at)
         self.strategy_b.reset(at)
 
-    def _record_strategy_a_evaluation(self, features: MarketFeatures, signal: StrategySignal | None) -> None:
+    async def _persist_strategy_a_telemetry(self, record: StrategyAEvaluationRecord) -> None:
+        self.strategy_a_telemetry.append(record)
+        entry = DecisionLogEntry(
+            id=f"TEL-A-{generate_id()}",
+            timestamp=datetime.fromisoformat(record.timestamp),
+            category="STRATEGY_A_TELEMETRY",
+            strategy=StrategyName.TREND_PULLBACK.value,
+            message=record.management_event or "EVALUATED",
+            details=record.model_dump(mode="json"),
+        )
+        result = self.repo.save_decision_log(entry)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _record_strategy_a_evaluation(self, features: MarketFeatures, signal: StrategySignal | None) -> None:
         futures = self._market_snapshot[2]
         if not futures:
             return
         snapshot = signal.features_snapshot if signal else {}
         candle_timestamp = snapshot.get("completed_candle_timestamp") or futures[-1].end_time.isoformat()
         contract = snapshot.get("futures_contract") or futures[-1].instrument_id
-        self.strategy_a_telemetry.append(StrategyAEvaluationRecord(
+        await self._persist_strategy_a_telemetry(StrategyAEvaluationRecord(
             timestamp=features.timestamp.isoformat(),
             futures_contract=contract,
             completed_candle_timestamp=candle_timestamp,
@@ -131,11 +147,33 @@ class StrategyService:
             minus_di=snapshot.get("minus_di14", features.minus_di_15m), atr=snapshot.get("atr14", features.atr_15m),
             vwap=snapshot.get("session_vwap", features.futures_vwap), active_support=snapshot.get("support"),
             active_resistance=snapshot.get("resistance"), trend_result=snapshot.get("trend"),
+            confluence_result=snapshot.get("confluence_result"), confirmation_result=snapshot.get("confirmation_result"),
             trigger=snapshot.get("trigger"), structural_stop=signal.structural_stop if signal else None,
             underlying_r=signal.r_points if signal else None, strategy_state=self.strategy_a.snapshot.state.value,
             rejection_or_invalidation_reason=self.strategy_a.last_event.reason if self.strategy_a.last_event else None,
-            entry_fill=snapshot.get("entry_price"), management_event=self.strategy_a.last_event.event if self.strategy_a.last_event else None,
+            entry_fill=(signal.underlying_entry_price if signal else snapshot.get("entry_price")), management_event=self.strategy_a.last_event.event if self.strategy_a.last_event else "EVALUATED",
         ))
+
+    async def _record_strategy_a_lifecycle_event(self, trade: ActiveTrade, features: MarketFeatures, event: str, reason: str | None = None) -> None:
+        futures = self._market_snapshot[2]
+        record = StrategyAEvaluationRecord(
+            timestamp=features.timestamp.isoformat(),
+            futures_contract=trade.futures_contract_id or (futures[-1].instrument_id if futures else "UNAVAILABLE"),
+            completed_candle_timestamp=(futures[-1].end_time.isoformat() if futures else features.timestamp.isoformat()),
+            ema20=features.ema20_15m, ema50=features.ema50_15m, adx=features.adx_15m,
+            plus_di=features.plus_di_15m, minus_di=features.minus_di_15m, atr=features.atr_15m,
+            vwap=features.futures_vwap, option_contract=trade.contract_instrument_id,
+            expiry=trade.expiry, delta=trade.selected_option_delta, gamma=trade.selected_option_gamma,
+            delta_source=trade.selected_option_delta_source, gamma_source=trade.selected_option_gamma_source,
+            bid=trade.current_bid, ask=trade.current_ask,
+            spread=(trade.current_ask - trade.current_bid if trade.current_ask and trade.current_bid else None),
+            position_size=trade.quantity, entry_fill=trade.underlying_entry_price,
+            structural_stop=trade.underlying_structural_stop, underlying_r=trade.current_r,
+            strategy_state=trade.state.value, rejection_or_invalidation_reason=reason,
+            management_event=event, exit_reason=trade.exit_reason, realized_r=trade.realized_r,
+            option_pnl=trade.net_pnl,
+        )
+        await self._persist_strategy_a_telemetry(record)
 
     def get_strategy_a_telemetry_summary(self) -> dict[str, Any]:
         return self.strategy_a_telemetry.summary()
@@ -148,6 +186,20 @@ class StrategyService:
         await self.repo.initialize()
         self.config = await self.repo.get_auto_config()
         self._sync_subcomponents()
+        # Telemetry is an audit stream, not process-local state.  Restore the
+        # persisted Strategy A records before the scheduler can emit a new
+        # evaluation, so summaries survive a service restart.
+        try:
+            persisted_logs = await self.repo.list_decision_logs(limit=10000)
+            for log in reversed(persisted_logs):
+                if log.category != "STRATEGY_A_TELEMETRY":
+                    continue
+                try:
+                    self.strategy_a_telemetry.append(StrategyAEvaluationRecord.model_validate(log.details))
+                except Exception:
+                    logger.warning("Ignoring malformed persisted Strategy A telemetry log %s", log.id)
+        except Exception:
+            logger.exception("Unable to restore persisted Strategy A telemetry")
         self.strategy_a.restore_state(await self.repo.get_runtime())
         self.strategy_b.restore_state(await self.repo.get_runtime("volatility_breakout"))
         self._active_trades_cache = await self.repo.get_active_trades()
@@ -539,8 +591,16 @@ class StrategyService:
             await self._save_runtime()
             return {"status": "AUTO_TRADE_DISABLED"}
 
-        # 6. Check Session Entry Window (09:30 - 14:45 IST) or override
-        if not (self.position_manager.is_within_entry_window() or self._active_overrides.bypass_entry_window):
+        # 6. Apply strategy-specific entry windows.  Strategy A must not be
+        # silently gated by the shared legacy 09:20 schedule.
+        strategy_a_window = self.position_manager.is_within_strategy_a_entry_window(now)
+        strategy_b_window = self.position_manager.is_within_entry_window()
+        enabled_window = (
+            strategy_a_window if self.config.tunables.trend_pullback_enabled and not self.config.tunables.volatility_breakout_enabled
+            else strategy_b_window if self.config.tunables.volatility_breakout_enabled and not self.config.tunables.trend_pullback_enabled
+            else strategy_a_window or strategy_b_window
+        )
+        if not (enabled_window or self._active_overrides.bypass_entry_window):
             self._reset_setups(now)
             await self._save_runtime()
             return {"status": "OUTSIDE_ENTRY_WINDOW"}
@@ -592,7 +652,7 @@ class StrategyService:
 
         if self.config.tunables.trend_pullback_enabled:
             signal = self.strategy_a.evaluate(features, candles_5m, candles_15m, futures_candles=futures_candles, overrides=self._active_overrides)
-            self._record_strategy_a_evaluation(features, signal)
+            await self._record_strategy_a_evaluation(features, signal)
             await self._save_runtime()
 
         if not signal and self.config.tunables.volatility_breakout_enabled:
@@ -619,7 +679,7 @@ class StrategyService:
             strategy=signal.strategy.value,
             message=f"Setup Triggered: {signal.strategy.value} {signal.direction.value} ({signal.option_type.value})",
             details={
-                "spot": signal.spot_reference_price,
+                "underlying_entry_price": signal.underlying_entry_price or signal.spot_reference_price,
                 "stop": signal.structural_stop,
                 "r_points": signal.r_points,
                 "derivatives_score": signal.derivatives_score,
@@ -630,7 +690,11 @@ class StrategyService:
         execution_mode = self._execution_mode_for_signal(signal)
         chain = await self._get_option_chain()
         is_strategy_a = self._is_strategy_a(signal.strategy)
-        selector_underlying = signal.spot_reference_price if is_strategy_a else features.spot_price
+        if is_strategy_a and signal.underlying_entry_price is None:
+            await self._log_decision("RISK", signal.strategy.value, "Strategy A signal missing authoritative futures entry", signal.model_dump(mode="json"))
+            return {"status": "INVALID_STRATEGY_A_ENTRY_REFERENCE"}
+        underlying_entry = signal.underlying_entry_price if is_strategy_a else signal.spot_reference_price
+        selector_underlying = underlying_entry
         selected_contract, candidates, rejection_reason = self.contract_selector.select_contract(
             direction=signal.direction,
             spot_price=selector_underlying,
@@ -678,7 +742,7 @@ class StrategyService:
         # 11. Position Sizing
         if self._is_strategy_a(signal.strategy):
             sizing = self.risk_sizer.size(
-                underlying_entry=signal.spot_reference_price,
+                underlying_entry=underlying_entry,
                 underlying_stop=signal.structural_stop,
                 option_delta=selected_contract.delta,
                 lot_size=selected_contract.lot_size,
@@ -738,7 +802,7 @@ class StrategyService:
             lots=lots,
             entry_time=now,
             entry_option_price=entry_price,
-            entry_spot_price=signal.spot_reference_price,
+            entry_spot_price=underlying_entry,
             initial_structural_stop=signal.structural_stop,
             initial_r_points=signal.r_points,
             pullback_swing_low=signal.features_snapshot.get("pullback_low"),
@@ -747,7 +811,7 @@ class StrategyService:
             box_low=signal.features_snapshot.get("box_low"),
             atr_at_lock=signal.features_snapshot.get("atr_at_lock"),
             current_option_price=selected_contract.ltp or selected_contract.ask_price,
-            current_spot_price=(signal.spot_reference_price if self._is_strategy_a(signal.strategy) else features.spot_price),
+            current_spot_price=(underlying_entry if self._is_strategy_a(signal.strategy) else features.spot_price),
             current_trailing_stop=signal.structural_stop,
             option_hard_stop_price=hard_stop_price,
             current_r=0.0,
@@ -777,9 +841,12 @@ class StrategyService:
             cost_assumption_version=self.config.risk.paper_cost_assumption_version,
             cost_assumptions=self._cost_metadata(),
             futures_contract_id=signal.features_snapshot.get("futures_contract"),
-            underlying_entry_price=signal.spot_reference_price,
+            underlying_entry_price=underlying_entry,
+            underlying_current_price=underlying_entry,
             underlying_structural_stop=signal.structural_stop,
             underlying_r=signal.r_points,
+            initial_quantity=quantity,
+            remaining_quantity=quantity,
             selected_option_delta=selected_contract.delta,
             selected_option_delta_source=selected_contract.greek_source,
             selected_option_gamma=selected_contract.gamma,
@@ -916,6 +983,20 @@ class StrategyService:
             trade, current_option_price, features, as_of=features.timestamp
         )
 
+        if exit_reason == "T1_PARTIAL_EXIT":
+            if trade.mode == AutoTradingMode.LIVE:
+                # Strategy A LIVE routing remains blocked.  Never turn a
+                # partial lifecycle event into an unreviewed broker order.
+                trade.option_data_status = "LIVE_TRADING_DISABLED"
+                await self.repo.save_trade(trade)
+                return
+            await self._execute_strategy_a_partial_exit(trade, features, float(quote["bid"]), quote)
+            return
+        if exit_reason == "T1_REACHED_NO_PARTIAL_ONE_LOT":
+            await self._record_strategy_a_lifecycle_event(trade, features, "T1_REACHED_NO_PARTIAL_ONE_LOT", exit_reason)
+            await self.repo.save_trade(trade)
+            return
+
         exit_reason = trade.pending_exit_reason or exit_reason
         if exit_reason:
             if trade.mode == AutoTradingMode.LIVE:
@@ -947,11 +1028,44 @@ class StrategyService:
         else:
             await self.repo.save_trade(updated_trade)
 
+    async def _execute_strategy_a_partial_exit(
+        self,
+        trade: ActiveTrade,
+        features: MarketFeatures,
+        price: float,
+        quote: dict[str, Any],
+    ) -> None:
+        quantity = trade.t1_exit_quantity
+        if quantity <= 0 or quantity % trade.lot_size != 0:
+            raise ValueError("Strategy A partial exit quantity must be a positive whole-lot quantity")
+        trade.partial_exit_filled_quantity += quantity
+        trade.partial_exit_price = round(price, 2)
+        trade.partial_exit_reason = "T1_REACHED_PARTIAL_EXIT"
+        await self._record_execution({
+            "trade_id": trade.trade_id,
+            "side": "SELL",
+            "timestamp": features.timestamp.isoformat(),
+            "raw_bid": quote.get("bid"),
+            "raw_ask": quote.get("ask"),
+            "raw_ltp": quote.get("ltp"),
+            "executable_price": price,
+            "slippage_points": self._paper_slippage(),
+            "quantity": quantity,
+            "source": quote.get("source", "UNKNOWN"),
+            "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+            "reason": "T1_REACHED_PARTIAL_EXIT",
+        })
+        await self._record_strategy_a_lifecycle_event(trade, features, "PARTIAL_EXIT", "T1_REACHED_PARTIAL_EXIT")
+        await self._log_decision("EXIT", trade.strategy.value, "Strategy A T1 partial exit", trade.model_dump(mode="json"))
+        await self.repo.save_trade(trade)
+
     async def _close_trade(self, trade, features, price, reason, quote: Optional[dict[str, Any]] = None):
         trade.state = TradeLifecycleState.CLOSED
         trade.exit_time = utc_now()
         trade.exit_option_price = price
-        trade.exit_spot_price = features.spot_price if features else trade.current_spot_price
+        exit_underlying = (features.futures_price if features and features.futures_price > 0 else trade.underlying_current_price or trade.current_spot_price)
+        trade.exit_spot_price = exit_underlying
+        trade.underlying_exit_price = exit_underlying
         trade.exit_reason = reason
         trade.option_exit_time = trade.exit_time
         trade.option_exit_reason = reason
@@ -964,14 +1078,16 @@ class StrategyService:
 
         raw_entry = float(trade.entry_raw_ask or trade.entry_option_price)
         raw_exit = float((quote or {}).get("bid") or price)
-        trade.raw_gross_option_pnl = round((raw_exit - raw_entry) * trade.quantity, 2)
-        trade.gross_pnl = round((price - trade.entry_option_price) * trade.quantity, 2)
+        partial_quantity = trade.partial_exit_filled_quantity
+        partial_price = trade.partial_exit_price or 0.0
+        trade.raw_gross_option_pnl = round((raw_exit - raw_entry) * trade.quantity + (partial_price - raw_entry) * partial_quantity, 2)
+        trade.gross_pnl = round((price - trade.entry_option_price) * trade.quantity + (partial_price - trade.entry_option_price) * partial_quantity, 2)
         entry_slip = abs(float(trade.entry_executable_price or trade.entry_option_price) - raw_entry)
         exit_slip = abs(raw_exit - float(price))
         trade.slippage_cost = round((entry_slip + exit_slip) * trade.quantity, 2)
-        turnover = (float(trade.entry_option_price) + float(price)) * trade.quantity
-        buy_turnover = float(trade.entry_option_price) * trade.quantity
-        sell_turnover = float(price) * trade.quantity
+        turnover = (float(trade.entry_option_price) + float(price)) * trade.quantity + 2 * float(trade.entry_option_price) * partial_quantity
+        buy_turnover = float(trade.entry_option_price) * (trade.quantity + partial_quantity)
+        sell_turnover = float(price) * trade.quantity + float(partial_price) * partial_quantity
         r = self.config.risk
         trade.brokerage = round(2 * r.paper_brokerage_per_order, 2)
         trade.exchange_charges = round(turnover * r.paper_exchange_charge_rate, 2)
@@ -1072,11 +1188,9 @@ class StrategyService:
         inst_svc = getattr(self.chain_svc, "inst_svc", None)
         if inst_svc:
             instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
-            today = utc_now().astimezone(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
-            eligible = sorted((i for i in instruments if i.segment == "FUTURES" and i.tradable
-                               and i.expiry and i.expiry >= today), key=lambda i: i.expiry)
-            if eligible:
-                futures = await self._get_recent_candles("5m", eligible[0].instrument_id)
+            active_instrument = resolve_active_futures_instrument(instruments, as_of=utc_now())
+            if active_instrument:
+                futures = await self._get_recent_candles("5m", active_instrument)
             elif getattr(getattr(self.chain_svc, "broker_gateway", None), "active_broker_name", None) == "kite":
                 # The local instrument seed contains spot/options only. Kite's
                 # adapter resolves this virtual ID to the nearest NIFTY future
@@ -1288,7 +1402,13 @@ class StrategyService:
         diag_b = self.strategy_b.diagnose(features, candles_5m, overrides=self._active_overrides)
 
         now = utc_now()
-        is_window = self.position_manager.is_within_entry_window()
+        strategy_a_window = self.position_manager.is_within_strategy_a_entry_window(now)
+        strategy_b_window = self.position_manager.is_within_entry_window()
+        is_window = (
+            strategy_a_window if self.config.tunables.trend_pullback_enabled and not self.config.tunables.volatility_breakout_enabled
+            else strategy_b_window if self.config.tunables.volatility_breakout_enabled and not self.config.tunables.trend_pullback_enabled
+            else strategy_a_window or strategy_b_window
+        )
         bypass_win = self._active_overrides.bypass_entry_window
         effective_window = is_window or bypass_win
 
@@ -1315,7 +1435,7 @@ class StrategyService:
         elif not self.config.auto_trade_enabled:
             primary = "Auto-Trading Execution is DISABLED"
         elif not effective_window:
-            primary = "Outside intraday entry window (09:30 - 14:45 IST). Set 'Bypass Entry Window' in Overrides to test now."
+            primary = "Outside strategy entry window (Strategy A 09:45-14:45; Strategy B legacy schedule). Set 'Bypass Entry Window' in Overrides to test now."
         elif pos_blocked:
             primary = f"Max concurrent positions reached ({active_count}/{max_pos})"
         elif in_cooldown:
@@ -1359,12 +1479,17 @@ class StrategyService:
         now = utc_now()
         features = self._last_features or await self._gather_features()
 
-        spot = features.spot_price if (features and features.spot_price > 0) else 0.0
-        if spot <= 0 and self.mkt_svc:
+        if strategy == StrategyName.TREND_PULLBACK:
+            spot = features.futures_price if (features and features.futures_price > 0) else 0.0
+            missing_reason = "Missing real futures price: Strategy A manual entry requires an authoritative futures/underlying price"
+        else:
+            spot = features.spot_price if (features and features.spot_price > 0) else 0.0
+            missing_reason = "Missing real spot price: No current or historical NIFTY spot price available to price options and calculate risk"
+        if strategy != StrategyName.TREND_PULLBACK and spot <= 0 and self.mkt_svc:
             q = self.mkt_svc.get_latest_quote("INST-NIFTY-INDEX")
             if q and q.last_price > 0:
                 spot = q.last_price
-        if spot <= 0:
+        if strategy != StrategyName.TREND_PULLBACK and spot <= 0:
             candles_5m = await self._get_recent_candles("5m")
             if candles_5m:
                 spot = candles_5m[-1].close
@@ -1372,7 +1497,7 @@ class StrategyService:
         if spot <= 0:
             return {
                 "status": "DATA_UNAVAILABLE",
-                "reason": "Missing real spot price: No current or historical NIFTY spot price available to price options and calculate risk",
+                "reason": missing_reason,
             }
 
         atr = max(10.0, features.atr_5m if (features and features.atr_5m > 0) else 15.0)
@@ -1473,6 +1598,12 @@ class StrategyService:
             entry_time=now,
             entry_option_price=entry_price,
             entry_spot_price=spot,
+            underlying_entry_price=(spot if strategy == StrategyName.TREND_PULLBACK else None),
+            underlying_current_price=(spot if strategy == StrategyName.TREND_PULLBACK else None),
+            underlying_structural_stop=(structural_stop if strategy == StrategyName.TREND_PULLBACK else None),
+            underlying_r=(r_points if strategy == StrategyName.TREND_PULLBACK else None),
+            initial_quantity=quantity,
+            remaining_quantity=quantity,
             initial_structural_stop=structural_stop,
             initial_r_points=r_points,
             current_option_price=selected_contract.ltp or selected_contract.ask_price,
@@ -1623,7 +1754,13 @@ class StrategyService:
             "trigger_diagnostics": diagnostics.model_dump(mode="json"),
             "active_overrides": self._active_overrides.model_dump(mode="json"),
             "system_time": utc_now().isoformat(),
-            "in_trading_window": self.position_manager.is_within_entry_window(),
+            "in_trading_window": (
+                self.position_manager.is_within_strategy_a_entry_window(utc_now())
+                if self.config.tunables.trend_pullback_enabled and not self.config.tunables.volatility_breakout_enabled
+                else self.position_manager.is_within_entry_window()
+                if self.config.tunables.volatility_breakout_enabled and not self.config.tunables.trend_pullback_enabled
+                else self.position_manager.is_within_strategy_a_entry_window(utc_now()) or self.position_manager.is_within_entry_window()
+            ),
         }
 
 

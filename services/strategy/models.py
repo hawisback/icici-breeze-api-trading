@@ -4,7 +4,7 @@ Based on implementation/NIFTY_INTRADAY_OPTIONS_AUTO_TRADING_STRATEGIES.md.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from math import isclose
 from typing import Any, Optional
@@ -129,6 +129,7 @@ class OptionSelectionConfig(BaseModel):
     minimum_expiry_sessions_remaining: int = Field(default=2, ge=0)
     max_quote_age_seconds: float = Field(default=30.0, gt=0.0)
     minimum_volume: int = Field(default=0, ge=0)
+    exchange_holidays: tuple[date, ...] = Field(default=(), description="NSE holidays required for exact expiry-session counting")
 
     @model_validator(mode="after")
     def validate_delta_ranges(self) -> "OptionSelectionConfig":
@@ -521,6 +522,7 @@ class StrategySignal(BaseModel):
     option_type: OptionType
     timestamp: datetime = Field(default_factory=utc_now)
     spot_reference_price: float
+    underlying_entry_price: Optional[float] = Field(default=None, description="Authoritative Strategy A futures trigger/open fill")
     structural_stop: float
     r_points: float
     derivatives_score: float
@@ -629,8 +631,17 @@ class ActiveTrade(BaseModel):
     cost_assumptions: dict[str, Any] = Field(default_factory=dict)
     futures_contract_id: Optional[str] = None
     underlying_entry_price: Optional[float] = None
+    underlying_current_price: Optional[float] = None
+    underlying_exit_price: Optional[float] = None
     underlying_structural_stop: Optional[float] = None
     underlying_r: Optional[float] = None
+    initial_quantity: Optional[int] = None
+    remaining_quantity: Optional[int] = None
+    t1_reached: bool = False
+    t1_exit_quantity: int = 0
+    partial_exit_filled_quantity: int = 0
+    partial_exit_price: Optional[float] = None
+    partial_exit_reason: Optional[str] = None
     selected_option_delta: Optional[float] = None
     selected_option_delta_source: str = "UNAVAILABLE"
     selected_option_gamma: Optional[float] = None

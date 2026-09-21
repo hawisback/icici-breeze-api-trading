@@ -12,6 +12,7 @@ from typing import Any, Optional
 from libs.contracts.models import Candle, utc_now
 from services.strategy.contract_selector import ContractSelector
 from services.strategy.features import FeatureEngine
+from services.strategy.futures_signal import resolve_active_futures_instrument
 from services.strategy.models import (
     ActiveTrade,
     AutoTradingMode,
@@ -407,16 +408,19 @@ class SimulationEngine:
         inst_svc = getattr(self.hist_svc, "instrument_service", None)
         if inst_svc:
             instruments = await inst_svc.repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
-            contracts = sorted((i for i in instruments if i.segment == "FUTURES" and i.expiry
-                                and i.expiry >= date_str), key=lambda i: i.expiry)
-            if contracts:
+            active_instrument = resolve_active_futures_instrument(
+                instruments,
+                as_of=datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=IST),
+            )
+            contracts = [i for i in instruments if getattr(i, "instrument_id", None) == active_instrument]
+            if active_instrument and contracts:
                 selected_contracts = [{
-                    "instrument_id": contracts[0].instrument_id,
+                    "instrument_id": active_instrument,
                     "expiry": contracts[0].expiry,
                 }]
                 warm_fut, day_fut = await self._fetch_session_candles(
                     date_str,
-                    contracts[0].instrument_id,
+                    active_instrument,
                     historical_source=historical_source,
                     source_diagnostics=source_diagnostics,
                     role="futures",
@@ -485,8 +489,6 @@ class SimulationEngine:
         replay_manifest_recorder = self.replay_manifest_recorder or ReplayManifestRecorder()
         replay_manifest_recorder.set_replay_metadata(replay_metadata)
         running = list(warmup)
-        start_h, start_m = map(int, self.session_config.no_new_trade_before.split(":"))
-        end_h, end_m = map(int, self.session_config.no_new_trade_after.split(":"))
         for idx, bar in enumerate(session):
             running.append(bar)
             macro = self.resample_to_15m(running, request.instrument_id)
@@ -497,7 +499,16 @@ class SimulationEngine:
             diags_b = strat_b.diagnose(features, running, overrides=overrides)
             clock = bar.end_time.astimezone(IST)
             minutes = clock.hour*60+clock.minute
-            in_window = bypass_entry_window or start_h*60+start_m <= minutes <= end_h*60+end_m
+            a_start_h, a_start_m = map(int, self.tunables.entry_session_start.split(":"))
+            a_end_h, a_end_m = map(int, self.tunables.entry_session_end.split(":"))
+            b_start_h, b_start_m = map(int, self.session_config.no_new_trade_before.split(":"))
+            b_end_h, b_end_m = map(int, self.session_config.no_new_trade_after.split(":"))
+            a_window = a_start_h * 60 + a_start_m <= minutes <= a_end_h * 60 + a_end_m
+            b_window = b_start_h * 60 + b_start_m <= minutes <= b_end_h * 60 + b_end_m
+            in_window = bypass_entry_window or (
+                (self.tunables.trend_pullback_enabled and a_window)
+                or (self.tunables.volatility_breakout_enabled and b_window)
+            )
             event, details = None, None
             effective_diags_a = diags_a
             sig_a = None
@@ -512,9 +523,9 @@ class SimulationEngine:
                         replay_manifest_recorder.record_entry(
                             signal=sig_a, trading_date=date_str,
                             trigger_source_candle_timestamp=bar.end_time,
-                            trigger_level=float(snapshot.get("trigger", sig_a.spot_reference_price)),
+                            trigger_level=float(snapshot.get("trigger", sig_a.underlying_entry_price or sig_a.spot_reference_price)),
                             simulated_entry_timestamp=bar.end_time,
-                            simulated_entry_price=float(snapshot.get("entry_price", sig_a.spot_reference_price)),
+                            simulated_entry_price=float(snapshot.get("entry_price", sig_a.underlying_entry_price or sig_a.spot_reference_price)),
                             entry_5m_candle_timestamp=bar.end_time,
                             entry_occurred_intrabar=False, entry_features=snapshot,
                             setup_id=sig_a.signal_id,
@@ -525,7 +536,8 @@ class SimulationEngine:
                             initial_risk_points=float(sig_a.r_points),
                             initial_risk_atr=(float(sig_a.r_points) / float(snapshot.get("atr14", 1.0))) if snapshot.get("atr14") else 0.0,
                             current_trailing_stop=float(sig_a.structural_stop), current_r=0.0,
-                            highest_favorable_price=float(sig_a.spot_reference_price), lowest_favorable_price=float(sig_a.spot_reference_price),
+                            highest_favorable_price=float(sig_a.underlying_entry_price or sig_a.spot_reference_price),
+                            lowest_favorable_price=float(sig_a.underlying_entry_price or sig_a.spot_reference_price),
                             peak_r=0.0, protected_breakeven_active=False, profit_lock_active=False,
                             runner_mode_active=False, current_ladder_stage="OPEN_INITIAL_RISK", reversal_score=0,
                             adverse_health_counters={}, entry_bar_timestamp=bar.end_time,
@@ -587,6 +599,7 @@ class SimulationEngine:
         lifecycle_replayer = HistoricalPositionManagerReplayer(
             risk_config=self.risk_config,
             session_config=self.session_config,
+            strategy_config=self.tunables,
             recorder=replay_manifest_recorder,
             instrument_id=request.instrument_id,
             warmup_candles=warmup,

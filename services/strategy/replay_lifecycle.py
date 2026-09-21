@@ -23,6 +23,7 @@ from services.strategy.models import (
     OptionType,
     RiskConfig,
     SessionTimersConfig,
+    StrategyTunablesConfig,
     SimulatedTradeRecord,
     StrategyName,
     TradeDirection,
@@ -97,6 +98,14 @@ def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrad
             "consecutive_inside_box_closes": record.consecutive_inside_box_closes or 0,
         }
 
+    strategy_a_entry = (
+        float(record.entry_features.get("underlying_entry_price"))
+        if strategy == StrategyName.TREND_PULLBACK
+        and record.entry_features.get("underlying_entry_price") is not None
+        else record.simulated_entry_price
+    )
+    strategy_a_stop = record.initial_structural_stop
+    strategy_a_r = record.initial_risk_points
     return ActiveTrade(
         trade_id=record.replay_signal_id,
         mode=AutoTradingMode.PAPER,
@@ -112,9 +121,9 @@ def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrad
         lots=1,
         entry_time=record.simulated_entry_timestamp,
         entry_option_price=0.0,
-        entry_spot_price=record.simulated_entry_price,
-        initial_structural_stop=record.initial_structural_stop,
-        initial_r_points=record.initial_risk_points,
+        entry_spot_price=strategy_a_entry,
+        initial_structural_stop=strategy_a_stop,
+        initial_r_points=strategy_a_r,
         pullback_swing_low=record.pullback_swing_low,
         pullback_swing_high=record.pullback_swing_high,
         **strategy_b_state,
@@ -122,7 +131,14 @@ def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrad
         lowest_close_since_entry=record.lowest_favorable_price or record.simulated_entry_price,
         last_managed_bar=record.last_managed_completed_bar_timestamp,
         current_option_price=0.0,
-        current_spot_price=record.simulated_entry_price,
+        current_spot_price=strategy_a_entry,
+        futures_contract_id=(record.entry_features.get("futures_contract_id") if strategy == StrategyName.TREND_PULLBACK else None),
+        underlying_entry_price=(strategy_a_entry if strategy == StrategyName.TREND_PULLBACK else None),
+        underlying_current_price=(strategy_a_entry if strategy == StrategyName.TREND_PULLBACK else None),
+        underlying_structural_stop=(strategy_a_stop if strategy == StrategyName.TREND_PULLBACK else None),
+        underlying_r=(strategy_a_r if strategy == StrategyName.TREND_PULLBACK else None),
+        initial_quantity=1,
+        remaining_quantity=1,
         current_trailing_stop=record.current_trailing_stop,
         option_hard_stop_price=0.0,
         current_r=record.current_r,
@@ -136,6 +152,7 @@ def _feature_at(features: MarketFeatures, *, spot: float, timestamp: datetime, c
     """Make a spot-only poll without inventing a completed candle."""
     return features.model_copy(update={
         "spot_price": spot,
+        "futures_price": spot,
         "timestamp": timestamp,
         "closed_5m_price": features.closed_5m_price if completed else None,
         "closed_5m_time": features.closed_5m_time if completed else None,
@@ -149,7 +166,7 @@ def _exit_label(reason: str | None, state: TradeLifecycleState) -> str:
         return "THESIS_INVALIDATION"
     if reason.startswith("ADVERSE_HEALTH"):
         return "ADVERSE_HEALTH_EXIT"
-    if reason == "SESSION_FORCE_SQUARE_OFF_1520":
+    if reason in ("SESSION_FORCE_SQUARE_OFF_1515", "SESSION_FORCE_SQUARE_OFF_1520"):
         return "SESSION_EXIT"
     if reason.startswith("STRUCTURAL_SPOT_STOP"):
         return {
@@ -179,6 +196,7 @@ class HistoricalPositionManagerReplayer:
         session_candles: list[Candle],
         futures_candles: list[Candle],
         one_minute_candles: list[Candle] | None = None,
+        strategy_config: StrategyTunablesConfig | None = None,
     ) -> None:
         self.risk_config = risk_config
         self.session_config = session_config
@@ -188,6 +206,7 @@ class HistoricalPositionManagerReplayer:
         self.session = session_candles
         self.futures = futures_candles
         self.one_minute = one_minute_candles or []
+        self.strategy_config = strategy_config or StrategyTunablesConfig()
         self.stats: dict[str, int] = defaultdict(int)
 
     def _minutes(self, start: datetime, end: datetime) -> list[Candle]:
@@ -282,7 +301,7 @@ class HistoricalPositionManagerReplayer:
         if resolution.event == "ENTRY_THEN_STOP":
             exit_price = resolution.exit_price or trade.current_trailing_stop
             event_time = resolution.event_time or entry_bar.end_time
-            trade, reason = PositionManager(self.risk_config, self.session_config).update_position(
+            trade, reason = PositionManager(self.risk_config, self.session_config, strategy_config=self.strategy_config).update_position(
                 trade, 0.0, _feature_at(MarketFeatures(spot_price=exit_price, timestamp=event_time), spot=exit_price, timestamp=event_time, completed=False), as_of=event_time
             )
             self._record_event(record, event="STRUCTURAL_STOP_CROSSED", timestamp=event_time, price=exit_price,
@@ -311,7 +330,7 @@ class HistoricalPositionManagerReplayer:
         if record.entry_occurred_intrabar and not self._entry_resolution(record, trade, entry_bar):
             return
 
-        pm = PositionManager(self.risk_config, self.session_config)
+        pm = PositionManager(self.risk_config, self.session_config, strategy_config=self.strategy_config)
         running = list(self.warmup)
         entry_seen = False
         for bar in self.session:
@@ -399,9 +418,21 @@ class HistoricalPositionManagerReplayer:
                 self._record_event(record, event="PROFIT_LOCK", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=bar.start_time)
             if after.runner_mode_active and not before.runner_mode_active:
                 self._record_event(record, event="RUNNER_MODE", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=bar.start_time)
+            if reason in ("T1_PARTIAL_EXIT", "T1_REACHED_NO_PARTIAL_ONE_LOT"):
+                self._record_event(
+                    record,
+                    event=reason,
+                    timestamp=bar.end_time,
+                    price=features.futures_price,
+                    trade=trade,
+                    source=bar.start_time,
+                    details={"remaining_quantity": trade.remaining_quantity, "t1_exit_quantity": trade.t1_exit_quantity},
+                )
+                self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after)
+                continue
             if reason:
                 label = _exit_label(reason, trade.state)
-                price = features.spot_price
+                price = features.futures_price if record.strategy_id == StrategyName.TREND_PULLBACK.value else features.spot_price
                 exit_event = ReplayEvent(event=label, timestamp=bar.end_time, reference_price=price, active_stop=before.active_stop,
                                          r_multiple=trade.current_r, source_candle=bar.start_time, details={"manager_reason": reason})
                 self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after, exit_event=exit_event)

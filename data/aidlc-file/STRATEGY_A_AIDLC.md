@@ -1377,11 +1377,13 @@ Add new decisions; do not rewrite past decisions without recording a superseding
 
 | ID | Limitation | First observed | Status | Resolution phase |
 |---|---|---:|---|---:|
-| L-001 | Existing Strategy A evaluator is still legacy during Phase 1 | 1 | Open | 3 |
-| L-002 | Existing signal path mixes old spot/futures responsibilities | 1 | Open | 2 |
+| L-001 | Existing Strategy A evaluator is still legacy during Phase 1 | 1 | Resolved | Review-fix runtime/replay parity |
+| L-002 | Existing signal path mixes old spot/futures responsibilities | 1 | Resolved | Review-fix futures-entry invariant |
 | L-003 | Historical option execution may lack reliable intraday quotes | Plan | Open | 7/9 |
 | L-004 | Exact intrabar event order may be unknowable from 15m OHLC | Plan | Open | 4/7 |
 | L-005 | Reliable delta/gamma may not always be broker-provided | Plan | Open | 5/6 |
+| L-006 | Exact exchange holiday calendar is not stored in the repository | Review | Accepted | Injected `OptionSelectionConfig.exchange_holidays`; production calendar remains an operational input |
+| L-007 | Paper/shadow observation period and sufficient option-outcome sample are not complete | Review | Open | 10 |
 
 Update status to `Resolved`, `Accepted`, or `Open` with evidence.
 
@@ -1528,6 +1530,88 @@ Files modified: `services/strategy/contract_selector.py`, `services/strategy/mod
 Implementation decisions: Strategy A filters nearest expiry with two remaining trading sessions, requires usable absolute delta in 0.55–0.70, ranks toward 0.60–0.65, and carries Greek provenance; premium is not a moneyness filter.  
 Tests: selector, expiry, missing-delta, freshness, liquidity, and provenance coverage in `tests/test_strategy_a_v2.py` — passed.  
 Acceptance-gate result: implementation evidence present; awaiting human review.  
+
+---
+
+# 15. Review-fix reconciliation — 2026-09-21
+
+Review base: `861306bfc48c5e652d72e42a517facd5e00da251`.
+
+All phase headings remain `[?] Awaiting human review/approval`; automated
+evidence does not grant human approval. Relevant acceptance items are
+reconciled below with `[x]` for implemented and tested, `[S]` for an explicit
+testing limitation, and `[?]` where operational human evidence is still
+required.
+
+| Acceptance item | Status | Evidence / limitation |
+|---|---|---|
+| Strategy A forced exit is configurable at 15:15; Strategy B remains 15:20 | [x] | `PositionManager` boundary tests |
+| Actual futures trigger/open entry is authoritative for R, sizing, trade, telemetry, and replay | [x] | `StrategySignal.underlying_entry_price`, service/sizer/replay paths and normal/gap tests |
+| +1R protective stop is enforced and monotonic for CALL/PUT | [x] | Position-manager regression test |
+| T1 +1.5R is whole-lot deterministic; one-lot behavior is explicit | [x] | 1/2/3/4-lot parameterized test and paper partial-exit path |
+| Canonical futures resolver and rollover reset | [x] | Runtime feature path, replay path, `FUTURES_ROLLOVER_RESET` test |
+| Replay lifecycle, conservative OHLC, metrics, exit reasons, unresolved trades | [x] | `replay_lifecycle.py`, `replay_strategy_a.py`, simulation and replay tests |
+| Phase 8 deterministic acceptance matrix and genuine runtime/replay parity | [x] | Concrete mapping in `tests/STRATEGY_A_RULE_TEST_MATRIX.md` |
+| Preferred delta band 0.60–0.65 ranked before outside-band quality | [x] | Selector ranking test |
+| Explicit quote freshness and timestamp validation; Greek provenance carried | [x] | Missing/naive/future/stale quote tests; selected Greek timestamp uses same-snapshot quote provenance when no separate Greek timestamp exists |
+| Phase 9 inspected-status rejection accounting | [x] | Expiry, delta, stale, spread/liquidity and sizing bucket tests |
+| Telemetry lifecycle and restart persistence | [x] | Structured decision-log persistence and restart restoration test |
+| Strategy A service entry window 09:45–14:45; Strategy B legacy window unchanged | [x] | Service/runtime window code and boundary tests |
+| Structural stop uses confirmed pullback structure extreme | [x] | `_build_setup` test and implementation comments |
+| Holiday semantics | [S] | Calendar is injected/configured; no repository-owned exchange calendar exists |
+| Strategy B unchanged | [x] | Focused Strategy B/volatility regression suites and origin diff check |
+| Legacy reference classification and tracker reconciliation | [x] | Matrix, this section, Decision Register, Limitations, Evidence and Change Log |
+| LIVE safety | [x] | Existing gate retained; Strategy A order routing remains blocked |
+
+## Review-fix decisions
+
+| ID | Decision | Status |
+|---|---|---|
+| D-009 | `StrategySignal.underlying_entry_price` is the authoritative Strategy A futures trigger/open fill; compatibility spot fields are not risk inputs | Implemented |
+| D-010 | Strategy A uses `StrategyTunablesConfig.forced_exit_time` (default 15:15) and 09:45–14:45 entry window; Strategy B retains shared legacy timers | Implemented |
+| D-011 | Position management enforces a monotonic +1R protective stop and T1 +1.5R whole-lot partial exit with explicit one-lot degradation | Implemented |
+| D-012 | Runtime, simulation, replay and feature generation resolve one canonical nearest non-expired futures contract | Implemented |
+| D-013 | Replay uses conservative stop-first OHLC ambiguity handling and records unresolved session-end trades | Implemented |
+| D-014 | Exchange holidays are injected through configuration/chain metadata; a complete repository calendar is outside this change | Accepted limitation |
+
+## Review-fix artifact and evidence ledger
+
+| Artifact | Path | Status |
+|---|---|---|
+| Review-fix acceptance/regression suite | `tests/test_strategy_a_review_fixes.py` | Added |
+| Rule-to-test matrix | `tests/STRATEGY_A_RULE_TEST_MATRIX.md` | Reconciled with concrete test names |
+| Runtime/replay telemetry comparison | `services/strategy/telemetry.py` | Exact field comparison; persisted decision-log records |
+| Strategy A replay lifecycle report | `services/strategy/replay_strategy_a.py`, `services/strategy/replay_lifecycle.py` | Underlying lifecycle metrics and conservative exits |
+
+## Review-fix test evidence
+
+Final command results:
+
+- Review-fix acceptance suite: `.venv\Scripts\python.exe -m pytest -q tests/test_strategy_a_review_fixes.py` — `39 passed`.
+- Required focused suites: `.venv\Scripts\python.exe -m pytest -q tests/test_strategy_a_v2.py tests/test_strategy_contracts.py tests/test_forward_option_execution_validation.py tests/test_strategy_simulation.py tests/test_strategy_b_forward_validation.py tests/test_strategy_b_replay_lifecycle.py tests/test_volatility_breakout_fixed.py tests/test_live_gate.py` — `94 passed`.
+- Full suite: `.venv\Scripts\python.exe -m pytest -q tests` — `218 passed, 6 warnings`.
+- Compile check: `.venv\Scripts\python.exe -m compileall -q services libs tests` — passed.
+- Baseline smoke against `861306b`: Strategy A 15:15 was not a dedicated baseline gate, `StrategySignal` had no declared authoritative underlying-entry field, and the baseline manager had no T1 partial-exit implementation; the new regression paths therefore exercise baseline gaps.
+
+## Review-fix handoff
+
+Implementation is paper/shadow scoped. Strategy A LIVE routing remains
+blocked by the existing safety gate and no LIVE order path was enabled.
+Remaining operational work is the paper/shadow observation period, sufficient
+forward option-outcome coverage, and human approval of the ten `[?]` phases.
+
+---
+
+## 2026-09-21 — Review-fix lifecycle change
+
+- Audited the pushed review base `861306b` against all listed findings.
+- Added futures-authoritative entry/R propagation, explicit Strategy A timing,
+  protective-stop enforcement, whole-lot T1 management, canonical rollover
+  handling, replay lifecycle metrics, selector timestamp/ranking checks,
+  Phase 9 accounting, and persisted telemetry restoration.
+- Added concrete review-fix regression tests and reconciled the rule matrix.
+- Preserved Strategy B compatibility behavior and kept all phase headings at
+  `[?]` pending human review.
 Known limitation: locally calculated Greeks are accepted only when explicitly supplied and labelled; this repository does not fabricate a local model.
 
 ### Phase 6
@@ -1619,6 +1703,7 @@ OMS/risk tests, and generic replay infrastructure.
 | 2026-09-20 | all | `python -m compileall -q services libs tests` | passed |
 | 2026-09-20 | all | `.venv\Scripts\python.exe -m pytest -q tests` | 179 passed, 24 warnings |
 | 2026-09-21 | 9, all | `.venv\Scripts\python.exe -m pytest -q tests/test_strategy_a_v2.py tests/test_forward_option_execution_validation.py`; `.venv\Scripts\python.exe -m pytest -q tests` | 15 passed; 179 passed, 7 warnings |
+| 2026-09-21 | review-fix, all | `.venv\Scripts\python.exe -m pytest -q tests/test_strategy_a_review_fixes.py`; focused matrix; `.venv\Scripts\python.exe -m pytest -q tests`; `.venv\Scripts\python.exe -m compileall -q services libs tests` | 39 passed; 94 passed; 218 passed, 6 warnings; compile passed |
 
 ## Final handoff
 

@@ -116,6 +116,7 @@ def test_forward_option_validation_keeps_underlying_and_option_states_separate()
         option_type=OptionType.CALL,
         timestamp=timestamp,
         spot_reference_price=24000,
+        underlying_entry_price=24000,
         structural_stop=23990,
         r_points=10,
         derivatives_score=0,

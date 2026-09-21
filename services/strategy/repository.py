@@ -225,6 +225,9 @@ class StrategyRepository:
                     passed INTEGER NOT NULL
                 );
             """)
+            signal_columns = await (await conn.execute("PRAGMA table_info(strategy_signals)")).fetchall()
+            if "underlying_entry_price" not in {r["name"] for r in signal_columns}:
+                await conn.execute("ALTER TABLE strategy_signals ADD COLUMN underlying_entry_price REAL")
             await conn.commit()
 
     async def save_definition(self, definition_id: str, name: str, version: str, description: str) -> None:
@@ -653,8 +656,8 @@ class StrategyRepository:
                 """
                 INSERT OR REPLACE INTO strategy_signals (
                     signal_id, strategy, direction, option_type, timestamp, spot_reference_price,
-                    structural_stop, r_points, derivatives_score, features_snapshot, block_reason, passed
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    underlying_entry_price, structural_stop, r_points, derivatives_score, features_snapshot, block_reason, passed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sig.signal_id,
@@ -663,6 +666,7 @@ class StrategyRepository:
                     sig.option_type.value,
                     sig.timestamp.isoformat(),
                     sig.spot_reference_price,
+                    sig.underlying_entry_price,
                     sig.structural_stop,
                     sig.r_points,
                     sig.derivatives_score,
@@ -688,6 +692,7 @@ class StrategyRepository:
                     "option_type": r["option_type"],
                     "timestamp": r["timestamp"],
                     "spot_reference_price": r["spot_reference_price"],
+                    "underlying_entry_price": r["underlying_entry_price"] if "underlying_entry_price" in r.keys() else None,
                     "structural_stop": r["structural_stop"],
                     "r_points": r["r_points"],
                     "derivatives_score": r["derivatives_score"],

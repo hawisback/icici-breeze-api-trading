@@ -80,7 +80,8 @@ class ContractSelector:
         strikes_data = chain.get("strikes", [])
         if not strikes_data:
             return None, [], "NO_STRIKES_IN_OPTION_CHAIN"
-        holidays = {date.fromisoformat(str(x)[:10]) for x in chain.get("holidays", [])}
+        holidays = set(self.config.exchange_holidays)
+        holidays.update(date.fromisoformat(str(x)[:10]) for x in chain.get("holidays", []))
         expiry_values = sorted({str((s.get(leg_key) or {}).get("expiry") or s.get("expiry") or chain.get("expiry")) for s in strikes_data})
         eligible_expiries = [x for x in expiry_values if x != "None" and self._eligible_expiry(x, as_of=now, holidays=holidays)]
         if not eligible_expiries:
@@ -101,15 +102,23 @@ class ContractSelector:
             mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0
             spread = ask - bid if bid > 0 and ask > 0 else 0.0
             spread_pct = spread / mid * 100 if mid else float("inf")
-            quote_timestamp = _parse_timestamp(leg.get("quote_timestamp") or leg.get("timestamp") or chain.get("timestamp"))
+            raw_quote_timestamp = leg.get("quote_timestamp") or leg.get("timestamp") or chain.get("timestamp")
+            quote_timestamp = _parse_timestamp(raw_quote_timestamp)
             freshness = (now - quote_timestamp).total_seconds() if quote_timestamp else None
+            greeks = leg.get("greeks") if isinstance(leg.get("greeks"), dict) else {}
+            # Broker snapshots commonly publish Greeks and quote together. If
+            # no separate Greek timestamp exists, the quote timestamp is the
+            # explicit provenance timestamp for that same snapshot.
+            raw_greek_timestamp = leg.get("greek_timestamp") or greeks.get("timestamp") or raw_quote_timestamp
+            greek_timestamp = _parse_timestamp(raw_greek_timestamp)
             info = {
                 "strike": strike, "option_type": option_type.value, "expiry": expiry,
                 "bid": bid, "ask": ask, "mid": mid, "spread_points": spread,
                 "spread_pct": round(spread_pct, 4) if spread_pct != float("inf") else None,
                 "delta": float(delta) if delta is not None else None,
                 "gamma": float(leg["gamma"]) if leg.get("gamma") is not None else (float(leg["greeks"]["gamma"]) if isinstance(leg.get("greeks"), dict) and leg["greeks"].get("gamma") is not None else None),
-                "greek_source": source, "quote_timestamp": quote_timestamp.isoformat() if quote_timestamp else None,
+                "greek_source": source, "greek_timestamp": greek_timestamp.isoformat() if greek_timestamp else None,
+                "quote_timestamp": quote_timestamp.isoformat() if quote_timestamp else None,
                 "quote_freshness_seconds": freshness, "open_interest": int(leg.get("open_interest", 0) or 0),
                 "volume": int(leg.get("volume", 0) or 0), "lot_size": int(leg.get("lot_size", 0) or 0),
                 "instrument_id": leg.get("instrument_id"), "instrument_token": leg.get("instrument_token") or leg.get("token"),
@@ -132,19 +141,27 @@ class ContractSelector:
                 info["status"] = "REJECTED_INVALID_QUOTE"; continue
             if info["delta"] is None or not (self.config.allowed_delta_min <= abs(info["delta"]) <= self.config.allowed_delta_max):
                 info["status"] = "REJECTED_DELTA_UNAVAILABLE_OR_OUT_OF_RANGE"; continue
-            if freshness is not None and (freshness < 0 or freshness > self.config.max_quote_age_seconds):
+            if raw_quote_timestamp is None:
+                info["status"] = "REJECTED_MISSING_QUOTE_TIMESTAMP"; continue
+            if quote_timestamp is None:
+                info["status"] = "REJECTED_INVALID_QUOTE_TIMESTAMP"; continue
+            if freshness < 0:
+                info["status"] = "REJECTED_FUTURE_QUOTE_TIMESTAMP"; continue
+            if freshness > self.config.max_quote_age_seconds:
                 info["status"] = "REJECTED_STALE_QUOTE"; continue
             if spread_pct > self.config.max_bid_ask_spread_pct:
                 info["status"] = "REJECTED_WIDE_SPREAD"; continue
             if info["volume"] < self.config.minimum_volume or info["open_interest"] < self.config.min_open_interest:
                 info["status"] = "REJECTED_LIQUIDITY"; continue
             info["status"] = "ELIGIBLE"
-            info["delta_distance"] = min(abs(abs(info["delta"]) - self.config.preferred_delta_min), abs(abs(info["delta"]) - self.config.preferred_delta_max))
+            delta_abs = abs(info["delta"])
+            info["preferred_delta"] = self.config.preferred_delta_min <= delta_abs <= self.config.preferred_delta_max
+            info["delta_distance"] = 0.0 if info["preferred_delta"] else min(abs(delta_abs - self.config.preferred_delta_min), abs(delta_abs - self.config.preferred_delta_max))
             candidates.append(info)
         if not candidates:
             return None, inspected, "NO_ELIGIBLE_DELTA_AWARE_CONTRACT"
         if strategy_a:
-            candidates.sort(key=lambda x: (x["delta_distance"], x["quote_freshness_seconds"] if x["quote_freshness_seconds"] is not None else float("inf"), x["spread_pct"] or float("inf"), -x["open_interest"], -x["volume"], x["strike"], x["instrument_id"] or ""))
+            candidates.sort(key=lambda x: (0 if x["preferred_delta"] else 1, x["delta_distance"], x["quote_freshness_seconds"], x["spread_pct"] or float("inf"), -x["open_interest"], -x["volume"], x["strike"], x["instrument_id"] or ""))
         else:
             candidates.sort(key=lambda x: (-x["ask"], x["spread_pct"], -x["open_interest"], x["strike"], x["instrument_id"] or ""))
         best = candidates[0]
@@ -156,6 +173,6 @@ class ContractSelector:
             instrument_token=best["instrument_token"], premium=best["ask"], delta=best.get("delta"), gamma=best.get("gamma"),
             greek_source=best.get("greek_source", "UNAVAILABLE"), greek_timestamp=_parse_timestamp(best.get("greek_timestamp")),
             quote_timestamp=_parse_timestamp(best.get("quote_timestamp")), quote_freshness_seconds=best.get("quote_freshness_seconds"),
-            mid_price=best.get("mid"), spread_points=best.get("spread_points"), selection_metadata={"strategy_a": strategy_a, "expiry_sessions_remaining": trading_sessions_remaining(now.date(), date.fromisoformat(best["expiry"][:10]), holidays), "ranking": "delta_distance, freshness, spread, oi, volume, strike, instrument_id"},
+            mid_price=best.get("mid"), spread_points=best.get("spread_points"), selection_metadata={"strategy_a": strategy_a, "expiry_sessions_remaining": trading_sessions_remaining(now.date(), date.fromisoformat(best["expiry"][:10]), holidays), "ranking": "preferred_band, distance_to_band, freshness, spread, oi, volume, strike, instrument_id"},
         )
         return selected, inspected, None

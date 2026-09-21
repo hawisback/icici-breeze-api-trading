@@ -10,7 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from libs.contracts.models import Candle
 from services.strategy.futures_signal import completed_futures_candles
-from services.strategy.models import StrategyTunablesConfig
+from services.strategy.models import ActiveTrade, AutoTradingMode, OptionType, StrategyName, StrategySignal, StrategyTunablesConfig, TradeDirection, TradeLifecycleState
+from services.strategy.position_manager import PositionManager
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 
 
@@ -26,6 +27,7 @@ class ReplayDecision(BaseModel):
     trigger: float | None = None
     stop: float | None = None
     r_points: float | None = None
+    underlying_entry_price: float | None = None
 
 
 class StrategyAReplayReport(BaseModel):
@@ -60,6 +62,35 @@ class StrategyAReplayEngine:
     def __init__(self, config: StrategyTunablesConfig | None = None) -> None:
         self.config = config or StrategyTunablesConfig()
 
+    @staticmethod
+    def _trade(signal: StrategySignal) -> ActiveTrade:
+        entry = signal.underlying_entry_price or signal.spot_reference_price
+        return ActiveTrade(
+            trade_id=signal.signal_id, mode=AutoTradingMode.PAPER,
+            strategy=StrategyName.TREND_PULLBACK, direction=signal.direction,
+            option_type=signal.option_type, contract_symbol="UNDERLYING-REPLAY",
+            contract_instrument_id=signal.features_snapshot.get("futures_contract", "UNKNOWN"),
+            expiry="REPLAY", strike=0.0, quantity=1, lot_size=1, lots=1,
+            entry_time=signal.timestamp, entry_option_price=100.0,
+            entry_spot_price=entry, initial_structural_stop=signal.structural_stop,
+            initial_r_points=signal.r_points, current_option_price=100.0,
+            current_spot_price=entry, current_trailing_stop=signal.structural_stop,
+            option_hard_stop_price=0.0, state=TradeLifecycleState.OPEN_INITIAL_RISK,
+            futures_contract_id=signal.features_snapshot.get("futures_contract"),
+            underlying_entry_price=entry, underlying_current_price=entry,
+            underlying_structural_stop=signal.structural_stop, underlying_r=signal.r_points,
+            initial_quantity=1, remaining_quantity=1,
+        )
+
+    @staticmethod
+    def _drawdown(values: list[float]) -> float:
+        equity = peak = drawdown = 0.0
+        for value in values:
+            equity += value
+            peak = max(peak, equity)
+            drawdown = max(drawdown, peak - equity)
+        return round(drawdown, 4)
+
     def replay(self, futures_candles: Sequence[Candle]) -> StrategyAReplayReport:
         bars = completed_futures_candles(futures_candles, interval="15m")
         if not bars:
@@ -71,11 +102,19 @@ class StrategyAReplayEngine:
         setups = entries = 0
         rejections: Counter[str] = Counter()
         directions: Counter[str] = Counter()
+        r_results: list[float] = []
+        exit_reasons: Counter[str] = Counter()
+        unresolved = 0
+        active_trade: ActiveTrade | None = None
+        manager = PositionManager(strategy_config=self.config)
         last_contract: str | None = None
         for bar in bars:
             contracts.add(bar.instrument_id)
             if last_contract and bar.instrument_id != last_contract:
-                strategy.reset(bar.end_time)
+                if active_trade is not None:
+                    unresolved += 1
+                    exit_reasons["FUTURES_ROLLOVER_RESET"] += 1
+                    active_trade = None
                 rejections["FUTURES_ROLLOVER_RESET"] += 1
             last_contract = bar.instrument_id
             history.append(bar)
@@ -88,8 +127,40 @@ class StrategyAReplayEngine:
             if signal:
                 entries += 1
                 directions[signal.option_type.value] += 1
+                if active_trade is None:
+                    active_trade = self._trade(signal)
             if event and event.reason and event.event in {"REJECTED", "INVALIDATED", "EXPIRED"}:
                 rejections[event.reason] += 1
+            if active_trade is not None and active_trade.entry_time < bar.end_time:
+                stop = active_trade.current_trailing_stop
+                favorable = bar.high if active_trade.direction is TradeDirection.BULLISH else bar.low
+                stop_hit = (bar.low <= stop) if active_trade.direction is TradeDirection.BULLISH else (bar.high >= stop)
+                favorable_hit = (
+                    favorable >= active_trade.underlying_entry_price + active_trade.initial_r_points
+                    if active_trade.direction is TradeDirection.BULLISH
+                    else favorable <= active_trade.underlying_entry_price - active_trade.initial_r_points
+                )
+                # Conservative OHLC ordering: when both a protective stop and
+                # a favorable excursion are present, resolve the stop first.
+                if stop_hit:
+                    exit_price = bar.open if ((bar.open <= stop) if active_trade.direction is TradeDirection.BULLISH else (bar.open >= stop)) else stop
+                    r_value = ((exit_price - active_trade.underlying_entry_price) if active_trade.direction is TradeDirection.BULLISH else (active_trade.underlying_entry_price - exit_price)) / active_trade.initial_r_points
+                    r_results.append(round(r_value, 4))
+                    exit_reasons["UNDERLYING_TRAILING_STOP" if active_trade.peak_r >= self.config.trailing_activation_r else "UNDERLYING_STRUCTURAL_STOP"] += 1
+                    strategy.on_exit(active_trade.direction, bar.end_time)
+                    active_trade = None
+                else:
+                    if favorable_hit:
+                        manager.update_strategy_a_position(active_trade, favorable, 100.0, as_of=bar.end_time)
+                    _, reason = manager.update_strategy_a_position(active_trade, bar.close, 100.0, as_of=bar.end_time)
+                    if reason and reason.startswith("SESSION_FORCE_SQUARE_OFF"):
+                        exit_price = bar.close
+                        r_value = ((exit_price - active_trade.underlying_entry_price) if active_trade.direction is TradeDirection.BULLISH else (active_trade.underlying_entry_price - exit_price)) / active_trade.initial_r_points
+                        r_results.append(round(r_value, 4)); exit_reasons[reason] += 1
+                        strategy.on_exit(active_trade.direction, bar.end_time); active_trade = None
+                    elif reason in {"UNDERLYING_STRUCTURAL_STOP", "UNDERLYING_TRAILING_STOP"}:
+                        r_results.append(round(active_trade.current_r, 4)); exit_reasons[reason] += 1
+                        strategy.on_exit(active_trade.direction, bar.end_time); active_trade = None
             setup = strategy.snapshot.setup
             decisions.append(ReplayDecision(
                 timestamp=bar.end_time, futures_contract=bar.instrument_id,
@@ -98,19 +169,32 @@ class StrategyAReplayEngine:
                 direction=signal.option_type.value if signal else (setup.direction.value if setup else None),
                 trigger=setup.trigger_price if setup else None,
                 stop=setup.structural_stop if setup else None,
-                r_points=setup.initial_underlying_r if setup else None,
+                r_points=signal.r_points if signal else (setup.initial_underlying_r if setup else None),
+                underlying_entry_price=signal.underlying_entry_price if signal else None,
             ))
+        if active_trade is not None:
+            unresolved += 1
+            exit_reasons["SESSION_END_WITHOUT_EXIT"] += 1
+            active_trade = None
         limitation = [
             "15m OHLC cannot prove intrabar order; trigger assumptions are gap-at-open otherwise trigger-price fills.",
             "No option quote stream is used; report is underlying-signal evidence, not option profitability.",
+            "When a 15m bar touches both a favorable level and a protective stop, the stop is resolved first.",
+            "Unresolved trades are retained at session end rather than marked profitable or losing.",
         ]
         timestamps = [bar.end_time.astimezone(timezone.utc).isoformat() for bar in bars]
+        expectancy = round(sum(r_results) / len(r_results), 4) if r_results else None
+        gains = sum(r for r in r_results if r > 0)
+        losses = abs(sum(r for r in r_results if r < 0))
         return StrategyAReplayReport(
             config_fingerprint=_fingerprint(self.config),
             data_range={"start": min(timestamps) if timestamps else None, "end": max(timestamps) if timestamps else None},
             futures_contracts=sorted(contracts), setup_count=setups, entry_count=entries,
             rejection_reasons=dict(sorted(rejections.items())), direction_distribution=dict(sorted(directions.items())),
-            data_quality_limitations=limitation, decisions=decisions,
+            r_results=r_results, expectancy_r=expectancy,
+            profit_factor=round(gains / losses, 4) if losses else (None if not gains else None),
+            max_drawdown_r=self._drawdown(r_results), exit_reasons=dict(sorted(exit_reasons.items())),
+            unresolved_trades=unresolved, data_quality_limitations=limitation, decisions=decisions,
         )
 
 
@@ -127,7 +211,16 @@ def compare_replay_decisions(runtime: Iterable[dict[str, Any] | ReplayDecision],
         a, b = left.get(identity), right.get(identity)
         def values(row: Any) -> dict[str, Any] | None:
             if row is None: return None
-            return row.model_dump(mode="json") if isinstance(row, ReplayDecision) else row
+            payload = row.model_dump(mode="json") if isinstance(row, ReplayDecision) else dict(row)
+            # Pydantic serializes UTC as ``Z`` while runtime adapters often
+            # emit ``+00:00``.  Compare the event identity semantically while
+            # retaining every decision field in the parity check.
+            if isinstance(payload.get("timestamp"), str):
+                try:
+                    payload["timestamp"] = datetime.fromisoformat(payload["timestamp"].replace("Z", "+00:00")).isoformat()
+                except ValueError:
+                    pass
+            return payload
         if values(a) != values(b):
             mismatches.append({"identity": identity, "runtime": values(a), "replay": values(b)})
     return mismatches

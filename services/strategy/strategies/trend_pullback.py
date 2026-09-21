@@ -19,6 +19,7 @@ from services.strategy.futures_signal import (
     FuturesFeatureSnapshot,
     aggregate_completed_15m,
     completed_futures_candles,
+    resolve_completed_futures_contract,
 )
 from services.strategy.models import (
     OptionType,
@@ -77,12 +78,13 @@ class TrendPullbackStrategy:
             self.config = self.config.model_copy(update=updates)
         self.snapshot = StrategyStateSnapshot()
         self.last_processed_candle: datetime | None = None
+        self.active_contract_id: str | None = None
         self.last_event: StrategyEvent | None = None
         self._setup_confirmation_key: str | None = None
 
     @property
     def state(self) -> dict[str, Any]:
-        return {"snapshot": self.snapshot.model_dump(mode="json"), "last_processed_candle": self.last_processed_candle.isoformat() if self.last_processed_candle else None}
+        return {"snapshot": self.snapshot.model_dump(mode="json"), "last_processed_candle": self.last_processed_candle.isoformat() if self.last_processed_candle else None, "active_contract_id": self.active_contract_id}
 
     @property
     def adx_threshold(self) -> float:
@@ -103,10 +105,12 @@ class TrendPullbackStrategy:
             self.snapshot = StrategyStateSnapshot()
         raw = state.get("last_processed_candle")
         self.last_processed_candle = datetime.fromisoformat(raw) if raw else None
+        self.active_contract_id = state.get("active_contract_id")
 
     def reset(self, at: Optional[datetime] = None) -> None:
         self.snapshot = StrategyStateSnapshot()
         self.last_processed_candle = None
+        self.active_contract_id = None
         self.last_event = StrategyEvent(event="RESET", timestamp=at or datetime.now(timezone.utc))
         self._setup_confirmation_key = None
 
@@ -132,14 +136,16 @@ class TrendPullbackStrategy:
         return self._time_minutes(timestamp) >= hour * 60 + minute
 
     def _features_for_input(self, futures_candles: Sequence[Candle], as_of: datetime | None) -> tuple[list[Candle], FuturesFeatureSnapshot]:
-        raw = completed_futures_candles(futures_candles, as_of=as_of, interval="15m")
+        selection_time = as_of or (max(c.end_time for c in futures_candles) if futures_candles else None)
+        if selection_time is None:
+            raise ValueError("no futures timestamp available")
+        raw = resolve_completed_futures_contract(futures_candles, as_of=selection_time, interval="15m")
         if not raw:
             raw = aggregate_completed_15m(futures_candles, as_of=as_of)
+            raw = resolve_completed_futures_contract(raw, as_of=selection_time, interval="15m") if raw else []
         if not raw:
             raise ValueError("no completed futures 15m candles")
-        contract = raw[-1].instrument_id
-        same_contract = [c for c in raw if c.instrument_id == contract]
-        return same_contract, FuturesFeatureEngine.build(same_contract, as_of=as_of)
+        return raw, FuturesFeatureEngine.build(raw, as_of=as_of)
 
     def _trend_ok(self, feature: FuturesFeatureSnapshot, direction: StrategyDirection) -> tuple[bool, str]:
         if feature.atr14 <= 0:
@@ -205,11 +211,13 @@ class TrendPullbackStrategy:
     def _build_setup(self, feature: FuturesFeatureSnapshot, direction: StrategyDirection, references: list[str], level: float) -> tuple[StrategySetup | None, str | None]:
         if direction is StrategyDirection.CALL:
             trigger = feature.high + self.config.trigger_buffer_atr * feature.atr14
-            stop = feature.low - self.config.structural_stop_buffer_atr * feature.atr14
+            structural_extreme = min(feature.low, feature.support) if feature.support is not None else feature.low
+            stop = structural_extreme - self.config.structural_stop_buffer_atr * feature.atr14
             opposing = feature.resistance if feature.resistance and feature.resistance > trigger else None
         else:
             trigger = feature.low - self.config.trigger_buffer_atr * feature.atr14
-            stop = feature.high + self.config.structural_stop_buffer_atr * feature.atr14
+            structural_extreme = max(feature.high, feature.resistance) if feature.resistance is not None else feature.high
+            stop = structural_extreme + self.config.structural_stop_buffer_atr * feature.atr14
             opposing = feature.support if feature.support and feature.support < trigger else None
         risk = abs(trigger - stop)
         risk_atr = risk / feature.atr14 if feature.atr14 > 0 else 0.0
@@ -238,15 +246,20 @@ class TrendPullbackStrategy:
     def _signal(self, setup: StrategySetup, feature: FuturesFeatureSnapshot, entry_price: float) -> StrategySignal:
         direction = TradeDirection.BULLISH if setup.direction is StrategyDirection.CALL else TradeDirection.BEARISH
         option = OptionType.CALL if setup.direction is StrategyDirection.CALL else OptionType.PUT
+        initial_r = abs(entry_price - setup.structural_stop)
         return StrategySignal(
             signal_id=f"STRATEGY-A-{setup.direction.value}-{feature.contract_id}-{int(feature.candle_timestamp.timestamp())}",
             strategy=StrategyName.TREND_PULLBACK,
             direction=direction,
             option_type=option,
             timestamp=feature.candle_timestamp,
+            # Compatibility field retained for shared APIs; Strategy A uses
+            # the explicit futures trigger/open fill below everywhere risk is
+            # calculated.
             spot_reference_price=feature.close,
+            underlying_entry_price=entry_price,
             structural_stop=setup.structural_stop,
-            r_points=setup.initial_underlying_r,
+            r_points=initial_r,
             derivatives_score=0.0,
             features_snapshot={
                 "futures_contract": feature.contract_id,
@@ -256,8 +269,12 @@ class TrendPullbackStrategy:
                 "minus_di14": feature.minus_di14, "atr14": feature.atr14,
                 "session_vwap": feature.session_vwap,
                 "support": feature.support, "resistance": feature.resistance,
+                "trend": feature.trend, "confluence_result": True,
+                "confirmation_result": True,
                 "trigger": setup.trigger_price, "entry_price": entry_price,
-                "structural_stop": setup.structural_stop, "underlying_r": setup.initial_underlying_r,
+                "underlying_entry_price": entry_price, "bar_close": feature.close,
+                "structural_extreme": (min(feature.low, feature.support) if setup.direction is StrategyDirection.CALL and feature.support is not None else max(feature.high, feature.resistance) if setup.direction is StrategyDirection.PUT and feature.resistance is not None else feature.low if setup.direction is StrategyDirection.CALL else feature.high),
+                "structural_stop": setup.structural_stop, "underlying_r": initial_r,
                 "confluence_references": list(setup.confluence_references),
                 "state": StrategyState.ENTERED.value,
             },
@@ -295,6 +312,16 @@ class TrendPullbackStrategy:
         except ValueError as exc:
             self.last_event = StrategyEvent(event="REJECTED", timestamp=as_of or datetime.now(timezone.utc), reason="INCOMPLETE_FUTURES_DATA", details={"error": str(exc)})
             return None
+        if self.active_contract_id is not None and feature.contract_id != self.active_contract_id:
+            previous_contract = self.active_contract_id
+            previous_state = self.snapshot.state.value
+            self.snapshot = StrategyStateSnapshot()
+            self._setup_confirmation_key = None
+            self.last_processed_candle = feature.candle_timestamp
+            self.active_contract_id = feature.contract_id
+            self.last_event = StrategyEvent(event="ROLLOVER_RESET", timestamp=feature.candle_timestamp, reason="FUTURES_ROLLOVER_RESET", details={"previous_contract": previous_contract, "new_contract": feature.contract_id, "previous_state": previous_state})
+            return None
+        self.active_contract_id = feature.contract_id
         if self.last_processed_candle == feature.candle_timestamp:
             self.last_event = StrategyEvent(event="DUPLICATE_IGNORED", timestamp=feature.candle_timestamp, reason="DUPLICATE_COMPLETED_CANDLE")
             return None

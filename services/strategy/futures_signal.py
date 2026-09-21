@@ -124,6 +124,37 @@ class FuturesContractResolver:
         return [c for c in _ordered(candles) if c.instrument_id == instrument_id]
 
 
+def resolve_active_futures_instrument(instruments: Iterable[object], *, as_of: datetime) -> str | None:
+    """Resolve the same nearest non-expired contract policy from instrument metadata."""
+    _aware(as_of, "as_of")
+    local_day = as_of.astimezone(IST).date()
+    candidates: list[tuple[date, str]] = []
+    for instrument in instruments:
+        if getattr(instrument, "segment", None) != "FUTURES" or not getattr(instrument, "tradable", False):
+            continue
+        expiry_value = getattr(instrument, "expiry", None)
+        instrument_id = getattr(instrument, "instrument_id", None)
+        if not expiry_value or not instrument_id:
+            continue
+        try:
+            expiry = date.fromisoformat(str(expiry_value)[:10])
+        except ValueError:
+            continue
+        if expiry >= local_day:
+            candidates.append((expiry, str(instrument_id)))
+    return min(candidates, key=lambda item: (item[0], item[1]))[1] if candidates else None
+
+
+def resolve_completed_futures_contract(
+    candles: Iterable[Candle], *, as_of: datetime, interval: str = "15m"
+) -> list[Candle]:
+    """Canonical completed-bar contract selection shared by runtime and replay."""
+    completed = completed_futures_candles(candles, as_of=as_of, interval=interval)
+    if not completed:
+        return []
+    return FuturesContractResolver().select(completed, as_of=as_of)
+
+
 class ConfirmedPivot(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     kind: str
@@ -276,6 +307,8 @@ class FuturesFeatureEngine:
         bars = completed_futures_candles(candles, as_of=as_of, interval="15m")
         if not bars:
             raise ValueError("at least one completed 15m futures candle is required")
+        selection_time = as_of or bars[-1].end_time
+        bars = FuturesContractResolver().select(bars, as_of=selection_time)
         contracts = {bar.instrument_id for bar in bars}
         if len(contracts) != 1:
             raise ValueError("Strategy A feature calculation cannot splice futures contracts")

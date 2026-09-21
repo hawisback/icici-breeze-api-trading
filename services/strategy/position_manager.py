@@ -118,33 +118,70 @@ class PositionManager:
         as_of=None,
     ) -> tuple[ActiveTrade, Optional[str]]:
         """Manage Strategy A from futures structural R only."""
-        if current_underlying_price <= 0 or trade.initial_r_points <= 0:
+        entry_price = trade.underlying_entry_price or trade.entry_spot_price
+        initial_r = trade.underlying_r or trade.initial_r_points
+        if current_underlying_price <= 0 or entry_price <= 0 or initial_r <= 0:
             return trade, "INVALID_INITIAL_UNDERLYING_R"
+        trade.underlying_entry_price = entry_price
+        trade.underlying_current_price = current_underlying_price
         trade.current_spot_price = current_underlying_price
         trade.current_option_price = current_option_price
         trade.current_r = round(
-            (current_underlying_price - trade.entry_spot_price) / trade.initial_r_points
+            (current_underlying_price - entry_price) / initial_r
             if trade.direction == TradeDirection.BULLISH
-            else (trade.entry_spot_price - current_underlying_price) / trade.initial_r_points,
+            else (entry_price - current_underlying_price) / initial_r,
             4,
         )
         trade.peak_r = max(trade.peak_r, trade.current_r)
         trade.unrealized_pnl = round((current_option_price - trade.entry_option_price) * trade.quantity, 2)
-        if as_of is not None and self.is_force_exit_time(as_of):
+        if as_of is not None and self.is_strategy_a_force_exit_time(as_of):
             return trade, "SESSION_FORCE_SQUARE_OFF_1515"
         if current_option_price > 0 and current_option_price <= trade.option_hard_stop_price:
             return trade, "OPTION_EMERGENCY_STOP"
-        if trade.direction == TradeDirection.BULLISH and current_underlying_price <= trade.initial_structural_stop:
-            return trade, "UNDERLYING_STRUCTURAL_STOP"
-        if trade.direction == TradeDirection.BEARISH and current_underlying_price >= trade.initial_structural_stop:
-            return trade, "UNDERLYING_STRUCTURAL_STOP"
+
+        # The protective stop is monotonic.  Before activation it is the
+        # initial structural stop; at +1R it tightens to breakeven plus the
+        # configured buffer and is then used for the actual exit check.
+        if trade.current_trailing_stop <= 0:
+            trade.current_trailing_stop = trade.initial_structural_stop
         activation = self.strategy_config.trailing_activation_r
         if trade.peak_r >= activation:
             trade.state = TradeLifecycleState.PROTECTED_BREAKEVEN
             if trade.direction == TradeDirection.BULLISH:
-                trade.current_trailing_stop = max(trade.current_trailing_stop, trade.entry_spot_price)
+                trade.current_trailing_stop = round(max(trade.current_trailing_stop, entry_price + self.risk_config.breakeven_buffer_points), 2)
             else:
-                trade.current_trailing_stop = min(trade.current_trailing_stop, trade.entry_spot_price)
+                trade.current_trailing_stop = round(min(trade.current_trailing_stop, entry_price - self.risk_config.breakeven_buffer_points), 2)
+        activated = trade.peak_r >= activation
+        if trade.direction == TradeDirection.BULLISH and current_underlying_price <= trade.current_trailing_stop:
+            return trade, "UNDERLYING_TRAILING_STOP" if activated else "UNDERLYING_STRUCTURAL_STOP"
+        if trade.direction == TradeDirection.BEARISH and current_underlying_price >= trade.current_trailing_stop:
+            return trade, "UNDERLYING_TRAILING_STOP" if activated else "UNDERLYING_STRUCTURAL_STOP"
+
+        if trade.peak_r >= self.strategy_config.t1_r and not trade.t1_reached:
+            trade.t1_reached = True
+            trade.state = TradeLifecycleState.PROFIT_LOCKED
+            if trade.direction == TradeDirection.BULLISH:
+                trade.current_trailing_stop = round(
+                    max(trade.current_trailing_stop, entry_price + 0.50 * initial_r), 2
+                )
+            else:
+                trade.current_trailing_stop = round(
+                    min(trade.current_trailing_stop, entry_price - 0.50 * initial_r), 2
+                )
+            original_quantity = trade.initial_quantity or trade.quantity
+            original_lots = max(1, original_quantity // trade.lot_size)
+            partial_lots = original_lots // 2
+            if partial_lots < 1:
+                trade.remaining_quantity = trade.quantity
+                trade.partial_exit_reason = "T1_REACHED_NO_PARTIAL_ONE_LOT"
+                return trade, "T1_REACHED_NO_PARTIAL_ONE_LOT"
+            partial_quantity = partial_lots * trade.lot_size
+            trade.t1_exit_quantity = partial_quantity
+            trade.remaining_quantity = trade.quantity - partial_quantity
+            trade.quantity = trade.remaining_quantity
+            trade.lots = trade.remaining_quantity // trade.lot_size
+            trade.partial_exit_reason = "T1_PARTIAL_EXIT"
+            return trade, "T1_PARTIAL_EXIT"
         if trade.peak_r >= self.strategy_config.runner_target_reference_r:
             trade.state = TradeLifecycleState.RUNNER_MODE
         return trade, None
@@ -259,6 +296,19 @@ class PositionManager:
         exit_hour, exit_min = map(int, self.session_config.force_exit_time.split(":"))
         return (now_ist.hour > exit_hour) or (now_ist.hour == exit_hour and now_ist.minute >= exit_min)
 
+    def is_strategy_a_force_exit_time(self, as_of: datetime) -> bool:
+        """Evaluate Strategy A's explicit 15:15 schedule, never shared 15:20."""
+        now_ist = as_of.astimezone(IST)
+        exit_hour, exit_min = map(int, self.strategy_config.forced_exit_time.split(":"))
+        return (now_ist.hour > exit_hour) or (now_ist.hour == exit_hour and now_ist.minute >= exit_min)
+
+    def is_within_strategy_a_entry_window(self, as_of: datetime) -> bool:
+        now_ist = as_of.astimezone(IST)
+        start_h, start_m = map(int, self.strategy_config.entry_session_start.split(":"))
+        end_h, end_m = map(int, self.strategy_config.entry_session_end.split(":"))
+        current = now_ist.hour * 60 + now_ist.minute
+        return start_h * 60 + start_m <= current <= end_h * 60 + end_m
+
     def is_within_entry_window(self) -> bool:
         """Checks if current IST time allows new trade entries (09:20/09:30 - 14:45)."""
         now_ist = datetime.now(IST)
@@ -284,7 +334,7 @@ class PositionManager:
             (updated_trade, exit_reason_if_triggered)
         """
         if trade.strategy == StrategyName.TREND_PULLBACK:
-            underlying = features.futures_price if features.futures_price > 0 else features.spot_price
+            underlying = features.futures_price
             return self.update_strategy_a_position(trade, underlying, current_option_price, as_of)
 
         spot = features.spot_price
