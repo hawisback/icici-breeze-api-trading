@@ -1,5 +1,7 @@
 """Focused tests for Kite selection and normalized order translation."""
 
+from datetime import date, datetime, timezone
+
 import pytest
 from pydantic import SecretStr
 
@@ -65,3 +67,35 @@ def test_gateway_selects_kite_for_live_mode(tmp_path):
     gateway = BrokerGatewayService(settings=settings)
     assert gateway.get_adapter(TradingMode.LIVE) is gateway.kite_adapter
     assert gateway.active_broker_name == "kite"
+
+
+class FakeKiteMarket(FakeKite):
+    def instruments(self, exchange):
+        assert exchange == "NFO"
+        return [
+            {"name": "NIFTY", "instrument_type": "FUT", "expiry": date(2026, 9, 29),
+             "tradingsymbol": "NIFTY26SEPFUT", "instrument_token": 9001, "lot_size": 65, "tick_size": 0.05},
+            {"name": "NIFTY", "instrument_type": "FUT", "expiry": date(2026, 10, 27),
+             "tradingsymbol": "NIFTY26OCTFUT", "instrument_token": 9002, "lot_size": 65, "tick_size": 0.05},
+            {"name": "NIFTY", "instrument_type": "CE", "expiry": date(2026, 9, 22),
+             "tradingsymbol": "NIFTY26SEP23400CE", "instrument_token": 9101, "lot_size": 65, "tick_size": 0.05},
+        ]
+
+    def historical_data(self, instrument_token, from_date, to_date, interval, oi):
+        assert instrument_token == 9001
+        return [{"date": datetime(2026, 9, 21, 10, 0, tzinfo=timezone.utc),
+                 "open": 100, "high": 102, "low": 99, "close": 101, "volume": 10, "oi": 1000}]
+
+
+@pytest.mark.asyncio
+async def test_kite_resolves_exact_active_future_from_instrument_master():
+    adapter = ZerodhaKiteAdapter(custom_client=FakeKiteMarket())
+    adapter._access_token = "access-token"
+    contract = await adapter.resolve_nearest_future("NIFTY")
+    assert contract and contract["expiry"] == "2026-09-29"
+    assert contract["broker_token"] == "9001"
+    assert contract["lot_size"] == 65
+    assert await adapter.get_option_expiries("NIFTY") == ["2026-09-22"]
+    candles = await adapter.fetch_historical_candles("INST-NIFTY-FUT-2026-09-29", "15m", 1)
+    assert candles and candles[0].source == "KITE"
+    assert await adapter._find_instrument_token("INST-NIFTY-FUT-2026-09-28") is None

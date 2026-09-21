@@ -792,3 +792,59 @@ def test_strategy_a_after_force_exit_does_not_require_post_1515_futures_bar():
     bars, feature = strategy._features_for_input([candle], after_close)
     assert bars[-1].end_time == end
     assert feature.candle_timestamp == end
+
+
+@pytest.mark.asyncio
+async def test_strategy_diagnostics_are_cache_only():
+    service, repo = _service(None)
+    repo.list_trades = AsyncMock(return_value=[])
+    service._last_features = MarketFeatures(
+        timestamp=datetime(2026, 9, 21, 10, 0, tzinfo=IST),
+        spot_price=23400, futures_price=23420,
+    )
+    service._market_snapshot = ([], [], [])
+    service._gather_features = AsyncMock(side_effect=AssertionError("diagnostics must not perform broker I/O"))
+    await service.get_trigger_diagnostics()
+    service._gather_features.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_strategy_status_is_cache_only():
+    service, repo = _service(None)
+    repo.get_active_trades = AsyncMock(return_value=[])
+    repo.list_strategy_signals = AsyncMock(return_value=[])
+    repo.list_trades = AsyncMock(return_value=[])
+    service._last_features = MarketFeatures(
+        timestamp=datetime(2026, 9, 21, 10, 0, tzinfo=IST),
+        spot_price=23400, futures_price=23420,
+    )
+    service._gather_features = AsyncMock(side_effect=AssertionError("status must not perform broker I/O"))
+    payload = await service.get_status()
+    assert payload["features"]["futures_price"] == 23420
+    service._gather_features.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_strategy_a_persists_broker_resolved_future_identity():
+    service, _ = _service(None)
+    adapter = SimpleNamespace(
+        is_active=True,
+        resolve_nearest_future=AsyncMock(return_value={
+            "underlying": "NIFTY", "expiry": "2026-09-29",
+            "stock_code": "NIFTY26SEPFUT", "broker": "ZERODHA_KITE",
+            "exchange": "NFO", "lot_size": 65, "tick_size": 0.05, "broker_token": "9001",
+        }),
+    )
+    inst_svc = SimpleNamespace(
+        upsert_futures_contract=AsyncMock(return_value=SimpleNamespace(
+            instrument_id="INST-NIFTY-FUT-2026-09-29"
+        ))
+    )
+    service.chain_svc = SimpleNamespace(
+        inst_svc=inst_svc,
+        broker_gateway=SimpleNamespace(active_broker_name="kite", active_adapter=adapter),
+    )
+    resolved = await service._resolve_strategy_a_futures_instrument()
+    assert resolved == "INST-NIFTY-FUT-2026-09-29"
+    adapter.resolve_nearest_future.assert_awaited_once_with("NIFTY")
+    inst_svc.upsert_futures_contract.assert_awaited_once()

@@ -37,10 +37,16 @@ class HistoricalService:
     def _active_provider(self) -> tuple[str, Any | None]:
         if not self.broker_gateway:
             return "", None
-        return (
-            str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower(),
-            getattr(self.broker_gateway, "active_adapter", None),
-        )
+        adapter = getattr(self.broker_gateway, "active_adapter", None)
+        name = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
+        if not name:
+            breeze = getattr(self.broker_gateway, "breeze_adapter", None)
+            client = getattr(breeze, "client_manager", None)
+            if client and getattr(client, "is_active", False):
+                name = "breeze"
+            elif adapter and getattr(adapter, "is_active", False) and "kite" in type(adapter).__name__.lower():
+                name = "kite"
+        return name, adapter
 
     def _provider_is_active(self) -> bool:
         name, adapter = self._active_provider()

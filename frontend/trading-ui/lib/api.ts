@@ -257,6 +257,15 @@ export async function fetchLoginUrl(): Promise<{ login_url: string; api_key: str
 // ==============================================================================
 
 export interface StrategyStatusData {
+  market_data?: {
+    provider: string;
+    provider_active: boolean;
+    futures_instrument?: string | null;
+    futures_candle_count: number;
+    latest_futures_candle?: string | null;
+    last_error?: string | null;
+    last_evaluation_time?: string | null;
+  };
   config: {
     mode: "PAPER" | "LIVE" | "DISABLED";
     auto_trade_enabled: boolean;

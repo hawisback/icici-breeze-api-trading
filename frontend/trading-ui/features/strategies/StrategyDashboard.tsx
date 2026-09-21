@@ -138,7 +138,7 @@ export const StrategyDashboard: React.FC = () => {
               NIFTY INTRADAY AUTO-TRADING STRATEGIES
             </h2>
             <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-              v1.0 • BREEZE CONNECTED
+              v1.0 • {(status?.market_data?.provider || "BROKER").toUpperCase()} {status?.market_data?.provider_active ? "CONNECTED" : "INACTIVE"}
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">

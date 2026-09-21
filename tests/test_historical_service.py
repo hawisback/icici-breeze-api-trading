@@ -270,3 +270,56 @@ async def test_get_candles_recognizes_authenticated_breeze_client_manager(tmp_pa
     candles = await service.get_candles("INST-NIFTY-INDEX", "5m", allow_synthetic_fallback=False)
     assert candles and candles[-1].close == 23410
     assert service.fetch_candles_from_breeze.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_history_does_not_cross_from_kite_to_breeze(tmp_path):
+    repo = HistoricalRepository(db_path=tmp_path / "historical.db")
+    await repo.initialize()
+    candle = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-29", interval="15m",
+        start_time=datetime(2026, 9, 21, 4, 0, tzinfo=timezone.utc),
+        end_time=datetime(2026, 9, 21, 4, 15, tzinfo=timezone.utc),
+        open=23400, high=23420, low=23390, close=23410, volume=100, source="KITE",
+    )
+    kite = SimpleNamespace(is_active=True, fetch_historical_candles=AsyncMock(return_value=[candle]))
+    gateway = SimpleNamespace(
+        active_broker_name="kite", active_adapter=kite,
+        breeze_adapter=SimpleNamespace(client_manager=SimpleNamespace(is_active=True)),
+    )
+    service = HistoricalService(repository=repo, broker_gateway=gateway)
+    service.fetch_candles_from_breeze = AsyncMock(return_value=[])
+    candles = await service.get_candles(
+        "INST-NIFTY-FUT-2026-09-29", "15m",
+        requested_source="MIXED", allow_synthetic_fallback=False,
+    )
+    assert candles and all(item.source == "KITE" for item in candles)
+    kite.fetch_historical_candles.assert_awaited_once()
+    service.fetch_candles_from_breeze.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_runtime_history_does_not_cross_from_breeze_to_kite(tmp_path):
+    repo = HistoricalRepository(db_path=tmp_path / "historical.db")
+    await repo.initialize()
+    candle = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-29", interval="15m",
+        start_time=datetime(2026, 9, 21, 4, 0, tzinfo=timezone.utc),
+        end_time=datetime(2026, 9, 21, 4, 15, tzinfo=timezone.utc),
+        open=23400, high=23420, low=23390, close=23410, volume=100, source="BREEZE",
+    )
+    kite = SimpleNamespace(is_active=True, fetch_historical_candles=AsyncMock(return_value=[]))
+    gateway = SimpleNamespace(
+        active_broker_name="breeze", active_adapter=SimpleNamespace(),
+        breeze_adapter=SimpleNamespace(client_manager=SimpleNamespace(is_active=True)),
+        kite_adapter=kite,
+    )
+    service = HistoricalService(repository=repo, broker_gateway=gateway)
+    service.fetch_candles_from_breeze = AsyncMock(return_value=[candle])
+    candles = await service.get_candles(
+        "INST-NIFTY-FUT-2026-09-29", "15m",
+        requested_source="MIXED", allow_synthetic_fallback=False,
+    )
+    assert candles and all(item.source == "BREEZE" for item in candles)
+    service.fetch_candles_from_breeze.assert_awaited_once()
+    kite.fetch_historical_candles.assert_not_awaited()
