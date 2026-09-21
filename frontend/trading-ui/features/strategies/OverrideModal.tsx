@@ -416,7 +416,7 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
             <div className="mt-3 bg-slate-950/80 p-3.5 rounded-lg border border-slate-800 flex items-center justify-between">
               <div>
                 <span className="text-xs font-semibold text-slate-200 block">
-                  Bypass Configured Session Windows
+                  Bypass Session Window (Strategy B only)
                 </span>
                 <span className="text-[10px] text-slate-400">
                   Allow live testing / trigger evaluation outside regular intraday trading hours.

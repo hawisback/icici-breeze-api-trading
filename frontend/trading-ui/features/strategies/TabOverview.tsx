@@ -341,7 +341,7 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
                   >
                     <div className="font-bold">+2.5R Runner Reference</div>
                     <div className="text-[10px] mt-1">
-                      {rMultiple >= 2.5 ? "Dynamic trailing by EMA9 & ATR" : "Awaiting +2.0R move"}
+                      {rMultiple >= 2.5 ? "Runner beyond reference; +1R trailing remains active" : "Runner managed after T1; reference +2.5R"}
                     </div>
                     <div className="text-[10px]">Riding trend runner</div>
                   </div>
