@@ -1891,3 +1891,32 @@ Run the targeted Strategy A/API suites, replay/simulation suites, Strategy B
 regressions, LIVE safety tests, full `tests` suite, and `compileall`. Do not
 convert any phase to `[x]` until those results and the implementation receive
 human approval.
+
+### Post-CI lifecycle evidence — 2026-09-21
+
+GitHub Actions independently executed the lifecycle-integrity patch at
+`16a91ee3c4d389c6c3d48d7b0c32eb5f9373d954` on Python 3.14.7.
+
+| Evidence | Result |
+|---|---|
+| GitHub Actions `python -m compileall -q services libs tests` | passed |
+| GitHub Actions `python -m pytest -q tests` | 249 passed, 8 warnings in 27.22s |
+| Workflow run | `35571876074` / job `106245019684` |
+
+The earlier statement that lifecycle-integrity verification was pending is
+superseded by this CI evidence. Phase headings remain `[?]`: automated
+verification does not substitute for human approval, and Phases 9–10 still
+require real captured-chain / paper-shadow observation evidence.
+
+Three additional integration regressions are added after that successful run
+to exercise the actual `TrendPullbackStrategy -> StrategyService -> selector /
+sizer -> repository` boundary: contract-selection rejection, sizing rejection,
+and successful trade persistence followed by `ENTERED` confirmation. Their
+results must come from the next CI run before they are treated as evidence.
+
+The 8 warnings in run `35571876074` include third-party deprecations/security
+test-key warnings and two `aiosqlite` worker-thread shutdown warnings from
+`tests/test_boundary_security.py`. The latter is shared API-gateway test
+resource-cleanup debt, not a Strategy A decision-path failure; it is recorded
+rather than suppressed or conflated with Strategy A readiness.
+

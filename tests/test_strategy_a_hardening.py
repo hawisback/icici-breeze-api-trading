@@ -16,7 +16,7 @@ from services.strategy.reason_codes import (
 )
 from services.strategy.models import (
     ActiveTrade, AutoTradingMode, MarketFeatures, OptionType, StrategyDirection,
-    StrategyName, StrategyState, StrategyStateSnapshot, StrategySetup, StrategyTunablesConfig,
+    SelectedContract, StrategyName, StrategyState, StrategyStateSnapshot, StrategySetup, StrategyTunablesConfig,
     ThresholdOverrides, TradeDirection, TradeLifecycleState,
 )
 from services.strategy.position_manager import PositionManager, calculate_realized_trade_r
@@ -582,4 +582,141 @@ def test_historical_as_of_accepts_the_expected_completed_futures_bar():
     bars, feature = strategy._features_for_input([candle], end)
     assert bars[-1].end_time == end
     assert feature.candle_timestamp == end
+
+def _execution_cycle_service(at, *, selected_contract=None, sizing=None):
+    service, repo = _service(None)
+    service.config.auto_trade_enabled = True
+    service.config.mode = AutoTradingMode.PAPER
+    service.config.tunables.trend_pullback_enabled = True
+    service.config.tunables.volatility_breakout_enabled = False
+    service.position_manager.is_within_strategy_a_entry_window = Mock(return_value=True)
+    service.position_manager.is_within_entry_window = Mock(return_value=False)
+    repo.get_active_trades = AsyncMock(return_value=[])
+    repo.list_trades = AsyncMock(return_value=[])
+    repo.save_strategy_signal = AsyncMock()
+    service._gather_features = AsyncMock(return_value=MarketFeatures(
+        timestamp=at,
+        spot_price=100,
+        futures_price=100,
+        data_ready=True,
+    ))
+    candle = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-24",
+        interval="15m",
+        start_time=at - timedelta(minutes=15),
+        end_time=at,
+        open=99,
+        high=101,
+        low=98,
+        close=100,
+        volume=100,
+        source="BREEZE",
+    )
+    service._market_snapshot = ([], [], [candle])
+    service.strategy_a = _armed_execution_strategy(at)
+    service._get_option_chain = AsyncMock(return_value={"source": "BREEZE", "contracts": []})
+    if selected_contract is None:
+        service.contract_selector.select_contract = Mock(
+            return_value=(None, [], "NO_EXECUTABLE_CONTRACT")
+        )
+    else:
+        service.contract_selector.select_contract = Mock(
+            return_value=(selected_contract, [selected_contract], None)
+        )
+    if sizing is not None:
+        service.risk_sizer.size = Mock(return_value=sizing)
+    return service, repo
+
+
+@pytest.mark.asyncio
+async def test_real_service_contract_rejection_consumes_trigger_without_phantom_entered():
+    at = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    service, repo = _execution_cycle_service(at)
+
+    result = await service._evaluate_cycle()
+
+    assert result["status"] == "CONTRACT_SELECTION_FAILED"
+    assert service.strategy_a.snapshot.state is StrategyState.COOLDOWN
+    assert repo.save_trade.await_count == 0
+    assert repo.save_runtime.await_count >= 2
+    assert repo.save_strategy_signal.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_real_service_sizing_rejection_consumes_trigger_without_phantom_entered():
+    at = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    contract = SelectedContract(
+        instrument_id="OPT-A",
+        symbol="NIFTY-OPT-A",
+        expiry="2026-09-24",
+        strike=100,
+        option_type=OptionType.CALL,
+        ask_price=10,
+        bid_price=9.5,
+        open_interest=10000,
+        volume=1000,
+        spread_pct=0.05,
+        lot_size=75,
+        ltp=9.75,
+        delta=0.62,
+        gamma=0.01,
+        greek_source="BREEZE",
+        quote_timestamp=at,
+        quote_freshness_seconds=0,
+    )
+    sizing = SimpleNamespace(
+        lots=0,
+        quantity=0,
+        risk_budget=1000,
+        option_loss_per_lot=1200,
+        rejection_reason="RISK_BUDGET_TOO_SMALL",
+    )
+    service, repo = _execution_cycle_service(at, selected_contract=contract, sizing=sizing)
+
+    result = await service._evaluate_cycle()
+
+    assert result["status"] == "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"
+    assert service.strategy_a.snapshot.state is StrategyState.COOLDOWN
+    assert repo.save_trade.await_count == 0
+    assert repo.save_runtime.await_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_real_service_success_persists_trade_before_confirming_entered():
+    at = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    contract = SelectedContract(
+        instrument_id="OPT-A",
+        symbol="NIFTY-OPT-A",
+        expiry="2026-09-24",
+        strike=100,
+        option_type=OptionType.CALL,
+        ask_price=10,
+        bid_price=9.5,
+        open_interest=10000,
+        volume=1000,
+        spread_pct=0.05,
+        lot_size=75,
+        ltp=9.75,
+        delta=0.62,
+        gamma=0.01,
+        greek_source="BREEZE",
+        quote_timestamp=at,
+        quote_freshness_seconds=0,
+    )
+    sizing = SimpleNamespace(
+        lots=1,
+        quantity=75,
+        risk_budget=1000,
+        option_loss_per_lot=500,
+        rejection_reason=None,
+    )
+    service, repo = _execution_cycle_service(at, selected_contract=contract, sizing=sizing)
+
+    result = await service._evaluate_cycle()
+
+    assert result["status"] == "TRADE_OPENED"
+    assert repo.save_trade.await_count >= 1
+    assert service.strategy_a.snapshot.state is StrategyState.ENTERED
+    assert service.strategy_a.last_event.reason == "OPTION_EXECUTION_CONFIRMED"
+    assert repo.save_runtime.await_count >= 2
 

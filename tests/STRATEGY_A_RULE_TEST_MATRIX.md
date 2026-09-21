@@ -65,3 +65,7 @@ the original matrix:
 | Strategy A manual force-entry prohibition | `test_strategy_a_force_entry_is_disabled_and_cannot_create_validation_trade`, API endpoint coverage in `test_strategy_api_endpoints.py` |
 | Production session window cannot be bypassed | `test_production_strategy_a_cannot_bypass_entry_window_but_simulation_can_opt_in` |
 | Futures freshness and historical as-of parity | `test_stale_futures_data_is_machine_readable_and_does_not_advance_state`, `test_historical_as_of_accepts_the_expected_completed_futures_bar` |
+| End-to-end trigger → selector rejection → persisted recovery | `test_real_service_contract_rejection_consumes_trigger_without_phantom_entered` |
+| End-to-end trigger → sizing rejection → persisted recovery | `test_real_service_sizing_rejection_consumes_trigger_without_phantom_entered` |
+| End-to-end trigger → persisted trade → ENTERED confirmation | `test_real_service_success_persists_trade_before_confirming_entered` |
+
