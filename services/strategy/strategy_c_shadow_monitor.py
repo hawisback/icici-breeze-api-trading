@@ -34,6 +34,8 @@ from services.strategy.models import (
 logger = logging.getLogger(__name__)
 RUNTIME_KEY = "strategy_c_shadow_v1"
 ALLOWED_MARKET_SOURCES = {"BREEZE", "KITE", "LIVE"}
+MAX_PAPER_ENTRY_LATENCY_SECONDS = 300.0
+MAX_PAPER_EXIT_QUOTE_LATENCY_SECONDS = 120.0
 
 
 def _aware(value: Any) -> datetime | None:
@@ -80,6 +82,7 @@ class StrategyCShadowMonitor:
             "candidate_spec_fingerprint": _spec_fingerprint(),
             "seen_signal_ids": [],
             "resolved_signal_ids": [],
+            "paper_closed_signal_ids": [],
             "tracked": {},
         }
 
@@ -122,6 +125,7 @@ class StrategyCShadowMonitor:
             **stored,
             "seen_signal_ids": list(stored.get("seen_signal_ids") or []),
             "resolved_signal_ids": list(stored.get("resolved_signal_ids") or []),
+            "paper_closed_signal_ids": list(stored.get("paper_closed_signal_ids") or []),
             "tracked": dict(stored.get("tracked") or {}),
         }
 
