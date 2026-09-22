@@ -16,8 +16,13 @@ async def test_api_gateway_health_and_endpoints():
         res = await client.get("/api/v1/system/health")
         assert res.status_code == 200
         data = res.json()
-        assert data["status"] == "HEALTHY"
+        assert data["status"] in {"HEALTHY", "DEGRADED"}
         assert "services" in data
+        assert data["services"]["api_gateway"] == "ONLINE"
+        assert data["services"]["strategy_scheduler"] == "RUNNING"
+        if data["services"]["broker_session"] == "DISCONNECTED":
+            assert data["status"] == "DEGRADED"
+            assert data["services"]["strategy_market_data"] == "NOT_READY"
 
         # 2. Account funds
         res = await client.get("/api/v1/account/funds")
