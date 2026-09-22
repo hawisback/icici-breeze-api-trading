@@ -366,6 +366,8 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
         onRefresh={onRefresh}
         defaultCap={config.option_selection.max_option_premium}
         marketData={status.market_data}
+        entryWindowStart={config.tunables.entry_session_start}
+        entryWindowEnd={config.tunables.entry_session_end}
       />
 
       {/* 3. Market Regime & Derivatives Flow Vector */}
