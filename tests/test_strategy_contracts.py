@@ -67,6 +67,9 @@ def test_strategy_a_defaults_are_single_and_consistent_with_runtime_constructor(
     assert config.ema_fast_period == 20
     assert config.ema_slow_period == 50
     assert config.adx_period == config.atr_period == 14
+    assert config.momentum_adx_min_delta_2bars == -2.0
+    assert config.momentum_ema20_slope_min_atr == 0.0
+    assert config.momentum_ema20_slope_max_atr == 0.15
     assert config.ema_separation_min_atr == 0.10
     assert config.confluence_distance_atr == 0.25
     assert config.sr_zone_atr == 0.10
@@ -108,6 +111,7 @@ def test_service_uses_authoritative_strategy_a_configuration_and_preserves_strat
         {"ema_fast_period": 50, "ema_slow_period": 20},
         {"minimum_stop_distance_atr": 1.51, "maximum_stop_distance_atr": 1.50},
         {"entry_session_start": "14:45", "entry_session_end": "14:00"},
+        {"momentum_ema20_slope_min_atr": 0.15, "momentum_ema20_slope_max_atr": 0.15},
     ],
 )
 def test_invalid_strategy_a_configuration_is_rejected(overrides):
@@ -208,10 +212,13 @@ async def test_persisted_adx_migration_preserves_strategy_b_and_documents_v2_pol
 
     migrated = await repo.get_auto_config()
     expected_v2_adx = 22.0 if old_adx == 20.0 else old_adx
-    assert migrated.strategy_a_revision == 4
+    assert migrated.strategy_a_revision == 5
     assert migrated.tunables.strategy_b_adx_threshold == old_adx
     assert migrated.tunables.legacy_strategy_a_adx_threshold == old_adx
     assert migrated.tunables.adx_threshold == expected_v2_adx
+    assert migrated.tunables.momentum_adx_min_delta_2bars == -2.0
+    assert migrated.tunables.momentum_ema20_slope_min_atr == 0.0
+    assert migrated.tunables.momentum_ema20_slope_max_atr == 0.15
 
 
 @pytest.mark.parametrize("field_name", [
