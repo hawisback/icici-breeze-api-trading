@@ -61,6 +61,12 @@ def _row_features(current: Any, previous: Any | None, direction: str) -> dict[st
         ema20_slope = sign * (float(current.ema20) - float(previous.ema20)) / atr
         adx_delta_1 = float(current.adx14) - float(previous.adx14)
 
+    previous_close = float(previous.close) if previous is not None else None
+    previous_high = float(previous.high) if previous is not None else None
+    previous_low = float(previous.low) if previous is not None else None
+    previous_ema20 = float(previous.ema20) if previous is not None else None
+    previous_vwap = float(previous.session_vwap) if previous is not None else None
+
     if direction == "CALL":
         trend_order = current.ema20 > current.ema50
         di_direction = current.plus_di14 > current.minus_di14
@@ -69,6 +75,18 @@ def _row_features(current: Any, previous: Any | None, direction: str) -> dict[st
         sr_level = current.support
         opposing = current.resistance
         di_spread = current.plus_di14 - current.minus_di14
+        previous_ema_side = (
+            previous_close is not None and previous_ema20 is not None
+            and previous_close < previous_ema20
+        )
+        previous_vwap_side = (
+            previous_close is not None and previous_vwap is not None
+            and previous_close < previous_vwap
+        )
+        ema_reclaim_now = bool(previous_ema_side and current.close >= current.ema20)
+        vwap_reclaim_now = bool(previous_vwap_side and current.close >= current.session_vwap)
+        previous_bar_break = bool(previous_high is not None and current.close > previous_high)
+        toward_vwap = bool(current.close < current.session_vwap and current.close > current.open)
     else:
         trend_order = current.ema20 < current.ema50
         di_direction = current.minus_di14 > current.plus_di14
@@ -77,6 +95,18 @@ def _row_features(current: Any, previous: Any | None, direction: str) -> dict[st
         sr_level = current.resistance
         opposing = current.support
         di_spread = current.minus_di14 - current.plus_di14
+        previous_ema_side = (
+            previous_close is not None and previous_ema20 is not None
+            and previous_close > previous_ema20
+        )
+        previous_vwap_side = (
+            previous_close is not None and previous_vwap is not None
+            and previous_close > previous_vwap
+        )
+        ema_reclaim_now = bool(previous_ema_side and current.close <= current.ema20)
+        vwap_reclaim_now = bool(previous_vwap_side and current.close <= current.session_vwap)
+        previous_bar_break = bool(previous_low is not None and current.close < previous_low)
+        toward_vwap = bool(current.close > current.session_vwap and current.close < current.open)
 
     return {
         "direction": direction,
@@ -84,6 +114,10 @@ def _row_features(current: Any, previous: Any | None, direction: str) -> dict[st
         "di_direction": bool(di_direction),
         "vwap_side": bool(vwap_side),
         "ema20_side": bool(ema20_side),
+        "ema_reclaim": ema_reclaim_now,
+        "vwap_reclaim": vwap_reclaim_now,
+        "previous_bar_break": previous_bar_break,
+        "toward_vwap": toward_vwap,
         "adx14": float(current.adx14),
         "adx_delta_1": adx_delta_1,
         "di_spread": float(di_spread),
@@ -283,6 +317,40 @@ def _candidates() -> list[SwingCandidate]:
             and row["directional_body_atr"] > 0
         )
 
+    def ema_reclaim_cross(row: dict[str, Any]) -> bool:
+        return bool(
+            row["trend_order"]
+            and row["ema_reclaim"]
+            and row["directional_body_atr"] > 0
+            and row["body_ratio"] >= 0.25
+        )
+
+    def vwap_reclaim_cross(row: dict[str, Any]) -> bool:
+        return bool(
+            row["vwap_reclaim"]
+            and row["directional_body_atr"] > 0
+            and row["body_ratio"] >= 0.25
+            and row["di_spread"] > 0
+        )
+
+    def micro_breakout(row: dict[str, Any]) -> bool:
+        slope = _num(row, "ema20_slope_atr")
+        return bool(
+            row["previous_bar_break"]
+            and row["di_direction"]
+            and slope is not None and slope > -0.05
+            and row["directional_body_atr"] >= 0.15
+        )
+
+    def controlled_vwap_reversion(row: dict[str, Any]) -> bool:
+        vwap_dist = _num(row, "close_to_vwap_atr")
+        return bool(
+            row["toward_vwap"]
+            and vwap_dist is not None and 0.20 <= vwap_dist <= 0.80
+            and row["body_ratio"] >= 0.30
+            and row["adx14"] < 30.0
+        )
+
     return [
         SwingCandidate("trend_core", "EMA20/50 + DI agreement + positive directional EMA20 slope.", trend),
         SwingCandidate("trend_vwap", "Trend core plus price on the directional side of session VWAP.", trend_vwap),
@@ -291,6 +359,10 @@ def _candidates() -> list[SwingCandidate]:
         SwingCandidate("strong_di", "Trend/VWAP continuation with DI spread >= 5 and modest body.", strong_di),
         SwingCandidate("ema_reclaim", "Trend core, directional EMA20 side, within 0.25 ATR, directional body.", ema_reclaim),
         SwingCandidate("sr_bounce", "Trend core within 0.35 ATR of confirmed directional S/R with directional body.", sr_bounce),
+        SwingCandidate("ema_reclaim_cross", "Directional EMA20 reclaim inside the broader EMA20/50 trend.", ema_reclaim_cross),
+        SwingCandidate("vwap_reclaim_cross", "Directional session-VWAP reclaim with DI support and body confirmation.", vwap_reclaim_cross),
+        SwingCandidate("micro_breakout", "Close beyond the prior 15m bar in the directional DI/slope context.", micro_breakout),
+        SwingCandidate("controlled_vwap_reversion", "Counter-extension swing back toward VWAP when ADX is below 30.", controlled_vwap_reversion),
     ]
 
 
