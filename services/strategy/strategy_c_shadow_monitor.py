@@ -17,10 +17,12 @@ import logging
 from typing import Any
 
 from libs.contracts.models import generate_id
+from services.historical.strategy_a_data_audit import IST
 from services.historical.strategy_c_candidate_manifest import (
     CANDIDATE_ID,
     _spec_fingerprint,
 )
+from services.historical.strategy_c_forward_validation import FREEZE_DATE
 from services.historical.strategy_c_shadow_observer import replay_strategy_c_to_as_of
 from services.strategy.models import (
     AutoTradingMode,
@@ -458,6 +460,13 @@ class StrategyCShadowMonitor:
             await self.initialize()
         if self.disabled_reason:
             return {"status": "DISABLED", "reason": self.disabled_reason}
+        local_day = now.astimezone(IST).date()
+        if local_day <= FREEZE_DATE:
+            return {
+                "status": "WAITING_FOR_POST_FREEZE_SESSION",
+                "freeze_date": FREEZE_DATE.isoformat(),
+                "current_session_date": local_day.isoformat(),
+            }
         if not active_futures_instrument or not self.hist_svc:
             return {"status": "NO_ACTIVE_FUTURES_DATA"}
 
