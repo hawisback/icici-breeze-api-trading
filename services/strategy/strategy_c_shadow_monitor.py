@@ -749,6 +749,7 @@ class StrategyCShadowMonitor:
         latest_1m_end = futures_1m[-1].end_time.isoformat()
         seen = set(self.runtime.get("seen_signal_ids") or [])
         resolved = set(self.runtime.get("resolved_signal_ids") or [])
+        paper_closed = set(self.runtime.get("paper_closed_signal_ids") or [])
         tracked_map = self.runtime.setdefault("tracked", {})
         changed = False
 
@@ -774,46 +775,83 @@ class StrategyCShadowMonitor:
                 )
                 changed = True
 
-            if lifecycle.get("status") == "RESOLVED" and signal_id not in resolved:
-                final_quote = None
-                if tracked.get("selected_contract"):
+            if lifecycle.get("status") == "RESOLVED":
+                final_quote = tracked.get("last_quote")
+                if (
+                    tracked.get("selected_contract")
+                    and tracked.get("last_quote_bar_end") != latest_1m_end
+                ):
                     final_quote = await self._record_quote(
                         signal_id,
                         tracked,
                         now=now,
                         quote_bar_end=latest_1m_end,
                     )
-                await self._log(
-                    timestamp=now,
-                    message="CANDIDATE_UNDERLYING_RESOLVED",
-                    details={
-                        "signal_id": signal_id,
-                        "underlying_lifecycle": lifecycle,
-                        "selected_contract": tracked.get("selected_contract"),
-                        "entry_executable_price": tracked.get("entry_executable_price"),
-                        "final_observed_option_quote": final_quote,
-                        "note": "Observed option quote is evidence only; no order or synthetic fill was created.",
-                    },
+                    changed = True
+
+                if signal_id not in resolved:
+                    await self._log(
+                        timestamp=now,
+                        message="CANDIDATE_UNDERLYING_RESOLVED",
+                        details={
+                            "signal_id": signal_id,
+                            "underlying_lifecycle": lifecycle,
+                            "selected_contract": tracked.get("selected_contract"),
+                            "entry_executable_price": tracked.get("entry_executable_price"),
+                            "final_observed_option_quote": final_quote,
+                            "note": "Underlying resolution is independent of paper option fill availability.",
+                        },
+                    )
+                    resolved.add(signal_id)
+                    changed = True
+
+                previous_paper_status = tracked.get("paper_status")
+                paper_status = await self._attempt_paper_close(
+                    signal_id=signal_id,
+                    tracked=tracked,
+                    lifecycle=lifecycle,
+                    quote=final_quote,
+                    observed_at=now,
                 )
-                resolved.add(signal_id)
-                changed = True
+                if paper_status != previous_paper_status:
+                    changed = True
+                if paper_status == "CLOSED" and signal_id not in paper_closed:
+                    paper_closed.add(signal_id)
+                    changed = True
 
         if changed:
             self.runtime["seen_signal_ids"] = sorted(seen)
             self.runtime["resolved_signal_ids"] = sorted(resolved)
+            self.runtime["paper_closed_signal_ids"] = sorted(paper_closed)
             await self._save_runtime()
 
+        tracked_values = list(tracked_map.values())
+        closed_paper = [row for row in tracked_values if row.get("paper_status") == "CLOSED"]
+        open_paper = [
+            row for row in tracked_values
+            if row.get("paper_status") in {"OPEN", "EXIT_QUOTE_PENDING"}
+        ]
+        incomplete_paper = [
+            row for row in tracked_values
+            if row.get("paper_status") == "INCOMPLETE_EXIT_QUOTE"
+        ]
         return {
             "status": report.get("status"),
             "candidate_id": CANDIDATE_ID,
             "candidate_spec_fingerprint": _spec_fingerprint(),
+            "execution_mode": AutoTradingMode.PAPER.value,
             "native_5m_candles": len(futures_5m),
             "native_1m_candles": len(futures_1m),
             "raw_entries_today": len(report.get("raw_entries") or []),
             "candidate_entries_today": len(report.get("candidate_entries") or []),
             "seen_candidate_signals": len(seen),
             "resolved_candidate_signals": len(resolved),
+            "paper_open_trades": len(open_paper),
+            "paper_closed_trades": len(closed_paper),
+            "paper_incomplete_trades": len(incomplete_paper),
+            "paper_net_pnl": round(sum(float(row.get("paper_net_pnl") or 0.0) for row in closed_paper), 2),
             "active_raw_trade": report.get("active_raw_trade"),
             "broker_called": False,
             "orders_created": False,
+            "live_trading_allowed": False,
         }
