@@ -132,7 +132,12 @@ def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrad
         last_managed_bar=record.last_managed_completed_bar_timestamp,
         current_option_price=0.0,
         current_spot_price=strategy_a_entry,
-        futures_contract_id=(record.entry_features.get("futures_contract_id") if strategy == StrategyName.TREND_PULLBACK else None),
+        futures_contract_id=(
+            record.entry_features.get("futures_contract")
+            or record.entry_features.get("futures_contract_id")
+            if strategy == StrategyName.TREND_PULLBACK
+            else None
+        ),
         underlying_entry_price=(strategy_a_entry if strategy == StrategyName.TREND_PULLBACK else None),
         underlying_current_price=(strategy_a_entry if strategy == StrategyName.TREND_PULLBACK else None),
         underlying_structural_stop=(strategy_a_stop if strategy == StrategyName.TREND_PULLBACK else None),
@@ -460,21 +465,21 @@ class HistoricalPositionManagerReplayer:
 
             if stop_decision.crossed and (resolution is None or resolution.event == "STRUCTURAL_STOP"):
                 exit_price = stop_decision.exit_price or active_stop
-                event_time = resolution.event_time if resolution else bar.start_time
+                event_time = resolution.event_time if resolution else price_bar.start_time
                 stop_features = _feature_at(features, spot=exit_price, timestamp=event_time, completed=False)
                 trade, reason = pm.update_position(trade, 0.0, stop_features, as_of=event_time)
                 after = _state_snapshot(trade, event_time)
                 label = _exit_label(reason or "STRUCTURAL_SPOT_STOP_BREACHED", trade.state)
                 event = ReplayEvent(event=label, timestamp=event_time, reference_price=exit_price,
                                     active_stop=active_stop, r_multiple=_r_for(trade.direction, trade.entry_spot_price, exit_price, trade.initial_r_points),
-                                    source_candle=bar.start_time, details={"manager_reason": reason, "active_stop_at_bar_start": active_stop})
+                                    source_candle=price_bar.start_time, details={"manager_reason": reason, "active_stop_at_bar_start": active_stop})
                 self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after, exit_event=event)
                 self._finish(record, trade, status="RESOLVED", reason=label, timestamp=event_time, price=exit_price)
                 self.stats["structural_stop"] += 1
                 return
 
             if resolution is not None and resolution.event == "FAVORABLE_THEN_STOP":
-                fav_time = resolution.event_time or bar.start_time
+                fav_time = resolution.event_time or price_bar.start_time
                 trade, _ = pm.update_position(trade, 0.0, _feature_at(features, spot=favorable_price or features.spot_price, timestamp=fav_time, completed=False), as_of=fav_time)
                 self._record_event(record, event=_event_name_for_level(level or 0.0), timestamp=fav_time,
                                    price=favorable_price, trade=trade, source=price_bar.start_time)
@@ -484,7 +489,7 @@ class HistoricalPositionManagerReplayer:
                 after = _state_snapshot(trade, stop_time)
                 label = _exit_label(reason or "STRUCTURAL_SPOT_STOP_BREACHED", trade.state)
                 event = ReplayEvent(event=label, timestamp=stop_time, reference_price=exit_price, active_stop=active_stop,
-                                    r_multiple=_r_for(trade.direction, trade.entry_spot_price, exit_price, trade.initial_r_points), source_candle=bar.start_time,
+                                    r_multiple=_r_for(trade.direction, trade.entry_spot_price, exit_price, trade.initial_r_points), source_candle=price_bar.start_time,
                                     details={"manager_reason": reason, "favorable_before_stop": True, "active_stop_at_bar_start": active_stop})
                 self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after, exit_event=event)
                 self._finish(record, trade, status="RESOLVED", reason=label, timestamp=stop_time, price=exit_price)
@@ -527,7 +532,7 @@ class HistoricalPositionManagerReplayer:
                 label = _exit_label(reason, trade.state)
                 price = features.futures_price if record.strategy_id == StrategyName.TREND_PULLBACK.value else features.spot_price
                 exit_event = ReplayEvent(event=label, timestamp=bar.end_time, reference_price=price, active_stop=before.active_stop,
-                                         r_multiple=trade.current_r, source_candle=bar.start_time, details={"manager_reason": reason})
+                                         r_multiple=trade.current_r, source_candle=price_bar.start_time, details={"manager_reason": reason})
                 self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after, exit_event=exit_event)
                 self._finish(record, trade, status="RESOLVED", reason=label, timestamp=bar.end_time, price=price)
                 self.stats[label.lower()] += 1
