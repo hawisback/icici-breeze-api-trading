@@ -27,7 +27,7 @@ from typing import Any
 
 from services.historical.repository import HistoricalRepository
 from services.historical.service import HistoricalService
-from services.strategy.models import HistoricalReplaySource, SimulationRequest, StrategyName
+from services.strategy.models import HistoricalReplaySource, SimulationRequest, StrategyName, StrategyTunablesConfig
 from services.strategy.simulation import SimulationEngine
 
 
@@ -195,6 +195,7 @@ async def run_batch(
     *,
     db_path: Path,
     source: HistoricalReplaySource,
+    tunables: StrategyTunablesConfig | None = None,
 ) -> dict[str, Any]:
     state_report = json.loads(state_report_path.read_text(encoding="utf-8"))
     expected_by_date = _expected_signals(state_report)
@@ -204,7 +205,10 @@ async def run_batch(
         broker_gateway=None,
         instrument_service=None,
     )
-    engine = SimulationEngine(historical_service=historical)
+    engine = SimulationEngine(
+        historical_service=historical,
+        tunables=tunables,
+    )
 
     sessions: list[dict[str, Any]] = []
     all_records: list[dict[str, Any]] = []
@@ -245,6 +249,11 @@ async def run_batch(
         "state_report": str(state_report_path),
         "db_path": str(db_path.resolve()),
         "source": source.value,
+        "strategy_a_tunables": (
+            tunables.model_dump(mode="json")
+            if tunables is not None
+            else StrategyTunablesConfig().model_dump(mode="json")
+        ),
         "signal_dates_requested": list(expected_by_date),
         "signal_dates_count": len(expected_by_date),
         "signal_parity": {
