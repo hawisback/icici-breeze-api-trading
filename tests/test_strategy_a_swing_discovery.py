@@ -17,7 +17,10 @@ def test_swing_path_label_uses_conservative_same_bar_ordering():
         atr14=10.0,
     )
     # Same bar touches +0.6 ATR target and -0.4 ATR stop.
-    future = [_bar(100.0, 106.5, 95.5, 101.0)]
+    future = [
+        _bar(100.0, 106.5, 95.5, 101.0),
+        _bar(101.0, 102.0, 99.0, 100.5),
+    ]
 
     label = _path_label(
         current=current,
@@ -105,3 +108,17 @@ def test_swing_summary_excludes_incomplete_horizons():
     assert result["trades"] == 1
     assert result["trades_per_10_sessions"] == 5.0
     assert result["mean_r_proxy"] == 1.5
+
+
+def test_swing_path_label_requires_full_horizon():
+    current = SimpleNamespace(close=100.0, atr14=10.0)
+    label = _path_label(
+        current=current,
+        future=[_bar(100.0, 105.0, 98.0, 104.0)],
+        direction="CALL",
+        horizon_bars=2,
+    )
+
+    assert label["mfe_atr"] is None
+    assert label["mae_atr"] is None
+    assert label["close_return_atr"] is None
