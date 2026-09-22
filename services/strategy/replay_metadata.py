@@ -121,8 +121,10 @@ def build_configuration_snapshot(
     """Capture effective values without changing strategy construction."""
 
     contract_fields = (
-        "ema_fast_period", "ema_slow_period", "adx_period", "adx_threshold",
-        "atr_period", "ema_separation_min_atr", "confluence_distance_atr",
+        "ema_fast_period", "ema_slow_period", "adx_period",
+        "momentum_adx_min_delta_2bars", "momentum_ema20_slope_min_atr",
+        "momentum_ema20_slope_max_atr", "atr_period",
+        "ema_separation_min_atr", "confluence_distance_atr",
         "sr_zone_atr", "confirmation_min_body_ratio", "confirmation_close_location_pct",
         "confirmation_max_range_atr", "trigger_buffer_atr", "trigger_validity_bars",
         "maximum_chase_atr", "structural_stop_buffer_atr", "minimum_stop_distance_atr",
@@ -131,7 +133,7 @@ def build_configuration_snapshot(
         "entry_session_end", "forced_exit_time",
     )
     strategy_a = {
-        "evaluator_version": "trend_pullback_confluence_v1",
+        "evaluator_version": "trend_pullback_momentum_v3",
         "contract_config": {name: (getattr(overrides, name) if getattr(overrides, name, None) is not None else getattr(tunables, name)) for name in contract_fields},
         "compatibility_config": {
             "legacy_fields": {
