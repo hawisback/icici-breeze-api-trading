@@ -526,6 +526,186 @@ class StrategyCShadowMonitor:
         tracked["last_quote"] = quote
         return quote
 
+    def _paper_costs(
+        self,
+        *,
+        entry_price: float,
+        exit_price: float,
+        quantity: int,
+    ) -> dict[str, float | str | None]:
+        r = self.risk_config
+        if r is None or quantity <= 0:
+            return {
+                "brokerage": 0.0,
+                "exchange_charges": 0.0,
+                "stt": 0.0,
+                "gst": 0.0,
+                "sebi_charges": 0.0,
+                "stamp_duty": 0.0,
+                "transaction_costs": 0.0,
+                "cost_assumption_version": None,
+            }
+        buy_turnover = entry_price * quantity
+        sell_turnover = exit_price * quantity
+        turnover = buy_turnover + sell_turnover
+        brokerage = round(2 * float(getattr(r, "paper_brokerage_per_order", 0.0) or 0.0), 2)
+        exchange_charges = round(turnover * float(getattr(r, "paper_exchange_charge_rate", 0.0) or 0.0), 2)
+        stt = round(sell_turnover * float(getattr(r, "paper_stt_sell_rate", 0.0) or 0.0), 2)
+        sebi_charges = round(turnover * float(getattr(r, "paper_sebi_charge_rate", 0.0) or 0.0), 2)
+        stamp_duty = round(buy_turnover * float(getattr(r, "paper_stamp_buy_rate", 0.0) or 0.0), 2)
+        gst = round(
+            (brokerage + exchange_charges + sebi_charges)
+            * float(getattr(r, "paper_gst_rate", 0.0) or 0.0),
+            2,
+        )
+        transaction_costs = round(
+            brokerage + exchange_charges + stt + gst + sebi_charges + stamp_duty,
+            2,
+        )
+        return {
+            "brokerage": brokerage,
+            "exchange_charges": exchange_charges,
+            "stt": stt,
+            "gst": gst,
+            "sebi_charges": sebi_charges,
+            "stamp_duty": stamp_duty,
+            "transaction_costs": transaction_costs,
+            "cost_assumption_version": getattr(r, "paper_cost_assumption_version", None),
+        }
+
+    async def _attempt_paper_close(
+        self,
+        *,
+        signal_id: str,
+        tracked: dict[str, Any],
+        lifecycle: dict[str, Any],
+        quote: dict[str, Any] | None,
+        observed_at: datetime,
+    ) -> str:
+        if tracked.get("paper_status") not in {"OPEN", "EXIT_QUOTE_PENDING"}:
+            return str(tracked.get("paper_status") or "SKIPPED")
+
+        exit_time = _aware(lifecycle.get("exit_time"))
+        if exit_time is None:
+            tracked["paper_status"] = "EXIT_QUOTE_PENDING"
+            return "EXIT_QUOTE_PENDING"
+
+        quote_valid = bool(
+            quote
+            and quote.get("status") == "VALID"
+            and float(quote.get("bid") or 0.0) > 0.0
+        )
+        quote_time = _aware((quote or {}).get("quote_timestamp")) if quote else None
+        quote_latency_seconds = (
+            (quote_time - exit_time).total_seconds()
+            if quote_time is not None
+            else None
+        )
+
+        if (
+            quote_valid
+            and quote_latency_seconds is not None
+            and -5.0 <= quote_latency_seconds <= MAX_PAPER_EXIT_QUOTE_LATENCY_SECONDS
+        ):
+            raw_bid = float(quote["bid"])
+            slippage = float(getattr(self.risk_config, "paper_slippage_points", 0.0) or 0.0)
+            exit_fill = round(max(0.0, raw_bid - slippage), 6)
+            entry_fill = float(tracked["entry_executable_price"])
+            quantity = int(tracked["paper_quantity"])
+            if exit_fill <= 0 or quantity <= 0:
+                tracked["paper_status"] = "INCOMPLETE_EXIT_QUOTE"
+                tracked["paper_rejection_reason"] = "NON_POSITIVE_EXECUTABLE_EXIT"
+                return tracked["paper_status"]
+
+            gross_pnl = round((exit_fill - entry_fill) * quantity, 2)
+            raw_entry_ask = float(tracked.get("entry_raw_ask") or entry_fill)
+            raw_gross_pnl = round((raw_bid - raw_entry_ask) * quantity, 2)
+            entry_slippage_cost = abs(entry_fill - raw_entry_ask) * quantity
+            exit_slippage_cost = abs(raw_bid - exit_fill) * quantity
+            slippage_cost = round(entry_slippage_cost + exit_slippage_cost, 2)
+            costs = self._paper_costs(
+                entry_price=entry_fill,
+                exit_price=exit_fill,
+                quantity=quantity,
+            )
+            net_pnl = round(gross_pnl - float(costs["transaction_costs"]), 2)
+            premium_outlay = entry_fill * quantity
+            return_pct = round((net_pnl / premium_outlay) * 100.0, 4) if premium_outlay > 0 else None
+
+            tracked.update({
+                "paper_status": "CLOSED",
+                "paper_exit_underlying_time": exit_time.isoformat(),
+                "paper_exit_observed_at": observed_at.isoformat(),
+                "paper_exit_quote_timestamp": quote_time.isoformat(),
+                "paper_exit_quote_latency_seconds": round(quote_latency_seconds, 3),
+                "paper_exit_raw_bid": raw_bid,
+                "paper_exit_executable_price": exit_fill,
+                "paper_raw_gross_pnl": raw_gross_pnl,
+                "paper_gross_pnl": gross_pnl,
+                "paper_slippage_cost": slippage_cost,
+                "paper_transaction_costs": float(costs["transaction_costs"]),
+                "paper_net_pnl": net_pnl,
+                "paper_return_on_premium_pct": return_pct,
+                "paper_cost_breakdown": costs,
+                "paper_underlying_realized_r": lifecycle.get("realized_r"),
+                "paper_underlying_exit_reason": lifecycle.get("exit_reason"),
+                "paper_rejection_reason": None,
+            })
+            if self.repo and hasattr(self.repo, "save_execution_ledger"):
+                await self.repo.save_execution_ledger({
+                    "ledger_id": f"PAPER-C-SELL-{generate_id()}",
+                    "trade_id": f"PAPER-C:{signal_id}",
+                    "side": "SELL",
+                    "timestamp": observed_at.isoformat(),
+                    "raw_bid": raw_bid,
+                    "raw_ask": float(quote.get("ask") or 0.0),
+                    "raw_ltp": float(quote.get("ltp") or 0.0),
+                    "executable_price": exit_fill,
+                    "slippage_points": slippage,
+                    "quantity": quantity,
+                    "source": quote.get("source", "UNKNOWN"),
+                    "cost_assumption_version": costs["cost_assumption_version"] or "unknown",
+                    "reason": f"STRATEGY_C_{lifecycle.get('exit_reason') or 'UNDERLYING_EXIT'}",
+                })
+            await self._log(
+                timestamp=observed_at,
+                message="PAPER_TRADE_CLOSED",
+                details={
+                    "signal_id": signal_id,
+                    "paper_trade": tracked,
+                    "execution_mode": AutoTradingMode.PAPER.value,
+                    "broker_called": False,
+                },
+            )
+            return "CLOSED"
+
+        elapsed_since_exit = max(0.0, (observed_at - exit_time).total_seconds())
+        if (
+            quote_latency_seconds is not None
+            and quote_latency_seconds > MAX_PAPER_EXIT_QUOTE_LATENCY_SECONDS
+        ) or elapsed_since_exit > MAX_PAPER_EXIT_QUOTE_LATENCY_SECONDS:
+            previous = tracked.get("paper_status")
+            tracked["paper_status"] = "INCOMPLETE_EXIT_QUOTE"
+            tracked["paper_rejection_reason"] = "NO_TIMELY_EXECUTABLE_EXIT_QUOTE"
+            tracked["paper_exit_underlying_time"] = exit_time.isoformat()
+            tracked["paper_exit_observed_at"] = observed_at.isoformat()
+            if previous != "INCOMPLETE_EXIT_QUOTE":
+                await self._log(
+                    timestamp=observed_at,
+                    message="PAPER_TRADE_INCOMPLETE",
+                    details={
+                        "signal_id": signal_id,
+                        "reason": tracked["paper_rejection_reason"],
+                        "underlying_lifecycle": lifecycle,
+                        "last_quote": quote,
+                        "broker_called": False,
+                    },
+                )
+            return "INCOMPLETE_EXIT_QUOTE"
+
+        tracked["paper_status"] = "EXIT_QUOTE_PENDING"
+        return "EXIT_QUOTE_PENDING"
+
     async def observe(
         self,
         *,
