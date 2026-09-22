@@ -776,6 +776,8 @@ class GateBlockers(BaseModel):
     system_armed: bool = False
     kill_switch_active: bool = False
     auto_trade_enabled: bool = True
+    market_data_ready: bool = True
+    market_data_reason: Optional[str] = None
     max_positions_reached: bool = False
     in_cooldown: bool = False
     primary_blocker: Optional[str] = None
