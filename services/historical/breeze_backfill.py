@@ -40,6 +40,15 @@ MAX_INTERVALS_PER_REQUEST = 1000
 # this is comfortably below Breeze's 1,000-interval response limit.
 MAX_CALENDAR_DAYS_PER_REQUEST = 10
 
+# Official NSE contract-expiry revisions where the scheduled monthly expiry
+# fell on an exchange holiday. Keep these explicit and source-controlled so
+# historical contract identity is deterministic and does not depend on a live
+# holiday API during replay/backfill.
+NIFTY_MONTHLY_EXPIRY_OVERRIDES: dict[date, date] = {
+    # NSE/FAOP/71876: 31-Mar-2026 (Mahavir Jayanti holiday) -> 30-Mar-2026.
+    date(2026, 3, 31): date(2026, 3, 30),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class BackfillConfig:
@@ -136,15 +145,16 @@ def _last_weekday(year: int, month: int, weekday: int) -> date:
 
 
 def _monthly_nifty_futures_expiry(year: int, month: int) -> date:
-    """Resolve the monthly NIFTY futures expiry for its historical rule.
+    """Resolve the exchange-valid monthly NIFTY futures expiry.
 
     NIFTY monthly expiries were Thursday through August 2025 and Tuesday from
-    September 2025 onward.  This keeps the contract identity correct when the
-    additive backfill crosses that exchange-calendar change.
+    September 2025 onward. If the scheduled expiry is an exchange holiday, NSE
+    moves the contract to the previous trading day; known official revisions
+    are recorded explicitly in the expiry override table above.
     """
     weekday = 3 if date(year, month, 1) < date(2025, 9, 1) else 1
-    return _last_weekday(year, month, weekday)
-
+    scheduled = _last_weekday(year, month, weekday)
+    return NIFTY_MONTHLY_EXPIRY_OVERRIDES.get(scheduled, scheduled)
 
 def _month_starts(start: date, end: date) -> Iterable[date]:
     cursor = date(start.year, start.month, 1)
