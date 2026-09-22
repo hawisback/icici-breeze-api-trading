@@ -98,11 +98,15 @@ def test_trigger_cannot_use_1m_bar_that_started_before_5m_setup_close():
         previous=_feature(previous),
         one_minute=[pre_close_break, valid_break],
         config=DiscoveryConfig(),
+        context=_feature(setup),
     )
 
     assert trigger is not None
     assert trigger.entry_bar.start_time == setup.end_time
     assert trigger.entry_bar.end_time == setup.end_time + timedelta(minutes=1)
+    assert trigger.research_features["trigger_delay_minutes"] == 1.0
+    assert trigger.research_features["risk_atr"] is not None
+    assert trigger.research_features["context_15m_adx14"] == 24.0
 
 
 def test_micro_breakout_requires_retest_then_later_1m_break():
