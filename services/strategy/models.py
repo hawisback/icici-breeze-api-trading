@@ -455,7 +455,7 @@ class AutoTradingConfig(BaseModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     session: SessionTimersConfig = Field(default_factory=SessionTimersConfig)
     tunables: StrategyTunablesConfig = Field(default_factory=StrategyTunablesConfig)
-    strategy_a_revision: int = 4
+    strategy_a_revision: int = 5
 
 
 class MarketFeatures(BaseModel):
