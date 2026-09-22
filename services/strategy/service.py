@@ -1771,11 +1771,27 @@ class StrategyService:
         today_count = sum(1 for t in today_trades if t.entry_time.strftime("%Y-%m-%d") == today_str)
         max_daily = self.config.risk.max_trades_per_day
 
+        strategy_a_market_ready = (
+            not self.config.tunables.trend_pullback_enabled
+            or (
+                bool(futures_candles)
+                and bool(self._market_data_status.get("provider_active"))
+            )
+        )
+        strategy_a_market_reason = None
+        if not strategy_a_market_ready:
+            strategy_a_market_reason = str(
+                self._market_data_status.get("last_error")
+                or "NO_FUTURES_MARKET_DATA"
+            )
+
         primary = "All system gates clear — monitoring live market candles for technical trigger"
         if self.config.kill_switch:
             primary = "Emergency Kill Switch is ACTIVE"
         elif not self.config.auto_trade_enabled:
             primary = "Auto-Trading Execution is DISABLED"
+        elif not strategy_a_market_ready:
+            primary = f"Strategy A market data unavailable: {strategy_a_market_reason}"
         elif not effective_window:
             primary = "Outside strategy entry window (Strategy A 09:45-14:45; Strategy B legacy schedule). Set 'Bypass Entry Window' in Overrides to test now."
         elif pos_blocked:
@@ -1790,12 +1806,31 @@ class StrategyService:
         gates = GateBlockers(
             kill_switch_active=self.config.kill_switch,
             auto_trade_enabled=self.config.auto_trade_enabled,
+            market_data_ready=strategy_a_market_ready,
+            market_data_reason=strategy_a_market_reason,
             within_trading_window=effective_window,
             max_positions_reached=pos_blocked,
             in_cooldown=in_cooldown,
             daily_trades_count=today_count,
             daily_trades_max=max_daily,
             system_armed=self.config.system_armed,
+            concurrent_positions_count=active_count,
+            max_concurrent_positions=max_pos,
+            can_enter_new_trades=bool(
+                not self.config.kill_switch
+                and self.config.auto_trade_enabled
+                and strategy_a_market_ready
+                and effective_window
+                and not pos_blocked
+                and not in_cooldown
+                and today_count < max_daily
+                and not (self.config.mode == AutoTradingMode.LIVE and not self.config.system_armed)
+            ),
+            primary_gate_reason=(
+                "Ready"
+                if primary.startswith("All system gates clear")
+                else primary
+            ),
             primary_blocker=primary,
         )
 
