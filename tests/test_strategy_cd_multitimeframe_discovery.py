@@ -8,6 +8,7 @@ from services.historical.strategy_cd_multitimeframe_discovery import (
     Trade,
     Trigger,
     _find_trigger,
+    _frequency_band,
     _metrics,
     _run_lifecycle,
 )
@@ -225,3 +226,12 @@ def test_metrics_report_drawdown_losing_streak_profit_factor_and_frequency():
     assert result["profit_factor"] == 1.5
     assert result["trades_per_10_sessions"] == 4.0
     assert result["frequency_band"] == "~1 trade / 3 sessions"
+
+
+def test_frequency_band_does_not_call_one_trade_per_ten_sessions_one_per_five():
+    assert _frequency_band(0.1077) == "<1 trade / 5 sessions"
+    assert _frequency_band(0.20) == "~1 trade / 5 sessions"
+    assert _frequency_band(0.30) == "~1 trade / 3 sessions"
+    assert _frequency_band(0.50) == "~1 trade / 2 sessions"
+    assert _frequency_band(1.0) == "~1 trade / session"
+    assert _frequency_band(1.5) == "~1-2 trades / session"
