@@ -428,10 +428,19 @@ class TrendPullbackStrategy:
             },
         )
 
-    def _diagnostic(self, raw: Sequence[Candle], feature: FuturesFeatureSnapshot, direction: StrategyDirection, reason: str, setup: StrategySetup | None = None) -> StrategyTriggerDiagnostics:
+    def _diagnostic(
+        self,
+        feature: FuturesFeatureSnapshot,
+        direction: StrategyDirection,
+        reason: str,
+        setup: StrategySetup | None = None,
+        *,
+        raw: Sequence[Candle] | None = None,
+    ) -> StrategyTriggerDiagnostics:
+        raw_history = list(raw or [])
         option = OptionType.CALL if direction is StrategyDirection.CALL else OptionType.PUT
-        trend_components = self._trend_components(raw, feature, direction)
-        trend_ok, trend_reason = self._trend_ok(raw, feature, direction)
+        trend_components = self._trend_components(raw_history, feature, direction)
+        trend_ok, trend_reason = self._trend_ok(raw_history, feature, direction)
         confirmation_ok, confirmation_reason = self._confirmation_ok(feature, direction)
         confluence_ok, references, level, confluence_reason = self._confluence(feature, direction)
         active_setup = setup if setup is not None and setup.direction is direction else None
@@ -706,7 +715,7 @@ class TrendPullbackStrategy:
     def evaluate_replay_trigger(self, direction: TradeDirection, features: Any, candles_5m: Sequence[Candle], candles_15m: Sequence[Candle], futures_candles: Sequence[Candle] | None = None, overrides: ThresholdOverrides | None = None, **_: Any) -> tuple[StrategySignal | None, StrategyTriggerDiagnostics]:
         signal = self.evaluate(features, candles_5m, candles_15m, futures_candles=futures_candles, overrides=overrides)
         raw, feature = self._features_for_input(list(futures_candles or []), getattr(features, "timestamp", None))
-        return signal, self._diagnostic(raw, feature, StrategyDirection.CALL if direction is TradeDirection.BULLISH else StrategyDirection.PUT, self.last_event.reason if self.last_event else "NO_DECISION", self.snapshot.setup)
+        return signal, self._diagnostic(feature, StrategyDirection.CALL if direction is TradeDirection.BULLISH else StrategyDirection.PUT, self.last_event.reason if self.last_event else "NO_DECISION", self.snapshot.setup, raw=raw)
 
     def diagnose(self, features: Any, candles_5m: Sequence[Candle], candles_15m: Sequence[Candle], overrides: ThresholdOverrides | None = None, futures_candles: Sequence[Candle] | None = None) -> list[StrategyTriggerDiagnostics]:
         try:
@@ -737,7 +746,7 @@ class TrendPullbackStrategy:
                 "STALE_FUTURES_DATA" if message.startswith("STALE_FUTURES_DATA:")
                 else "FUTURES_DATA_UNAVAILABLE"
             )
-            return [self._diagnostic([], feature, direction, reason, self.snapshot.setup) for direction in (StrategyDirection.CALL, StrategyDirection.PUT)]
+            return [self._diagnostic(feature, direction, reason, self.snapshot.setup, raw=[]) for direction in (StrategyDirection.CALL, StrategyDirection.PUT)]
         result = []
         for direction in (StrategyDirection.CALL, StrategyDirection.PUT):
             trend_ok, trend_reason = self._trend_ok(raw, feature, direction)
@@ -762,5 +771,5 @@ class TrendPullbackStrategy:
                 if self.snapshot.setup is not None and self.snapshot.setup.direction is direction
                 else prospective_setup
             )
-            result.append(self._diagnostic(raw, feature, direction, reason, setup_for_direction))
+            result.append(self._diagnostic(feature, direction, reason, setup_for_direction, raw=raw))
         return result
