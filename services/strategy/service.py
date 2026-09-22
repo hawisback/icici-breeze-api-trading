@@ -58,6 +58,7 @@ from services.strategy.repository import StrategyRepository
 from services.strategy.simulation import SimulationEngine
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
+from services.strategy.strategy_c_shadow_monitor import StrategyCShadowMonitor
 from services.strategy.telemetry import StrategyAEvaluationRecord, StrategyATelemetryStore
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,16 @@ class StrategyService:
         self.position_manager = PositionManager(self.config.risk, self.config.session, strategy_config=self.config.tunables)
         self.risk_sizer = UnderlyingRiskSizer(self.config.risk)
         self.contract_selector = ContractSelector(self.config.option_selection)
+        self.strategy_c_shadow = StrategyCShadowMonitor(
+            repository=self.repo,
+            historical_service=self.hist_svc,
+            option_chain_service=self.chain_svc,
+            market_data_service=self.mkt_svc,
+            contract_selector=self.contract_selector,
+            risk_sizer=self.risk_sizer,
+            risk_config=self.config.risk,
+        )
+        self._last_strategy_c_shadow_status: dict[str, Any] = {"status": "NOT_INITIALIZED"}
 
         self.strategy_a = TrendPullbackStrategy(config=self.config.tunables)
         self.strategy_b = VolatilityBreakoutStrategy(
@@ -226,6 +237,11 @@ class StrategyService:
         await self.repo.initialize()
         self.config = await self.repo.get_auto_config()
         self._sync_subcomponents()
+        try:
+            await self.strategy_c_shadow.initialize()
+        except Exception:
+            logger.exception("Strategy C shadow initialization failed; Strategy A/B remain unaffected")
+            self._last_strategy_c_shadow_status = {"status": "INITIALIZATION_FAILED"}
         # Telemetry is an audit stream, not process-local state.  Restore the
         # persisted Strategy A records before the scheduler can emit a new
         # evaluation, so summaries survive a service restart.
@@ -275,6 +291,11 @@ class StrategyService:
         self.position_manager = PositionManager(self.config.risk, self.config.session, strategy_config=self.config.tunables)
         self.risk_sizer = UnderlyingRiskSizer(self.config.risk)
         self.contract_selector = ContractSelector(self.config.option_selection)
+        self.strategy_c_shadow.refresh_dependencies(
+            contract_selector=self.contract_selector,
+            risk_sizer=self.risk_sizer,
+            risk_config=self.config.risk,
+        )
         self.strategy_a = TrendPullbackStrategy(config=self.config.tunables)
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
@@ -643,6 +664,16 @@ class StrategyService:
         features = await self._gather_features()
         self._last_features = features
 
+        # Passive Strategy C research observation. This sidecar never creates
+        # ActiveTrade state or OMS intents and cannot affect Strategy A/B gates.
+        try:
+            self._last_strategy_c_shadow_status = await self.strategy_c_shadow.observe(
+                active_futures_instrument=self._market_data_status.get("futures_instrument"),
+                now=now,
+            )
+        except Exception:
+            logger.exception("Strategy C shadow observation failed; Strategy A/B evaluation continues")
+            self._last_strategy_c_shadow_status = {"status": "OBSERVATION_FAILED"}
 
         # 3. Manage active trades (trailing stops, thesis reversal, square-off)
         active_trades = await self.repo.get_active_trades()
