@@ -106,13 +106,32 @@ def _signal_parity(
     }
 
 
+def _record_time_key(row: dict[str, Any]) -> datetime:
+    raw = (
+        row.get("simulated_entry_timestamp")
+        or row.get("entry_timestamp")
+        or row.get("trading_date")
+        or "1970-01-01T00:00:00+00:00"
+    )
+    value = str(raw)
+    if len(value) == 10:
+        value += "T00:00:00+00:00"
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
-    resolved = [
-        row
-        for row in records
-        if row.get("lifecycle_status") == "RESOLVED"
-        and row.get("realized_r") is not None
-    ]
+    resolved = sorted(
+        [
+            row
+            for row in records
+            if row.get("lifecycle_status") == "RESOLVED"
+            and row.get("realized_r") is not None
+        ],
+        key=_record_time_key,
+    )
     unresolved = [row for row in records if row.get("lifecycle_status") != "RESOLVED"]
     ambiguous = [row for row in records if bool(row.get("ambiguous"))]
     rs = [float(row["realized_r"]) for row in resolved]
