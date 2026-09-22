@@ -246,14 +246,32 @@ def _feature_snapshot(**updates):
     return FuturesFeatureSnapshot(**base)
 
 
-@pytest.mark.parametrize("direction, updates, expected", [
-    (StrategyDirection.CALL, {}, True),
-    (StrategyDirection.PUT, {"ema20": 95, "ema50": 100, "plus_di14": 10, "minus_di14": 30, "close": 92, "open": 100}, True),
-    (StrategyDirection.CALL, {"adx14": 21}, False),
-    (StrategyDirection.CALL, {"ema20": 100.5, "ema50": 100, "atr14": 10}, False),
+@pytest.mark.parametrize("updates, expected, expected_reason", [
+    ({}, True, "TREND_CONFIRMED"),
+    ({"ema_order": False}, False, "TREND_REGIME_NOT_CONFIRMED"),
+    ({"di_direction": False}, False, "TREND_REGIME_NOT_CONFIRMED"),
+    ({"ema_separation": False}, False, "TREND_REGIME_NOT_CONFIRMED"),
+    ({"momentum_context_available": False}, False, "MOMENTUM_CONTEXT_UNAVAILABLE"),
+    ({"adx_decay_ok": False}, False, "MOMENTUM_ADX_DECAY_TOO_FAST"),
+    ({"ema_slope_ok": False}, False, "MOMENTUM_EMA_SLOPE_OUT_OF_BAND"),
 ])
-def test_phase8_trend_regime_matrix(direction, updates, expected):
-    assert TrendPullbackStrategy()._trend_ok(_feature_snapshot(**updates), direction)[0] is expected
+def test_phase8_trend_regime_matrix(updates, expected, expected_reason):
+    strategy = TrendPullbackStrategy()
+    components = {
+        "ema_order": True,
+        "di_direction": True,
+        "ema_separation": True,
+        "momentum_context_available": True,
+        "adx_delta_2bars": -1.0,
+        "adx_decay_ok": True,
+        "ema20_directional_slope_atr": 0.10,
+        "ema_slope_ok": True,
+    }
+    components.update(updates)
+    strategy._trend_components = lambda *_args, **_kwargs: dict(components)
+    passed, reason = strategy._trend_ok([], _feature_snapshot(adx14=18), StrategyDirection.CALL)
+    assert passed is expected
+    assert reason == expected_reason
 
 
 @pytest.mark.parametrize("direction, updates, expected_reason", [
