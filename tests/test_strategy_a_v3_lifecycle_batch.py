@@ -101,3 +101,45 @@ def test_v3_lifecycle_aggregate_uses_resolved_r_and_tracks_unresolved_and_option
     assert summary["mean_realized_r"] == 0.25
     assert summary["max_drawdown_r"] == -1.0
     assert summary["direction_counts"] == {"CALL": 2, "PUT": 1}
+
+
+def test_v3_lifecycle_aggregate_orders_path_metrics_chronologically():
+    # Deliberately newest-first, matching the state-machine audit session order.
+    records = [
+        {
+            "trading_date": "2026-01-03",
+            "simulated_entry_timestamp": "2026-01-03T05:00:00Z",
+            "lifecycle_status": "RESOLVED",
+            "realized_r": 2.0,
+            "ambiguous": False,
+            "option_data_status": "UNAVAILABLE",
+            "exit_reason": "SESSION_EXIT",
+            "direction": "CALL",
+        },
+        {
+            "trading_date": "2026-01-02",
+            "simulated_entry_timestamp": "2026-01-02T05:00:00Z",
+            "lifecycle_status": "RESOLVED",
+            "realized_r": -1.0,
+            "ambiguous": False,
+            "option_data_status": "UNAVAILABLE",
+            "exit_reason": "UNDERLYING_STRUCTURAL_STOP",
+            "direction": "PUT",
+        },
+        {
+            "trading_date": "2026-01-01",
+            "simulated_entry_timestamp": "2026-01-01T05:00:00Z",
+            "lifecycle_status": "RESOLVED",
+            "realized_r": -1.0,
+            "ambiguous": False,
+            "option_data_status": "UNAVAILABLE",
+            "exit_reason": "UNDERLYING_STRUCTURAL_STOP",
+            "direction": "CALL",
+        },
+    ]
+
+    summary = _aggregate(records)
+
+    assert summary["sum_realized_r"] == 0.0
+    assert summary["max_drawdown_r"] == -2.0
+    assert summary["max_consecutive_losses"] == 2
