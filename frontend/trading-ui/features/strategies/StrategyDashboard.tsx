@@ -184,7 +184,7 @@ export const StrategyDashboard: React.FC = () => {
           {/* Arm System */}
           <button
             onClick={handleArmToggle}
-            disabled={actionLoading || status?.config.kill_switch || status?.config.mode !== "LIVE"}
+            disabled={actionLoading || status?.config.kill_switch || (status?.config.mode !== "LIVE" && !status?.config.system_armed)}
             className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
               status?.config.system_armed
                 ? "bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-900/30 animate-pulse"
