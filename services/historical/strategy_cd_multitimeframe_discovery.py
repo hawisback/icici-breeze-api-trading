@@ -942,6 +942,7 @@ def build_report(
         "sessions_requested": sessions,
         "usable_sessions": len(usable_dates),
         "usable_dates": usable_dates,
+        "strategy_a_v3_signal_dates": sorted(v3_dates),
         "skipped_sessions": skipped,
         "config": asdict(cfg),
         "timeframe_contract": {
@@ -955,7 +956,7 @@ def build_report(
             "Underlying futures R only; not executable historical option P&L.",
             "Candidate thresholds are discovery hypotheses, not production settings.",
             "Strategy A V3 remains unchanged.",
-            "Strategy A overlap is measured at signal-day granularity in this first pass.",
+            "Strategy A overlap is measured at signal-day granularity, not exact simultaneous-position overlap.",
             "Production lifecycle, option execution, conflict rules, paper/shadow, and forward validation are still required before deployment.",
         ],
         "production_thresholds_changed": False,
