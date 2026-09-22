@@ -267,7 +267,7 @@ export interface StrategyStatusData {
     last_evaluation_time?: string | null;
   };
   config: {
-    mode: "PAPER" | "LIVE" | "DISABLED";
+    mode: "PAPER" | "SHADOW_ONLY" | "LIVE" | "DISABLED";
     auto_trade_enabled: boolean;
     system_armed: boolean;
     kill_switch: boolean;
@@ -279,6 +279,13 @@ export interface StrategyStatusData {
       max_bid_ask_spread_pct: number;
       prefer_premium_closest_to_cap: boolean;
       use_current_expiry_on_0dte: boolean;
+      preferred_delta_min: number;
+      preferred_delta_max: number;
+      allowed_delta_min: number;
+      allowed_delta_max: number;
+      minimum_expiry_sessions_remaining: number;
+      max_quote_age_seconds: number;
+      minimum_volume: number;
     };
     risk: {
       max_lots_per_trade: number;
@@ -317,6 +324,9 @@ export interface StrategyStatusData {
       ema_slow_period: number;
       adx_period: number;
       adx_threshold: number;
+      momentum_adx_min_delta_2bars: number;
+      momentum_ema20_slope_min_atr: number;
+      momentum_ema20_slope_max_atr: number;
       atr_period: number;
       ema_separation_min_atr: number;
       confluence_distance_atr: number;
@@ -343,6 +353,7 @@ export interface StrategyStatusData {
       supertrend_period: number;
       supertrend_multiplier: number;
     };
+    strategy_a_revision: number;
   };
   features: {
     timestamp: string;
@@ -446,13 +457,34 @@ export interface StrategyTriggerDiagnosticsData {
     extension?: { status: string; extension_atr: number; max_allowed_atr: number };
     confirmation?: { score: number; required: number; passed_factors?: string[] };
     risk?: { initial_r_atr: number; stop: number };
+    active_evaluator_version?: string;
     strategy_a_v2?: {
+      compatibility_envelope?: boolean;
+      active_evaluator_version?: string;
       data: { contract: string; completed_candle_timestamp: string; close: number };
-      trend: { passed: boolean; reason: string; ema20: number; ema50: number; adx: number; plus_di: number; minus_di: number };
+      trend: {
+        passed: boolean;
+        reason: string;
+        ema20: number;
+        ema50: number;
+        adx: number;
+        plus_di: number;
+        minus_di: number;
+        adx_delta_2bars?: number | null;
+        ema20_directional_slope_atr?: number | null;
+        components?: {
+          ema_order: boolean;
+          di_direction: boolean;
+          ema_separation: boolean;
+          momentum_context: boolean;
+          adx_decay: boolean;
+          ema20_slope: boolean;
+        };
+      };
       confluence: { passed: boolean; reason: string; references: string[]; level?: number | null; support?: number | null; resistance?: number | null; vwap: number };
       confirmation: { passed: boolean; reason: string; body_ratio: number; range_atr: number };
       trigger: { state: string; trigger_price?: number | null; distance_pts?: number | null };
-      risk: { structural_stop?: number | null; initial_r_points?: number | null };
+      risk: { passed?: boolean | null; reason?: string; structural_stop?: number | null; initial_r_points?: number | null };
     };
   };
   passed_count: number;
@@ -529,7 +561,7 @@ export interface AutoTradeData {
   mfe_points: number;
   mae_points: number;
   reversal_score: number;
-  state: "OPEN_INITIAL_RISK" | "PROTECTED_BREAKEVEN" | "PROFIT_LOCKED" | "RUNNER_MODE" | "CLOSED";
+  state: "ENTRY_PENDING" | "EXIT_PENDING" | "OPEN_INITIAL_RISK" | "PROTECTED_BREAKEVEN" | "PROFIT_LOCKED" | "RUNNER_MODE" | "CLOSED";
   unrealized_pnl: number;
   exit_time?: string | null;
   exit_option_price?: number | null;
