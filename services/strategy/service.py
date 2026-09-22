@@ -2140,6 +2140,7 @@ class StrategyService:
                 "evaluation_interval_seconds": max(1, self.config.tunables.evaluation_interval_sec),
             },
             "market_data": {**self._market_data_status, "last_evaluation_time": (self._last_eval_time.isoformat() if self._last_eval_time > datetime.min.replace(tzinfo=timezone.utc) else None)},
+            "strategy_c_shadow": self._last_strategy_c_shadow_status,
             "features": features.model_dump(mode="json"),
             "active_trades": [t.model_dump(mode="json") for t in active_trades],
             "signals": latest_signals,
