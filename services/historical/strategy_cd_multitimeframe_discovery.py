@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from statistics import mean, median
@@ -89,6 +89,7 @@ class Trigger:
     entry_price: float
     initial_stop: float
     setup_atr: float
+    research_features: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,7 @@ class Trade:
     mfe_r: float
     mae_r: float
     exit_reason: str
+    research_features: dict[str, Any] = field(default_factory=dict)
 
     @property
     def day(self) -> str:
@@ -126,6 +128,7 @@ class Trade:
             "mfe_r": round(self.mfe_r, 6),
             "mae_r": round(self.mae_r, 6),
             "exit_reason": self.exit_reason,
+            "research_features": self.research_features,
         }
 
 
@@ -317,6 +320,54 @@ def _risk_ok(entry: float, stop: float, atr: float, config: DiscoveryConfig) -> 
     )
 
 
+def _directional_di_spread(feature: MTFFeature, direction: str) -> float:
+    if direction == "CALL":
+        return feature.plus_di14 - feature.minus_di14
+    return feature.minus_di14 - feature.plus_di14
+
+
+def _atr_ratio(value: float, atr: float) -> float | None:
+    return value / atr if atr > 0 else None
+
+
+def _trigger_research_features(
+    *,
+    context: MTFFeature | None,
+    current: MTFFeature,
+    previous: MTFFeature,
+    direction: str,
+    entry_price: float,
+    stop: float,
+    chase: float,
+    entry_bar: Candle,
+) -> dict[str, Any]:
+    atr = current.atr14
+    context_atr = context.atr14 if context is not None else 0.0
+    return {
+        "context_15m_adx14": context.adx14 if context is not None else None,
+        "context_15m_di_spread": _directional_di_spread(context, direction) if context is not None else None,
+        "context_15m_ema_separation_atr": (
+            _atr_ratio(abs(context.ema20 - context.ema50), context_atr)
+            if context is not None else None
+        ),
+        "context_15m_vwap_distance_atr": (
+            _atr_ratio(abs(context.candle.close - context.session_vwap), context_atr)
+            if context is not None else None
+        ),
+        "setup_5m_adx14": current.adx14,
+        "setup_5m_di_spread": _directional_di_spread(current, direction),
+        "setup_5m_ema_separation_atr": _atr_ratio(abs(current.ema20 - current.ema50), atr),
+        "setup_5m_vwap_distance_atr": _atr_ratio(abs(current.candle.close - current.session_vwap), atr),
+        "setup_5m_ema20_distance_atr": _atr_ratio(abs(current.candle.close - current.ema20), atr),
+        "setup_5m_body_ratio": _body_ratio(current),
+        "setup_5m_range_atr": _atr_ratio(current.candle.high - current.candle.low, atr),
+        "previous_5m_close": previous.candle.close,
+        "risk_atr": _atr_ratio(abs(entry_price - stop), atr),
+        "chase_atr": _atr_ratio(max(0.0, chase), atr),
+        "trigger_delay_minutes": (entry_bar.end_time - current.candle.end_time).total_seconds() / 60.0,
+    }
+
+
 def _find_trigger(
     *,
     family: str,
@@ -325,6 +376,7 @@ def _find_trigger(
     previous: MTFFeature,
     one_minute: Sequence[Candle],
     config: DiscoveryConfig,
+    context: MTFFeature | None = None,
 ) -> Trigger | None:
     setup = current.candle
     eligible = _eligible_1m(
@@ -380,6 +432,16 @@ def _find_trigger(
                 entry_price=bar.close,
                 initial_stop=stop,
                 setup_atr=atr,
+                research_features=_trigger_research_features(
+                    context=context,
+                    current=current,
+                    previous=previous,
+                    direction=direction,
+                    entry_price=bar.close,
+                    stop=stop,
+                    chase=chase,
+                    entry_bar=bar,
+                ),
             )
         return None
 
@@ -416,6 +478,16 @@ def _find_trigger(
             entry_price=bar.close,
             initial_stop=base_stop,
             setup_atr=atr,
+            research_features=_trigger_research_features(
+                context=context,
+                current=current,
+                previous=previous,
+                direction=direction,
+                entry_price=bar.close,
+                stop=base_stop,
+                chase=chase,
+                entry_bar=bar,
+            ),
         )
     return None
 
@@ -483,6 +555,7 @@ def _run_lifecycle(
                 mfe_r=mfe,
                 mae_r=mae,
                 exit_reason="STOP_OR_TRAIL",
+                research_features=trigger.research_features,
             )
         if target_hit:
             return Trade(
@@ -498,6 +571,7 @@ def _run_lifecycle(
                 mfe_r=mfe,
                 mae_r=mae,
                 exit_reason="HARD_TARGET",
+                research_features=trigger.research_features,
             )
 
         if direction == "CALL":
@@ -544,6 +618,7 @@ def _run_lifecycle(
         mfe_r=mfe,
         mae_r=mae,
         exit_reason="FORCED_EXIT",
+        research_features=trigger.research_features,
     )
 
 
@@ -748,6 +823,7 @@ def _build_day_trades(
                     previous=previous,
                     one_minute=stream_1m,
                     config=config,
+                    context=context,
                 )
                 if trigger is None:
                     continue
