@@ -209,21 +209,60 @@ class HistoricalPositionManagerReplayer:
         self.strategy_config = strategy_config or StrategyTunablesConfig()
         self.stats: dict[str, int] = defaultdict(int)
 
-    def _minutes(self, start: datetime, end: datetime) -> list[Candle]:
-        return [c for c in self.one_minute if c.start_time >= start and c.start_time < end]
+    def _minutes(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        instrument_id: str | None = None,
+    ) -> list[Candle]:
+        return [
+            c for c in self.one_minute
+            if c.start_time >= start
+            and c.start_time < end
+            and (instrument_id is None or c.instrument_id == instrument_id)
+        ]
+
+    @staticmethod
+    def _strategy_a_contract(record: ReplayManifestRecord) -> str | None:
+        return (
+            record.entry_features.get("futures_contract")
+            or record.entry_features.get("futures_contract_id")
+        )
+
+    def _underlying_bar(
+        self,
+        record: ReplayManifestRecord,
+        session_bar: Candle,
+    ) -> Candle | None:
+        if record.strategy_id != StrategyName.TREND_PULLBACK.value:
+            return session_bar
+        contract = self._strategy_a_contract(record)
+        if not contract:
+            return None
+        exact = [
+            candle for candle in self.futures
+            if candle.instrument_id == contract
+            and candle.start_time == session_bar.start_time
+            and candle.end_time == session_bar.end_time
+        ]
+        return exact[0] if exact else None
 
     def _bars_after(self, record: ReplayManifestRecord) -> tuple[Candle | None, list[Candle]]:
         entry = None
+        # Simulation records the completed trigger bar's END timestamp. Match
+        # that first so the immediately following 5m candle is managed.
         for bar in self.session:
-            if bar.start_time == record.entry_5m_candle_timestamp:
+            if bar.end_time == record.entry_5m_candle_timestamp:
                 entry = bar
                 break
+        # Backward compatibility for older manifests that stored bar start.
         if entry is None:
             for bar in self.session:
-                if bar.end_time == record.entry_5m_candle_timestamp:
+                if bar.start_time == record.entry_5m_candle_timestamp:
                     entry = bar
                     break
-        return entry, [bar for bar in self.session if entry is not None and bar.start_time > entry.start_time]
+        return entry, [bar for bar in self.session if entry is not None and bar.start_time >= entry.end_time]
 
     def _features(self, bar: Candle, running: list[Candle]) -> MarketFeatures:
         from services.strategy.simulation import SimulationEngine
@@ -264,18 +303,31 @@ class HistoricalPositionManagerReplayer:
         ))
 
     def _entry_resolution(self, record: ReplayManifestRecord, trade: ActiveTrade, entry_bar: Candle) -> bool:
+        price_bar = self._underlying_bar(record, entry_bar)
+        if price_bar is None:
+            self._finish(
+                record,
+                trade,
+                status="UNRESOLVED",
+                reason="FUTURES_ENTRY_CANDLE_NOT_FOUND",
+            )
+            return False
         decision = evaluate_replay_candle(
-            record.direction, candle_open=entry_bar.open, candle_high=entry_bar.high,
-            candle_low=entry_bar.low, active_stop=trade.current_trailing_stop, entry_candle=True,
+            record.direction, candle_open=price_bar.open, candle_high=price_bar.high,
+            candle_low=price_bar.low, active_stop=trade.current_trailing_stop, entry_candle=True,
         )
         if not decision.crossed:
             return True
-        minutes = self._minutes(entry_bar.start_time, entry_bar.end_time)
+        minutes = self._minutes(
+            price_bar.start_time,
+            price_bar.end_time,
+            instrument_id=price_bar.instrument_id,
+        )
         self.stats["entry_ambiguous_candidates"] += 1
         if not minutes:
             self.stats["entry_unavailable"] += 1
             self._record_event(record, event="AMBIGUOUS", timestamp=entry_bar.end_time, price=None,
-                               trade=trade, source=entry_bar.start_time,
+                               trade=trade, source=price_bar.start_time,
                                details={"reason": "1-minute data unavailable", "active_stop": decision.stop_level})
             self._finish(record, trade, status="AMBIGUOUS", reason="AMBIGUOUS_ENTRY_CANDLE",
                          timestamp=entry_bar.end_time, ambiguous=True)
@@ -287,13 +339,13 @@ class HistoricalPositionManagerReplayer:
         self.stats[f"entry_{resolution.event.lower()}"] += 1
         if resolution.event == "ADVERSE_BEFORE_ENTRY":
             self._record_event(record, event="ADVERSE_BEFORE_ENTRY", timestamp=resolution.event_time or entry_bar.end_time,
-                               price=None, trade=trade, source=entry_bar.start_time)
+                               price=None, trade=trade, source=price_bar.start_time)
             self._finish(record, trade, status="ADVERSE_BEFORE_ENTRY", reason="ADVERSE_BEFORE_ENTRY",
                          timestamp=resolution.event_time or entry_bar.end_time, ambiguous=False)
             return False
         if resolution.event == "STILL_AMBIGUOUS":
             self._record_event(record, event="AMBIGUOUS", timestamp=resolution.event_time or entry_bar.end_time,
-                               price=None, trade=trade, source=entry_bar.start_time,
+                               price=None, trade=trade, source=price_bar.start_time,
                                details={"reason": resolution.detail or "intrabar order unresolved"})
             self._finish(record, trade, status="AMBIGUOUS", reason="AMBIGUOUS_ENTRY_CANDLE",
                          timestamp=resolution.event_time or entry_bar.end_time, ambiguous=True)
@@ -305,7 +357,7 @@ class HistoricalPositionManagerReplayer:
                 trade, 0.0, _feature_at(MarketFeatures(spot_price=exit_price, timestamp=event_time), spot=exit_price, timestamp=event_time, completed=False), as_of=event_time
             )
             self._record_event(record, event="STRUCTURAL_STOP_CROSSED", timestamp=event_time, price=exit_price,
-                               trade=trade, source=entry_bar.start_time, details={"entry_order": "ENTRY_THEN_STOP", "manager_reason": reason})
+                               trade=trade, source=price_bar.start_time, details={"entry_order": "ENTRY_THEN_STOP", "manager_reason": reason})
             self._finish(record, trade, status="RESOLVED", reason="STRUCTURAL_STOP", timestamp=event_time, price=exit_price)
             self.stats["entry_then_stop"] += 1
             return False
@@ -340,28 +392,69 @@ class HistoricalPositionManagerReplayer:
             if bar not in bars:
                 continue
             entry_seen = True
+            price_bar = self._underlying_bar(record, bar)
+            if price_bar is None:
+                self._finish(
+                    record,
+                    trade,
+                    status="UNRESOLVED",
+                    reason=(
+                        "FUTURES_CANDLE_NOT_FOUND"
+                        if record.strategy_id == StrategyName.TREND_PULLBACK.value
+                        else "SESSION_CANDLE_NOT_FOUND"
+                    ),
+                    timestamp=bar.end_time,
+                )
+                return
             features = self._features(bar, running)
             before = _state_snapshot(trade, bar.start_time)
+
+            # Replay excursions on the same authoritative price series used by
+            # the strategy.  Strategy A is futures-authoritative; Strategy B
+            # remains spot-authoritative.
+            if trade.direction == TradeDirection.BULLISH:
+                trade.mfe_points = max(
+                    trade.mfe_points,
+                    price_bar.high - trade.entry_spot_price,
+                )
+                trade.mae_points = min(
+                    trade.mae_points,
+                    price_bar.low - trade.entry_spot_price,
+                )
+            else:
+                trade.mfe_points = max(
+                    trade.mfe_points,
+                    trade.entry_spot_price - price_bar.low,
+                )
+                trade.mae_points = min(
+                    trade.mae_points,
+                    trade.entry_spot_price - price_bar.high,
+                )
+
             active_stop = trade.current_trailing_stop
             stop_decision = evaluate_replay_candle(
-                record.direction, candle_open=bar.open, candle_high=bar.high,
-                candle_low=bar.low, active_stop=active_stop,
+                record.direction, candle_open=price_bar.open, candle_high=price_bar.high,
+                candle_low=price_bar.low, active_stop=active_stop,
             )
-            level, favorable_price = self._next_favorable_level(trade, bar)
+            level, favorable_price = self._next_favorable_level(trade, price_bar)
             resolution = None
             if stop_decision.crossed and level is not None:
-                minutes = self._minutes(bar.start_time, bar.end_time)
+                minutes = self._minutes(
+                    price_bar.start_time,
+                    price_bar.end_time,
+                    instrument_id=price_bar.instrument_id,
+                )
                 if not minutes:
                     self.stats["trailing_unavailable"] += 1
                     self._record_event(record, event="AMBIGUOUS", timestamp=bar.end_time, price=None, trade=trade,
-                                       source=bar.start_time, details={"reason": "1-minute data unavailable", "active_stop": active_stop, "favorable_level": favorable_price})
+                                       source=price_bar.start_time, details={"reason": "1-minute data unavailable", "active_stop": active_stop, "favorable_level": favorable_price})
                     self._finish(record, trade, status="AMBIGUOUS", reason="AMBIGUOUS_INTRABAR_ORDER", timestamp=bar.end_time, ambiguous=True)
                     return
                 resolution = resolve_stop_order(record.direction, active_stop=active_stop, minute_candles=minutes, favorable_level=favorable_price)
                 if resolution.ambiguous:
                     self.stats["trailing_still_ambiguous"] += 1
                     self._record_event(record, event="AMBIGUOUS", timestamp=resolution.event_time or bar.end_time, price=None, trade=trade,
-                                       source=bar.start_time, details={"reason": resolution.detail, "active_stop": active_stop, "favorable_level": favorable_price})
+                                       source=price_bar.start_time, details={"reason": resolution.detail, "active_stop": active_stop, "favorable_level": favorable_price})
                     self._finish(record, trade, status="AMBIGUOUS", reason="AMBIGUOUS_INTRABAR_ORDER", timestamp=resolution.event_time or bar.end_time, ambiguous=True)
                     return
 
@@ -384,7 +477,7 @@ class HistoricalPositionManagerReplayer:
                 fav_time = resolution.event_time or bar.start_time
                 trade, _ = pm.update_position(trade, 0.0, _feature_at(features, spot=favorable_price or features.spot_price, timestamp=fav_time, completed=False), as_of=fav_time)
                 self._record_event(record, event=_event_name_for_level(level or 0.0), timestamp=fav_time,
-                                   price=favorable_price, trade=trade, source=bar.start_time)
+                                   price=favorable_price, trade=trade, source=price_bar.start_time)
                 exit_price = resolution.exit_price or active_stop
                 stop_time = fav_time
                 trade, reason = pm.update_position(trade, 0.0, _feature_at(features, spot=exit_price, timestamp=stop_time, completed=False), as_of=stop_time)
@@ -405,19 +498,19 @@ class HistoricalPositionManagerReplayer:
                 # was used to detect it.
                 event_time = bar.end_time
                 trade, _ = pm.update_position(trade, 0.0, _feature_at(features, spot=favorable_price, timestamp=event_time, completed=False), as_of=event_time)
-                self._record_event(record, event=_event_name_for_level(level), timestamp=event_time, price=favorable_price, trade=trade, source=bar.start_time)
+                self._record_event(record, event=_event_name_for_level(level), timestamp=event_time, price=favorable_price, trade=trade, source=price_bar.start_time)
 
             trade, reason = pm.update_position(trade, 0.0, features, as_of=bar.end_time)
             after = _state_snapshot(trade, bar.end_time)
             if after.active_stop != before.active_stop:
-                self._record_event(record, event="TRAILING_STOP_UPDATE", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=bar.start_time,
+                self._record_event(record, event="TRAILING_STOP_UPDATE", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time,
                                    details={"previous_stop": before.active_stop, "new_stop": after.active_stop})
             if after.protected_breakeven_active and not before.protected_breakeven_active:
-                self._record_event(record, event="BREAKEVEN_PROTECTION", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=bar.start_time)
+                self._record_event(record, event="BREAKEVEN_PROTECTION", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time)
             if after.profit_lock_active and not before.profit_lock_active:
-                self._record_event(record, event="PROFIT_LOCK", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=bar.start_time)
+                self._record_event(record, event="PROFIT_LOCK", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time)
             if after.runner_mode_active and not before.runner_mode_active:
-                self._record_event(record, event="RUNNER_MODE", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=bar.start_time)
+                self._record_event(record, event="RUNNER_MODE", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time)
             if reason in ("T1_PARTIAL_EXIT", "T1_REACHED_NO_PARTIAL_ONE_LOT"):
                 self._record_event(
                     record,
@@ -425,7 +518,7 @@ class HistoricalPositionManagerReplayer:
                     timestamp=bar.end_time,
                     price=features.futures_price,
                     trade=trade,
-                    source=bar.start_time,
+                    source=price_bar.start_time,
                     details={"remaining_quantity": trade.remaining_quantity, "t1_exit_quantity": trade.t1_exit_quantity},
                 )
                 self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after)
