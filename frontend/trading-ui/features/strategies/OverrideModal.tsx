@@ -117,7 +117,6 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
       setActionMessage(null);
       await updateThresholdOverrides({
         max_option_premium_cap: Number(premiumCap),
-        adx_threshold: Number(adxThreshold),
         rvol_threshold: Number(rvolThreshold),
         min_confirmation_score: Number(minConfirmationScore),
         strat_b_min_confirmation: Number(stratBMinConfirmation),
@@ -249,7 +248,7 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
               <div className="bg-slate-950/80 p-3.5 rounded-lg border border-slate-800">
                 <div className="flex justify-between items-center mb-1.5">
                   <label className="text-xs font-semibold text-slate-200 flex items-center gap-1">
-                    Max Option Premium Cap
+                    Strategy B Max Option Premium Cap
                   </label>
                   <span className="text-xs font-bold text-cyan-400">₹{premiumCap}</span>
                 </div>
@@ -263,14 +262,14 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
                   className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
                 />
                 <p className="text-[10px] text-slate-400 mt-1">
-                  ATM options often trade ₹100-₹150. Set higher to allow ATM contract discovery.
+                  Strategy B / manual force-entry only. Strategy A V3 uses delta-based contract selection.
                 </p>
               </div>
 
               {/* ADX Threshold */}
               <div className="bg-slate-950/80 p-3.5 rounded-lg border border-slate-800">
                 <div className="flex justify-between items-center mb-1.5">
-                  <label className="text-xs font-semibold text-slate-200">ADX Trend Strength Target</label>
+                  <label className="text-xs font-semibold text-slate-200">Legacy ADX Compatibility</label>
                   <span className="text-xs font-bold text-indigo-400">{adxThreshold} pts</span>
                 </div>
                 <input
@@ -279,11 +278,11 @@ export const OverrideModal: React.FC<OverrideModalProps> = ({
                   max="35"
                   step="1"
                   value={adxThreshold}
-                  onChange={(e) => setAdxThreshold(Number(e.target.value))}
-                  className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-400"
+                  disabled
+                  className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-not-allowed opacity-50 accent-indigo-400"
                 />
                 <p className="text-[10px] text-slate-400 mt-1">
-                  Default 20.0. Lower to 12-15 to qualify entries during moderate trending days.
+                  Display-only compatibility value. Strategy A V3 does not use a hard ADX floor; its momentum-health thresholds are configured in Parameters.
                 </p>
               </div>
 
