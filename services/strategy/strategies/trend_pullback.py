@@ -536,7 +536,10 @@ class TrendPullbackStrategy:
                 "atr": feature.atr14, "vwap": feature.session_vwap,
                 "active_support": feature.support, "active_resistance": feature.resistance,
                 "rejection_reason": reason,
-                "strategy_a_v3": {
+                "active_evaluator_version": "trend_pullback_momentum_v3",
+                "strategy_a_v2": {
+                    "compatibility_envelope": True,
+                    "active_evaluator_version": "trend_pullback_momentum_v3",
                     "data": {
                         "contract": feature.contract_id,
                         "completed_candle_timestamp": feature.candle_timestamp.isoformat(),
