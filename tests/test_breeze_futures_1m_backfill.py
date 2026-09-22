@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 
 import pytest
 
@@ -39,8 +39,8 @@ def test_futures_1m_backfill_normalizes_native_breeze_rows(tmp_path):
             }
         ],
         instrument_id="INST-NIFTY-FUT-2026-09-29",
-        window_start=start.astimezone().astimezone(start.tzinfo).astimezone(__import__("datetime").timezone.utc),
-        window_end=end.astimezone().astimezone(end.tzinfo).astimezone(__import__("datetime").timezone.utc),
+        window_start=start.astimezone(timezone.utc),
+        window_end=end.astimezone(timezone.utc),
     )
 
     assert len(candles) == 1
@@ -72,8 +72,8 @@ async def test_futures_1m_backfill_is_additive(tmp_path):
             }
         ],
         instrument_id="INST-NIFTY-FUT-2026-09-29",
-        window_start=start.astimezone(__import__("datetime").timezone.utc),
-        window_end=end.astimezone(__import__("datetime").timezone.utc),
+        window_start=start.astimezone(timezone.utc),
+        window_end=end.astimezone(timezone.utc),
     )
 
     await backfill._save_additive(candles)
