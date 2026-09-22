@@ -305,20 +305,28 @@ def _max_drawdown(values: Sequence[float]) -> float:
 
 
 def _score_row(row: dict[str, Any], *, horizon: str, target_key: str) -> float:
+    """Return a conservative stop-normalized R proxy for one horizon.
+
+    If target is hit before stop, record target/stop R. If neither barrier is
+    established as a target-before-stop success, use the horizon close return
+    normalized by the stop and clipped to [-1R, target_R]. This avoids treating
+    a quiet late-horizon observation as a full stop while still preventing
+    optimistic beyond-target credit.
+    """
     label = row["labels"][horizon]
+    target_stop = {
+        "target_060_before_stop_040": (0.60, 0.40),
+        "target_075_before_stop_050": (0.75, 0.50),
+        "target_100_before_stop_075": (1.00, 0.75),
+    }
+    target, stop = target_stop[target_key]
+    target_r = target / stop
     if bool(label[target_key]):
-        target = {
-            "target_060_before_stop_040": 0.60,
-            "target_075_before_stop_050": 0.75,
-            "target_100_before_stop_075": 1.00,
-        }[target_key]
-        return target
-    stop = {
-        "target_060_before_stop_040": -0.40,
-        "target_075_before_stop_050": -0.50,
-        "target_100_before_stop_075": -0.75,
-    }[target_key]
-    return stop
+        return target_r
+    close_return_atr = label.get("close_return_atr")
+    if close_return_atr is None:
+        raise ValueError("score requested without a complete horizon label")
+    return max(-1.0, min(target_r, float(close_return_atr) / stop))
 
 
 def _dedupe_daily(rows: Sequence[dict[str, Any]], *, max_per_day: int = 2) -> list[dict[str, Any]]:
@@ -346,7 +354,11 @@ def _summarize(
     horizon: str,
     target_key: str,
 ) -> dict[str, Any]:
-    selected = _dedupe_daily(rows)
+    complete_rows = [
+        row for row in rows
+        if (row.get("labels") or {}).get(horizon, {}).get("mfe_atr") is not None
+    ]
+    selected = _dedupe_daily(complete_rows)
     scores = [_score_row(row, horizon=horizon, target_key=target_key) for row in selected]
     wins = [value for value in scores if value > 0]
     months: dict[str, list[float]] = defaultdict(list)
@@ -359,8 +371,8 @@ def _summarize(
         "mean_r_proxy": round(mean(scores), 6) if scores else None,
         "sum_r_proxy": round(sum(scores), 6),
         "max_drawdown_r_proxy": _max_drawdown(scores),
-        "median_mfe_atr": round(median([row["labels"][horizon]["mfe_atr"] for row in selected if row["labels"][horizon]["mfe_atr"] is not None]), 6) if selected else None,
-        "median_mae_atr": round(median([row["labels"][horizon]["mae_atr"] for row in selected if row["labels"][horizon]["mae_atr"] is not None]), 6) if selected else None,
+        "median_mfe_atr": round(median([row["labels"][horizon]["mfe_atr"] for row in selected]), 6) if selected else None,
+        "median_mae_atr": round(median([row["labels"][horizon]["mae_atr"] for row in selected]), 6) if selected else None,
         "profitable_months": sum(sum(values) > 0 for values in months.values()),
         "active_months": len(months),
         "direction_counts": {
