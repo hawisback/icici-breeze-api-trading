@@ -42,7 +42,7 @@ def test_v3_lifecycle_signal_parity_compares_time_direction_entry_stop_and_r():
         "r_points": 26.656871103914455,
     }]
     manifests = [{
-        "simulated_entry_timestamp": "2026-09-18T06:30:00+00:00",
+        "simulated_entry_timestamp": "2026-09-18T06:30:00Z",
         "direction": "CALL",
         "simulated_entry_price": 23336.085623701303,
         "initial_structural_stop": 23309.42875259739,
