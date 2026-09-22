@@ -151,7 +151,7 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
               className="w-full accent-cyan-500 cursor-pointer"
             />
             <p className="text-[11px] text-slate-400 mt-1">
-              Contracts exceeding this premium are excluded. If ATM is ₹120 and +1 OTM is ₹62, the system selects the ₹62 contract.
+              Strategy B uses this premium cap. Strategy A V3 ignores premium caps and selects options from its configured delta/expiry/liquidity bands.
             </p>
           </div>
 
@@ -441,17 +441,38 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
             </div>
           </div>
           <p className="text-[11px] text-slate-400">
-            Open intraday positions are automatically squared off at 15:20 IST to avoid broker auction risk.
+            These shared timers primarily serve Strategy B. Strategy A V3 uses its dedicated 09:45–14:45 entry window and 15:15 forced exit shown below.
           </p>
         </div>
 
-        {/* Strategy A V2 — authoritative completed-15m futures contract */}
-        <div className="bg-slate-900/90 border border-cyan-900/60 rounded-xl p-5 shadow-lg space-y-4">
-          <div className="flex items-center gap-2 pb-2 border-b border-slate-800 text-cyan-400 text-sm font-bold uppercase tracking-wider"><TrendingUp className="w-4 h-4" />Strategy A — NIFTY Trend-Pullback Confluence</div>
-          <p className="text-[11px] text-slate-400">Signal and structural-risk settings use completed 15-minute NIFTY futures bars. These are the authoritative V2 hypothesis parameters; options are execution-only.</p>
+        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
+          <div className="text-sm font-bold uppercase tracking-wider text-cyan-400">Strategy A Option Execution Bands</div>
+          <p className="text-[11px] text-slate-400">Strategy A V3 contract selection is delta/expiry/liquidity based, not premium-cap based.</p>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
             {([
-              ["ema_fast_period","Fast EMA",1,100,1],["ema_slow_period","Slow EMA",2,200,1],["adx_period","ADX period",1,50,1],["adx_threshold","ADX threshold",0,100,1],["atr_period","ATR period",1,50,1],
+              ["preferred_delta_min","Preferred delta min",0.01,0.99,0.01],
+              ["preferred_delta_max","Preferred delta max",0.01,0.99,0.01],
+              ["allowed_delta_min","Allowed delta min",0.01,0.99,0.01],
+              ["allowed_delta_max","Allowed delta max",0.01,0.99,0.01],
+              ["minimum_expiry_sessions_remaining","Min expiry sessions",0,10,1],
+              ["max_quote_age_seconds","Max quote age (sec)",1,300,1],
+            ] as const).map(([key,label,min,max,step]) => (
+              <label key={key} className="text-xs text-slate-400">{label}
+                <input type="number" min={min} max={max} step={step} value={form.option_selection[key]}
+                  onChange={e => setForm({...form, option_selection: {...form.option_selection, [key]: Number(e.target.value)}})}
+                  className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-100" />
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* Strategy A V3 — authoritative completed-15m futures contract */}
+        <div className="bg-slate-900/90 border border-cyan-900/60 rounded-xl p-5 shadow-lg space-y-4">
+          <div className="flex items-center gap-2 pb-2 border-b border-slate-800 text-cyan-400 text-sm font-bold uppercase tracking-wider"><TrendingUp className="w-4 h-4" />Strategy A V3 — NIFTY Trend-Pullback Momentum</div>
+          <p className="text-[11px] text-slate-400">Signal and structural-risk settings use completed 15-minute NIFTY futures bars. V3 replaces the hard ADX floor with momentum health: two-bar ADX change and directional EMA20 slope. Options remain execution-only.</p>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            {([
+              ["ema_fast_period","Fast EMA",1,100,1],["ema_slow_period","Slow EMA",2,200,1],["adx_period","ADX period",1,50,1],["momentum_adx_min_delta_2bars","Min ADX 2-bar delta",-10,10,0.1],["momentum_ema20_slope_min_atr","Min directional EMA20 slope (ATR)",0,1,0.01],["momentum_ema20_slope_max_atr","Max directional EMA20 slope (ATR)",0.01,1,0.01],["atr_period","ATR period",1,50,1],
               ["ema_separation_min_atr","Min EMA separation (ATR)",0,2,0.01],["confluence_distance_atr","Confluence tolerance (ATR)",0,2,0.01],["sr_zone_atr","S/R tolerance (ATR)",0,2,0.01],
               ["confirmation_min_body_ratio","Confirmation min body ratio",0,1,0.05],["confirmation_close_location_pct","Directional close location",0,0.5,0.05],["confirmation_max_range_atr","Max confirmation range (ATR)",0.1,5,0.05],
               ["trigger_buffer_atr","Trigger buffer (ATR)",0,1,0.01],["trigger_validity_bars","Trigger validity (bars)",1,10,1],["maximum_chase_atr","Max chase (ATR)",0,2,0.01],
@@ -511,21 +532,14 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
 
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <label className="text-xs text-slate-400 block mb-1">ADX Threshold</label>
+              <label className="text-xs text-slate-400 block mb-1">Legacy ADX Compatibility</label>
               <input
                 type="number"
                 value={form.tunables.adx_threshold}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    tunables: {
-                      ...form.tunables,
-                      adx_threshold: parseFloat(e.target.value),
-                    },
-                  })
-                }
-                className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-1.5 text-xs text-slate-100"
+                disabled
+                className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-1.5 text-xs text-slate-500 cursor-not-allowed"
               />
+              <p className="text-[10px] text-slate-500 mt-1">Retained for persisted V2 compatibility; not an active Strategy A V3 entry gate.</p>
             </div>
 
             <div>
