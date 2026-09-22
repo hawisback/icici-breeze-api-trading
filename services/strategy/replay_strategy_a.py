@@ -32,7 +32,7 @@ class ReplayDecision(BaseModel):
 
 class StrategyAReplayReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    strategy_version: str = "trend_pullback_confluence_v1"
+    strategy_version: str = "trend_pullback_momentum_v3"
     config_fingerprint: str
     data_range: dict[str, str | None]
     futures_contracts: list[str]
