@@ -890,9 +890,25 @@ async def test_strategy_a_does_not_use_calendar_futures_when_breeze_session_is_i
     inst_svc.ensure_current_nifty_futures.assert_not_awaited()
 
 
+
+
+def _passing_v3_trend_components() -> dict:
+    return {
+        "ema_order": True,
+        "di_direction": True,
+        "ema_separation": True,
+        "momentum_context_available": True,
+        "adx_delta_2bars": -1.0,
+        "adx_decay_ok": True,
+        "ema20_directional_slope_atr": 0.10,
+        "ema_slope_ok": True,
+    }
+
+
 def test_strategy_a_diagnostics_keep_passed_trend_when_confirmation_is_blocker():
     at = datetime(2026, 9, 21, 12, 0, tzinfo=IST)
     strategy = TrendPullbackStrategy()
+    strategy._trend_components = lambda *_args, **_kwargs: _passing_v3_trend_components()
     feature = __import__("services.strategy.futures_signal", fromlist=["FuturesFeatureSnapshot"]).FuturesFeatureSnapshot(
         contract_id="INST-NIFTY-FUT-2026-09-29",
         candle_timestamp=at,
@@ -913,6 +929,7 @@ def test_strategy_a_diagnostics_keep_passed_trend_when_confirmation_is_blocker()
 def test_strategy_a_diagnostics_surface_structural_risk_rejection():
     at = datetime(2026, 9, 21, 12, 0, tzinfo=IST)
     strategy = TrendPullbackStrategy()
+    strategy._trend_components = lambda *_args, **_kwargs: _passing_v3_trend_components()
     feature_cls = __import__("services.strategy.futures_signal", fromlist=["FuturesFeatureSnapshot"]).FuturesFeatureSnapshot
     direction_cls = __import__("services.strategy.strategies.trend_pullback", fromlist=["StrategyDirection"]).StrategyDirection
     # Trend, confirmation, and confluence pass, but the structural stop is
