@@ -2,7 +2,7 @@ from datetime import date, datetime, time, timezone
 
 import pytest
 
-from services.historical.breeze_backfill import IST
+from services.historical.breeze_backfill import IST, _monthly_nifty_futures_expiry, futures_contract_periods
 from services.historical.breeze_futures_1m_backfill import (
     BreezeFutures1mBackfill,
     Futures1mBackfillConfig,
@@ -87,3 +87,12 @@ async def test_futures_1m_backfill_is_additive(tmp_path):
     assert len(stored) == 1
     assert backfill.report.candles_inserted == 1
     assert backfill.report.candles_skipped_existing == 1
+
+
+def test_march_2026_expiry_uses_official_holiday_revision():
+    assert _monthly_nifty_futures_expiry(2026, 3) == date(2026, 3, 30)
+
+    periods = futures_contract_periods(date(2026, 3, 1), date(2026, 4, 2))
+    march = [item for item in periods if item[2] == date(2026, 3, 30)]
+    assert march
+    assert march[0][1] == date(2026, 3, 30)
