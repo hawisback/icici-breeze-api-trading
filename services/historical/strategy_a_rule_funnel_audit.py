@@ -1,8 +1,8 @@
-"""Read-only Strategy A V2 rule-funnel audit over cached historical data.
+"""Read-only Strategy A V3 rule-funnel audit over cached historical data.
 
 This module:
 - opens the replay SQLite database in read-only mode,
-- uses the authoritative Strategy A V2 defaults,
+- uses the authoritative Strategy A V3 defaults,
 - evaluates only completed 15-minute NIFTY futures bars in the entry window,
 - never calls a broker, writes candles, changes thresholds, or persists trades.
 
@@ -344,7 +344,7 @@ def audit_rule_funnel(
     }
 
     return {
-        "audit_type": "STRATEGY_A_V2_RULE_FUNNEL_READ_ONLY",
+        "audit_type": "STRATEGY_A_V3_RULE_FUNNEL_READ_ONLY",
         "db_path": str(db_path.resolve()),
         "source": source.upper(),
         "sessions_requested": sessions,
@@ -356,7 +356,9 @@ def audit_rule_funnel(
             "directional_evaluations should be 2x completed_15m_decision_bars."
         ),
         "thresholds": {
-            "adx_threshold": config.adx_threshold,
+            "momentum_adx_min_delta_2bars": config.momentum_adx_min_delta_2bars,
+            "momentum_ema20_slope_min_atr": config.momentum_ema20_slope_min_atr,
+            "momentum_ema20_slope_max_atr": config.momentum_ema20_slope_max_atr,
             "ema_separation_min_atr": config.ema_separation_min_atr,
             "confirmation_min_body_ratio": config.confirmation_min_body_ratio,
             "confirmation_close_location_pct": config.confirmation_close_location_pct,
