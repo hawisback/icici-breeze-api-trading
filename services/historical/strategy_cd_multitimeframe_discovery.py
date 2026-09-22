@@ -358,7 +358,7 @@ def _find_trigger(
             if not (directional and broke):
                 continue
             chase = bar.close - trigger_level if direction == "CALL" else trigger_level - bar.close
-            if chase > config.max_chase_atr * atr:
+            if chase > config.max_chase_atr * atr + EPSILON:
                 return None
             stop = (
                 min(base_stop, retest.low - config.stop_buffer_atr * atr)
@@ -399,7 +399,7 @@ def _find_trigger(
                 continue
 
         chase = bar.close - base_level if direction == "CALL" else base_level - bar.close
-        if chase > config.max_chase_atr * atr:
+        if chase > config.max_chase_atr * atr + EPSILON:
             return None
         if not _risk_ok(bar.close, base_stop, atr, config):
             return None
