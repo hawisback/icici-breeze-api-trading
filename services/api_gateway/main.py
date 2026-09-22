@@ -388,14 +388,27 @@ async def get_system_health():
     session_status = await services.session_svc.get_session_status()
     feed_status = services.market_svc.get_feed_status()
     system_mode = await services.risk_svc.get_system_mode()
+    strategy_status = await services.strategy_svc.get_status()
+
+    broker_connected = bool(session_status.get("connected"))
+    strategy_market = strategy_status.get("market_data", {})
+    strategy_scheduler = strategy_status.get("scheduler", {})
+    strategy_ready = bool(
+        strategy_scheduler.get("running")
+        and strategy_market.get("provider_active")
+        and strategy_market.get("futures_candle_count", 0) > 0
+    )
 
     return {
-        "status": "HEALTHY",
+        "status": "HEALTHY" if broker_connected and strategy_ready else "DEGRADED",
         "timestamp": utc_now().isoformat(),
         "services": {
             "api_gateway": "ONLINE",
-            "broker_session": "CONNECTED" if session_status.get("connected") else "DISCONNECTED",
+            "broker_session": "CONNECTED" if broker_connected else "DISCONNECTED",
             "market_feed": feed_status["status"],
+            "strategy_scheduler": "RUNNING" if strategy_scheduler.get("running") else "STOPPED",
+            "strategy_market_data": "READY" if strategy_ready else "NOT_READY",
+            "strategy_market_data_reason": strategy_market.get("last_error"),
             "order_feed": "LIVE",
             "risk_engine": "ACTIVE",
             "oms": "ACTIVE",
