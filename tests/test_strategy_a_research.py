@@ -1,4 +1,7 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
 
 from libs.contracts.models import Candle
 from services.historical.strategy_a_entry_timing import (
@@ -21,7 +24,7 @@ from services.historical.strategy_a_research import (
     _walk_forward_folds,
 )
 from services.strategy.futures_signal import FuturesFeatureSnapshot
-from services.strategy.models import StrategyTunablesConfig
+from services.strategy.models import StrategyDirection, StrategyTunablesConfig
 
 
 UTC = timezone.utc
