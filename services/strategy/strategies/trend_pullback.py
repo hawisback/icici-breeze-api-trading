@@ -215,23 +215,103 @@ class TrendPullbackStrategy:
                 )
         return raw, FuturesFeatureEngine.build(raw, as_of=as_of)
 
-    def _trend_ok(self, feature: FuturesFeatureSnapshot, direction: StrategyDirection) -> tuple[bool, str]:
+    def _trend_components(
+        self,
+        raw: Sequence[Candle],
+        feature: FuturesFeatureSnapshot,
+        direction: StrategyDirection,
+    ) -> dict[str, Any]:
+        ema_order_ok = (
+            feature.ema20 > feature.ema50
+            if direction is StrategyDirection.CALL
+            else feature.ema20 < feature.ema50
+        )
+        di_ok = (
+            feature.plus_di14 > feature.minus_di14
+            if direction is StrategyDirection.CALL
+            else feature.minus_di14 > feature.plus_di14
+        )
+        ema_separation_ok = (
+            feature.atr14 > 0
+            and abs(feature.ema20 - feature.ema50)
+            >= self.config.ema_separation_min_atr * feature.atr14
+        )
+
+        current_index = next(
+            (
+                index
+                for index, candle in enumerate(raw)
+                if candle.end_time == feature.candle_timestamp
+                and candle.instrument_id == feature.contract_id
+            ),
+            -1,
+        )
+        context_available = current_index >= 2 and feature.atr14 > 0
+        adx_delta_2bars: float | None = None
+        ema20_directional_slope_atr: float | None = None
+        adx_decay_ok = False
+        ema_slope_ok = False
+
+        if context_available:
+            previous_bar = raw[current_index - 1]
+            previous2_bar = raw[current_index - 2]
+            previous_feature = FuturesFeatureEngine.build(
+                raw[:current_index],
+                as_of=previous_bar.end_time,
+            )
+            previous2_feature = FuturesFeatureEngine.build(
+                raw[: current_index - 1],
+                as_of=previous2_bar.end_time,
+            )
+            adx_delta_2bars = feature.adx14 - previous2_feature.adx14
+            ema_slope = (feature.ema20 - previous_feature.ema20) / feature.atr14
+            if direction is StrategyDirection.PUT:
+                ema_slope = -ema_slope
+            ema20_directional_slope_atr = ema_slope
+            adx_decay_ok = (
+                adx_delta_2bars + 1e-12
+                >= self.config.momentum_adx_min_delta_2bars
+            )
+            ema_slope_ok = (
+                ema20_directional_slope_atr + 1e-12
+                >= self.config.momentum_ema20_slope_min_atr
+                and ema20_directional_slope_atr
+                < self.config.momentum_ema20_slope_max_atr - 1e-12
+            )
+
+        return {
+            "ema_order": ema_order_ok,
+            "di_direction": di_ok,
+            "ema_separation": ema_separation_ok,
+            "momentum_context_available": context_available,
+            "adx_delta_2bars": adx_delta_2bars,
+            "adx_decay_ok": adx_decay_ok,
+            "ema20_directional_slope_atr": ema20_directional_slope_atr,
+            "ema_slope_ok": ema_slope_ok,
+        }
+
+    def _trend_ok(
+        self,
+        raw: Sequence[Candle],
+        feature: FuturesFeatureSnapshot,
+        direction: StrategyDirection,
+    ) -> tuple[bool, str]:
         if feature.atr14 <= 0:
             return False, "ATR_UNAVAILABLE"
-        aligned = (
-            feature.ema20 > feature.ema50
-            and feature.plus_di14 > feature.minus_di14
-            and feature.adx14 >= self.config.adx_threshold
-            and abs(feature.ema20 - feature.ema50) >= self.config.ema_separation_min_atr * feature.atr14
-        )
-        if direction is StrategyDirection.PUT:
-            aligned = (
-                feature.ema20 < feature.ema50
-                and feature.minus_di14 > feature.plus_di14
-                and feature.adx14 >= self.config.adx_threshold
-                and abs(feature.ema20 - feature.ema50) >= self.config.ema_separation_min_atr * feature.atr14
-            )
-        return (True, "TREND_CONFIRMED") if aligned else (False, "TREND_REGIME_NOT_CONFIRMED")
+        components = self._trend_components(raw, feature, direction)
+        if not components["momentum_context_available"]:
+            return False, "MOMENTUM_CONTEXT_UNAVAILABLE"
+        if not (
+            components["ema_order"]
+            and components["di_direction"]
+            and components["ema_separation"]
+        ):
+            return False, "TREND_REGIME_NOT_CONFIRMED"
+        if not components["adx_decay_ok"]:
+            return False, "MOMENTUM_ADX_DECAY_TOO_FAST"
+        if not components["ema_slope_ok"]:
+            return False, "MOMENTUM_EMA_SLOPE_OUT_OF_BAND"
+        return True, "TREND_CONFIRMED"
 
     def _confirmation_ok(self, feature: FuturesFeatureSnapshot, direction: StrategyDirection) -> tuple[bool, str]:
         range_ = feature.high - feature.low
@@ -348,9 +428,10 @@ class TrendPullbackStrategy:
             },
         )
 
-    def _diagnostic(self, feature: FuturesFeatureSnapshot, direction: StrategyDirection, reason: str, setup: StrategySetup | None = None) -> StrategyTriggerDiagnostics:
+    def _diagnostic(self, raw: Sequence[Candle], feature: FuturesFeatureSnapshot, direction: StrategyDirection, reason: str, setup: StrategySetup | None = None) -> StrategyTriggerDiagnostics:
         option = OptionType.CALL if direction is StrategyDirection.CALL else OptionType.PUT
-        trend_ok, trend_reason = self._trend_ok(feature, direction)
+        trend_components = self._trend_components(raw, feature, direction)
+        trend_ok, trend_reason = self._trend_ok(raw, feature, direction)
         confirmation_ok, confirmation_reason = self._confirmation_ok(feature, direction)
         confluence_ok, references, level, confluence_reason = self._confluence(feature, direction)
         active_setup = setup if setup is not None and setup.direction is direction else None
@@ -364,17 +445,19 @@ class TrendPullbackStrategy:
         body_ratio = abs(feature.close - feature.open) / range_points if range_points > 0 else 0.0
         range_atr = range_points / feature.atr14 if feature.atr14 > 0 else 0.0
         if direction is StrategyDirection.CALL:
-            ema_order_ok = feature.ema20 > feature.ema50
-            di_ok = feature.plus_di14 > feature.minus_di14
             candle_direction_ok = feature.close > feature.open
             close_location_ok = range_points > 0 and (feature.high - feature.close) / range_points <= self.config.confirmation_close_location_pct
         else:
-            ema_order_ok = feature.ema20 < feature.ema50
-            di_ok = feature.minus_di14 > feature.plus_di14
             candle_direction_ok = feature.close < feature.open
             close_location_ok = range_points > 0 and (feature.close - feature.low) / range_points <= self.config.confirmation_close_location_pct
-        adx_ok = feature.adx14 >= self.config.adx_threshold
-        ema_separation_ok = feature.atr14 > 0 and abs(feature.ema20 - feature.ema50) >= self.config.ema_separation_min_atr * feature.atr14
+        ema_order_ok = bool(trend_components["ema_order"])
+        di_ok = bool(trend_components["di_direction"])
+        ema_separation_ok = bool(trend_components["ema_separation"])
+        momentum_context_ok = bool(trend_components["momentum_context_available"])
+        adx_decay_ok = bool(trend_components["adx_decay_ok"])
+        ema_slope_ok = bool(trend_components["ema_slope_ok"])
+        adx_delta_2bars = trend_components["adx_delta_2bars"]
+        ema20_directional_slope_atr = trend_components["ema20_directional_slope_atr"]
         body_ok = range_points > 0 and body_ratio >= self.config.confirmation_min_body_ratio
         range_ok = feature.atr14 > 0 and range_points <= self.config.confirmation_max_range_atr * feature.atr14
         sr_present = level is not None
@@ -453,7 +536,7 @@ class TrendPullbackStrategy:
                 "atr": feature.atr14, "vwap": feature.session_vwap,
                 "active_support": feature.support, "active_resistance": feature.resistance,
                 "rejection_reason": reason,
-                "strategy_a_v2": {
+                "strategy_a_v3": {
                     "data": {
                         "contract": feature.contract_id,
                         "completed_candle_timestamp": feature.candle_timestamp.isoformat(),
@@ -463,11 +546,15 @@ class TrendPullbackStrategy:
                         "passed": trend_ok, "reason": trend_reason,
                         "ema20": feature.ema20, "ema50": feature.ema50,
                         "adx": feature.adx14, "plus_di": feature.plus_di14, "minus_di": feature.minus_di14,
+                        "adx_delta_2bars": adx_delta_2bars,
+                        "ema20_directional_slope_atr": ema20_directional_slope_atr,
                         "components": {
                             "ema_order": ema_order_ok,
                             "di_direction": di_ok,
-                            "adx_threshold": adx_ok,
                             "ema_separation": ema_separation_ok,
+                            "momentum_context": momentum_context_ok,
+                            "adx_decay": adx_decay_ok,
+                            "ema20_slope": ema_slope_ok,
                         },
                     },
                     "confluence": {
@@ -514,7 +601,7 @@ class TrendPullbackStrategy:
         if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
             as_of = None
         try:
-            _, feature = self._features_for_input(source, as_of)
+            raw, feature = self._features_for_input(source, as_of)
         except ValueError as exc:
             message = str(exc)
             reason = "STALE_FUTURES_DATA" if message.startswith("STALE_FUTURES_DATA:") else "INCOMPLETE_FUTURES_DATA"
@@ -591,7 +678,7 @@ class TrendPullbackStrategy:
             self.last_event = StrategyEvent(event="REJECTED", timestamp=feature.candle_timestamp, reason="SETUP_SESSION_CLOSED")
             return None
         for direction in (StrategyDirection.CALL, StrategyDirection.PUT):
-            trend_ok, trend_reason = self._trend_ok(feature, direction)
+            trend_ok, trend_reason = self._trend_ok(raw, feature, direction)
             if not trend_ok:
                 continue
             conf_ok, conf_reason = self._confirmation_ok(feature, direction)
@@ -615,12 +702,12 @@ class TrendPullbackStrategy:
 
     def evaluate_replay_trigger(self, direction: TradeDirection, features: Any, candles_5m: Sequence[Candle], candles_15m: Sequence[Candle], futures_candles: Sequence[Candle] | None = None, overrides: ThresholdOverrides | None = None, **_: Any) -> tuple[StrategySignal | None, StrategyTriggerDiagnostics]:
         signal = self.evaluate(features, candles_5m, candles_15m, futures_candles=futures_candles, overrides=overrides)
-        _, feature = self._features_for_input(list(futures_candles or []), getattr(features, "timestamp", None))
-        return signal, self._diagnostic(feature, StrategyDirection.CALL if direction is TradeDirection.BULLISH else StrategyDirection.PUT, self.last_event.reason if self.last_event else "NO_DECISION", self.snapshot.setup)
+        raw, feature = self._features_for_input(list(futures_candles or []), getattr(features, "timestamp", None))
+        return signal, self._diagnostic(raw, feature, StrategyDirection.CALL if direction is TradeDirection.BULLISH else StrategyDirection.PUT, self.last_event.reason if self.last_event else "NO_DECISION", self.snapshot.setup)
 
     def diagnose(self, features: Any, candles_5m: Sequence[Candle], candles_15m: Sequence[Candle], overrides: ThresholdOverrides | None = None, futures_candles: Sequence[Candle] | None = None) -> list[StrategyTriggerDiagnostics]:
         try:
-            _, feature = self._features_for_input(list(futures_candles or []), getattr(features, "timestamp", None))
+            raw, feature = self._features_for_input(list(futures_candles or []), getattr(features, "timestamp", None))
         except ValueError as exc:
             timestamp = getattr(features, "timestamp", None)
             if not isinstance(timestamp, datetime) or timestamp.tzinfo is None or timestamp.utcoffset() is None:
@@ -647,10 +734,10 @@ class TrendPullbackStrategy:
                 "STALE_FUTURES_DATA" if message.startswith("STALE_FUTURES_DATA:")
                 else "FUTURES_DATA_UNAVAILABLE"
             )
-            return [self._diagnostic(feature, direction, reason, self.snapshot.setup) for direction in (StrategyDirection.CALL, StrategyDirection.PUT)]
+            return [self._diagnostic([], feature, direction, reason, self.snapshot.setup) for direction in (StrategyDirection.CALL, StrategyDirection.PUT)]
         result = []
         for direction in (StrategyDirection.CALL, StrategyDirection.PUT):
-            trend_ok, trend_reason = self._trend_ok(feature, direction)
+            trend_ok, trend_reason = self._trend_ok(raw, feature, direction)
             conf_ok, conf_reason = self._confirmation_ok(feature, direction)
             confluence_ok, references, level, confluence_reason = self._confluence(feature, direction)
             prospective_setup = None
@@ -672,5 +759,5 @@ class TrendPullbackStrategy:
                 if self.snapshot.setup is not None and self.snapshot.setup.direction is direction
                 else prospective_setup
             )
-            result.append(self._diagnostic(feature, direction, reason, setup_for_direction))
+            result.append(self._diagnostic(raw, feature, direction, reason, setup_for_direction))
         return result
