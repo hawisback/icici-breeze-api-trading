@@ -5,6 +5,10 @@ from services.historical.strategy_a_entry_timing import (
     build_entry_timing_report,
     enrich_rows,
 )
+from services.historical.strategy_a_v3_momentum_validation import (
+    _momentum_context,
+    _variant_pass,
+)
 from services.historical.strategy_a_v3_candidate_research import (
     build_report as build_v3_candidate_report,
     candidate_catalog,
@@ -372,3 +376,50 @@ def test_v3_walk_forward_can_abstain_instead_of_selecting_negative_train_variant
     assert report["fold_count"] == 1
     assert report["folds"][0]["selection"] == "ABSTAIN"
     assert report["adaptive_selection_out_of_sample"]["triggered_rows"] == 0
+
+
+def test_v3_momentum_context_uses_true_previous_bars_and_directional_slope():
+    current = SimpleNamespace(adx14=24.0, ema20=101.0, atr14=2.0)
+    previous = SimpleNamespace(adx14=25.0, ema20=100.8, atr14=2.0)
+    previous2 = SimpleNamespace(adx14=27.0, ema20=100.5, atr14=2.0)
+
+    call_ctx = _momentum_context(current, previous, previous2, StrategyDirection.CALL)
+    put_ctx = _momentum_context(current, previous, previous2, StrategyDirection.PUT)
+
+    assert call_ctx["adx_delta_2bars"] == -3.0
+    assert call_ctx["ema20_directional_slope_atr_1bar"] == pytest.approx(0.1)
+    assert put_ctx["ema20_directional_slope_atr_1bar"] == pytest.approx(-0.1)
+
+
+def test_v3_guard_requires_non_collapsing_adx_and_non_steep_directional_slope():
+    row = _research_row()
+    row["baseline_components"] = {
+        "ema_order": True,
+        "di_direction": True,
+        "adx": False,
+        "ema_separation": True,
+        "confirmation_direction": True,
+        "confirmation_body": True,
+        "confirmation_close_location": True,
+        "confirmation_range": True,
+        "sr_present": True,
+        "sr_touch": True,
+        "ema_or_vwap_near": True,
+        "minimum_stop_distance": True,
+        "maximum_stop_distance": True,
+        "opposing_sr_room": True,
+    }
+    row["momentum_context"] = {
+        "adx_delta_2bars": -1.5,
+        "ema20_directional_slope_atr_1bar": 0.10,
+    }
+    row["timestamp"] = "2026-09-21T05:00:00+00:00"
+
+    assert _variant_pass(row, "guard_d2_m2_slope_0_015") is True
+
+    row["momentum_context"]["adx_delta_2bars"] = -2.1
+    assert _variant_pass(row, "guard_d2_m2_slope_0_015") is False
+
+    row["momentum_context"]["adx_delta_2bars"] = -1.5
+    row["momentum_context"]["ema20_directional_slope_atr_1bar"] = 0.16
+    assert _variant_pass(row, "guard_d2_m2_slope_0_015") is False
