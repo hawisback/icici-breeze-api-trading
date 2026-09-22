@@ -99,6 +99,10 @@ def _audit_session(conn: Any, day: Any, *, source: str, config: StrategyTunables
             "event_counts": {},
             "events": [],
             "signals": [],
+            "setup_count": 0,
+            "signal_count": 0,
+            "final_state": "FLAT",
+            "skip_reason": "NO_ACTIVE_FUTURES_CONTRACT",
         }
 
     warmup_start = datetime.combine(
@@ -211,14 +215,16 @@ def audit_state_machine(
     signal_dates: list[str] = []
     for session in session_reports:
         aggregate_events.update(session["event_counts"])
-        if session["setup_count"]:
+        setup_count = int(session.get("setup_count", 0))
+        signal_count = int(session.get("signal_count", 0))
+        if setup_count:
             setup_dates.append(session["date"])
-        if session["signal_count"]:
+        if signal_count:
             signal_dates.append(session["date"])
-            total_signals += int(session["signal_count"])
+            total_signals += signal_count
 
     return {
-        "audit_type": "STRATEGY_A_V2_STATE_MACHINE_READ_ONLY",
+        "audit_type": "STRATEGY_A_V3_STATE_MACHINE_READ_ONLY",
         "db_path": str(db_path.resolve()),
         "source": source.upper(),
         "sessions_requested": sessions,
@@ -232,7 +238,7 @@ def audit_state_machine(
         },
         "aggregate": {
             "event_counts": dict(aggregate_events),
-            "setup_count": sum(int(session["setup_count"]) for session in session_reports),
+            "setup_count": sum(int(session.get("setup_count", 0)) for session in session_reports),
             "signal_count": total_signals,
             "setup_dates": setup_dates,
             "signal_dates": signal_dates,
@@ -243,7 +249,7 @@ def audit_state_machine(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Read-only Strategy A V2 state-machine/trigger audit"
+        description="Read-only Strategy A V3 state-machine/trigger audit"
     )
     parser.add_argument("--db-path", type=Path, default=_default_db_path())
     parser.add_argument("--sessions", type=int, default=10)
