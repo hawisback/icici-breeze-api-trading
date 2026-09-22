@@ -266,13 +266,13 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
         {showOverrides && (
           <div className="mt-4 pt-4 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 bg-slate-950/60 p-4 rounded-lg border border-slate-800/80">
             <div className="sm:col-span-2 lg:col-span-3 rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-3 py-2 text-[11px] text-slate-300">
-              Strategy A V2 signal override: only the ADX target below changes the V2 evaluator.
-              RVOL, Strategy B confirmation/box controls, and the premium cap do not change Strategy A V2 signal generation.
+              Strategy A V3 has no hard ADX-floor what-if override. Its momentum-health gate comes from the replay configuration.
+              RVOL, Strategy B confirmation/box controls, legacy ADX compatibility, and the premium cap do not change Strategy A V3 signal generation.
             </div>
             {/* ADX Threshold */}
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-slate-300 font-medium">Strategy A V2 ADX Target</span>
+                <span className="text-slate-300 font-medium">Legacy ADX Compatibility (not A V3)</span>
                 <span className="font-bold text-indigo-400">{adxThreshold} pts</span>
               </div>
               <input
@@ -281,8 +281,8 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 max="35"
                 step="1"
                 value={adxThreshold}
-                onChange={(e) => setAdxThreshold(Number(e.target.value))}
-                className="w-full h-1.5 bg-slate-800 rounded-lg cursor-pointer accent-indigo-400"
+                disabled
+                className="w-full h-1.5 bg-slate-800 rounded-lg cursor-not-allowed opacity-50 accent-indigo-400"
               />
             </div>
 
@@ -303,12 +303,12 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               />
             </div>
 
-            {/* Strategy A V2 confirmation contract */}
+            {/* Strategy A V3 confirmation contract */}
             <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-2.5">
-              <div className="text-xs text-slate-300 font-medium">Strategy A V2 Confirmation</div>
+              <div className="text-xs text-slate-300 font-medium">Strategy A V3 Confirmation</div>
               <div className="text-[10px] text-slate-400 mt-1">
                 Fixed contract: body ≥ 40%, directional close location ≤ 30%, range ≤ 1.50 ATR.
-                The legacy confirmation-score slider does not apply to Strategy A V2.
+                The legacy confirmation-score slider does not apply to Strategy A V3.
               </div>
             </div>
 
