@@ -194,11 +194,12 @@ def audit_state_machine(
     *,
     sessions: int = 10,
     source: str = "BREEZE",
+    config: StrategyTunablesConfig | None = None,
 ) -> dict[str, Any]:
     if sessions < 1:
         raise ValueError("sessions must be at least 1")
 
-    config = StrategyTunablesConfig()
+    config = config or StrategyTunablesConfig()
     conn = _open_read_only(db_path)
     try:
         dates = _latest_spot_session_dates(conn, sessions=sessions, source=source)
