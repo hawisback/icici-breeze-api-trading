@@ -159,13 +159,15 @@ class PositionManager:
         option_price = float(current_option_price or 0.0)
         if option_price > 0:
             trade.current_option_price = option_price
-        trade.current_r = round(
-            (current_underlying_price - entry_price) / initial_r
+        directional_points = (
+            current_underlying_price - entry_price
             if trade.direction == TradeDirection.BULLISH
-            else (entry_price - current_underlying_price) / initial_r,
-            4,
+            else entry_price - current_underlying_price
         )
+        trade.current_r = round(directional_points / initial_r, 4)
         trade.peak_r = max(trade.peak_r, trade.current_r)
+        trade.mfe_points = max(trade.mfe_points, directional_points)
+        trade.mae_points = min(trade.mae_points, directional_points)
         if option_price > 0:
             trade.unrealized_pnl = round((option_price - trade.entry_option_price) * trade.quantity, 2)
         if as_of is not None and self.is_strategy_a_force_exit_time(as_of):
