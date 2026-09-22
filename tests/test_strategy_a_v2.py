@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from libs.contracts.models import Candle
 from services.strategy.contract_selector import ContractSelector, trading_sessions_remaining
-from services.strategy.futures_signal import FuturesContractResolver, FuturesFeatureEngine, aggregate_completed_15m
+from services.strategy.futures_signal import FuturesContractResolver, FuturesFeatureEngine, FuturesFeatureSnapshot, aggregate_completed_15m
 from services.strategy.models import (
     OptionSelectionConfig,
     OptionType,
