@@ -142,7 +142,7 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
           <div className="text-[11px] text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
             <span className="flex items-center gap-1.5">
               <Layers className="w-3.5 h-3.5 text-cyan-400" />
-              Option Cap
+              Strategy B Cap
             </span>
             <span className="text-[9px] text-cyan-400 opacity-0 group-hover:opacity-100 transition">Tune ⚡</span>
           </div>
@@ -434,69 +434,57 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
 
       {/* 4. Strategy A & Strategy B Live Setup Condition Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        {/* Strategy A Card */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg">
+        {/* Strategy A V3 Card */}
+        <div className="bg-slate-900/90 border border-cyan-900/60 rounded-xl p-5 shadow-lg">
           <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
             <div>
-              <div className="text-xs font-bold text-indigo-400 uppercase tracking-wider">Strategy A (Primary)</div>
-              <h4 className="text-base font-bold text-slate-100">NIFTY Trend-Pullback Confluence</h4>
+              <div className="text-xs font-bold text-cyan-400 uppercase tracking-wider">Strategy A V3 (Primary)</div>
+              <h4 className="text-base font-bold text-slate-100">NIFTY Futures Trend-Pullback Momentum</h4>
             </div>
             <div className="text-right">
-              <span
-                className={`px-2.5 py-1 rounded text-xs font-bold ${
-                  strategies.trend_pullback.state === "TRIGGERED"
-                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 animate-pulse"
-                    : "bg-slate-800 text-slate-300"
-                }`}
-              >
+              <span className={`px-2.5 py-1 rounded text-xs font-bold ${
+                strategies.trend_pullback.state === "TRIGGERED"
+                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 animate-pulse"
+                  : "bg-slate-800 text-slate-300"
+              }`}>
                 {strategies.trend_pullback.state}
               </span>
             </div>
           </div>
 
           <p className="text-xs text-slate-400 mb-4">
-            Uses completed 15-minute NIFTY futures bars only for signal and structure. A qualified EMA20/EMA50 + ADX trend must form a confluence pullback, confirmation bar and buffered trigger before option execution can confirm ENTERED.
+            Signal and structure are driven only by completed 15-minute NIFTY futures bars. V3 has no hard ADX floor; trend quality is gated by EMA/DI alignment plus momentum-health decay and directional EMA20 slope.
           </p>
 
           <div className="space-y-2 text-xs">
             <div className="flex items-center justify-between p-2 bg-slate-950/60 rounded border border-slate-800/60">
-              <span className="text-slate-300">15m Futures Trend Regime (EMA20 / EMA50)</span>
-              <span className={features.ema20_15m > features.ema50_15m ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                {features.ema20_15m > features.ema50_15m ? "BULLISH PASS" : "NEUTRAL/BEAR"}
+              <span className="text-slate-300">Trend structure</span>
+              <span className="text-cyan-300 font-bold">EMA20/50 + DI · sep ≥ {config.tunables.ema_separation_min_atr.toFixed(2)} ATR</span>
+            </div>
+            <div className="flex items-center justify-between p-2 bg-slate-950/60 rounded border border-slate-800/60">
+              <span className="text-slate-300">V3 momentum health</span>
+              <span className="text-cyan-300 font-bold">
+                ADX Δ2 ≥ {config.tunables.momentum_adx_min_delta_2bars.toFixed(1)} · EMA20 slope [{config.tunables.momentum_ema20_slope_min_atr.toFixed(2)}, {config.tunables.momentum_ema20_slope_max_atr.toFixed(2)}) ATR
               </span>
             </div>
-
             <div className="flex items-center justify-between p-2 bg-slate-950/60 rounded border border-slate-800/60">
-              <span className="text-slate-300">15m Futures Trend Strength (ADX14 ≥ {config.tunables.adx_threshold})</span>
-              <span className={features.adx_15m >= config.tunables.adx_threshold ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                ADX {features.adx_15m} ({features.adx_15m >= config.tunables.adx_threshold ? "PASS" : "WAIT"})
-              </span>
+              <span className="text-slate-300">Pullback confluence</span>
+              <span className="text-cyan-300 font-bold">S/R zone {config.tunables.sr_zone_atr.toFixed(2)} ATR · EMA/VWAP {config.tunables.confluence_distance_atr.toFixed(2)} ATR</span>
             </div>
-
             <div className="flex items-center justify-between p-2 bg-slate-950/60 rounded border border-slate-800/60">
-              <span className="text-slate-300">Futures &gt; Session Futures VWAP</span>
-              <span className={features.futures_price > features.futures_vwap ? "text-emerald-400 font-bold" : "text-slate-500"}>
-                {features.futures_price > features.futures_vwap ? "ABOVE VWAP" : "BELOW VWAP"}
-              </span>
+              <span className="text-slate-300">Confirmation candle</span>
+              <span className="text-cyan-300 font-bold">Body ≥ {config.tunables.confirmation_min_body_ratio.toFixed(2)} · close ≤ {(config.tunables.confirmation_close_location_pct * 100).toFixed(0)}% · range ≤ {config.tunables.confirmation_max_range_atr.toFixed(2)} ATR</span>
             </div>
-
             <div className="flex items-center justify-between p-2 bg-slate-950/60 rounded border border-slate-800/60">
-              <span className="text-slate-300">Derivatives Confirmation Score &gt;= +2.0</span>
-              <span className={features.bull_derivatives_score >= 2.0 ? "text-emerald-400 font-bold" : "text-amber-400"}>
-                +{features.bull_derivatives_score.toFixed(1)} / +2.0 REQ
-              </span>
+              <span className="text-slate-300">Structural risk</span>
+              <span className="text-cyan-300 font-bold">{config.tunables.minimum_stop_distance_atr.toFixed(2)}–{config.tunables.maximum_stop_distance_atr.toFixed(2)} ATR · opposing room ≥ {config.tunables.minimum_room_to_opposing_sr_r.toFixed(2)}R</span>
             </div>
-
             <div className="flex items-center justify-between p-2 bg-slate-950/60 rounded border border-slate-800/60">
-              <span className="text-slate-300">Pullback Depth &lt;= 60% of Impulse Distance</span>
-              <span className="text-emerald-400 font-bold">MONITORED ON 5m</span>
-            </div>
-
-            <div className="flex items-center justify-between p-2 bg-slate-950/60 rounded border border-slate-800/60">
-              <span className="text-slate-300">Structural Stop & R-Band (0.50 - 1.50 ATR)</span>
-              <span className="text-emerald-400 font-bold">CALCULATED AT TRIGGER</span>
+              <span className="text-slate-300">Session / trigger lifecycle</span>
+              <span className="text-cyan-300 font-bold">{config.tunables.entry_session_start}–{config.tunables.entry_session_end} · {config.tunables.trigger_validity_bars} bars · force {config.tunables.forced_exit_time}</span>
             </div>
           </div>
+          <p className="text-[10px] text-slate-500 mt-3">Directional pass/fail values are shown in the Live Trigger Radar below.</p>
         </div>
 
         {/* Strategy B Card */}
