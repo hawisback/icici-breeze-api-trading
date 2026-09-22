@@ -51,10 +51,27 @@ async def test_shadow_monitor_no_active_futures_is_passive():
     repo = _repo()
     monitor = StrategyCShadowMonitor(repository=repo)
     await monitor.initialize()
-    result = await monitor.observe(active_futures_instrument=None)
+    result = await monitor.observe(
+        active_futures_instrument=None,
+        now=datetime(2026, 9, 23, 4, 0, tzinfo=UTC),
+    )
     assert result["status"] == "NO_ACTIVE_FUTURES_DATA"
     repo.save_option_chain_snapshot.assert_not_awaited()
     repo.save_option_quote.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shadow_monitor_refuses_freeze_day_observation():
+    repo = _repo()
+    monitor = StrategyCShadowMonitor(repository=repo)
+    await monitor.initialize()
+    result = await monitor.observe(
+        active_futures_instrument="INST-NIFTY-FUT-2026-09-29",
+        now=datetime(2026, 9, 22, 10, 0, tzinfo=UTC),
+    )
+    assert result["status"] == "WAITING_FOR_POST_FREEZE_SESSION"
+    assert result["freeze_date"] == "2026-09-22"
+    repo.save_option_chain_snapshot.assert_not_awaited()
 
 
 @pytest.mark.asyncio
