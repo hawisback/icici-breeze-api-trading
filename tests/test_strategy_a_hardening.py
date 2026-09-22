@@ -312,13 +312,43 @@ def test_pivot_is_absent_until_two_right_confirmation_bars_and_confirmed_at_seco
     assert pivots and pivots[0].confirmed_at == make(5)[4].end_time
 
 
-def test_phase8_trend_di_adx_and_ema_separation_exact_boundaries():
+def test_phase8_trend_di_momentum_and_ema_separation_boundaries():
     strategy = TrendPullbackStrategy()
-    base = dict(contract_id="FUT", candle_timestamp=datetime(2026, 9, 21, 10, 0, tzinfo=UTC), candle_start=datetime(2026, 9, 21, 9, 45, tzinfo=UTC), open=100, high=110, low=90, close=108, ema20=101, ema50=100, adx14=22, plus_di14=30, minus_di14=10, atr14=10, session_vwap=100, bar_index=10)
-    assert strategy._trend_ok(FuturesFeatureSnapshot(**base), StrategyDirection.CALL)[0]
-    assert not strategy._trend_ok(FuturesFeatureSnapshot(**{**base, "plus_di14": 10, "minus_di14": 30}), StrategyDirection.CALL)[0]
-    assert not strategy._trend_ok(FuturesFeatureSnapshot(**{**base, "adx14": 21.999}), StrategyDirection.CALL)[0]
-    assert not strategy._trend_ok(FuturesFeatureSnapshot(**{**base, "ema20": 100.999}), StrategyDirection.CALL)[0]
+    feature = FuturesFeatureSnapshot(
+        contract_id="FUT",
+        candle_timestamp=datetime(2026, 9, 21, 10, 0, tzinfo=UTC),
+        candle_start=datetime(2026, 9, 21, 9, 45, tzinfo=UTC),
+        open=100, high=110, low=90, close=108,
+        ema20=101, ema50=100, adx14=18,
+        plus_di14=30, minus_di14=10, atr14=10,
+        session_vwap=100, bar_index=10,
+    )
+    passing = {
+        "ema_order": True,
+        "di_direction": True,
+        "ema_separation": True,
+        "momentum_context_available": True,
+        "adx_delta_2bars": -2.0,
+        "adx_decay_ok": True,
+        "ema20_directional_slope_atr": 0.149,
+        "ema_slope_ok": True,
+    }
+
+    strategy._trend_components = lambda *_args, **_kwargs: dict(passing)
+    assert strategy._trend_ok([], feature, StrategyDirection.CALL) == (True, "TREND_CONFIRMED")
+
+    for key, reason in (
+        ("di_direction", "TREND_REGIME_NOT_CONFIRMED"),
+        ("ema_separation", "TREND_REGIME_NOT_CONFIRMED"),
+        ("adx_decay_ok", "MOMENTUM_ADX_DECAY_TOO_FAST"),
+        ("ema_slope_ok", "MOMENTUM_EMA_SLOPE_OUT_OF_BAND"),
+    ):
+        components = dict(passing)
+        components[key] = False
+        strategy._trend_components = lambda *_args, _components=components, **_kwargs: dict(_components)
+        passed, blocker = strategy._trend_ok([], feature, StrategyDirection.CALL)
+        assert passed is False
+        assert blocker == reason
 
 
 def test_phase8_confirmation_exact_body_close_location_zero_range_and_range_boundaries():
