@@ -18,7 +18,7 @@ import argparse
 import json
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 from statistics import mean, median
 from typing import Any, Callable, Sequence
@@ -160,7 +160,7 @@ def _path_label(
     atr = float(current.atr14 or 0.0)
     entry = float(current.close)
     selected = list(future[:horizon_bars])
-    if atr <= 0 or not selected:
+    if atr <= 0 or len(selected) < horizon_bars:
         return {
             "horizon_bars": horizon_bars,
             "mfe_atr": None,
@@ -230,10 +230,12 @@ def _build_rows(db_path: Path, *, source: str, sessions: int) -> tuple[list[dict
                 idx = index_by_end[bar.end_time]
                 current = fmap[bar.end_time]
                 previous = fmap.get(stream[idx - 1].end_time) if idx >= 1 else None
+                forced_exit_minute = time(15, 15).hour * 60 + time(15, 15).minute
                 future = [
                     fmap[item.end_time]
                     for item in stream[idx + 1:]
                     if item.end_time.astimezone(IST).date() == day
+                    and _minute(item.end_time) <= forced_exit_minute
                 ]
                 for direction in ("CALL", "PUT"):
                     row = {
@@ -546,7 +548,9 @@ def build_report(
         ),
         "execution_proxy": (
             "At most two candidate entries per session and at most one direction per completed "
-            "15m bar. Outcomes use conservative target-before-stop labels, not executable option P&L."
+            "15m bar. Each 30/60/90-minute label requires the full horizon before the 15:15 "
+            "intraday force-exit boundary. Outcomes use conservative target-before-stop labels, "
+            "not executable option P&L."
         ),
         "frequency_edge_frontier": frontier,
         "candidates": candidate_reports,
