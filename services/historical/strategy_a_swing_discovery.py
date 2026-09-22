@@ -396,11 +396,11 @@ def _score_row(row: dict[str, Any], *, horizon: str, target_key: str) -> float:
     target, stop = target_stop[target_key]
     target_r = target / stop
     if bool(label[target_key]):
-        return target_r
+        return round(target_r, 6)
     close_return_atr = label.get("close_return_atr")
     if close_return_atr is None:
         raise ValueError("score requested without a complete horizon label")
-    return max(-1.0, min(target_r, float(close_return_atr) / stop))
+    return round(max(-1.0, min(target_r, float(close_return_atr) / stop)), 6)
 
 
 def _dedupe_daily(rows: Sequence[dict[str, Any]], *, max_per_day: int = 2) -> list[dict[str, Any]]:
