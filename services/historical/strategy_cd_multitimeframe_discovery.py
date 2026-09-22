@@ -586,13 +586,16 @@ def _period_metrics(trades: Sequence[Trade]) -> dict[str, Any]:
 
 
 def _frequency_band(trades_per_session: float) -> str:
+    """Coarse opportunity-frequency label; numeric rate remains authoritative."""
+    if trades_per_session < 0.15:
+        return "<1 trade / 5 sessions"
     if trades_per_session < 0.27:
         return "~1 trade / 5 sessions"
     if trades_per_session < 0.42:
         return "~1 trade / 3 sessions"
     if trades_per_session < 0.75:
         return "~1 trade / 2 sessions"
-    if trades_per_session < 1.40:
+    if trades_per_session < 1.25:
         return "~1 trade / session"
     return "~1-2 trades / session"
 
