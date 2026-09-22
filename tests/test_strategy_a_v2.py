@@ -26,6 +26,7 @@ from services.strategy.replay_strategy_a import StrategyAReplayEngine, compare_r
 from services.strategy.replay_metadata import build_configuration_snapshot
 from services.strategy.models import AutoTradingConfig, HistoricalReplaySource, SessionTimersConfig, ThresholdOverrides
 from services.strategy.service import StrategyService
+from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from unittest.mock import Mock
 
 
@@ -102,7 +103,7 @@ def test_structural_r_sizing_rejects_missing_delta_without_fallback():
 def test_replay_report_is_versioned_and_comparison_is_event_level():
     start = datetime(2026, 9, 20, 9, 15, tzinfo=UTC)
     report = StrategyAReplayEngine().replay([candle(start + timedelta(minutes=15 * i), 100 + i) for i in range(55)])
-    assert report.strategy_version == "trend_pullback_confluence_v1"
+    assert report.strategy_version == "trend_pullback_momentum_v3"
     assert report.futures_contracts == ["INST-NIFTY-FUT-2026-09-24"]
     assert compare_replay_decisions(report.decisions, report.decisions) == []
 
@@ -140,6 +141,9 @@ def test_legacy_configuration_sentinel_propagates_without_hidden_defaults():
     service.config = AutoTradingConfig(tunables=config)
     service._sync_subcomponents()
     assert service.strategy_a.config.adx_threshold == config.adx_threshold
+    assert service.strategy_a.config.momentum_adx_min_delta_2bars == -2.0
+    assert service.strategy_a.config.momentum_ema20_slope_min_atr == 0.0
+    assert service.strategy_a.config.momentum_ema20_slope_max_atr == 0.15
     assert service.simulation_engine.tunables.legacy_strategy_a_adx_threshold == 27.0
     metadata = build_configuration_snapshot(start_date="2026-09-20", end_date="2026-09-20", instrument_id="INST-NIFTY-FUT-2026-09-24", historical_source=HistoricalReplaySource.BREEZE, bypass_entry_window=False, strategy_a_enabled=True, overrides=ThresholdOverrides(), tunables=config, session=SessionTimersConfig())
     assert metadata.strategy_a["compatibility_config"]["legacy_fields"]["adx_threshold"] == 27.0
@@ -181,3 +185,78 @@ def test_wilder_adx14_remains_unavailable_until_seed_is_complete():
     adx, plus_di, minus_di = FuturesFeatureEngine.adx_di(bars, 14)
     assert adx == 0.0
     assert plus_di > minus_di
+
+
+def _v3_feature(
+    timestamp: datetime,
+    *,
+    ema20: float,
+    ema50: float = 99.0,
+    adx: float = 18.0,
+    plus_di: float = 30.0,
+    minus_di: float = 10.0,
+    atr: float = 2.0,
+) -> FuturesFeatureSnapshot:
+    return FuturesFeatureSnapshot(
+        contract_id="INST-NIFTY-FUT-2026-09-29",
+        candle_timestamp=timestamp,
+        candle_start=timestamp - timedelta(minutes=15),
+        open=100.0,
+        high=102.0,
+        low=99.0,
+        close=101.0,
+        ema20=ema20,
+        ema50=ema50,
+        adx14=adx,
+        plus_di14=plus_di,
+        minus_di14=minus_di,
+        atr14=atr,
+        session_vwap=100.0,
+        support=99.0,
+        resistance=105.0,
+        bar_index=100,
+    )
+
+
+def test_strategy_a_v3_momentum_gate_replaces_hard_adx_floor(monkeypatch):
+    strategy = TrendPullbackStrategy()
+    start = datetime(2026, 9, 21, 4, 45, tzinfo=UTC)
+    raw = [
+        candle(start + timedelta(minutes=15 * i), 100 + i, instrument="INST-NIFTY-FUT-2026-09-29")
+        for i in range(3)
+    ]
+    current = _v3_feature(raw[-1].end_time, ema20=100.2, adx=18.0)
+    previous = _v3_feature(raw[-2].end_time, ema20=100.0, adx=18.2)
+    previous2 = _v3_feature(raw[-3].end_time, ema20=99.9, adx=18.5)
+
+    def fake_build(_bars, *, as_of=None):
+        if as_of == raw[-2].end_time:
+            return previous
+        if as_of == raw[-3].end_time:
+            return previous2
+        raise AssertionError(f"unexpected as_of {as_of}")
+
+    monkeypatch.setattr(FuturesFeatureEngine, "build", staticmethod(fake_build))
+
+    passed, reason = strategy._trend_ok(raw, current, StrategyDirection.CALL)
+    assert current.adx14 < strategy.config.adx_threshold
+    assert passed is True
+    assert reason == "TREND_CONFIRMED"
+
+    too_fast = current.model_copy(update={"adx14": 16.4})
+    passed, reason = strategy._trend_ok(raw, too_fast, StrategyDirection.CALL)
+    assert passed is False
+    assert reason == "MOMENTUM_ADX_DECAY_TOO_FAST"
+
+    too_steep = current.model_copy(update={"ema20": 100.4})
+    passed, reason = strategy._trend_ok(raw, too_steep, StrategyDirection.CALL)
+    assert passed is False
+    assert reason == "MOMENTUM_EMA_SLOPE_OUT_OF_BAND"
+
+
+def test_strategy_a_v3_momentum_config_rejects_inverted_slope_band():
+    with pytest.raises(ValidationError, match="momentum EMA20 slope band"):
+        StrategyTunablesConfig(
+            momentum_ema20_slope_min_atr=0.15,
+            momentum_ema20_slope_max_atr=0.15,
+        )
