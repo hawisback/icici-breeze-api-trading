@@ -441,7 +441,7 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
               </div>
             </div>
           ) : (
-            /* Strategy A V2 Pipeline: broker data -> trend -> confluence -> confirmation -> trigger -> risk */
+            /* Strategy A V3 Pipeline: futures data -> momentum trend -> confluence -> confirmation -> trigger -> risk */
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
               <div className="p-2.5 rounded-lg border border-cyan-500/30 bg-cyan-500/5 text-xs text-slate-300">
                 <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">1. Futures Data</div>
@@ -458,6 +458,9 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
                 <div className="font-bold">{currentStrategy.phase_summary.strategy_a_v2?.trend.passed ? "PASSED" : "WAITING"}</div>
                 <div className="text-[10px] text-slate-400 mt-1">
                   EMA {currentStrategy.phase_summary.strategy_a_v2?.trend.ema20?.toFixed(1) ?? "-"} / {currentStrategy.phase_summary.strategy_a_v2?.trend.ema50?.toFixed(1) ?? "-"} · ADX {currentStrategy.phase_summary.strategy_a_v2?.trend.adx?.toFixed(1) ?? "-"}
+                </div>
+                <div className="text-[10px] text-cyan-400/80 mt-1">
+                  ΔADX(2) {currentStrategy.phase_summary.strategy_a_v2?.trend.adx_delta_2bars?.toFixed(2) ?? "—"} · directional EMA20 slope {currentStrategy.phase_summary.strategy_a_v2?.trend.ema20_directional_slope_atr?.toFixed(3) ?? "—"} ATR
                 </div>
                 <div className="text-[10px] text-slate-500 mt-1">{currentStrategy.phase_summary.strategy_a_v2?.trend.reason}</div>
               </div>
