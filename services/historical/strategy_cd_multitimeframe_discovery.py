@@ -44,6 +44,7 @@ from services.strategy.futures_signal import (
 SETUP_FIRST_END = time(9, 45)
 SETUP_LAST_END = time(14, 45)
 FORCED_EXIT = time(15, 15)
+EPSILON = 1e-9
 FAMILIES = (
     "vwap_reclaim",
     "ema_reclaim_pullback",
@@ -309,7 +310,11 @@ def _risk_ok(entry: float, stop: float, atr: float, config: DiscoveryConfig) -> 
     if atr <= 0:
         return False
     risk_atr = abs(entry - stop) / atr
-    return config.min_risk_atr <= risk_atr <= config.max_risk_atr
+    return (
+        config.min_risk_atr - EPSILON
+        <= risk_atr
+        <= config.max_risk_atr + EPSILON
+    )
 
 
 def _find_trigger(
