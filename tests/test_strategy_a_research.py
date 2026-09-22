@@ -5,6 +5,10 @@ from services.historical.strategy_a_entry_timing import (
     build_entry_timing_report,
     enrich_rows,
 )
+from services.historical.strategy_a_v3_candidate_research import (
+    build_report as build_v3_candidate_report,
+    candidate_catalog,
+)
 from services.historical.strategy_a_research import (
     ResearchVariant,
     _row_passes,
@@ -305,3 +309,66 @@ def test_entry_timing_report_keeps_pre_risk_and_baseline_cohorts_separate():
     assert report["cohorts"]["baseline_ready"]["metrics"]["candidate_rows"] == 0
     assert "adx_change_1bar" in report["cohorts"]["pre_risk"]["dimensions"]
     assert "trigger_delay" in report["cohorts"]["pre_risk"]["dimensions"]
+
+
+def test_v3_candidate_catalog_keeps_baseline_and_momentum_hypotheses_separate():
+    names = [candidate.name for candidate in candidate_catalog()]
+    assert names[0] == "baseline_v2"
+    assert "without_adx_floor" in names
+    assert "without_adx_reject_sharp_decay" in names
+    assert "without_adx_controlled_fade" in names
+    assert "without_adx_moderate_ema_slope" in names
+    assert "confirmation_close_location_20" in names
+
+
+def test_v3_walk_forward_can_abstain_instead_of_selecting_negative_train_variant():
+    rows = []
+    base_components = {
+        "ema_order": True,
+        "di_direction": True,
+        "adx": True,
+        "ema_separation": True,
+        "confirmation_direction": True,
+        "confirmation_body": True,
+        "confirmation_close_location": True,
+        "confirmation_range": True,
+        "sr_present": True,
+        "sr_touch": True,
+        "ema_or_vwap_near": True,
+        "minimum_stop_distance": True,
+        "maximum_stop_distance": True,
+        "opposing_sr_room": True,
+    }
+    # Six sessions: first four train, last two test. Every triggered train row
+    # loses, so a selector that requires positive train expectancy must abstain.
+    for day in range(1, 7):
+        rows.append({
+            "date": f"2026-01-{day:02d}",
+            "direction": "CALL",
+            "adx14": 25.0,
+            "confirmation_close_location_pct": 0.1,
+            "baseline_components": base_components,
+            "baseline_pass": True,
+            "timing": {
+                "adx_delta_2bars": -1.0,
+                "ema20_directional_slope_atr_1bar": 0.1,
+            },
+            "label": {
+                "trigger_status": "TRIGGERED",
+                "t1_first_hit_r": -1.0,
+                "max_favorable_r": 0.2,
+                "max_adverse_r": 1.0,
+                "hit_t1_before_stop": False,
+            },
+        })
+
+    report = build_v3_candidate_report(
+        {"enriched_rows": rows},
+        train_sessions=4,
+        test_sessions=2,
+        min_train_triggers=2,
+    )
+
+    assert report["fold_count"] == 1
+    assert report["folds"][0]["selection"] == "ABSTAIN"
+    assert report["adaptive_selection_out_of_sample"]["triggered_rows"] == 0
