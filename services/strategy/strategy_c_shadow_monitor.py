@@ -273,7 +273,7 @@ class StrategyCShadowMonitor:
                 "chain_snapshot_timestamp": chain.get("captured_at") or chain.get("timestamp") or captured_at,
                 "signal_timestamp": row["entry_time"],
                 "strategy": CANDIDATE_ID,
-                "execution_mode": AutoTradingMode.SHADOW_ONLY.value,
+                "execution_mode": AutoTradingMode.PAPER.value,
                 "direction": row["direction"],
                 "spot_price": float(row["entry_price"]),
                 "expiry": chain.get("expiry"),
@@ -289,22 +289,51 @@ class StrategyCShadowMonitor:
         risk_method = None
         capital_per_lot = None
         entry_executable_price = None
+        paper_status = "SKIPPED"
+        paper_rejection_reason = reason or "CONTRACT_SELECTION_REJECTED"
+        lots = 0
+        quantity = 0
+        risk_budget = None
+        signal_time = datetime.fromisoformat(row["entry_time"].replace("Z", "+00:00"))
+        signal_latency_seconds = max(0.0, (observed_at - signal_time).total_seconds())
+        lifecycle_status = str((row.get("lifecycle") or {}).get("status") or "UNKNOWN")
+
         if selected is not None:
             slippage = float(getattr(self.risk_config, "paper_slippage_points", 0.0) or 0.0)
             entry_executable_price = round(float(selected.ask_price) + slippage, 6)
             capital_per_lot = round(entry_executable_price * int(selected.lot_size), 2)
             if self.risk_sizer is not None:
                 try:
-                    risk_per_lot, risk_method = self.risk_sizer.estimate_option_loss_per_lot(
+                    sizing = self.risk_sizer.size(
                         underlying_entry=float(row["entry_price"]),
                         underlying_stop=float(row["initial_stop"]),
                         option_delta=selected.delta,
                         lot_size=int(selected.lot_size),
                         option_entry=entry_executable_price,
+                        account_equity=float(getattr(self.risk_config, "account_equity", 0.0) or 0.0) or None,
                     )
+                    risk_per_lot = sizing.option_loss_per_lot
+                    risk_method = sizing.method
+                    risk_budget = sizing.risk_budget
+                    lots = int(sizing.lots)
+                    quantity = int(sizing.quantity)
+                    paper_rejection_reason = sizing.rejection_reason
                 except ValueError:
                     risk_per_lot = None
                     risk_method = "UNAVAILABLE"
+                    paper_rejection_reason = "OPTION_RISK_UNAVAILABLE"
+            else:
+                paper_rejection_reason = "RISK_SIZER_UNAVAILABLE"
+
+            if lifecycle_status != "OPEN":
+                paper_rejection_reason = "SIGNAL_ALREADY_RESOLVED_WHEN_OBSERVED"
+            elif signal_latency_seconds > MAX_PAPER_ENTRY_LATENCY_SECONDS:
+                paper_rejection_reason = "STALE_SIGNAL_FOR_PAPER_ENTRY"
+            elif lots < 1 or quantity < 1:
+                paper_rejection_reason = paper_rejection_reason or "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"
+            else:
+                paper_status = "OPEN"
+                paper_rejection_reason = None
 
         tracked = {
             "signal_id": signal_id,
@@ -313,10 +342,18 @@ class StrategyCShadowMonitor:
             "underlying_entry_price": row["entry_price"],
             "underlying_stop": row["initial_stop"],
             "selected_contract": selected_payload,
+            "entry_raw_ask": float(selected.ask_price) if selected is not None else None,
             "entry_executable_price": entry_executable_price,
+            "entry_observed_at": observed_at.isoformat(),
+            "signal_to_observation_seconds": signal_latency_seconds,
             "capital_per_lot": capital_per_lot,
             "estimated_option_loss_per_lot": risk_per_lot,
             "option_risk_method": risk_method,
+            "risk_budget": risk_budget,
+            "paper_status": paper_status,
+            "paper_rejection_reason": paper_rejection_reason,
+            "paper_lots": lots,
+            "paper_quantity": quantity,
             "last_quote_bar_end": None,
             "entry_selector_result": "SELECTED" if selected else "REJECTED",
             "entry_rejection_reason": reason,
@@ -332,12 +369,48 @@ class StrategyCShadowMonitor:
                 "capital_per_lot": capital_per_lot,
                 "estimated_option_loss_per_lot": risk_per_lot,
                 "option_risk_method": risk_method,
-                "signal_to_observation_seconds": max(
-                    0.0,
-                    (observed_at - datetime.fromisoformat(row["entry_time"].replace("Z", "+00:00"))).total_seconds(),
-                ),
+                "signal_to_observation_seconds": signal_latency_seconds,
+                "paper_status": paper_status,
+                "paper_rejection_reason": paper_rejection_reason,
+                "paper_lots": lots,
+                "paper_quantity": quantity,
+                "risk_budget": risk_budget,
             },
         )
+        if paper_status == "OPEN":
+            if self.repo and hasattr(self.repo, "save_execution_ledger"):
+                await self.repo.save_execution_ledger({
+                    "ledger_id": f"PAPER-C-BUY-{generate_id()}",
+                    "trade_id": f"PAPER-C:{signal_id}",
+                    "side": "BUY",
+                    "timestamp": observed_at.isoformat(),
+                    "raw_bid": float(selected.bid_price),
+                    "raw_ask": float(selected.ask_price),
+                    "raw_ltp": float(selected.ltp),
+                    "executable_price": entry_executable_price,
+                    "slippage_points": float(getattr(self.risk_config, "paper_slippage_points", 0.0) or 0.0),
+                    "quantity": quantity,
+                    "source": chain.get("source", "UNKNOWN"),
+                    "cost_assumption_version": getattr(self.risk_config, "paper_cost_assumption_version", "unknown"),
+                    "reason": "STRATEGY_C_PAPER_ENTRY",
+                })
+            await self._log(
+                timestamp=observed_at,
+                message="PAPER_ENTRY_OPENED",
+                details={
+                    "signal_id": signal_id,
+                    "selected_contract": selected_payload,
+                    "lots": lots,
+                    "quantity": quantity,
+                    "entry_raw_ask": float(selected.ask_price),
+                    "entry_executable_price": entry_executable_price,
+                    "risk_budget": risk_budget,
+                    "estimated_option_loss_per_lot": risk_per_lot,
+                    "capital_per_lot": capital_per_lot,
+                    "execution_mode": AutoTradingMode.PAPER.value,
+                    "broker_called": False,
+                },
+            )
         return tracked
 
     async def _quote_for_contract(
