@@ -198,7 +198,30 @@ class StrategyTunablesConfig(BaseModel):
     ema_fast_period: int = Field(default=20, ge=1, description="Fast EMA period on completed 15m bars")
     ema_slow_period: int = Field(default=50, ge=2, description="Slow EMA period on completed 15m bars")
     adx_period: int = Field(default=14, ge=1)
-    adx_threshold: float = Field(default=22.0, ge=0.0, le=100.0)
+    adx_threshold: float = Field(
+        default=22.0,
+        ge=0.0,
+        le=100.0,
+        description="Strategy A V2 compatibility value; V3 does not use a hard ADX floor",
+    )
+    momentum_adx_min_delta_2bars: float = Field(
+        default=-2.0,
+        ge=-100.0,
+        le=100.0,
+        description="Minimum allowed ADX14 change versus two completed 15m bars earlier",
+    )
+    momentum_ema20_slope_min_atr: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Minimum directional EMA20 one-bar slope in current ATR units",
+    )
+    momentum_ema20_slope_max_atr: float = Field(
+        default=0.15,
+        gt=0.0,
+        le=1.0,
+        description="Exclusive maximum directional EMA20 one-bar slope in current ATR units",
+    )
     atr_period: int = Field(default=14, ge=1)
     ema_separation_min_atr: float = Field(default=0.10, ge=0.0)
     confluence_distance_atr: float = Field(default=0.25, ge=0.0)
@@ -253,6 +276,8 @@ class StrategyTunablesConfig(BaseModel):
             raise ValueError("ema_fast_period must be less than ema_slow_period")
         if self.minimum_stop_distance_atr > self.maximum_stop_distance_atr:
             raise ValueError("minimum_stop_distance_atr must not exceed maximum_stop_distance_atr")
+        if self.momentum_ema20_slope_min_atr >= self.momentum_ema20_slope_max_atr:
+            raise ValueError("momentum EMA20 slope band must satisfy min < max")
         if not (self.entry_session_start < self.entry_session_end < self.forced_exit_time):
             raise ValueError("Strategy A session must satisfy start < end < forced exit")
         return self
