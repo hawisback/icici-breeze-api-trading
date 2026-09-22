@@ -335,11 +335,9 @@ class StrategyRepository:
                 tunables["legacy_strategy_a_adx_threshold"] = old_shared_adx
                 changed = True
 
-            # Deterministic V2 policy: every old value exactly equal to the
-            # historical shared default 20 is treated as the old default and
-            # converted to the V2 contract default 22. Values other than 20
-            # are preserved as explicit/custom hypotheses. We cannot infer
-            # whether a persisted 20 was intentional.
+            # Historical V2 migration: every old value exactly equal to the
+            # shared default 20 is converted to the V2 compatibility value 22.
+            # V3 preserves that field but no longer uses it as an entry gate.
             if data.get("strategy_a_revision", 1) < 3:
                 session = data.setdefault("session", {})
                 if tunables.get("rvol_threshold") == 1.30:
@@ -355,6 +353,12 @@ class StrategyRepository:
                     tunables["adx_threshold"] = 22.0
                     changed = True
                 data["strategy_a_revision"] = 4
+                changed = True
+            if data.get("strategy_a_revision", 1) < 5:
+                tunables.setdefault("momentum_adx_min_delta_2bars", -2.0)
+                tunables.setdefault("momentum_ema20_slope_min_atr", 0.0)
+                tunables.setdefault("momentum_ema20_slope_max_atr", 0.15)
+                data["strategy_a_revision"] = 5
                 changed = True
             if changed:
                 await conn.execute("UPDATE auto_strategy_config SET config_json = ? WHERE id = 'active'", (json.dumps(data),))
