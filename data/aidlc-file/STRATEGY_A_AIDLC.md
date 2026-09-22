@@ -3,7 +3,7 @@
 > **Repository:** `hawisback/icici-breeze-api-trading`  
 > **Workstream:** Strategy A — NIFTY Trend-Pullback Confluence  
 > **Lifecycle type:** Brownfield strategy replacement / refactor  
-> **Tracker version:** 1.0  
+> **Tracker version:** 1.1  
 > **Last reviewed branch:** `strategy-a-trend-pullback-v2`  
 > **Last reviewed head:** `bdb6d5c` (review-fix implementation; tracker handoff commit follows)  
 > **Lifecycle owner:** Human approval required at every phase gate
@@ -228,6 +228,88 @@ branch: strategy-a-trend-pullback-v2
 ```
 
 This identifies the reviewed code snapshot only. Update these values after new implementation work.
+
+## 2026-09-22 — Strategy A V3 momentum-health amendment
+
+**Status:** `[?] Awaiting automated regression evidence and human review`  
+**Active evaluator version:** `trend_pullback_momentum_v3`  
+**Research basis:** 402 BREEZE futures sessions, 16,884 directional decision rows, with momentum context computed from actual preceding completed 15-minute futures bars including 09:15/09:30 context before the 09:45 entry window.
+
+This amendment supersedes only the V2 **hard absolute ADX entry floor**. All other
+V2 signal, confluence, structural-risk, trigger, session and exit hypotheses
+remain unchanged unless explicitly stated below.
+
+### V3 authoritative momentum-health rule
+
+The trend regime still requires:
+
+- directional EMA20/EMA50 order;
+- directional +DI/-DI order;
+- EMA20/EMA50 separation of at least 0.10 ATR.
+
+The V2 requirement `ADX14 >= 22` is no longer an entry gate. ADX14 remains a
+computed feature, but entry qualification now requires momentum health:
+
+1. `ADX14(current) - ADX14(two completed 15m bars earlier) >= -2.0`
+2. directional EMA20 one-bar slope, normalized by current ATR, satisfies
+   `0.0 <= slope < 0.15`
+3. CALL slope is `(EMA20[current] - EMA20[previous]) / ATR14[current]`
+4. PUT slope is the sign-reversed equivalent so positive values always mean
+   movement in the trade direction.
+5. If the two prior completed bars required for momentum context are unavailable,
+   the setup is rejected; future bars may never be used to fill the context.
+
+### Evidence for choosing the broader guard
+
+The corrected pre-entry-context validation produced:
+
+| Variant | Triggers | Mean research R | Total research R | Max DD | T1-before-stop |
+|---|---:|---:|---:|---:|---:|
+| V2 baseline | 13 | -0.160R | -2.076R | -6.51R | 23.08% |
+| No ADX floor | 27 | +0.217R | +5.849R | -3.50R | 37.04% |
+| V3 guard: ADX delta >= -2, slope [0, 0.15) | 16 | +0.683R | +10.925R | -2.00R | 56.25% |
+| Nearby ADX delta >= -2.5, slope [0, 0.15) | 18 | +0.635R | +11.425R | -2.00R | 55.56% |
+| Tighter slope minimum 0.025 | 11 | +0.993R | +10.925R | -1.00R | 63.64% |
+| Wider slope maximum 0.20 | 20 | +0.409R | +8.188R | -2.50R | 45.00% |
+
+The active V3 rule intentionally chooses the broader `[-2.0, 0.0..0.15)`
+neighborhood rather than the best in-sample `0.025` lower slope bound. This
+reduces parameter-selection risk while retaining the observed momentum-health
+effect. The nearby -2.5 ADX variant remaining positive is supporting robustness
+evidence, not a reason to optimize to -2.5.
+
+### Session window decision
+
+The authoritative entry session remains **09:45–14:45 IST**. The corrected
+context study showed that starting at 10:00 or 10:15 removed two early triggers
+with a combined positive contribution; therefore no later start is justified
+by current evidence.
+
+### Unchanged Strategy A hypotheses
+
+- ATR14;
+- S/R and EMA20/VWAP confluence;
+- confirmation body >= 0.40;
+- directional close location <= 30%;
+- confirmation range <= 1.50 ATR;
+- trigger buffer 0.05 ATR;
+- trigger validity 2 completed 15m bars;
+- maximum chase 0.25 ATR;
+- structural stop buffer 0.10 ATR;
+- structural stop distance 0.80–1.50 ATR;
+- minimum room to opposing S/R 1.50R;
+- T1 1.50R;
+- runner reference 2.50R;
+- trailing activation +1R;
+- entry 09:45–14:45 IST;
+- forced exit 15:15 IST.
+
+### Validation boundary
+
+The historical metric is a futures-path research label, not executable option
+PnL and not a claim of production profitability. Production-path lifecycle
+replay, option execution validation, paper/shadow observation and LIVE safety
+gates remain required. LIVE remains blocked.
 
 ---
 
@@ -1671,13 +1753,15 @@ features/pivots → deterministic state machine → delta-aware option selection
 underlying-R sizing/management → existing OMS/risk gates → structured
 telemetry and production-path replay comparison.
 
-Final authoritative Strategy A values remain in
-`StrategyTunablesConfig`: EMA 20/50, ADX 14/22, ATR 14, EMA separation 0.10
-ATR, confluence 0.25 ATR, S/R zone 0.10 ATR, body 0.40, directional close 30%,
-maximum confirmation range 1.50 ATR, trigger 0.05 ATR, two bars, chase 0.25
-ATR, structural buffer 0.10 ATR, stop range 0.80–1.50 ATR, room 1.50R, T1
-1.50R, runner 2.50R, trailing activation 1R, entry 09:45–14:45 and forced
-exit 15:15.
+The historical V2 values recorded above remain the Phase 1 baseline. The active
+Strategy A V3 amendment replaces only the hard ADX14 >= 22 entry gate with:
+ADX14 two-bar delta >= -2.0 and directional EMA20 one-bar slope in
+[0.0, 0.15) current ATR units. All other authoritative values remain:
+EMA 20/50, ATR 14, EMA separation 0.10 ATR, confluence 0.25 ATR, S/R zone
+0.10 ATR, body 0.40, directional close 30%, maximum confirmation range
+1.50 ATR, trigger 0.05 ATR, two bars, chase 0.25 ATR, structural buffer
+0.10 ATR, stop range 0.80–1.50 ATR, room 1.50R, T1 1.50R, runner 2.50R,
+trailing activation 1R, entry 09:45–14:45 and forced exit 15:15.
 
 LIVE readiness remains `BLOCKED`.  Code/test readiness and underlying replay
 readiness are evidenced; option execution validation and paper/shadow
