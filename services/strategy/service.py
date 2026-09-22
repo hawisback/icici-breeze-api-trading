@@ -117,6 +117,9 @@ class StrategyService:
         self._market_snapshot = ([], [], [])
         self._evaluation_lock = asyncio.Lock()
         self._last_eval_time: datetime = datetime.min.replace(tzinfo=timezone.utc)  # epoch → forces first-call refresh
+        self._last_cycle_status: str | None = None
+        self._cycle_count: int = 0
+        self._last_heartbeat_log_time: datetime = datetime.min.replace(tzinfo=timezone.utc)
         self._last_eod_report_date: Optional[str] = None
         self._market_data_status: dict[str, Any] = {
             "provider": "unknown", "provider_active": False,
@@ -575,8 +578,22 @@ class StrategyService:
         while self._is_running:
             try:
                 interval = max(1, self.config.tunables.evaluation_interval_sec)
-                await self.evaluate_cycle()
-                ist_now = utc_now().astimezone(timezone(timedelta(hours=5, minutes=30)))
+                cycle_result = await self.evaluate_cycle()
+                self._cycle_count += 1
+                self._last_cycle_status = str(cycle_result.get("status", "UNKNOWN"))
+                heartbeat_now = utc_now()
+                if (heartbeat_now - self._last_heartbeat_log_time).total_seconds() >= 60:
+                    self._last_heartbeat_log_time = heartbeat_now
+                    logger.info(
+                        "Strategy heartbeat: cycles=%d last_status=%s provider=%s active=%s futures=%s latest_futures=%s",
+                        self._cycle_count,
+                        self._last_cycle_status,
+                        self._market_data_status.get("provider"),
+                        self._market_data_status.get("provider_active"),
+                        self._market_data_status.get("futures_instrument"),
+                        self._market_data_status.get("latest_futures_candle"),
+                    )
+                ist_now = heartbeat_now.astimezone(timezone(timedelta(hours=5, minutes=30)))
                 force_exit = datetime.strptime(self.config.session.force_exit_time, "%H:%M").time()
                 session_date = ist_now.date().isoformat()
                 if ist_now.time() >= force_exit and self._last_eod_report_date != session_date:
@@ -2039,6 +2056,23 @@ class StrategyService:
 
         return {
             "config": self.config.model_dump(mode="json"),
+            "scheduler": {
+                "running": bool(self._is_running and self._loop_task and not self._loop_task.done()),
+                "task_done": bool(self._loop_task.done()) if self._loop_task else None,
+                "cycle_count": self._cycle_count,
+                "last_cycle_status": self._last_cycle_status,
+                "last_evaluation_time": (
+                    self._last_eval_time.isoformat()
+                    if self._last_eval_time > datetime.min.replace(tzinfo=timezone.utc)
+                    else None
+                ),
+                "last_evaluation_age_seconds": (
+                    round((utc_now() - self._last_eval_time).total_seconds(), 3)
+                    if self._last_eval_time > datetime.min.replace(tzinfo=timezone.utc)
+                    else None
+                ),
+                "evaluation_interval_seconds": max(1, self.config.tunables.evaluation_interval_sec),
+            },
             "market_data": {**self._market_data_status, "last_evaluation_time": (self._last_eval_time.isoformat() if self._last_eval_time > datetime.min.replace(tzinfo=timezone.utc) else None)},
             "features": features.model_dump(mode="json"),
             "active_trades": [t.model_dump(mode="json") for t in active_trades],
