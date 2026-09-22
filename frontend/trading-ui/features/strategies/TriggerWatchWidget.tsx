@@ -36,6 +36,8 @@ interface TriggerWatchWidgetProps {
   onRefresh: () => void;
   defaultCap?: number;
   marketData?: StrategyStatusData["market_data"];
+  entryWindowStart?: string;
+  entryWindowEnd?: string;
 }
 
 export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
@@ -43,6 +45,8 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
   onRefresh,
   defaultCap = 70.0,
   marketData,
+  entryWindowStart = "09:45",
+  entryWindowEnd = "14:45",
 }) => {
   const [selectedStrategyIndex, setSelectedStrategyIndex] = useState<number>(0);
   const [isOverrideModalOpen, setIsOverrideModalOpen] = useState<boolean>(false);
@@ -170,7 +174,7 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
             </div>
             <div className="text-xs font-semibold">
               {gates.within_trading_window ? (
-                <span className="text-emerald-400">Active (09:30-14:45)</span>
+                <span className="text-emerald-400">Active ({entryWindowStart}-{entryWindowEnd})</span>
               ) : (
                 <span className="text-rose-400 font-medium">Closed</span>
               )}
