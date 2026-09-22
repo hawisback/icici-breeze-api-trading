@@ -95,7 +95,9 @@ def test_rule_funnel_audit_is_directional_and_read_only(tmp_path):
     assert report["completed_15m_decision_bars"] == 21
     assert report["directional_evaluations"] == 42
     assert report["aggregate"]["data_quality_counts"] == {}
-    assert report["thresholds"]["adx_threshold"] == 22.0
+    assert report["thresholds"]["momentum_adx_min_delta_2bars"] == -2.0
+    assert report["thresholds"]["momentum_ema20_slope_min_atr"] == 0.0
+    assert report["thresholds"]["momentum_ema20_slope_max_atr"] == 0.15
     assert "trend" in report["aggregate"]["gate_funnel"]
     assert "confirmation" in report["aggregate"]["gate_funnel"]
     assert "confluence" in report["aggregate"]["gate_funnel"]
