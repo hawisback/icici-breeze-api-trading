@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from datetime import datetime, timezone
 from collections import Counter
 from pathlib import Path
 from statistics import mean
@@ -73,12 +74,19 @@ def _signal_parity(
         for row in manifests
     ]
 
+    def _timestamp_key(value: Any) -> str:
+        raw = str(value or "")
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"signal parity timestamp must be timezone-aware: {raw}")
+        return parsed.astimezone(timezone.utc).isoformat()
+
     def normalize(rows: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
         normalized = []
         for row in rows:
             normalized.append(
                 (
-                    str(row.get("timestamp")),
+                    _timestamp_key(row.get("timestamp")),
                     str(row.get("direction")),
                     round(float(row.get("entry")), 8) if row.get("entry") is not None else None,
                     round(float(row.get("stop")), 8) if row.get("stop") is not None else None,
