@@ -233,11 +233,11 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
             </div>
           </div>
 
-          {/* Gate 6: Premium Cap */}
+          {/* Gate 6: Strategy B premium cap */}
           <div className="bg-slate-950/70 p-2 rounded-lg border border-slate-800/80">
             <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1">
               <Flame className="w-3 h-3 text-cyan-400" />
-              Option Cap
+              Strategy B Cap
             </div>
             <div className="text-xs font-bold text-cyan-300">
               ₹{activeCap.toFixed(0)}
