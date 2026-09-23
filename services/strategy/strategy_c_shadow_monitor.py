@@ -841,6 +841,11 @@ class StrategyCShadowMonitor:
             if lifecycle.get("status") == "OPEN":
                 active_candidate_trade = row
                 break
+        recent_paper_trades = sorted(
+            tracked_values,
+            key=lambda row: str(row.get("entry_time") or ""),
+            reverse=True,
+        )[:10]
         return {
             "status": report.get("status"),
             "candidate_id": CANDIDATE_ID,
@@ -859,6 +864,7 @@ class StrategyCShadowMonitor:
             "active_raw_trade": report.get("active_raw_trade"),
             "active_candidate_trade": active_candidate_trade,
             "active_paper_trade": open_paper[0] if open_paper else None,
+            "paper_trades": recent_paper_trades,
             "broker_called": False,
             "orders_created": False,
             "live_trading_allowed": False,
