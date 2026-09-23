@@ -221,36 +221,44 @@ class ExecutionService:
                     OrderState.SUBMITTING,
                     OrderState.SUBMISSION_UNKNOWN,
                 }:
-                    # Ambiguous submissions are resolved only from broker
-                    # evidence. Absence of evidence never triggers a retry.
-                    if broker_trades is None:
-                        broker_trades = await self.gateway.get_trades(
-                            mode=TradingMode.LIVE
-                        )
-                    matches = [
-                        trade
-                        for trade in broker_trades
-                        if trade.client_order_id == order.client_order_id
-                    ]
-                    if matches:
-                        filled = sum(max(0, trade.quantity) for trade in matches)
-                        notional = sum(
-                            max(0, trade.quantity) * trade.price for trade in matches
-                        )
-                        avg = notional / filled if filled else 0.0
-                        response = BrokerOrderResponse(
-                            success=True,
-                            broker_order_id=matches[0].broker_order_id,
-                            client_order_id=order.client_order_id,
-                            status=(
-                                "FILLED"
-                                if filled >= order.quantity
-                                else "PARTIALLY_FILLED"
-                            ),
-                            filled_quantity=min(filled, order.quantity),
-                            average_price=avg,
-                            message="Recovered from broker trade reconciliation",
-                        )
+                    # First recover the broker acknowledgement using the exact
+                    # immutable client reference/tag. This closes the crash
+                    # window after broker acceptance but before local receipt.
+                    response = await self.gateway.find_order_by_client_id(
+                        order.client_order_id,
+                        mode=TradingMode.LIVE,
+                    )
+                    if response is None:
+                        # Trade evidence is a secondary recovery path. Absence
+                        # of evidence never triggers a retry.
+                        if broker_trades is None:
+                            broker_trades = await self.gateway.get_trades(
+                                mode=TradingMode.LIVE
+                            )
+                        matches = [
+                            trade
+                            for trade in broker_trades
+                            if trade.client_order_id == order.client_order_id
+                        ]
+                        if matches:
+                            filled = sum(max(0, trade.quantity) for trade in matches)
+                            notional = sum(
+                                max(0, trade.quantity) * trade.price for trade in matches
+                            )
+                            avg = notional / filled if filled else 0.0
+                            response = BrokerOrderResponse(
+                                success=True,
+                                broker_order_id=matches[0].broker_order_id,
+                                client_order_id=order.client_order_id,
+                                status=(
+                                    "FILLED"
+                                    if filled >= order.quantity
+                                    else "PARTIALLY_FILLED"
+                                ),
+                                filled_quantity=min(filled, order.quantity),
+                                average_price=avg,
+                                message="Recovered from broker trade reconciliation",
+                            )
 
                 if response is None:
                     continue
