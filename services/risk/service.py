@@ -144,18 +144,62 @@ class RiskService:
             )
 
         if is_reduce_only_exit:
-            if self.portfolio_service is None:
-                return await self._record_and_publish(
-                    intent=intent,
-                    approved=False,
-                    rule="REDUCE_ONLY_POSITION_UNVERIFIED",
-                    reason="Reduce-only exit rejected because position service is unavailable",
-                    system_mode=system_mode,
+            held_quantity = 0
+            if intent.trading_mode == TradingMode.LIVE:
+                if self.broker_gateway is None:
+                    return await self._record_and_publish(
+                        intent=intent,
+                        approved=False,
+                        rule="REDUCE_ONLY_POSITION_UNVERIFIED",
+                        reason=(
+                            "LIVE reduce-only exit rejected because broker "
+                            "position verification is unavailable"
+                        ),
+                        system_mode=system_mode,
+                    )
+                try:
+                    broker_positions = await self.broker_gateway.get_positions(
+                        mode=TradingMode.LIVE
+                    )
+                except Exception as exc:
+                    logger.exception("LIVE reduce-only position verification failed")
+                    return await self._record_and_publish(
+                        intent=intent,
+                        approved=False,
+                        rule="REDUCE_ONLY_POSITION_UNVERIFIED",
+                        reason=(
+                            "LIVE reduce-only exit rejected because broker "
+                            f"positions could not be verified: {type(exc).__name__}"
+                        ),
+                        system_mode=system_mode,
+                    )
+                held_quantity = sum(
+                    max(0, int(position.quantity))
+                    for position in broker_positions
+                    if str(position.stock_code).upper()
+                    == str(intent.symbol).upper()
                 )
-            position = await self.portfolio_service.repo.get_position(
-                intent.instrument_id
-            )
-            held_quantity = int(position.quantity) if position is not None else 0
+            else:
+                if self.portfolio_service is None:
+                    return await self._record_and_publish(
+                        intent=intent,
+                        approved=False,
+                        rule="REDUCE_ONLY_POSITION_UNVERIFIED",
+                        reason=(
+                            "Reduce-only exit rejected because position service "
+                            "is unavailable"
+                        ),
+                        system_mode=system_mode,
+                    )
+                position = await self.portfolio_service.repo.get_position(
+                    intent.instrument_id
+                )
+                held_quantity = (
+                    int(position.quantity)
+                    if position is not None
+                    else 0
+                )
+
             if held_quantity <= 0 or intent.quantity > held_quantity:
                 return await self._record_and_publish(
                     intent=intent,
