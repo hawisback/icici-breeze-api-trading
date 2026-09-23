@@ -518,14 +518,49 @@ def _available_spot_dates(
     return first, last
 
 
+def _load_spot_interval_rows(
+    conn: Any,
+    *,
+    interval: str,
+    start_utc: datetime,
+    end_utc: datetime,
+    source: str,
+) -> list[Candle]:
+    clauses = [
+        "instrument_id = 'INST-NIFTY-INDEX'",
+        "interval = ?",
+        "start_time >= ?",
+        "start_time < ?",
+    ]
+    params: list[Any] = [
+        interval,
+        start_utc.isoformat(),
+        end_utc.isoformat(),
+    ]
+    source_clause, source_params = _source_predicate(source)
+    clauses.append(source_clause)
+    params.extend(source_params)
+    rows = conn.execute(
+        f"""
+        SELECT instrument_id, interval, start_time, end_time,
+               open, high, low, close, volume, open_interest, source
+        FROM historical_candles
+        WHERE {' AND '.join(clauses)}
+        ORDER BY start_time ASC
+        """,
+        params,
+    ).fetchall()
+    return [_row_to_candle(row) for row in rows]
+
+
 def load_historical_candles(
     *,
     db_path: Path,
     source: str,
     start_date: date,
     end_date: date,
-) -> tuple[list[Candle], list[Candle]]:
-    """Read only the candles required by Strategy D plus warm-up history."""
+) -> tuple[list[Candle], list[Candle], list[Candle]]:
+    """Read 5m signal data plus optional native 1m spot for ordering."""
     warmup_start = (
         start_date - timedelta(days=DEFAULT_WARMUP_CALENDAR_DAYS)
     )
@@ -539,22 +574,31 @@ def load_historical_candles(
         SESSION_END_EXCLUSIVE,
         tzinfo=IST,
     )
+    start_utc = start_ist.astimezone(timezone.utc)
+    end_utc = end_ist.astimezone(timezone.utc)
     with _open_read_only(db_path) as conn:
         spot = _load_rows(
             conn,
-            start_utc=start_ist.astimezone(timezone.utc),
-            end_utc=end_ist.astimezone(timezone.utc),
+            start_utc=start_utc,
+            end_utc=end_utc,
             source=source,
             instrument_id="INST-NIFTY-INDEX",
         )
         futures = _load_rows(
             conn,
-            start_utc=start_ist.astimezone(timezone.utc),
-            end_utc=end_ist.astimezone(timezone.utc),
+            start_utc=start_utc,
+            end_utc=end_utc,
             source=source,
             instrument_like="INST-NIFTY-FUT-%",
         )
-    return spot, futures
+        one_minute_spot = _load_spot_interval_rows(
+            conn,
+            interval="1m",
+            start_utc=start_utc,
+            end_utc=end_utc,
+            source=source,
+        )
+    return spot, futures, one_minute_spot
 
 
 def _parse_args() -> argparse.Namespace:
@@ -586,7 +630,7 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=(
             Path("data")
-            / "strategy_d_sr_momentum_breakout_backtest.json"
+            / "strategy_d_sr_momentum_breakout_v2_backtest.json"
         ),
     )
     return parser.parse_args()
@@ -605,15 +649,16 @@ def main() -> None:
         raise SystemExit(
             "end-date must not precede start-date"
         )
-    spot, futures = load_historical_candles(
+    spot, futures, one_minute_spot = load_historical_candles(
         db_path=args.db,
         source=args.source,
         start_date=start_date,
         end_date=end_date,
     )
-    report = run_backtest(
+    report = build_v2_comparison(
         spot_candles=spot,
         futures_candles=futures,
+        one_minute_spot_candles=one_minute_spot,
         start_date=start_date,
         end_date=end_date,
     )
@@ -636,6 +681,10 @@ def main() -> None:
                 "strategy_id": report["strategy_id"],
                 "metrics": report["metrics"],
                 "usable_sessions": report["usable_sessions"],
+                "intrabar_coverage": report["intrabar_coverage"],
+                "comparison_to_corrected_v1": (
+                    report["comparison_to_corrected_v1"]
+                ),
                 "skipped": report["skipped_sessions_or_events"],
                 "output": str(args.output),
             },
