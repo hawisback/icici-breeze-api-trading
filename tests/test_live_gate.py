@@ -12,6 +12,9 @@ Verifies:
 """
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from libs.config.settings import PlatformSettings
@@ -221,7 +224,19 @@ async def test_risk_service_enforces_live_gate(tmp_path):
     )
     gate = LiveTradingGate(settings=settings, event_bus=bus)
     repo = RiskRepository(db_path=tmp_path / "risk.db")
-    risk_svc = RiskService(repository=repo, event_bus=bus, live_gate=gate)
+    portfolio = SimpleNamespace(get_positions=AsyncMock(return_value=[]))
+    gateway = SimpleNamespace(
+        get_funds=AsyncMock(
+            return_value=SimpleNamespace(available_margin=500000.0)
+        )
+    )
+    risk_svc = RiskService(
+        repository=repo,
+        event_bus=bus,
+        live_gate=gate,
+        portfolio_service=portfolio,
+        broker_gateway=gateway,
+    )
     await risk_svc.initialize()
 
     live_intent = OrderIntent(
@@ -254,6 +269,7 @@ async def test_risk_service_enforces_live_gate(tmp_path):
     assert decision3.approved is False
     assert decision3.rule_name == "LIVE_TRADING_NOT_AUTHORIZED"
 
+    await risk_svc.stop()
     await bus.stop()
 
 
