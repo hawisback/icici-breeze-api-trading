@@ -729,71 +729,109 @@ class StrategyService:
         features = await self._gather_features()
         self._last_features = features
 
-        # Passive Strategy C research observation. This sidecar never creates
-        # ActiveTrade state or OMS intents and cannot affect Strategy A/B gates.
-        try:
-            self._last_strategy_c_shadow_status = await self.strategy_c_shadow.observe(
-                active_futures_instrument=self._market_data_status.get("futures_instrument"),
-                now=now,
-            )
-        except Exception:
-            logger.exception("Strategy C shadow observation failed; Strategy A/B evaluation continues")
-            self._last_strategy_c_shadow_status = {"status": "OBSERVATION_FAILED"}
-
-        # Strategy D is a frozen paper sidecar. It runs on the same scheduler
-        # heartbeat but remains isolated from OMS/live routing until promoted.
-        try:
-            self._last_strategy_d_paper_status = await self.strategy_d_paper.observe(
-                active_futures_instrument=self._market_data_status.get("futures_instrument"),
-                now=now,
-            )
-        except Exception:
-            logger.exception("Strategy D paper observation failed; Strategy A/B/C evaluation continues")
-            self._last_strategy_d_paper_status = {"status": "OBSERVATION_FAILED"}
-
-        # 3. Manage active trades (trailing stops, thesis reversal, square-off)
+        # 3. Manage active trades before any C/D research/history I/O. Exit,
+        # stop and order reconciliation are latency-critical and must never wait
+        # behind candidate discovery.
         active_trades = await self.repo.get_active_trades()
         self._active_trades_cache = active_trades
-
         for trade in active_trades:
             await self._evaluate_active_trade(trade, features)
-
         self._active_trades_cache = await self.repo.get_active_trades()
+
+        # 4. Refresh the frozen C/D signal engines only when enabled. These
+        # observers discover deterministic signals/lifecycle state; the common
+        # service below owns all actual ActiveTrade and OMS execution.
+        if self.config.tunables.di_continuation_enabled:
+            try:
+                self._last_strategy_c_shadow_status = await self.strategy_c_shadow.observe(
+                    active_futures_instrument=self._market_data_status.get("futures_instrument"),
+                    now=now,
+                )
+            except Exception:
+                logger.exception("Strategy C observation failed; other strategies continue")
+                self._last_strategy_c_shadow_status = {"status": "OBSERVATION_FAILED"}
+        else:
+            self._last_strategy_c_shadow_status = {"status": "DISABLED_BY_CONFIG"}
+
+        if self.config.tunables.sr_momentum_breakout_enabled:
+            try:
+                self._last_strategy_d_paper_status = await self.strategy_d_paper.observe(
+                    active_futures_instrument=self._market_data_status.get("futures_instrument"),
+                    now=now,
+                )
+            except Exception:
+                logger.exception("Strategy D observation failed; other strategies continue")
+                self._last_strategy_d_paper_status = {"status": "OBSERVATION_FAILED"}
+        else:
+            self._last_strategy_d_paper_status = {"status": "DISABLED_BY_CONFIG"}
+
         bypass = getattr(self._active_overrides, "bypass_entry_window", False)
         _, _, futures_candles = self._market_snapshot
         strategy_a_data_ready = self.config.tunables.trend_pullback_enabled and bool(futures_candles)
-        if not (strategy_a_data_ready or features.data_ready or features.breakout_data_ready or (bypass and features.spot_price > 0)):
+        candidate_blocked = {
+            "NOT_INITIALIZED",
+            "INITIALIZATION_FAILED",
+            "OBSERVATION_FAILED",
+            "DATA_RETRIEVAL_FAILED",
+            "MARKET_DATA_UNAVAILABLE",
+            "NATIVE_FUTURES_UNAVAILABLE",
+            "NO_ACTIVE_FUTURES_DATA",
+            "DISABLED",
+            "DISABLED_BY_CONFIG",
+        }
+        candidate_data_ready = bool(
+            (
+                self.config.tunables.di_continuation_enabled
+                and str(self._last_strategy_c_shadow_status.get("status")) not in candidate_blocked
+            )
+            or (
+                self.config.tunables.sr_momentum_breakout_enabled
+                and str(self._last_strategy_d_paper_status.get("status")) not in candidate_blocked
+            )
+        )
+        if not (
+            strategy_a_data_ready
+            or features.data_ready
+            or features.breakout_data_ready
+            or candidate_data_ready
+            or (bypass and features.spot_price > 0)
+        ):
             self._reset_setups(now)
             await self._save_runtime()
             return {"status": "DATA_UNAVAILABLE", "reason": features.data_reason}
 
-        # 4. If active positions reached limit, do not seek new entries
+        # 5. If active positions reached limit, do not seek new entries
         if len(self._active_trades_cache) >= self.config.risk.max_concurrent_positions:
             self._reset_setups(now)
             await self._save_runtime()
             return {"status": "MAX_CONCURRENT_POSITIONS_REACHED", "active_count": len(self._active_trades_cache)}
 
-        # 5. Check if Auto Trade is enabled
+        # 6. Check if Auto Trade is enabled
         if not self.config.auto_trade_enabled or self.config.mode == AutoTradingMode.DISABLED:
             self._reset_setups(now)
             await self._save_runtime()
             return {"status": "AUTO_TRADE_DISABLED"}
 
-        # 6. Apply strategy-specific entry windows.  Strategy A must not be
-        # silently gated by the shared legacy 09:20 schedule.
+        # 7. Apply strategy-specific entry windows. C/D retain their frozen
+        # internal windows and also pass through the shared intraday gate.
         strategy_a_window = self.position_manager.is_within_strategy_a_entry_window(now)
-        strategy_b_window = self.position_manager.is_within_entry_window()
-        enabled_window = (
-            strategy_a_window if self.config.tunables.trend_pullback_enabled and not self.config.tunables.volatility_breakout_enabled
-            else strategy_b_window if self.config.tunables.volatility_breakout_enabled and not self.config.tunables.trend_pullback_enabled
-            else strategy_a_window or strategy_b_window
-        )
+        shared_window = self.position_manager.is_within_entry_window()
+        enabled_windows: list[bool] = []
+        if self.config.tunables.trend_pullback_enabled:
+            enabled_windows.append(strategy_a_window)
+        if self.config.tunables.volatility_breakout_enabled:
+            enabled_windows.append(shared_window)
+        if self.config.tunables.di_continuation_enabled:
+            enabled_windows.append(shared_window)
+        if self.config.tunables.sr_momentum_breakout_enabled:
+            enabled_windows.append(shared_window)
+        enabled_window = any(enabled_windows)
         if not (enabled_window or self._active_overrides.bypass_entry_window):
             self._reset_setups(now)
             await self._save_runtime()
             return {"status": "OUTSIDE_ENTRY_WINDOW"}
 
-        # 7. Check Cooldown after loss
+        # 8. Check Cooldown after loss
         if self._last_loss_exit_time:
             mins_since_loss = (now - self._last_loss_exit_time).total_seconds() / 60.0
             if mins_since_loss < self.config.risk.cooldown_after_loss_min:
@@ -804,7 +842,7 @@ class StrategyService:
                     "cooldown_remaining_min": round(self.config.risk.cooldown_after_loss_min - mins_since_loss, 1),
                 }
 
-        # 8. Check Daily Trade Count Limit
+        # 9. Check Daily Trade Count Limit
         today_trades = await self.repo.list_trades(limit=1000)
         ist = timezone(timedelta(hours=5, minutes=30))
         today_str = now.astimezone(ist).date()
@@ -833,7 +871,7 @@ class StrategyService:
             await self._save_runtime()
             return {"status": "LIVE_SYSTEM_NOT_ARMED"}
 
-        # 9. Evaluate Strategy Entry Signals
+        # 10. Evaluate Strategy Entry Signals
         candles_5m, candles_15m, futures_candles = self._market_snapshot
 
         signal: Optional[StrategySignal] = None
@@ -849,6 +887,22 @@ class StrategyService:
         elif not self.config.tunables.volatility_breakout_enabled:
             self.strategy_b.reset(now)
             await self._save_runtime()
+
+        if not signal and self.config.tunables.di_continuation_enabled:
+            signal = strategy_c_signal_from_status(self._last_strategy_c_shadow_status)
+
+        if not signal and self.config.tunables.sr_momentum_breakout_enabled:
+            signal = strategy_d_signal_from_status(self._last_strategy_d_paper_status)
+
+        if signal and self._is_candidate_execution_strategy(signal.strategy):
+            prior_signals = await self.repo.list_strategy_signals(limit=1000)
+            prior_ids = {
+                str(item.get("signal_id"))
+                for item in prior_signals
+                if isinstance(item, dict) and item.get("signal_id")
+            }
+            if signal.signal_id in prior_ids:
+                signal = None
 
         if not signal:
             return {"status": "NO_SIGNAL", "features": features.model_dump(mode="json")}
