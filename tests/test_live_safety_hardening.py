@@ -161,6 +161,7 @@ async def test_reduce_only_exit_survives_closed_live_gate_and_reconciles(tmp_pat
     assert filled.average_price == 98.5
 
     await execution.stop()
+    await risk.stop()
     await bus.stop()
 
 
@@ -255,6 +256,126 @@ async def test_exit_only_and_halted_allow_only_explicit_reductions(tmp_path):
     assert denied_halted.approved is False
     assert denied_halted.rule_name == "SYSTEM_HALTED"
 
+    await risk.stop()
+    await bus.stop()
+
+
+@pytest.mark.asyncio
+async def test_live_entries_have_independent_notional_position_and_funds_caps(tmp_path):
+    bus = InMemoryEventBus()
+    await bus.start()
+    settings = PlatformSettings(
+        data_root=str(tmp_path),
+        live_trading_enabled=False,
+        live_allowed_accounts=["ICICI_PRIMARY"],
+    )
+    gate = LiveTradingGate(settings=settings, event_bus=bus)
+    challenge = await gate.request_activation_challenge(
+        "OPERATOR",
+        "ICICI_PRIMARY",
+        30,
+    )
+    assert await gate.confirm_activation(
+        challenge["challenge_id"],
+        challenge["challenge_token"],
+        "OPERATOR",
+    )
+
+    portfolio = SimpleNamespace(
+        get_positions=AsyncMock(return_value=[]),
+        repo=SimpleNamespace(get_position=AsyncMock(return_value=None)),
+    )
+    gateway = SimpleNamespace(
+        get_funds=AsyncMock(
+            return_value=SimpleNamespace(available_margin=100000.0)
+        )
+    )
+    risk = RiskService(
+        repository=RiskRepository(tmp_path / "risk-caps.db"),
+        event_bus=bus,
+        live_gate=gate,
+        portfolio_service=portfolio,
+        broker_gateway=gateway,
+        live_max_order_notional=50000.0,
+        live_max_open_positions=1,
+    )
+    await risk.initialize()
+
+    approved = await risk.evaluate_intent(
+        OrderIntent(
+            intent_id="LIVE-BUY-OK",
+            instrument_id="INST-NIFTY-OK-CE",
+            symbol="NIFTYOKCE",
+            side=OrderSide.BUY,
+            quantity=65,
+            price=100.0,
+            trading_mode=TradingMode.LIVE,
+        )
+    )
+    assert approved.approved is True
+
+    notional = await risk.evaluate_intent(
+        OrderIntent(
+            intent_id="LIVE-BUY-NOTIONAL",
+            instrument_id="INST-NIFTY-BIG-CE",
+            symbol="NIFTYBIGCE",
+            side=OrderSide.BUY,
+            quantity=65,
+            price=800.0,
+            trading_mode=TradingMode.LIVE,
+        )
+    )
+    assert notional.approved is False
+    assert notional.rule_name == "LIVE_ORDER_NOTIONAL_LIMIT"
+
+    naked_sell = await risk.evaluate_intent(
+        OrderIntent(
+            intent_id="LIVE-NAKED-SELL",
+            instrument_id="INST-NIFTY-NAKED-CE",
+            symbol="NIFTYNAKEDCE",
+            side=OrderSide.SELL,
+            quantity=65,
+            price=110.0,
+            trading_mode=TradingMode.LIVE,
+        )
+    )
+    assert naked_sell.approved is False
+    assert naked_sell.rule_name == "LIVE_NAKED_SELL_DISABLED"
+
+    portfolio.get_positions.return_value = [
+        SimpleNamespace(quantity=65, trading_mode=TradingMode.LIVE)
+    ]
+    position_cap = await risk.evaluate_intent(
+        OrderIntent(
+            intent_id="LIVE-BUY-POSITION-CAP",
+            instrument_id="INST-NIFTY-SECOND-CE",
+            symbol="NIFTYSECONDCE",
+            side=OrderSide.BUY,
+            quantity=65,
+            price=120.0,
+            trading_mode=TradingMode.LIVE,
+        )
+    )
+    assert position_cap.approved is False
+    assert position_cap.rule_name == "LIVE_OPEN_POSITION_LIMIT"
+
+    portfolio.get_positions.return_value = []
+    gateway.get_funds.return_value = SimpleNamespace(available_margin=1000.0)
+    funds = await risk.evaluate_intent(
+        OrderIntent(
+            intent_id="LIVE-BUY-FUNDS",
+            instrument_id="INST-NIFTY-FUNDS-CE",
+            symbol="NIFTYFUNDSCE",
+            side=OrderSide.BUY,
+            quantity=65,
+            price=130.0,
+            trading_mode=TradingMode.LIVE,
+        )
+    )
+    assert funds.approved is False
+    assert funds.rule_name == "LIVE_INSUFFICIENT_MARGIN"
+
+    await risk.stop()
     await bus.stop()
 
 
