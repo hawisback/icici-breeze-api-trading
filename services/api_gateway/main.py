@@ -180,6 +180,7 @@ async def lifespan(app: FastAPI):
                             secret_key=sec_k,
                             session_token=token,
                             account_id="ICICI_PRIMARY",
+                            broker="breeze",
                         )
                     body_msg = f"Session token ({token[:4]}...{token[-4:]}) captured, saved to .env, and activated!"
                 else:
@@ -227,6 +228,7 @@ h1 {{ color: #34d399; margin-top: 0; }} p {{ color: #94a3b8; font-size: 14px; }}
         except Exception:
             pass
     await container.market_svc.stop_simulated_feed()
+    await container.exec_svc.stop_reconciliation_worker()
     await container.oms_svc.stop_outbox_worker()
     await container.event_bus.stop()
 
@@ -282,6 +284,7 @@ class LoginRequest(BaseModel):
     session_token: str = ""
     access_token: Optional[str] = None
     account_id: str = "ICICI_PRIMARY"
+    broker: Optional[str] = None
 
 
 class OrderRequest(BaseModel):
@@ -493,26 +496,29 @@ async def create_ws_ticket(current_user: UserPrincipal = Depends(get_current_use
 
 @app.get("/api/v1/broker/session/login-url")
 @app.get("/api/v1/session/login-url")
-async def get_session_login_url():
-    """Return the selected broker's official daily login URL."""
+async def get_session_login_url(broker: Optional[str] = None):
+    """Return either broker's official daily login URL without changing execution ownership."""
     settings = get_platform_settings()
-    login_url = get_services().session_svc.get_login_url()
-    api_key_secret = settings.kite_api_key if settings.broker_backend.value == "kite" else settings.breeze_api_key
+    target = (broker or settings.broker_backend.value).lower()
+    if target not in {"breeze", "kite"}:
+        raise HTTPException(status_code=400, detail="broker must be 'breeze' or 'kite'")
+    login_url = get_services().session_svc.get_login_url(broker=target)
+    api_key_secret = settings.kite_api_key if target == "kite" else settings.breeze_api_key
     api_key = api_key_secret.get_secret_value() if api_key_secret else ""
     return {
         "login_url": login_url,
         "api_key": api_key,
-        "redirect_url_hint": "http://127.0.0.1:8000/api/v1/broker/session/callback",
-        "broker": settings.broker_backend.value,
-        "instructions": "Open this URL in your broker's browser login flow. The callback will persist the daily token and activate the selected live adapter.",
+        "redirect_url_hint": f"http://127.0.0.1:8000/api/v1/broker/session/callback?broker={target}",
+        "broker": target,
+        "instructions": "Open this URL in the broker login flow. The callback activates only this broker; the other broker can remain connected.",
     }
 
 
 @app.get("/api/v1/broker/session/status")
 @app.get("/api/v1/session/status")
-async def get_session_status():
+async def get_session_status(broker: Optional[str] = None):
     services = get_services()
-    return await services.session_svc.get_session_status()
+    return await services.session_svc.get_session_status(broker=broker)
 
 
 @app.post("/api/v1/broker/session/login")
@@ -525,6 +531,7 @@ async def session_login(req: LoginRequest):
         session_token=req.session_token,
         access_token=req.access_token,
         account_id=req.account_id,
+        broker=req.broker,
     )
     return result
 
@@ -538,6 +545,7 @@ async def broker_session_callback(
     session_token: Optional[str] = None,
     token: Optional[str] = None,
     request_token: Optional[str] = None,
+    broker: Optional[str] = None,
 ):
     """OAuth callback endpoint handling ICICI Direct 2FA redirect.
 
@@ -545,7 +553,17 @@ async def broker_session_callback(
     and activates running broker sessions across all services.
     """
     settings = get_platform_settings()
-    is_kite = settings.broker_backend.value == "kite"
+    explicit_broker = (broker or request.query_params.get("broker") or "").lower()
+    if explicit_broker and explicit_broker not in {"breeze", "kite"}:
+        raise HTTPException(status_code=400, detail="broker must be 'breeze' or 'kite'")
+    inferred_broker = explicit_broker or (
+        "kite"
+        if (request_token or request.query_params.get("request_token"))
+        else "breeze"
+        if (apisession or session_token or token or request.query_params.get("apisession") or request.query_params.get("session_token"))
+        else settings.broker_backend.value
+    )
+    is_kite = inferred_broker == "kite"
     broker_display_name = "Kite" if is_kite else "ICICI Breeze"
     success_event_type = "KITE_SESSION_SUCCESS" if is_kite else "BREEZE_SESSION_SUCCESS"
     raw_token = request_token if is_kite else (apisession or session_token or token)
@@ -616,6 +634,7 @@ a {{ color: #38bdf8; text-decoration: none; }}
                 secret_key=secret_key,
                 session_token=token_clean,
                 account_id="ZERODHA_PRIMARY" if is_kite else "ICICI_PRIMARY",
+                broker=inferred_broker,
             )
         except Exception as exc:
             logger.warning("Session service activation produced warning: %s", exc)
@@ -646,7 +665,7 @@ a {{ color: #38bdf8; text-decoration: none; }}
         return JSONResponse(
             content={
                 "status": "SUCCESS",
-                "message": f"{settings.broker_backend.value.title()} session token captured, persisted to .env, and activated.",
+                "message": f"{inferred_broker.title()} session token captured, persisted to .env, and activated.",
                 "token_masked": masked,
                 "env_updated": env_updated,
                 "session": session_result,
