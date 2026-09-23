@@ -69,7 +69,11 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
   const isBypassed = active_overrides?.bypass_entry_window;
   const activeCap = active_overrides?.max_option_premium_cap || defaultCap;
   const statusLabel =
-    currentStrategy.overall_status === "PAPER_OPEN"
+    currentStrategy.overall_status === "ACTIVE"
+      ? "POSITION / SIGNAL ACTIVE"
+      : currentStrategy.overall_status === "DISABLED"
+      ? "DISABLED"
+      : currentStrategy.overall_status === "PAPER_OPEN"
       ? "PAPER POSITION OPEN"
       : currentStrategy.overall_status === "READY_TO_TRIGGER"
       ? "READY TO TRIGGER"
@@ -292,10 +296,14 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
                   className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
                     st.overall_status === "READY_TO_TRIGGER"
                       ? "bg-emerald-500 text-black font-bold"
+                      : st.overall_status === "ACTIVE"
+                      ? "bg-cyan-500 text-black font-bold"
                       : st.overall_status === "PAPER_OPEN"
                       ? "bg-blue-500 text-white font-bold"
                       : st.overall_status === "BLOCKED"
                       ? "bg-rose-500 text-white font-bold"
+                      : st.overall_status === "DISABLED"
+                      ? "bg-slate-700 text-slate-300 font-bold"
                       : "bg-slate-800 text-slate-300"
                   }`}
                 >
@@ -317,10 +325,14 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
                 className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                   currentStrategy.overall_status === "READY_TO_TRIGGER"
                     ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 animate-pulse"
+                    : currentStrategy.overall_status === "ACTIVE"
+                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 animate-pulse"
                     : currentStrategy.overall_status === "PAPER_OPEN"
                     ? "bg-blue-500/20 text-blue-300 border border-blue-500/30 animate-pulse"
                     : currentStrategy.overall_status === "BLOCKED"
                     ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                    : currentStrategy.overall_status === "DISABLED"
+                    ? "bg-slate-800 text-slate-400 border border-slate-700"
                     : "bg-amber-500/10 text-amber-300 border border-amber-500/30"
                 }`}
               >
