@@ -32,6 +32,7 @@ class BrokerOrderRequest(BaseModel):
     order_type: str  # limit, market
     quantity: int
     price: float
+    trigger_price: Optional[float] = None
     validity: str = "day"
     strike_price: Optional[float] = None
     right: Optional[str] = None  # call, put
