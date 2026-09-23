@@ -228,6 +228,7 @@ h1 {{ color: #34d399; margin-top: 0; }} p {{ color: #94a3b8; font-size: 14px; }}
             pass
     await container.market_svc.stop_simulated_feed()
     await container.exec_svc.stop()
+    await container.risk_svc.stop()
     await container.oms_svc.stop_outbox_worker()
     await container.event_bus.stop()
 
