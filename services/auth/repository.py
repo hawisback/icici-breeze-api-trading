@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from libs.config.settings import get_platform_settings
+from libs.config.settings import AppEnv, PlatformSettings, get_platform_settings
 from libs.contracts.models import UserRole, generate_id, utc_now
 from libs.database.sqlite import SQLiteConfig, SQLiteEngine
 from services.auth.security import hash_password
@@ -19,8 +19,13 @@ logger = logging.getLogger(__name__)
 class AuthRepository:
     """Repository managing credentials, refresh tokens, and WebSocket single-use tickets."""
 
-    def __init__(self, db_path: Optional[Path] = None) -> None:
-        self.db_path = db_path or get_platform_settings().auth_db_path
+    def __init__(
+        self,
+        db_path: Optional[Path] = None,
+        settings: Optional[PlatformSettings] = None,
+    ) -> None:
+        self.settings = settings or get_platform_settings()
+        self.db_path = db_path or self.settings.auth_db_path
         self.engine = SQLiteEngine(SQLiteConfig(db_path=self.db_path, synchronous="FULL"))
 
     async def initialize(self) -> None:
@@ -95,7 +100,13 @@ class AuthRepository:
         if count > 0:
             return
 
-        logger.info("Seeding default bootstrap users into auth.db...")
+        if self.settings.app_env == AppEnv.PRODUCTION:
+            raise RuntimeError(
+                "Production auth.db has no users. Predictable bootstrap credentials are disabled; "
+                "provision production users before starting the live platform."
+            )
+
+        logger.info("Seeding default bootstrap users into auth.db for non-production use only...")
         defaults = [
             ("admin", "Admin@Trading123!", UserRole.ADMIN),
             ("operator", "Operator@Trading123!", UserRole.OPERATOR),
