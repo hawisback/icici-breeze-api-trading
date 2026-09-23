@@ -81,6 +81,8 @@ async def initialize_services(
                 _container.oms_svc._outbox_worker_task.cancel()
             if hasattr(_container.exec_svc, "_reconciliation_task") and _container.exec_svc._reconciliation_task:
                 _container.exec_svc._reconciliation_task.cancel()
+            if hasattr(_container.risk_svc, "_outbox_worker_task") and _container.risk_svc._outbox_worker_task:
+                _container.risk_svc._outbox_worker_task.cancel()
             if hasattr(_container.market_svc, "_feed_task") and _container.market_svc._feed_task:
                 _container.market_svc._feed_task.cancel()
         except Exception:
