@@ -68,6 +68,17 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
 
   const isBypassed = active_overrides?.bypass_entry_window;
   const activeCap = active_overrides?.max_option_premium_cap || defaultCap;
+  const statusLabel =
+    currentStrategy.overall_status === "PAPER_OPEN"
+      ? "PAPER POSITION OPEN"
+      : currentStrategy.overall_status === "READY_TO_TRIGGER"
+      ? "READY TO TRIGGER"
+      : currentStrategy.overall_status === "BLOCKED"
+      ? "BLOCKED"
+      : "AWAITING MARKET CONDITIONS";
+  const usesFuturesPrice =
+    currentStrategy.strategy === "TREND_PULLBACK" ||
+    currentStrategy.strategy === "DI_CONTINUATION";
 
   return (
     <div className="bg-slate-900/95 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
@@ -281,6 +292,10 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
                   className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
                     st.overall_status === "READY_TO_TRIGGER"
                       ? "bg-emerald-500 text-black font-bold"
+                      : st.overall_status === "PAPER_OPEN"
+                      ? "bg-blue-500 text-white font-bold"
+                      : st.overall_status === "BLOCKED"
+                      ? "bg-rose-500 text-white font-bold"
                       : "bg-slate-800 text-slate-300"
                   }`}
                 >
@@ -302,12 +317,14 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
                 className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                   currentStrategy.overall_status === "READY_TO_TRIGGER"
                     ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 animate-pulse"
+                    : currentStrategy.overall_status === "PAPER_OPEN"
+                    ? "bg-blue-500/20 text-blue-300 border border-blue-500/30 animate-pulse"
+                    : currentStrategy.overall_status === "BLOCKED"
+                    ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
                     : "bg-amber-500/10 text-amber-300 border border-amber-500/30"
                 }`}
               >
-                {currentStrategy.overall_status === "READY_TO_TRIGGER"
-                  ? "READY TO TRIGGER"
-                  : "AWAITING MARKET CONDITIONS"}
+                {statusLabel}
               </span>
             </div>
             <div className="text-[11px] text-slate-400 mt-0.5">
@@ -317,7 +334,7 @@ export const TriggerWatchWidget: React.FC<TriggerWatchWidgetProps> = ({
 
           <div className="text-right sm:text-right">
             <div className="text-[11px] text-slate-400">
-              {currentStrategy.strategy === "TREND_PULLBACK" ? "Current Futures" : "Current Spot"}: <span className="font-mono text-slate-200 font-bold">₹{currentStrategy.current_spot.toFixed(2)}</span>
+              {usesFuturesPrice ? "Current Futures" : "Current Spot"}: <span className="font-mono text-slate-200 font-bold">₹{currentStrategy.current_spot.toFixed(2)}</span>
               {currentStrategy.target_entry_level && (
                 <span className="ml-2">
                   Target: <span className="font-mono text-cyan-300 font-bold">₹{currentStrategy.target_entry_level.toFixed(2)}</span>
