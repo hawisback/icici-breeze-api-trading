@@ -31,6 +31,18 @@ async def test_strategy_api_endpoints():
         cfg = res.json()
         assert "option_selection" in cfg and "max_option_premium" in cfg["option_selection"]
 
+        # Mutating strategy controls are operator-only.
+        unauth = await client.post("/api/v1/strategies/arm", json={"armed": True})
+        assert unauth.status_code == 401
+        login = await client.post(
+            "/api/v1/auth/login",
+            json={"username": "operator", "password": "Operator@Trading123!"},
+        )
+        assert login.status_code == 200
+        client.headers.update(
+            {"Authorization": f"Bearer {login.json()['access_token']}"}
+        )
+
         # 3. POST /api/v1/strategies/config
         cfg["option_selection"]["max_option_premium"] = 65.0
         res = await client.post("/api/v1/strategies/config", json=cfg)
