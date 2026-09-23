@@ -39,19 +39,36 @@ class HistoricalService:
     def _provider_candidates(self) -> list[tuple[str, Any]]:
         if not self.broker_gateway:
             return []
-        order = getattr(self.broker_gateway, "provider_order", None)
-        providers = order("historical") if callable(order) else (
-            getattr(self.broker_gateway, "active_broker_name", ""),
-        )
-        result: list[tuple[str, Any]] = []
-        for provider in providers:
-            name = provider.value if hasattr(provider, "value") else str(provider)
-            try:
-                adapter = self.broker_gateway.get_broker_adapter(provider)
-            except Exception:
-                continue
-            result.append((name.lower(), adapter))
-        return result
+
+        route = getattr(self.broker_gateway, "provider_order", None)
+        resolver = getattr(self.broker_gateway, "get_broker_adapter", None)
+        if callable(route) and callable(resolver):
+            result: list[tuple[str, Any]] = []
+            for provider in route("historical"):
+                name = provider.value if hasattr(provider, "value") else str(provider)
+                try:
+                    adapter = resolver(provider)
+                except Exception:
+                    continue
+                result.append((name.lower(), adapter))
+            return result
+
+        # Backward-compatible gateway/test-double shape.
+        name = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
+        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
+        breeze = getattr(self.broker_gateway, "breeze_adapter", None)
+        breeze_client = getattr(breeze, "client_manager", None)
+
+        if name == "kite":
+            return [("kite", active_adapter)] if active_adapter is not None else []
+        if name == "breeze":
+            return [("breeze", breeze)] if breeze is not None else []
+        if breeze_client and getattr(breeze_client, "is_active", False):
+            return [("breeze", breeze)]
+        if active_adapter and getattr(active_adapter, "is_active", False):
+            inferred = "kite" if "kite" in type(active_adapter).__name__.lower() else "breeze"
+            return [(inferred, active_adapter)]
+        return []
 
     def _active_provider(self) -> tuple[str, Any | None]:
         for name, adapter in self._provider_candidates():
