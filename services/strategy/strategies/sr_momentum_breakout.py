@@ -703,7 +703,7 @@ class StrategyDPositionManager(PositionManager):
                                     scale_fill=scale_fill,
                                     scale_fraction=cfg.scale_out_fraction,
                                     exit_price=stop,
-                                    exit_reason="BREAKEVEN_STOP",
+                                    exit_reason="BREAKEVEN_STOP_1M_AMBIGUOUS",
                                     realized_component=realized_component,
                                     remaining_fraction=remaining_fraction,
                                     mfe_r=mfe_r,
@@ -819,10 +819,47 @@ class StrategyDPositionManager(PositionManager):
                         remaining_fraction = 1.0 - cfg.scale_out_fraction
                         stop = signal.entry_price
                         newly_scaled_without_minutes = True
-                if (
-                    scale_time is not None
-                    and not newly_scaled_without_minutes
-                ):
+                if scale_time is not None and newly_scaled_without_minutes:
+                    if self._stop_hit(signal.direction, bar, stop):
+                        return self._result(
+                            signal,
+                            bar=bar,
+                            stop=stop,
+                            scale_time=scale_time,
+                            scale_fill=scale_fill,
+                            scale_fraction=cfg.scale_out_fraction,
+                            exit_price=stop,
+                            exit_reason="BREAKEVEN_STOP_5M_AMBIGUOUS",
+                            realized_component=realized_component,
+                            remaining_fraction=remaining_fraction,
+                            mfe_r=mfe_r,
+                            mae_r=mae_r,
+                        )
+                    if (
+                        signal.next_pivot_price is not None
+                        and self._target_hit(
+                            signal.direction,
+                            bar,
+                            signal.next_pivot_price,
+                        )
+                    ):
+                        return self._result(
+                            signal,
+                            bar=bar,
+                            stop=stop,
+                            scale_time=scale_time,
+                            scale_fill=scale_fill,
+                            scale_fraction=cfg.scale_out_fraction,
+                            exit_price=signal.next_pivot_price,
+                            exit_reason=(
+                                f"NEXT_PIVOT_{signal.next_pivot_name}"
+                            ),
+                            realized_component=realized_component,
+                            remaining_fraction=remaining_fraction,
+                            mfe_r=mfe_r,
+                            mae_r=mae_r,
+                        )
+                elif scale_time is not None:
                     if self._stop_hit(signal.direction, bar, stop):
                         stop_fill = self._stop_fill(
                             signal.direction,
