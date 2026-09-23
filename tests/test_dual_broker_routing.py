@@ -309,11 +309,26 @@ class _SingleOrderOMS:
         return self.order if order_id == self.order.order_id else None
 
 
+class _KiteContractResolver:
+    async def resolve_option_contract(self, *, underlying, expiry, strike, right):
+        return {
+            "tradingsymbol": "NIFTY26SEP25000CE",
+            "expiry": expiry,
+            "strike": strike,
+            "right": "CE",
+        }
+
+
 class _CaptureExecutionGateway:
     active_broker_name = "kite"
 
     def __init__(self) -> None:
         self.requests = []
+        self.kite_adapter = _KiteContractResolver()
+
+    def get_broker_adapter(self, broker):
+        assert str(broker).lower() == "kite"
+        return self.kite_adapter
 
     async def place_order(self, request, mode, broker):
         self.requests.append((request, mode, broker))
