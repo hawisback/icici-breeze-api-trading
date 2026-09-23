@@ -51,6 +51,35 @@ class PaperBrokerAdapter(BrokerAdapter):
 
     async def place_order(self, request: BrokerOrderRequest) -> BrokerOrderResponse:
         broker_order_id = f"PAPER-{generate_id()[:8].upper()}"
+        normalized_type = request.order_type.lower().replace("-", "_")
+        if normalized_type in {"stop_limit", "stoploss"}:
+            if request.trigger_price is None or request.trigger_price <= 0:
+                return BrokerOrderResponse(
+                    success=False,
+                    client_order_id=request.client_order_id,
+                    status="REJECTED",
+                    message="STOP_LIMIT requires positive trigger_price",
+                )
+            self._orders[broker_order_id] = {
+                "broker_order_id": broker_order_id,
+                "client_order_id": request.client_order_id,
+                "stock_code": request.stock_code,
+                "action": request.action,
+                "quantity": request.quantity,
+                "price": request.price,
+                "trigger_price": request.trigger_price,
+                "status": "OPEN",
+                "filled_quantity": 0,
+                "average_price": 0.0,
+            }
+            return BrokerOrderResponse(
+                success=True,
+                broker_order_id=broker_order_id,
+                client_order_id=request.client_order_id,
+                status="OPEN",
+                message="Paper stop-limit accepted and left resting",
+            )
+
         fill_price = request.price
         if request.order_type.lower() == "market":
             fill_price = self._market_prices.get(request.stock_code, request.price or 100.0)
