@@ -28,7 +28,7 @@ from libs.broker_models.adapter import (
     BrokerTradeResponse,
 )
 from libs.config.settings import get_settings
-from libs.contracts.models import utc_now
+from libs.contracts.models import Quote, utc_now
 from services.broker_gateway.application.execution_guard import ExecutionGuard
 from services.broker_gateway.application.services.broker_service import BrokerApplicationService
 from services.broker_gateway.domain.enums import (
@@ -302,6 +302,58 @@ class IciciBreezeAdapter(BrokerAdapter):
         self._future_resolution_retry_after[key] = monotonic() + 60.0
         logger.warning("Breeze could not validate an active %s futures contract", clean)
         return None
+
+    async def get_index_quotes(self) -> list[Quote]:
+        """Fetch normalized NIFTY/BANKNIFTY quotes with Breeze rate-limit accounting."""
+        if not self.is_active:
+            return []
+        sdk = self.client_manager.get_sdk_client()
+        now = utc_now()
+        result: list[Quote] = []
+        for instrument_id, symbol, stock_code in (
+            ("INST-NIFTY-INDEX", "NIFTY 50", "NIFTY"),
+            ("INST-BANKNIFTY-INDEX", "NIFTY BANK", "CNXBAN"),
+        ):
+            await self.rate_limiter.acquire_read()
+            raw = await self.client_manager.sdk_runner.run(
+                lambda code=stock_code: sdk.get_quotes(
+                    stock_code=code,
+                    exchange_code="NSE",
+                    product_type="cash",
+                ),
+                timeout_sec=5.0,
+            )
+            rows = raw.get("Success", []) if isinstance(raw, dict) else []
+            if not isinstance(rows, list) or not rows:
+                continue
+            row = rows[0]
+            last = float(row.get("ltp") or 0.0)
+            if last <= 0:
+                continue
+            open_price = float(row.get("open") or last)
+            high = float(row.get("high") or last)
+            low = float(row.get("low") or last)
+            previous_close = float(row.get("previous_close") or row.get("close") or last)
+            result.append(
+                Quote(
+                    source="BREEZE",
+                    instrument_id=instrument_id,
+                    symbol=symbol,
+                    last_price=last,
+                    open=open_price,
+                    high=high,
+                    low=low,
+                    close=previous_close,
+                    volume=int(float(row.get("total_quantity_traded") or row.get("volume") or 0)),
+                    change_pct=(
+                        round(((last - previous_close) / previous_close) * 100.0, 4)
+                        if previous_close
+                        else 0.0
+                    ),
+                    timestamp=now,
+                )
+            )
+        return result
 
     async def get_funds(self) -> BrokerFunds:
         """Query funds balance via Account Adapter or return mock for test keys."""
