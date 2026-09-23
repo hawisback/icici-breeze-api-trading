@@ -14,6 +14,8 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, SecretStr
 
+from libs.contracts.models import UserRole
+from services.api_gateway.dependencies import require_roles
 from services.broker_gateway.application.services.broker_service import BrokerApplicationService
 from services.broker_gateway.domain.enums import (
     Exchange,
@@ -35,7 +37,19 @@ from services.broker_gateway.domain.models.session import SessionCredentials
 
 logger = logging.getLogger(__name__)
 
-internal_router = APIRouter(prefix="/internal/v1", tags=["Internal Broker Gateway"])
+internal_router = APIRouter(
+    prefix="/internal/v1",
+    tags=["Internal Broker Gateway"],
+    dependencies=[Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR))],
+)
+
+
+def reject_direct_broker_write() -> None:
+    """HTTP callers may not bypass OMS/Risk/Execution for broker writes."""
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Direct broker writes are disabled on the API gateway. Use the guarded /api/v1 order pipeline.",
+    )
 
 
 # --- Schemas ---
@@ -340,7 +354,7 @@ async def get_order_detail(
     }
 
 
-@internal_router.post("/orders")
+@internal_router.post("/orders", dependencies=[Depends(reject_direct_broker_write)])
 async def place_order(
     body: PlaceOrderSchema,
     service: BrokerApplicationService = Depends(get_clean_broker_service),
@@ -379,7 +393,7 @@ async def place_order(
     }
 
 
-@internal_router.post("/orders/{broker_order_id}/modify")
+@internal_router.post("/orders/{broker_order_id}/modify", dependencies=[Depends(reject_direct_broker_write)])
 async def modify_order(
     broker_order_id: str,
     body: ModifyOrderSchema,
@@ -401,7 +415,7 @@ async def modify_order(
     }
 
 
-@internal_router.post("/orders/{broker_order_id}/cancel")
+@internal_router.post("/orders/{broker_order_id}/cancel", dependencies=[Depends(reject_direct_broker_write)])
 async def cancel_order(
     broker_order_id: str,
     request_id: str = Query(...),
@@ -420,7 +434,7 @@ async def cancel_order(
     }
 
 
-@internal_router.post("/positions/square-off")
+@internal_router.post("/positions/square-off", dependencies=[Depends(reject_direct_broker_write)])
 async def square_off(
     body: SquareOffSchema,
     service: BrokerApplicationService = Depends(get_clean_broker_service),
