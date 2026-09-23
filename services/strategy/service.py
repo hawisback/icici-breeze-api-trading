@@ -1133,6 +1133,214 @@ class StrategyService:
 
         return {"status": "TRADE_OPENED", "trade": new_trade.model_dump(mode="json")}
 
+    @staticmethod
+    def _option_tick_price(value: float, *, down: bool = False) -> float:
+        """Normalize an option price to the platform's NFO tick."""
+        tick = 0.05
+        if value <= 0:
+            return tick
+        steps = int(value / tick) if down else round(value / tick)
+        return round(max(tick, steps * tick), 2)
+
+    def _protective_stop_prices(self, trade: ActiveTrade) -> tuple[float, float]:
+        trigger = self._option_tick_price(float(trade.option_hard_stop_price))
+        raw_limit = trigger * (
+            1.0 - self.config.risk.broker_protective_stop_limit_buffer_pct / 100.0
+        )
+        limit_price = self._option_tick_price(raw_limit, down=True)
+        if limit_price >= trigger:
+            limit_price = self._option_tick_price(trigger - 0.05, down=True)
+        return trigger, limit_price
+
+    async def _sync_live_protective_stop(
+        self,
+        trade: ActiveTrade,
+        features: MarketFeatures,
+    ) -> bool:
+        """Ensure a confirmed LIVE long option has broker-held catastrophe protection.
+
+        Returns True only when normal lifecycle management may continue. While
+        the protective order is still validating/submitting, management pauses
+        rather than racing a second SELL order against an unconfirmed stop.
+        """
+        if trade.mode != AutoTradingMode.LIVE or trade.filled_quantity <= 0:
+            return True
+        if trade.state == TradeLifecycleState.CLOSED:
+            return False
+
+        remaining_quantity = max(0, trade.quantity - trade.exit_filled_quantity)
+        if remaining_quantity <= 0:
+            if trade.exit_proceeds > 0 and trade.quantity > 0:
+                await self._close_trade(
+                    trade,
+                    features,
+                    trade.exit_proceeds / trade.quantity,
+                    OPTION_EMERGENCY_STOP,
+                    quote={"source": "BROKER_PROTECTIVE_STOP"},
+                )
+            return False
+
+        if trade.protective_stop_order_id:
+            protective = await self.oms.get_order(trade.protective_stop_order_id)
+            if protective is None:
+                trade.protective_stop_status = "OMS_ORDER_MISSING"
+                await self.repo.save_trade(trade)
+                return False
+
+            status = protective.status.value
+            trade.protective_stop_status = status
+            new_protective_filled = int(protective.filled_quantity or 0)
+            delta_fill = max(
+                0,
+                new_protective_filled - trade.protective_stop_filled_quantity,
+            )
+            if delta_fill:
+                fill_price = float(
+                    protective.average_price
+                    or trade.protective_stop_limit_price
+                    or trade.option_hard_stop_price
+                )
+                trade.exit_proceeds += fill_price * delta_fill
+                trade.exit_filled_quantity += delta_fill
+                trade.protective_stop_filled_quantity = new_protective_filled
+
+            if status == "FILLED" or trade.exit_filled_quantity >= trade.quantity:
+                trade.protective_stop_status = "FILLED"
+                average_exit = (
+                    trade.exit_proceeds / trade.quantity
+                    if trade.quantity > 0
+                    else float(protective.average_price or 0.0)
+                )
+                await self._close_trade(
+                    trade,
+                    features,
+                    average_exit,
+                    OPTION_EMERGENCY_STOP,
+                    quote={
+                        "bid": float(protective.average_price or average_exit),
+                        "source": "BROKER_PROTECTIVE_STOP",
+                    },
+                )
+                return False
+
+            if status in {
+                "CANCELLED",
+                "REJECTED",
+                "RISK_REJECTED",
+                "EXPIRED",
+                "FAILED_SAFE",
+            }:
+                cancelled_for_exit = trade.protective_stop_cancel_for_exit
+                trade.protective_stop_order_id = None
+                trade.protective_stop_cancel_for_exit = False
+                await self.repo.save_trade(trade)
+                return cancelled_for_exit
+
+            await self.repo.save_trade(trade)
+            return status in {"OPEN", "ACKNOWLEDGED", "PARTIALLY_FILLED"}
+
+        # An already-decided exit must not create a new protective order while
+        # it is trying to flatten the remaining position.
+        if trade.pending_exit_reason or trade.exit_order_id:
+            return True
+
+        trigger_price, limit_price = self._protective_stop_prices(trade)
+        intent = OrderIntent(
+            intent_id=generate_id(),
+            correlation_id=trade.trade_id,
+            strategy_instance_id="INST-NIFTY-AUTO-ENGINE-PROTECTIVE",
+            source=SourceType.STRATEGY,
+            instrument_id=trade.contract_instrument_id,
+            symbol=trade.contract_symbol,
+            side=OrderSide.SELL,
+            order_type=OrderType.STOP_LIMIT,
+            quantity=remaining_quantity,
+            price=limit_price,
+            trigger_price=trigger_price,
+            product=ProductType.OPTIONS,
+            trading_mode=TradingMode.LIVE,
+            reduce_only=True,
+        )
+        order = await self.oms.create_order_intent(intent)
+        trade.protective_stop_order_id = order.order_id
+        trade.protective_stop_status = order.status.value
+        trade.protective_stop_trigger_price = trigger_price
+        trade.protective_stop_limit_price = limit_price
+        trade.protective_stop_cancel_for_exit = False
+        await self.repo.save_trade(trade)
+        await self._log_decision(
+            "RISK",
+            trade.strategy.value,
+            "Broker-held option catastrophe stop submitted",
+            {
+                "trade_id": trade.trade_id,
+                "protective_order_id": order.order_id,
+                "quantity": remaining_quantity,
+                "trigger_price": trigger_price,
+                "limit_price": limit_price,
+            },
+        )
+        return False
+
+    async def _cancel_live_protective_stop_for_exit(
+        self,
+        trade: ActiveTrade,
+        features: MarketFeatures,
+    ) -> bool:
+        """Cancel/reconcile protection before submitting a discretionary SELL."""
+        if trade.mode != AutoTradingMode.LIVE or not trade.protective_stop_order_id:
+            return True
+
+        may_continue = await self._sync_live_protective_stop(trade, features)
+        if trade.state == TradeLifecycleState.CLOSED:
+            return False
+        if not trade.protective_stop_order_id:
+            return may_continue
+
+        protective = await self.oms.get_order(trade.protective_stop_order_id)
+        if protective is None:
+            trade.protective_stop_status = "OMS_ORDER_MISSING"
+            await self.repo.save_trade(trade)
+            return False
+        if protective.status.value in {
+            "CANCELLED",
+            "REJECTED",
+            "RISK_REJECTED",
+            "EXPIRED",
+            "FAILED_SAFE",
+        }:
+            trade.protective_stop_order_id = None
+            trade.protective_stop_cancel_for_exit = False
+            await self.repo.save_trade(trade)
+            return True
+        if protective.status.value == "FILLED":
+            return False
+        if not protective.broker_order_id:
+            trade.protective_stop_status = (
+                "CANCEL_WAITING_FOR_BROKER_REFERENCE"
+            )
+            await self.repo.save_trade(trade)
+            return False
+
+        gateway = getattr(self.hist_svc, "broker_gateway", None)
+        if gateway is None:
+            trade.protective_stop_status = "CANCEL_BLOCKED_NO_GATEWAY"
+            await self.repo.save_trade(trade)
+            return False
+
+        response = await gateway.cancel_order(
+            protective.broker_order_id,
+            mode=protective.trading_mode,
+        )
+        trade.protective_stop_cancel_for_exit = True
+        trade.protective_stop_status = (
+            "CANCEL_REQUESTED"
+            if response.success
+            else f"CANCEL_FAILED:{response.status}"
+        )
+        await self.repo.save_trade(trade)
+        return False
+
     async def _evaluate_active_trade(self, trade: ActiveTrade, features: MarketFeatures) -> None:
         """Evaluates active position stops, trailing updates, and thesis reversal score."""
         if trade.state == TradeLifecycleState.ENTRY_PENDING and not trade.entry_order_id:
