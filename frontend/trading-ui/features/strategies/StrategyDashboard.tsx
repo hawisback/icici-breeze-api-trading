@@ -113,7 +113,7 @@ export const StrategyDashboard: React.FC = () => {
   const handleModeChange = async (newMode: "PAPER" | "LIVE") => {
     if (!status || status.config.mode === newMode) return;
     if (newMode === "LIVE") {
-      if (!confirm("Switching the production engine to LIVE mode. C and D remain paper-locked frozen candidates until explicit promotion. Ensure live broker credentials are valid.")) return;
+      if (!confirm("Switching the four-strategy engine to LIVE mode. Enabled Strategies C and D can route real orders once the system is armed. Ensure live broker credentials and risk limits are correct.")) return;
     }
     try {
       setActionLoading(true);
@@ -145,7 +145,7 @@ export const StrategyDashboard: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            A/B production engine + frozen C/D paper candidates. Status refreshes every 1.5s; charts refresh candles every 3s and live quotes every 1s.
+            Four-strategy execution engine. C/D retain their frozen validated signal rules while sharing the same risk, contract-selection, ActiveTrade and OMS execution path.
           </p>
           <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] font-bold tracking-wider">
             <span className={`px-2 py-1 rounded border ${status?.scheduler?.running ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-rose-500/15 text-rose-300 border-rose-500/30"}`}>
@@ -153,8 +153,8 @@ export const StrategyDashboard: React.FC = () => {
             </span>
             <span className="px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">A V3 · REV {status?.config.strategy_a_revision ?? 5}</span>
             <span className="px-2 py-1 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">B · {status?.strategies?.volatility_breakout?.execution_mode ?? "PAPER"}</span>
-            <span className="px-2 py-1 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">C · PAPER LOCKED</span>
-            <span className="px-2 py-1 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">D · PAPER LOCKED</span>
+            <span className="px-2 py-1 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">C · {status?.strategies?.di_continuation?.execution_mode ?? "PAPER"}</span>
+            <span className="px-2 py-1 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">D · {status?.strategies?.sr_momentum_breakout?.execution_mode ?? "PAPER"}</span>
           </div>
         </div>
 
