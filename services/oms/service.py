@@ -138,6 +138,11 @@ class OMSService:
             return
         order = matching[0]
 
+        # Risk decisions may be replayed by the durable outbox. Once the order
+        # has advanced beyond VALIDATING, the persisted decision is idempotent.
+        if order.status != OrderState.VALIDATING:
+            return
+
         from_state = order.status
         to_state = OrderState.APPROVED if approved else OrderState.RISK_REJECTED
         OrderStateMachine.validate_transition(from_state, to_state, reason)
