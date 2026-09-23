@@ -11,7 +11,7 @@ from typing import Any, Optional
 from libs.config.settings import AppEnv, PlatformSettings, get_platform_settings
 from libs.contracts.models import UserRole, generate_id, utc_now
 from libs.database.sqlite import SQLiteConfig, SQLiteEngine
-from services.auth.security import hash_password
+from services.auth.security import hash_password, verify_password
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,34 @@ class AuthRepository:
             count = row[0] if row else 0
 
         if count > 0:
+            if self.settings.app_env == AppEnv.PRODUCTION:
+                known_defaults = {
+                    "admin": "Admin@Trading123!",
+                    "operator": "Operator@Trading123!",
+                    "trader": "Trader@Trading123!",
+                    "viewer": "Viewer@Trading123!",
+                }
+                async with self.engine.connect() as conn:
+                    cursor = await conn.execute(
+                        "SELECT username, password_hash, salt FROM users WHERE is_active = 1"
+                    )
+                    rows = await cursor.fetchall()
+                compromised = [
+                    row["username"]
+                    for row in rows
+                    if row["username"] in known_defaults
+                    and verify_password(
+                        known_defaults[row["username"]],
+                        row["password_hash"],
+                        row["salt"],
+                    )
+                ]
+                if compromised:
+                    raise RuntimeError(
+                        "Production startup refused because known development "
+                        "bootstrap passwords are still active for: "
+                        + ", ".join(sorted(compromised))
+                    )
             return
 
         if self.settings.app_env == AppEnv.PRODUCTION:
