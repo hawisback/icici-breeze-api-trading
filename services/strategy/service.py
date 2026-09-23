@@ -1800,6 +1800,127 @@ class StrategyService:
         )
         return self._active_overrides
 
+    def _candidate_monitor_diagnostics(
+        self,
+        *,
+        strategy: StrategyName,
+        label: str,
+        status: dict[str, Any],
+        current_price: float,
+        active_direction: str | None,
+        target_entry_level: float | None = None,
+    ) -> list[StrategyTriggerDiagnostics]:
+        """Adapt frozen paper sidecars to the common UI trigger-radar contract."""
+        raw_status = str(status.get("status") or "NOT_INITIALIZED")
+        blocked = raw_status in {
+            "DISABLED",
+            "INITIALIZATION_FAILED",
+            "OBSERVATION_FAILED",
+            "DATA_RETRIEVAL_FAILED",
+            "MARKET_DATA_UNAVAILABLE",
+            "NATIVE_FUTURES_UNAVAILABLE",
+            "NO_ACTIVE_FUTURES_DATA",
+        }
+        fingerprint_ok = bool(status.get("candidate_spec_fingerprint"))
+        data_ready = not blocked
+        paper_mode = status.get("execution_mode") == AutoTradingMode.PAPER.value
+        rows: list[StrategyTriggerDiagnostics] = []
+        for option_type, direction in (
+            (OptionType.CALL, TradeDirection.BULLISH),
+            (OptionType.PUT, TradeDirection.BEARISH),
+        ):
+            is_active = active_direction == option_type.value
+            conditions = [
+                TriggerCondition(
+                    id="frozen_candidate",
+                    name="Frozen candidate fingerprint",
+                    current_value="VALID" if fingerprint_ok else "MISSING",
+                    target_threshold="Frozen spec must match",
+                    status="PASSED" if fingerprint_ok else "BLOCKED",
+                    gap_description=(
+                        "Candidate fingerprint verified"
+                        if fingerprint_ok
+                        else "Candidate fingerprint unavailable"
+                    ),
+                ),
+                TriggerCondition(
+                    id="market_data",
+                    name="Real market data",
+                    current_value=raw_status,
+                    target_threshold="Native real-market candles available",
+                    status="PASSED" if data_ready else "BLOCKED",
+                    gap_description=(
+                        "Paper monitor is receiving its required candles"
+                        if data_ready
+                        else raw_status
+                    ),
+                ),
+                TriggerCondition(
+                    id="paper_execution",
+                    name="Candidate execution mode",
+                    current_value=str(status.get("execution_mode") or "N/A"),
+                    target_threshold="PAPER (live locked until promotion)",
+                    status="PASSED" if paper_mode else "PENDING",
+                    gap_description=(
+                        "Candidate remains isolated from live OMS"
+                        if paper_mode
+                        else "Waiting for paper monitor initialization"
+                    ),
+                ),
+                TriggerCondition(
+                    id="candidate_signal",
+                    name="Frozen setup signal",
+                    current_value="ACTIVE" if is_active else "WAITING",
+                    target_threshold=f"{option_type.value} candidate signal",
+                    status="PASSED" if is_active else "PENDING",
+                    gap_description=(
+                        "Paper position is open and stop management is active"
+                        if is_active
+                        else "Waiting for all frozen signal conditions"
+                    ),
+                ),
+            ]
+            passed = sum(item.status == "PASSED" for item in conditions)
+            if blocked:
+                overall = "BLOCKED"
+                blocker = raw_status
+            elif is_active:
+                overall = "PAPER_OPEN"
+                blocker = "Paper position open; frozen stop lifecycle is active"
+            else:
+                overall = "WAITING"
+                blocker = "Waiting for frozen candidate signal"
+            rows.append(
+                StrategyTriggerDiagnostics(
+                    strategy=strategy,
+                    strategy_label=f"{label} {option_type.value}",
+                    direction=direction,
+                    option_type=option_type,
+                    overall_status=overall,
+                    passed_count=passed,
+                    total_count=len(conditions),
+                    ready_pct=round(100.0 * passed / len(conditions), 1),
+                    key_blocker=blocker,
+                    target_entry_level=target_entry_level,
+                    current_spot=float(current_price or 0.0),
+                    phase_state=overall,
+                    phase_summary={
+                        "candidate_id": status.get("candidate_id"),
+                        "candidate_spec_fingerprint": status.get(
+                            "candidate_spec_fingerprint"
+                        ),
+                        "execution_mode": status.get("execution_mode"),
+                        "live_trading_allowed": status.get(
+                            "live_trading_allowed",
+                            False,
+                        ),
+                        "monitor_status": raw_status,
+                    },
+                    conditions=conditions,
+                )
+            )
+        return rows
+
     async def get_trigger_diagnostics(self) -> TriggerDiagnosticsResponse:
         """Gathers granular condition diagnostics across all strategies and session gates."""
         features = self._last_features or MarketFeatures(timestamp=utc_now(), data_reason="Awaiting first completed evaluation")
@@ -1899,10 +2020,48 @@ class StrategyService:
             primary_blocker=primary,
         )
 
+        c_active = (
+            self._last_strategy_c_shadow_status.get("active_candidate_trade")
+            or {}
+        )
+        c_direction = c_active.get("direction")
+        d_active = (
+            self._last_strategy_d_paper_status.get("active_paper_trade")
+            or {}
+        )
+        d_signal = d_active.get("signal") or {}
+        d_direction = d_signal.get("option_type")
+        d_market = self._last_strategy_d_paper_status.get("market") or {}
+        d_latest = self._last_strategy_d_paper_status.get("latest_signal") or {}
+
+        diag_c = self._candidate_monitor_diagnostics(
+            strategy=StrategyName.DI_CONTINUATION,
+            label="Strategy C · DI Continuation",
+            status=self._last_strategy_c_shadow_status,
+            current_price=float(features.futures_price or 0.0),
+            active_direction=c_direction,
+        )
+        diag_d = self._candidate_monitor_diagnostics(
+            strategy=StrategyName.SR_MOMENTUM_BREAKOUT,
+            label="Strategy D · S&R Momentum",
+            status=self._last_strategy_d_paper_status,
+            current_price=float(
+                d_market.get("spot_price")
+                or features.spot_price
+                or 0.0
+            ),
+            active_direction=d_direction,
+            target_entry_level=(
+                float(d_latest["breakout_level"])
+                if d_latest.get("breakout_level") is not None
+                else None
+            ),
+        )
+
         return TriggerDiagnosticsResponse(
             system_time=now,
             gates=gates,
-            strategies=[*diag_a, *diag_b],
+            strategies=[*diag_a, *diag_b, *diag_c, *diag_d],
             active_overrides=self._active_overrides,
         )
 
