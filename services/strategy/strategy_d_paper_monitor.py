@@ -579,7 +579,10 @@ class StrategyDPaperMonitor:
     ) -> None:
         if lifecycle.scale_out_time is None:
             return
-        if tracked.get("paper_partial_status") != "NOT_REACHED":
+        if tracked.get("paper_partial_status") not in {
+            "NOT_REACHED",
+            "T1_QUOTE_PENDING",
+        }:
             return
         total_lots = int(tracked.get("paper_lots") or 0)
         partial_lots = self.manager.scale_out_lots(total_lots)
@@ -667,6 +670,15 @@ class StrategyDPaperMonitor:
         if lifecycle.runner_exit_reason == "DATA_END":
             return
         if tracked.get("paper_status") == "CLOSED":
+            return
+        if (
+            tracked.get("paper_partial_status") == "INCOMPLETE_T1_QUOTE"
+            and int(tracked.get("paper_lots") or 0) >= 2
+        ):
+            tracked["paper_status"] = "INCOMPLETE_T1_QUOTE"
+            tracked["paper_rejection_reason"] = (
+                "T1_PARTIAL_FILL_UNAVAILABLE"
+            )
             return
         exit_time = lifecycle.exit_time
         quote_time = _aware(quote.get("quote_timestamp"))
