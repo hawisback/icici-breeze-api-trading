@@ -108,45 +108,45 @@ async def initialize_services(
     await gateway_svc.initialize()
     session_svc.set_broker_gateway(gateway_svc)
 
-    # If credentials and session token are configured in environment, auto-activate
-    if app_settings.broker_backend == BrokerBackend.KITE:
-        kite_key = app_settings.kite_api_key.get_secret_value() if app_settings.kite_api_key else ""
-        kite_secret = app_settings.kite_api_secret.get_secret_value() if app_settings.kite_api_secret else ""
-        kite_request = app_settings.kite_request_token.get_secret_value() if app_settings.kite_request_token else ""
-        kite_access = app_settings.kite_access_token.get_secret_value() if app_settings.kite_access_token else ""
-        if kite_key and kite_secret and (kite_request or kite_access):
-            try:
-                logger.info("Attempting auto-activation of configured Kite session...")
-                await session_svc.activate_session(
-                    api_key=kite_key,
-                    secret_key=kite_secret,
-                    session_token=kite_request,
-                    access_token=kite_access or None,
-                    account_id="ZERODHA_PRIMARY",
-                )
-            except Exception as exc:
-                logger.warning("Startup Kite auto-activation deferred: %s", exc)
-    elif (
+    # Auto-activate both configured broker sessions independently.
+    if (
         app_settings.breeze_api_key
         and app_settings.breeze_secret_key
         and app_settings.breeze_session_token
     ):
         try:
-            api_key_val = (
-                app_settings.breeze_api_key.get_secret_value()
-                if hasattr(app_settings.breeze_api_key, "get_secret_value")
-                else str(app_settings.breeze_api_key)
-            )
-            tok_val = app_settings.breeze_session_token.get_secret_value()
-            if tok_val and tok_val != "your_daily_session_token_here":
-                logger.info("Attempting auto-activation of broker session from configured token...")
+            breeze_key = app_settings.breeze_api_key.get_secret_value()
+            breeze_secret = app_settings.breeze_secret_key.get_secret_value()
+            breeze_token = app_settings.breeze_session_token.get_secret_value()
+            if breeze_token and breeze_token != "your_daily_session_token_here":
+                logger.info("Attempting auto-activation of configured Breeze session...")
                 await session_svc.activate_session(
-                    api_key=api_key_val,
-                    secret_key=app_settings.breeze_secret_key.get_secret_value(),
-                    session_token=tok_val,
+                    api_key=breeze_key,
+                    secret_key=breeze_secret,
+                    session_token=breeze_token,
+                    account_id="ICICI_PRIMARY",
+                    broker=BrokerBackend.BREEZE,
                 )
         except Exception as exc:
-            logger.warning("Startup auto-activation of broker session deferred: %s", exc)
+            logger.warning("Startup Breeze auto-activation deferred: %s", exc)
+
+    kite_key = app_settings.kite_api_key.get_secret_value() if app_settings.kite_api_key else ""
+    kite_secret = app_settings.kite_api_secret.get_secret_value() if app_settings.kite_api_secret else ""
+    kite_request = app_settings.kite_request_token.get_secret_value() if app_settings.kite_request_token else ""
+    kite_access = app_settings.kite_access_token.get_secret_value() if app_settings.kite_access_token else ""
+    if kite_key and kite_secret and (kite_request or kite_access):
+        try:
+            logger.info("Attempting auto-activation of configured Kite session...")
+            await session_svc.activate_session(
+                api_key=kite_key,
+                secret_key=kite_secret,
+                session_token=kite_request,
+                access_token=kite_access or None,
+                account_id="ZERODHA_PRIMARY",
+                broker=BrokerBackend.KITE,
+            )
+        except Exception as exc:
+            logger.warning("Startup Kite auto-activation deferred: %s", exc)
 
     instrument_repo = InstrumentRepository(db_path=app_settings.instruments_db_path)
     instrument_svc = InstrumentService(repository=instrument_repo)
@@ -189,6 +189,7 @@ async def initialize_services(
         event_bus=bus,
     )
     await exec_svc.initialize()
+    await exec_svc.start_reconciliation_worker(interval_sec=1.0)
 
     portfolio_repo = PortfolioRepository(db_path=app_settings.portfolio_db_path)
     portfolio_svc = PortfolioService(
