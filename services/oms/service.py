@@ -77,6 +77,7 @@ class OMSService:
             quantity=intent.quantity,
             remaining_quantity=intent.quantity,
             price=intent.price,
+            trigger_price=intent.trigger_price,
             status=OrderState.CREATED,
             trading_mode=intent.trading_mode,
             reduce_only=intent.reduce_only,
