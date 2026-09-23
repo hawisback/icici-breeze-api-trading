@@ -1177,20 +1177,21 @@ class StrategyService:
             self.strategy_a.confirm_entry(signal.timestamp)
             await self._save_runtime()
             await self._record_strategy_a_lifecycle_event(new_trade, features, "POSITION_SIZED")
-        await self._record_execution({
-            "trade_id": new_trade.trade_id,
-            "side": "BUY",
-            "timestamp": now.isoformat(),
-            "raw_bid": selected_contract.bid_price,
-            "raw_ask": selected_contract.ask_price,
-            "raw_ltp": selected_contract.ltp,
-            "executable_price": entry_price,
-            "slippage_points": entry_slippage,
-            "quantity": quantity,
-            "source": chain.get("source", "UNKNOWN"),
-            "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
-            "reason": "PAPER_OR_SHADOW_ENTRY",
-        })
+        if execution_mode != AutoTradingMode.LIVE:
+            await self._record_execution({
+                "trade_id": new_trade.trade_id,
+                "side": "BUY",
+                "timestamp": now.isoformat(),
+                "raw_bid": selected_contract.bid_price,
+                "raw_ask": selected_contract.ask_price,
+                "raw_ltp": selected_contract.ltp,
+                "executable_price": entry_price,
+                "slippage_points": entry_slippage,
+                "quantity": quantity,
+                "source": chain.get("source", "UNKNOWN"),
+                "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                "reason": "PAPER_OR_SHADOW_ENTRY",
+            })
         if is_strategy_a:
             await self._record_strategy_a_lifecycle_event(new_trade, features, "ENTRY_OPENED")
         self._active_trades_cache.append(new_trade)
@@ -1580,17 +1581,48 @@ class StrategyService:
                 trade.state = TradeLifecycleState.CLOSED
                 trade.exit_time = utc_now()
                 trade.exit_reason = "ENTRY_UNFILLED_" + order.status.value
-                self.strategy_a.on_exit(trade.direction, trade.exit_time)
-                self.strategy_b.reset(trade.exit_time)
-                await self._save_runtime()
+                if self._is_strategy_a(trade.strategy):
+                    self.strategy_a.on_exit(trade.direction, trade.exit_time)
+                    await self._save_runtime()
+                elif trade.strategy == StrategyName.VOLATILITY_BREAKOUT:
+                    self.strategy_b.reset(trade.exit_time)
+                    await self._save_runtime()
                 await self.repo.save_trade(trade)
                 return
             if trade.filled_quantity != order.filled_quantity:
-                trade.filled_quantity = order.filled_quantity
-                trade.quantity = order.filled_quantity
-                trade.entry_option_price = order.average_price
-                trade.option_hard_stop_price = round(order.average_price * (1-self.config.risk.option_hard_stop_pct/100), 2)
+                confirmed_qty = int(order.filled_quantity)
+                confirmed_price = float(order.average_price)
+                trade.filled_quantity = confirmed_qty
+                trade.quantity = confirmed_qty
+                trade.initial_quantity = confirmed_qty
+                trade.remaining_quantity = confirmed_qty
+                trade.lots = confirmed_qty // trade.lot_size
+                trade.entry_option_price = confirmed_price
+                trade.entry_executable_price = confirmed_price
+                trade.entry_slippage_points = round(
+                    confirmed_price - float(trade.entry_raw_ask or confirmed_price),
+                    4,
+                )
+                trade.option_hard_stop_price = round(
+                    confirmed_price
+                    * (1 - self.config.risk.option_hard_stop_pct / 100),
+                    2,
+                )
                 trade.state = TradeLifecycleState.OPEN_INITIAL_RISK
+                await self._record_execution({
+                    "trade_id": trade.trade_id,
+                    "side": "BUY",
+                    "timestamp": utc_now().isoformat(),
+                    "raw_bid": trade.entry_bid,
+                    "raw_ask": trade.entry_raw_ask,
+                    "raw_ltp": trade.entry_ltp,
+                    "executable_price": confirmed_price,
+                    "slippage_points": trade.entry_slippage_points,
+                    "quantity": confirmed_qty,
+                    "source": "LIVE_OMS",
+                    "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                    "reason": "LIVE_ENTRY_FILLED",
+                })
                 await self.repo.save_trade(trade)
 
         if await self._reconcile_partial_exit_order(trade):
