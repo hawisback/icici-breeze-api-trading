@@ -20,6 +20,11 @@ from statistics import mean
 from typing import Any, Sequence
 
 from libs.contracts.models import Candle
+from services.historical.strategy_d_candidate_manifest import (
+    candidate_spec,
+    spec_fingerprint,
+    validate_v2_config,
+)
 from services.historical.strategy_a_data_audit import (
     IST,
     _active_contract,
@@ -202,6 +207,8 @@ def run_backtest(
 ) -> dict[str, Any]:
     """Run one frozen Strategy D ruleset on preloaded real candles."""
     cfg = config or StrategyDConfig.v1_control()
+    if cfg.variant == "V2_CANDIDATE":
+        validate_v2_config(cfg)
     spot = sorted(spot_candles, key=lambda item: item.start_time)
     spot_by_day = _group_by_day(spot, interval="5m")
     minute_by_day = _group_by_day(
@@ -322,6 +329,16 @@ def run_backtest(
         "ruleset_version": cfg.ruleset_version,
         "variant": cfg.variant,
         "config": cfg.to_dict(),
+        "candidate_spec": (
+            candidate_spec()
+            if cfg.variant == "V2_CANDIDATE"
+            else None
+        ),
+        "candidate_spec_fingerprint": (
+            spec_fingerprint()
+            if cfg.variant == "V2_CANDIDATE"
+            else None
+        ),
         "data_contract": {
             "signal_price": "NIFTY spot completed 5m candles",
             "static_levels": (
