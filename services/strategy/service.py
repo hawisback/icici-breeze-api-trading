@@ -1418,7 +1418,7 @@ class StrategyService:
 
         entry = float(trade.underlying_entry_price or trade.entry_spot_price)
         risk = float(trade.underlying_r or trade.initial_r_points)
-        exit_reason = runtime.get("underlying_exit_reason")
+        exit_reason = trade.pending_exit_reason or runtime.get("underlying_exit_reason")
         exit_price_raw = runtime.get("underlying_exit_price")
         if exit_price_raw is not None:
             current_underlying = float(exit_price_raw)
@@ -1468,6 +1468,7 @@ class StrategyService:
             and not emergency_exit
             and runtime.get("scale_out_time")
             and not trade.t1_reached
+            and not trade.pending_exit_reason
         ):
             trade.t1_reached = True
             original_quantity = int(trade.initial_quantity or trade.quantity)
@@ -1966,9 +1967,16 @@ class StrategyService:
             "raw_ask": (quote or {}).get("ask"),
             "raw_ltp": (quote or {}).get("ltp"),
             "executable_price": price,
-            "slippage_points": self._paper_slippage(),
+            "slippage_points": (
+                0.0 if trade.mode == AutoTradingMode.LIVE
+                else self._paper_slippage()
+            ),
             "quantity": final_quantity,
-            "source": (quote or {}).get("source", "UNKNOWN"),
+            "source": (
+                "LIVE_OMS"
+                if trade.mode == AutoTradingMode.LIVE
+                else (quote or {}).get("source", "UNKNOWN")
+            ),
             "cost_assumption_version": r.paper_cost_assumption_version,
             "reason": reason,
         })
@@ -1989,6 +1997,30 @@ class StrategyService:
             return next((t for t in trades if t.trade_id == trade_id), None)
 
         features = self._last_features or await self._gather_features()
+        if target.mode == AutoTradingMode.LIVE and target.partial_exit_order_id:
+            order = await self.oms.get_order(target.partial_exit_order_id)
+            gateway = getattr(self.hist_svc, "broker_gateway", None)
+            if (
+                order
+                and order.status.value not in (
+                    "FILLED",
+                    "CANCELLED",
+                    "REJECTED",
+                    "RISK_REJECTED",
+                    "EXPIRED",
+                    "FAILED_SAFE",
+                )
+                and order.broker_order_id
+                and gateway
+            ):
+                await gateway.cancel_order(
+                    order.broker_order_id,
+                    mode=order.trading_mode,
+                )
+            target.pending_exit_reason = reason
+            await self.repo.save_trade(target)
+            return target
+
         quote = await self._resolve_option_quote(target)
         self._apply_quote_to_trade(target, quote)
         if quote.get("status") != "VALID" or not quote.get("bid") or float(quote.get("bid")) <= 0:
