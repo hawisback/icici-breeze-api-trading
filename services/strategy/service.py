@@ -45,6 +45,8 @@ from services.strategy.models import (
     ThresholdOverrides,
     TradeDirection,
     TradeLifecycleState,
+    TriggerCondition,
+    StrategyTriggerDiagnostics,
     TriggerDiagnosticsResponse,
 )
 from services.strategy.position_manager import PositionManager, UnderlyingRiskSizer, calculate_realized_trade_r, underlying_r_for_price
@@ -59,6 +61,7 @@ from services.strategy.simulation import SimulationEngine
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 from services.strategy.strategy_c_shadow_monitor import StrategyCShadowMonitor
+from services.strategy.strategy_d_paper_monitor import StrategyDPaperMonitor
 from services.strategy.telemetry import StrategyAEvaluationRecord, StrategyATelemetryStore
 
 logger = logging.getLogger(__name__)
@@ -97,6 +100,16 @@ class StrategyService:
             risk_config=self.config.risk,
         )
         self._last_strategy_c_shadow_status: dict[str, Any] = {"status": "NOT_INITIALIZED"}
+        self.strategy_d_paper = StrategyDPaperMonitor(
+            repository=self.repo,
+            historical_service=self.hist_svc,
+            option_chain_service=self.chain_svc,
+            market_data_service=self.mkt_svc,
+            contract_selector=self.contract_selector,
+            risk_config=self.config.risk,
+            session_config=self.config.session,
+        )
+        self._last_strategy_d_paper_status: dict[str, Any] = {"status": "NOT_INITIALIZED"}
 
         self.strategy_a = TrendPullbackStrategy(config=self.config.tunables)
         self.strategy_b = VolatilityBreakoutStrategy(
@@ -242,6 +255,11 @@ class StrategyService:
         except Exception:
             logger.exception("Strategy C shadow initialization failed; Strategy A/B remain unaffected")
             self._last_strategy_c_shadow_status = {"status": "INITIALIZATION_FAILED"}
+        try:
+            await self.strategy_d_paper.initialize()
+        except Exception:
+            logger.exception("Strategy D paper initialization failed; Strategy A/B/C remain unaffected")
+            self._last_strategy_d_paper_status = {"status": "INITIALIZATION_FAILED"}
         # Telemetry is an audit stream, not process-local state.  Restore the
         # persisted Strategy A records before the scheduler can emit a new
         # evaluation, so summaries survive a service restart.
@@ -295,6 +313,11 @@ class StrategyService:
             contract_selector=self.contract_selector,
             risk_sizer=self.risk_sizer,
             risk_config=self.config.risk,
+        )
+        self.strategy_d_paper.refresh_dependencies(
+            contract_selector=self.contract_selector,
+            risk_config=self.config.risk,
+            session_config=self.config.session,
         )
         self.strategy_a = TrendPullbackStrategy(config=self.config.tunables)
         self.strategy_b = VolatilityBreakoutStrategy(
@@ -674,6 +697,17 @@ class StrategyService:
         except Exception:
             logger.exception("Strategy C shadow observation failed; Strategy A/B evaluation continues")
             self._last_strategy_c_shadow_status = {"status": "OBSERVATION_FAILED"}
+
+        # Strategy D is a frozen paper sidecar. It runs on the same scheduler
+        # heartbeat but remains isolated from OMS/live routing until promoted.
+        try:
+            self._last_strategy_d_paper_status = await self.strategy_d_paper.observe(
+                active_futures_instrument=self._market_data_status.get("futures_instrument"),
+                now=now,
+            )
+        except Exception:
+            logger.exception("Strategy D paper observation failed; Strategy A/B/C evaluation continues")
+            self._last_strategy_d_paper_status = {"status": "OBSERVATION_FAILED"}
 
         # 3. Manage active trades (trailing stops, thesis reversal, square-off)
         active_trades = await self.repo.get_active_trades()
