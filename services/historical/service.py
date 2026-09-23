@@ -71,14 +71,28 @@ class HistoricalService:
             return [(inferred, active_adapter)]
         return []
 
+    @staticmethod
+    def _adapter_is_active(name: str, adapter: Any | None) -> bool:
+        if adapter is None:
+            return False
+        if name == "breeze":
+            client = getattr(adapter, "client_manager", None)
+            if client is not None:
+                return bool(getattr(client, "is_active", False))
+        return bool(getattr(adapter, "is_active", False))
+
     def _active_provider(self) -> tuple[str, Any | None]:
-        for name, adapter in self._provider_candidates():
-            if getattr(adapter, "is_active", False):
+        candidates = self._provider_candidates()
+        for name, adapter in candidates:
+            if self._adapter_is_active(name, adapter):
                 return name, adapter
-        return "", None
+        # Preserve the configured provider identity while disconnected so
+        # cached candles from the other broker cannot leak across the boundary.
+        return candidates[0] if candidates else ("", None)
 
     def _provider_is_active(self) -> bool:
-        return self._active_provider()[1] is not None
+        name, adapter = self._active_provider()
+        return self._adapter_is_active(name, adapter)
 
     @staticmethod
     def _expected_completed_end(interval: str, now: datetime) -> Optional[datetime]:
@@ -108,7 +122,7 @@ class HistoricalService:
     ) -> list[Candle]:
         """Try the configured historical primary, then the secondary provider."""
         for name, adapter in self._provider_candidates():
-            if not getattr(adapter, "is_active", False):
+            if not self._adapter_is_active(name, adapter):
                 continue
             retry_key = (name, instrument_id, interval)
             if monotonic() < self._provider_retry_after.get(retry_key, 0.0):
