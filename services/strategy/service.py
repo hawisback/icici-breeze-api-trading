@@ -889,10 +889,16 @@ class StrategyService:
             await self._save_runtime()
 
         if not signal and self.config.tunables.di_continuation_enabled:
-            signal = strategy_c_signal_from_status(self._last_strategy_c_shadow_status)
+            signal = strategy_c_signal_from_status(
+                self._last_strategy_c_shadow_status,
+                as_of=now,
+            )
 
         if not signal and self.config.tunables.sr_momentum_breakout_enabled:
-            signal = strategy_d_signal_from_status(self._last_strategy_d_paper_status)
+            signal = strategy_d_signal_from_status(
+                self._last_strategy_d_paper_status,
+                as_of=now,
+            )
 
         if signal and self._is_candidate_execution_strategy(signal.strategy):
             prior_signals = await self.repo.list_strategy_signals(limit=1000)
