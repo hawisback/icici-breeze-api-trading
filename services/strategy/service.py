@@ -909,6 +909,7 @@ class StrategyService:
                 as_of=now,
             )
 
+        candidate_signal_already_persisted = False
         if signal and self._is_candidate_execution_strategy(signal.strategy):
             prior_signals = await self.repo.list_strategy_signals(limit=1000)
             prior_ids = {
@@ -916,7 +917,11 @@ class StrategyService:
                 for item in prior_signals
                 if isinstance(item, dict) and item.get("signal_id")
             }
-            if signal.signal_id in prior_ids:
+            candidate_signal_already_persisted = signal.signal_id in prior_ids
+            if candidate_signal_already_persisted and any(
+                str(trade.signal_id or "") == signal.signal_id
+                for trade in today_trades
+            ):
                 signal = None
 
         if not signal:
@@ -929,19 +934,22 @@ class StrategyService:
         if failures >= self.config.risk.max_failed_trades_per_strategy:
             return {"status": "STRATEGY_FAILURE_LIMIT_REACHED"}
 
-        # Signal detected!
-        await self.repo.save_strategy_signal(signal)
-        await self._log_decision(
-            category="SETUP",
-            strategy=signal.strategy.value,
-            message=f"Setup Triggered: {signal.strategy.value} {signal.direction.value} ({signal.option_type.value})",
-            details={
-                "underlying_entry_price": signal.underlying_entry_price or signal.spot_reference_price,
-                "stop": signal.structural_stop,
-                "r_points": signal.r_points,
-                "derivatives_score": signal.derivatives_score,
-            },
-        )
+        # Persist a candidate signal only once, but allow a fresh signal to
+        # retry transient downstream failures (for example a temporarily stale
+        # option chain) until a trade exists or the freshness window expires.
+        if not candidate_signal_already_persisted:
+            await self.repo.save_strategy_signal(signal)
+            await self._log_decision(
+                category="SETUP",
+                strategy=signal.strategy.value,
+                message=f"Setup Triggered: {signal.strategy.value} {signal.direction.value} ({signal.option_type.value})",
+                details={
+                    "underlying_entry_price": signal.underlying_entry_price or signal.spot_reference_price,
+                    "stop": signal.structural_stop,
+                    "r_points": signal.r_points,
+                    "derivatives_score": signal.derivatives_score,
+                },
+            )
 
         # 11. Select the execution contract downstream of the underlying signal.
         execution_mode = self._execution_mode_for_signal(signal)
