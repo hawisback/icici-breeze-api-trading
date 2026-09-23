@@ -283,3 +283,90 @@ async def test_oms_accepts_repeated_partial_fill_progress(tmp_path: Path):
     assert updated.remaining_quantity == 25
     assert updated.average_price == 100.75
     await bus.stop()
+
+
+class _AllowLiveGate:
+    def validate_live_order(self, account_id: str):
+        return True, "Authorized"
+
+
+class _SingleOrderOMS:
+    def __init__(self, order: BrokerOrder) -> None:
+        self.order = order
+
+    async def get_order(self, order_id: str):
+        return self.order if order_id == self.order.order_id else None
+
+
+class _CaptureExecutionGateway:
+    active_broker_name = "kite"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def place_order(self, request, mode, broker):
+        self.requests.append((request, mode, broker))
+        return BrokerOrderResponse(
+            success=True,
+            broker_order_id="BROKER-1",
+            client_order_id=request.client_order_id,
+            status="PLACED",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("broker", "stored_stock_code", "expected_stock_code"),
+    [
+        ("kite", "NIFTY", "NIFTY26SEP25000CE"),
+        ("breeze", "NIFTY", "NIFTY"),
+    ],
+)
+async def test_execution_boundary_maps_option_identifier_per_broker(
+    broker: str,
+    stored_stock_code: str,
+    expected_stock_code: str,
+):
+    now = utc_now()
+    order = BrokerOrder(
+        intent_id="intent-broker-map",
+        client_order_id="CL-MAP",
+        instrument_id="INST-NIFTY-2026-09-29-25000-CE",
+        symbol="NIFTY26SEP25000CE",
+        execution_broker=broker,
+        stock_code=stored_stock_code,
+        exchange_code="NFO",
+        expiry_date="2026-09-29",
+        strike_price=25000.0,
+        option_right=OptionRight.CALL,
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=65,
+        remaining_quantity=65,
+        price=100.0,
+        status=OrderState.OPEN,
+        trading_mode=TradingMode.LIVE,
+        created_at=now,
+        updated_at=now,
+    )
+    bus = InMemoryEventBus()
+    await bus.start()
+    gateway = _CaptureExecutionGateway()
+    execution = ExecutionService(
+        broker_gateway=gateway,  # type: ignore[arg-type]
+        oms_service=_SingleOrderOMS(order),  # type: ignore[arg-type]
+        live_gate=_AllowLiveGate(),  # type: ignore[arg-type]
+        event_bus=bus,
+    )
+
+    await execution.execute_order(order.order_id, order.client_order_id)
+
+    assert len(gateway.requests) == 1
+    request, mode, routed_broker = gateway.requests[0]
+    assert routed_broker == broker
+    assert mode == TradingMode.LIVE
+    assert request.stock_code == expected_stock_code
+    assert request.expiry_date == "2026-09-29"
+    assert request.strike_price == 25000.0
+    assert request.right == "call"
+    await bus.stop()
