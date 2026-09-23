@@ -1,19 +1,55 @@
-# Strategy D — S&R Momentum Breakout V1
+# Strategy D — S&R Momentum Breakout
 
 ## Status
 
-Research/backtest implementation only. Strategy D is intentionally isolated
-from the production Strategy A, Strategy B, and Strategy C scheduler until its
-Breeze historical results are reviewed.
+Strategy D remains research/backtest-only and isolated from the production
+Strategy A, Strategy B, and Strategy C scheduler. The original V1 rules are
+preserved as a control. V2 is a frozen candidate derived from the first Breeze
+V1 review and must be rerun before paper orchestration is enabled.
 
-Strategy ID: `STRATEGY_D_SR_MOMENTUM_BREAKOUT_V1`
+Control ID:
+
+`STRATEGY_D_SR_MOMENTUM_BREAKOUT_V1`
+
+Current candidate ID:
+
+`STRATEGY_D_SR_MOMENTUM_BREAKOUT_V2_CANDIDATE`
+
+## V2 amendments
+
+V2 deliberately changes only entry quality. Risk and lifecycle parameters are
+left unchanged so the comparison isolates the effect of the filters.
+
+1. **RSI clearance**
+   - CE still requires the completed 5m RSI(14) to cross 60, but the trigger
+     candle must finish strictly above 62.
+   - PE still requires the completed 5m RSI(14) to cross 40, but the trigger
+     candle must finish strictly below 38.
+   - This is represented as a minimum clearance of more than 2 RSI points.
+
+2. **Previous-day range regime**
+   - Previous-day range = PDH - PDL.
+   - A new entry is allowed only when
+     `previous-day range / current 5m ATR < 8.0`.
+   - The ATR is the same completed 5m ATR(14) snapshot used for initial risk.
+
+These two filters were chosen after reviewing the V1 Breeze sample. They are
+therefore in-sample research hypotheses, not production-approved thresholds.
+
+The V1 review also found weak R1 performance and a weak 12:00 IST hour, but
+those effects were less stable across calendar splits. V2 keeps both as
+diagnostics rather than hard filters.
 
 ## Data contract
 
 Strategy D uses completed real-market candles only (`BREEZE`, `KITE`, or
-`LIVE`). NIFTY spot 5-minute candles are authoritative for the structural
-breakout, RSI, ATR, EMA9, and previous-session levels. The active NIFTY futures
-contract supplies a volume-backed 5-minute session VWAP confirmation.
+`LIVE`).
+
+- NIFTY spot completed 5m candles: structural breakout, RSI, ATR, EMA9, and
+  previous-session levels.
+- Active NIFTY futures completed 5m candles: volume-backed session VWAP.
+- NIFTY spot native 1m candles: intrabar ordering only. They never create the
+  signal and never alter the completed-5m entry rules.
 
 No synthetic price, synthetic option premium, or post-entry information is
 used to create a signal.
@@ -31,12 +67,11 @@ For session D, the immediately preceding trading session derives:
 - R2 = P + (PDH - PDL)
 - S2 = P - (PDH - PDL)
 
-These levels are immutable during the current session and are emitted in the
-backtest report for later chart overlays.
+These levels remain immutable during the current session.
 
 ## Entry contract
 
-Signals are evaluated only on completed NIFTY spot 5-minute candles inside
+Signals are evaluated only on completed NIFTY spot 5m candles inside
 09:20–14:45 IST.
 
 ### Long CE
@@ -45,9 +80,11 @@ All conditions must hold:
 
 1. The previous completed spot candle was at/below PDH or R1 and the current
    completed candle closes strictly above it.
-2. Active NIFTY futures price is strictly above its completed-session VWAP.
-3. RSI(14) crosses from at/below 60 to strictly above 60.
+2. Active NIFTY futures price is strictly above completed-session VWAP.
+3. RSI(14) crosses from at/below 60 and the trigger candle closes strictly
+   above 62.
 4. RSI is not in the 45–55 trap zone.
+5. Previous-day range / current completed 5m ATR(14) is strictly below 8.0.
 
 If both PDH and R1 are crossed in one candle, the higher crossed resistance is
 the structural trigger.
@@ -58,47 +95,54 @@ All conditions must hold:
 
 1. The previous completed spot candle was at/above PDL or S1 and the current
    completed candle closes strictly below it.
-2. Active NIFTY futures price is strictly below its completed-session VWAP.
-3. RSI(14) crosses from at/above 40 to strictly below 40.
+2. Active NIFTY futures price is strictly below completed-session VWAP.
+3. RSI(14) crosses from at/above 40 and the trigger candle closes strictly
+   below 38.
 4. RSI is not in the 45–55 trap zone.
+5. Previous-day range / current completed 5m ATR(14) is strictly below 8.0.
 
 If both PDL and S1 are crossed in one candle, the lower crossed support is the
 structural trigger.
 
-The crossover requirement prevents repeated entries simply because price
-remains above or below a broken level.
-
 ## Risk and lifecycle
 
-The completed 5-minute spot ATR(14) sets initial structural risk:
+The completed 5m spot ATR(14) sets structural risk:
 
 - CE stop: entry - 1.5 × ATR
 - PE stop: entry + 1.5 × ATR
 
-The PE stop is deliberately symmetric: a bearish thesis is invalidated by an
-upward move in the underlying.
+At +1.5R the research lifecycle realizes 50% and moves the remaining stop to
+entry. Runtime option sizing continues to reuse the existing PositionManager
+and reads the selected contract's actual `lot_size`; 65 is not hard-coded.
 
-At +1.5R, the research lifecycle realizes 50% and moves the remaining stop to
-breakeven. Runtime option sizing reuses the existing PositionManager and reads
-the selected contract's actual `lot_size`; 65 is not hard-coded.
-
-Whole-lot execution is preserved. A one-lot live/paper position therefore
-cannot literally be halved.
+Whole-lot execution is preserved. A one-lot paper/live position cannot be
+literally halved.
 
 After T1, the runner exits on the first applicable condition:
 
 - breakeven protective stop;
-- completed 5-minute spot close across EMA9;
-- R2 for CE or S2 for PE, when that pivot lies beyond +1.5R;
+- completed 5m spot close across EMA9;
+- R2 for CE or S2 for PE when that pivot lies beyond +1.5R;
 - session force exit at 15:20 IST.
 
-With only 5-minute OHLC, a bar containing both a protective stop and favorable
-target is treated conservatively as stop-first. A later 1-minute execution
-layer can refine intrabar ordering without changing Strategy D signals.
+### Intrabar ordering
+
+If all five native NIFTY spot 1m children exist for a 5m lifecycle candle, V2
+uses them to order:
+
+- ATR stop vs +1.5R scale-out;
+- post-scale breakeven;
+- R2/S2.
+
+A protective stop wins unresolved same-minute ambiguity. If a complete five
+minute child set is unavailable, the replay falls back to conservative 5m
+ordering and labels activation-bar ambiguity explicitly.
+
+EMA9 remains a completed-5m exit and is never evaluated intrabar.
 
 ## Backtest
 
-Run against the read-only historical database:
+Run the same command:
 
 ```bash
 python -m services.historical.strategy_d_sr_momentum_backtest --source BREEZE
@@ -115,11 +159,19 @@ python -m services.historical.strategy_d_sr_momentum_backtest \
 
 Default output:
 
-`data/strategy_d_sr_momentum_breakout_backtest.json`
+`data/strategy_d_sr_momentum_breakout_v2_backtest.json`
 
-V1 reports signal quality and lifecycle in underlying R. It does not fabricate
-historical option bid/ask. Option selection, option fills, slippage, transaction
-costs, and executable option P&L are intentionally the next validation layer.
+The root report is V2. It also contains
+`comparison_to_corrected_v1`, generated from the same candle set and the same
+1m-aware lifecycle engine, so V1/V2 differences are attributable to the V2
+entry filters rather than different replay mechanics.
+
+The report also includes segmented metrics by year, entry hour, breakout level,
+and direction, plus 1m coverage.
+
+Historical option bid/ask is still not fabricated. Contract selection, option
+fills, slippage, transaction costs, and executable option P&L remain the paper
+validation layer.
 
 The backtest never writes market data, never calls a broker, and does not alter
 Strategy A, Strategy B, Strategy C, production thresholds, or runtime state.
