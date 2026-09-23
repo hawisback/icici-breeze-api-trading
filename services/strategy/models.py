@@ -159,6 +159,12 @@ class RiskConfig(BaseModel):
     max_concurrent_positions: int = Field(default=1, ge=1, le=3, description="Maximum simultaneous open positions")
     cooldown_after_loss_min: int = Field(default=10, ge=0, le=60, description="Cooldown wait in minutes after a losing exit")
     option_hard_stop_pct: float = Field(default=25.0, ge=10.0, le=50.0, description="Emergency option premium loss stop %")
+    broker_protective_stop_limit_buffer_pct: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=25.0,
+        description="SELL SL-limit price buffer below the emergency option trigger",
+    )
     account_equity: float = Field(default=500000.0, gt=0)
     # Forward option-validation assumptions.  These do not alter signal,
     # selector, PositionManager, or exit rules.
@@ -598,6 +604,12 @@ class ActiveTrade(BaseModel):
     current_spot_price: float
     current_trailing_stop: float
     option_hard_stop_price: float
+    protective_stop_order_id: Optional[str] = None
+    protective_stop_status: str = "NOT_REQUIRED"
+    protective_stop_trigger_price: Optional[float] = None
+    protective_stop_limit_price: Optional[float] = None
+    protective_stop_filled_quantity: int = 0
+    protective_stop_cancel_for_exit: bool = False
     current_r: float = 0.0
     peak_r: float = 0.0
     mfe_points: float = 0.0
