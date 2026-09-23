@@ -183,6 +183,12 @@ async def initialize_services(
         else "ICICI_PRIMARY"
     )
 
+    portfolio_repo = PortfolioRepository(db_path=app_settings.portfolio_db_path)
+    portfolio_svc = PortfolioService(
+        repository=portfolio_repo, market_data_service=market_svc, event_bus=bus
+    )
+    await portfolio_svc.initialize()
+
     risk_repo = RiskRepository(db_path=app_settings.risk_db_path)
     risk_svc = RiskService(
         repository=risk_repo,
@@ -190,6 +196,10 @@ async def initialize_services(
         live_gate=live_gate,
         max_order_qty=1800,
         live_account_id=live_account_id,
+        portfolio_service=portfolio_svc,
+        broker_gateway=gateway_svc,
+        live_max_order_notional=app_settings.live_max_order_notional,
+        live_max_open_positions=app_settings.live_max_open_positions,
     )
     await risk_svc.initialize()
 
@@ -201,13 +211,6 @@ async def initialize_services(
         live_account_id=live_account_id,
     )
     await exec_svc.initialize()
-
-    portfolio_repo = PortfolioRepository(db_path=app_settings.portfolio_db_path)
-    portfolio_svc = PortfolioService(
-        repository=portfolio_repo, market_data_service=market_svc, event_bus=bus
-    )
-    await portfolio_svc.initialize()
-    risk_svc.set_portfolio_service(portfolio_svc)
 
     strategy_repo = StrategyRepository(db_path=app_settings.strategy_db_path)
     strategy_svc = StrategyService(
