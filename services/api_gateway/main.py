@@ -298,6 +298,12 @@ class OrderRequest(BaseModel):
     product: ProductType = ProductType.OPTIONS
     time_in_force: TimeInForce = TimeInForce.DAY
     trading_mode: TradingMode = TradingMode.PAPER
+    execution_broker: Optional[str] = None
+    stock_code: Optional[str] = None
+    exchange_code: str = "NFO"
+    expiry_date: Optional[str] = None
+    strike_price: Optional[float] = None
+    option_right: Optional[OptionRight] = None
 
 
 class KillSwitchRequest(BaseModel):
@@ -860,9 +866,28 @@ async def create_order(
     services = get_services()
 
     async def _execute():
+        metadata = await services.instrument_svc.get_instrument(req.instrument_id)
+        stock_code = req.stock_code or (
+            metadata.stock_code if metadata is not None else req.symbol
+        )
+        expiry_date = req.expiry_date or (
+            metadata.expiry if metadata is not None else None
+        )
+        strike_price = req.strike_price if req.strike_price is not None else (
+            metadata.strike if metadata is not None else None
+        )
+        option_right = req.option_right or (
+            metadata.option_right if metadata is not None else None
+        )
         intent = OrderIntent(
             instrument_id=req.instrument_id,
             symbol=req.symbol,
+            execution_broker=req.execution_broker or services.settings.broker_backend.value,
+            stock_code=stock_code,
+            exchange_code=req.exchange_code,
+            expiry_date=expiry_date,
+            strike_price=strike_price,
+            option_right=option_right,
             side=req.side,
             order_type=req.order_type,
             quantity=req.quantity,
@@ -902,7 +927,11 @@ async def cancel_order(
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
         if order.broker_order_id:
-            resp = await services.gateway_svc.cancel_order(order.broker_order_id, mode=order.trading_mode)
+            resp = await services.gateway_svc.cancel_order(
+                order.broker_order_id,
+                mode=order.trading_mode,
+                broker=order.execution_broker,
+            )
             return resp.model_dump()
         return {"message": "Order cancel initiated"}
 
