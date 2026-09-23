@@ -33,6 +33,8 @@ class EventBusBackend(str, Enum):
 class MarketDataBackend(str, Enum):
     SIMULATED = "simulated"
     BREEZE = "breeze"
+    KITE = "kite"
+    DUAL = "dual"
 
 
 class BrokerBackend(str, Enum):
@@ -80,9 +82,16 @@ class PlatformSettings(BaseSettings):
     rate_limit_general_per_minute: int = Field(default=120, alias="RATE_LIMIT_GENERAL_PER_MINUTE")
     idempotency_ttl_seconds: int = Field(default=86400, alias="IDEMPOTENCY_TTL_SECONDS")
 
-    # Market Data
+    # Broker routing
+    # broker_backend remains the default execution broker for backward compatibility.
     market_data_backend: MarketDataBackend = Field(default=MarketDataBackend.SIMULATED, alias="MARKET_DATA_BACKEND")
     broker_backend: BrokerBackend = Field(default=BrokerBackend.BREEZE, alias="BROKER_BACKEND")
+    live_data_primary: BrokerBackend = Field(default=BrokerBackend.KITE, alias="LIVE_DATA_PRIMARY")
+    live_data_secondary: BrokerBackend = Field(default=BrokerBackend.BREEZE, alias="LIVE_DATA_SECONDARY")
+    historical_primary: BrokerBackend = Field(default=BrokerBackend.BREEZE, alias="HISTORICAL_PRIMARY")
+    historical_secondary: BrokerBackend = Field(default=BrokerBackend.KITE, alias="HISTORICAL_SECONDARY")
+    option_chain_primary: BrokerBackend = Field(default=BrokerBackend.KITE, alias="OPTION_CHAIN_PRIMARY")
+    option_chain_secondary: BrokerBackend = Field(default=BrokerBackend.BREEZE, alias="OPTION_CHAIN_SECONDARY")
 
     # Secrets (strictly redacted by SecretStr)
     breeze_api_key: Optional[SecretStr] = Field(default=None, alias="BREEZE_API_KEY")
@@ -146,24 +155,32 @@ class PlatformSettings(BaseSettings):
                 )
             if self.market_data_backend == MarketDataBackend.SIMULATED:
                 raise ValueError(
-                    "Simulated market data is prohibited in production. Set MARKET_DATA_BACKEND=breeze."
+                    "Simulated market data is prohibited in production. Set MARKET_DATA_BACKEND to breeze, kite, or dual."
                 )
             if not self.auth_signing_key:
                 raise ValueError("AUTH_SIGNING_KEY is mandatory in production environment.")
 
-        # Breeze backend requires credentials
-        if self.market_data_backend == MarketDataBackend.BREEZE:
+        # Provider credentials are validated independently from the execution broker.
+        if self.market_data_backend in {MarketDataBackend.BREEZE, MarketDataBackend.DUAL}:
             if not self.breeze_api_key or not self.breeze_secret_key:
                 raise ValueError(
-                    "BREEZE_API_KEY and BREEZE_SECRET_KEY are required when MARKET_DATA_BACKEND is 'breeze'."
+                    "BREEZE_API_KEY and BREEZE_SECRET_KEY are required when Breeze market data is enabled."
                 )
-
-        # Kite credentials are required when Kite is selected for live trading.
-        if self.broker_backend == BrokerBackend.KITE and self.live_trading_enabled:
+        if self.market_data_backend in {MarketDataBackend.KITE, MarketDataBackend.DUAL}:
             if not self.kite_api_key or not self.kite_api_secret:
                 raise ValueError(
-                    "KITE_API_KEY and KITE_API_SECRET are required when BROKER_BACKEND is 'kite' "
-                    "and live trading is enabled."
+                    "KITE_API_KEY and KITE_API_SECRET are required when Kite market data is enabled."
+                )
+
+        # The selected execution broker must have credentials whenever LIVE routing is allowed.
+        if self.live_trading_enabled:
+            if self.broker_backend == BrokerBackend.KITE and (not self.kite_api_key or not self.kite_api_secret):
+                raise ValueError(
+                    "KITE_API_KEY and KITE_API_SECRET are required when Kite is the live execution broker."
+                )
+            if self.broker_backend == BrokerBackend.BREEZE and (not self.breeze_api_key or not self.breeze_secret_key):
+                raise ValueError(
+                    "BREEZE_API_KEY and BREEZE_SECRET_KEY are required when Breeze is the live execution broker."
                 )
 
         if self.kite_product.upper() not in {"MIS", "NRML", "CNC"}:
@@ -251,6 +268,12 @@ class PlatformSettings(BaseSettings):
             "cors_allowed_origins": self.cors_allowed_origins,
             "market_data_backend": self.market_data_backend.value,
             "broker_backend": self.broker_backend.value,
+            "live_data_primary": self.live_data_primary.value,
+            "live_data_secondary": self.live_data_secondary.value,
+            "historical_primary": self.historical_primary.value,
+            "historical_secondary": self.historical_secondary.value,
+            "option_chain_primary": self.option_chain_primary.value,
+            "option_chain_secondary": self.option_chain_secondary.value,
             "breeze_api_key": "[CONFIGURED]" if self.breeze_api_key else "[NOT CONFIGURED]",
             "breeze_secret_key": "[CONFIGURED]" if self.breeze_secret_key else "[NOT CONFIGURED]",
             "breeze_session_token": "[CONFIGURED]" if self.breeze_session_token else "[NOT CONFIGURED]",
