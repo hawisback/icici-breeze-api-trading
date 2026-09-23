@@ -586,6 +586,8 @@ class ActiveTrade(BaseModel):
     option_type: OptionType
     contract_symbol: str
     contract_instrument_id: str
+    execution_broker: Optional[str] = None
+    broker_stock_code: str = "NIFTY"
     expiry: str
     strike: float
     quantity: int
