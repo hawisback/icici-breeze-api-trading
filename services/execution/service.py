@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Optional
 
 from libs.broker_models.adapter import BrokerOrderRequest, BrokerOrderResponse
@@ -76,6 +77,44 @@ class ExecutionService:
 
         await self.execute_order(order_id=order_id, client_order_id=client_order_id)
 
+    def _build_broker_request(self, order: Any) -> Optional[BrokerOrderRequest]:
+        stock_code = order.symbol
+        strike_price = None
+        right = None
+        expiry_date = None
+
+        if (
+            order.trading_mode == TradingMode.LIVE
+            and str(getattr(self.gateway, "active_broker_name", "")).lower()
+            == "breeze"
+        ):
+            match = re.fullmatch(
+                r"INST-(NIFTY|BANKNIFTY)-(\d{4}-\d{2}-\d{2})-"
+                r"(\d+(?:\.\d+)?)-(CE|PE)",
+                str(order.instrument_id).upper(),
+            )
+            if match is None:
+                return None
+            stock_code = match.group(1)
+            expiry_date = match.group(2)
+            strike_price = float(match.group(3))
+            right = "call" if match.group(4) == "CE" else "put"
+
+        return BrokerOrderRequest(
+            client_order_id=order.client_order_id,
+            stock_code=stock_code,
+            exchange_code="NFO",
+            action=order.side.value.lower(),
+            order_type=order.order_type.value.lower(),
+            quantity=order.quantity,
+            price=order.price,
+            trigger_price=order.trigger_price,
+            strike_price=strike_price,
+            right=right,
+            expiry_date=expiry_date,
+            user_remark=order.client_order_id,
+        )
+
     @staticmethod
     def _normalize_broker_status(status: str) -> str:
         normalized = str(status or "UNKNOWN").upper().replace("-", "_")
@@ -129,17 +168,25 @@ class ExecutionService:
             logger.warning("ExecutionService: could not reserve order %s for submission", order_id)
             return
 
-        req = BrokerOrderRequest(
-            client_order_id=order.client_order_id,
-            stock_code=order.symbol,
-            exchange_code="NFO",
-            action=order.side.value.lower(),
-            order_type=order.order_type.value.lower(),
-            quantity=order.quantity,
-            price=order.price,
-            trigger_price=order.trigger_price,
-            user_remark=order.client_order_id,
-        )
+        req = self._build_broker_request(order)
+        if req is None:
+            await self.bus.publish(
+                EventEnvelope(
+                    topic=Topics.BROKER_ORDER_EVENT,
+                    payload={
+                        "client_order_id": order.client_order_id,
+                        "broker_order_id": None,
+                        "status": "FAILED_SAFE",
+                        "filled_quantity": order.filled_quantity,
+                        "average_price": order.average_price,
+                        "message": (
+                            "Breeze option contract identity could not be "
+                            "resolved from the canonical instrument id"
+                        ),
+                    },
+                )
+            )
+            return
 
         try:
             resp = await self.gateway.place_order(req, mode=order.trading_mode)
