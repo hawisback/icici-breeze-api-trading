@@ -47,6 +47,12 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
 
   const { config, features, active_trades, strategies, in_trading_window } = status;
   const activeTrade = active_trades && active_trades.length > 0 ? active_trades[0] : null;
+  const fleet = [
+    ["A", strategies.trend_pullback],
+    ["B", strategies.volatility_breakout],
+    ["C", strategies.di_continuation],
+    ["D", strategies.sr_momentum_breakout],
+  ] as const;
 
   const handleManualExit = async (tradeId: string) => {
     if (!confirm("Are you sure you want to immediately exit this auto-trade position?")) return;
@@ -434,6 +440,46 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
         </div>
       </div>
 
+      {/* 3.5 Four-Strategy Fleet Runtime */}
+      <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg">
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <div>
+            <h3 className="text-sm font-bold tracking-wider text-slate-200 uppercase">Strategy Fleet · Runtime & Stops</h3>
+            <p className="text-[11px] text-slate-500 mt-1">A/B use the production lifecycle. C/D are frozen paper candidates and cannot route live until explicitly promoted.</p>
+          </div>
+          <span className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 rounded px-2 py-1">AUTO REFRESH 1.5s</span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+          {fleet.map(([shortName, item]) => (
+            <div key={shortName} className="bg-slate-950/70 border border-slate-800 rounded-lg p-3 space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500">Strategy {shortName}</div>
+                  <div className="text-xs font-bold text-slate-200">{item.label || item.state}</div>
+                </div>
+                <span className={`px-2 py-0.5 rounded text-[9px] font-bold border ${item.active_trade_id ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-slate-800 text-slate-400 border-slate-700"}`}>
+                  {item.active_trade_id ? "ACTIVE" : item.state}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-[10px]">
+                <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Mode</div><div className="font-bold text-blue-300">{item.execution_mode || "N/A"}</div></div>
+                <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Live routing</div><div className={`font-bold ${item.live_trading_allowed ? "text-emerald-300" : "text-amber-300"}`}>{item.live_trading_allowed ? "ELIGIBLE" : "LOCKED"}</div></div>
+                <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Current R</div><div className="font-mono font-bold text-slate-200">{item.current_r == null ? "--" : `${item.current_r.toFixed(2)}R`}</div></div>
+                <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Trailing / protective SL</div><div className="font-mono font-bold text-rose-300">{item.current_trailing_stop == null ? "--" : `₹${item.current_trailing_stop.toFixed(2)}`}</div></div>
+              </div>
+              {item.paper_closed_trades != null && (
+                <div className="flex justify-between text-[10px] text-slate-400 border-t border-slate-800 pt-2">
+                  <span>Paper {item.paper_open_trades || 0} open / {item.paper_closed_trades || 0} closed</span>
+                  <span className={(item.paper_net_pnl || 0) >= 0 ? "text-emerald-300" : "text-rose-300"}>₹{(item.paper_net_pnl || 0).toFixed(2)}</span>
+                </div>
+              )}
+              {item.candidate_spec_fingerprint && (
+                <div className="text-[9px] text-slate-600 font-mono truncate" title={item.candidate_spec_fingerprint}>spec {item.candidate_spec_fingerprint.slice(0, 12)}…</div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
       {/* 4. Strategy A & Strategy B Live Setup Condition Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         {/* Strategy A V3 Card */}

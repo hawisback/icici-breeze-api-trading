@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   AlertOctagon,
@@ -29,10 +29,10 @@ import { TabParameters } from "./TabParameters";
 import { TabDecisionLog } from "./TabDecisionLog";
 import { TabHistory } from "./TabHistory";
 import { TabReplaySimulation } from "./TabReplaySimulation";
+import { TradingChart } from "../charts/TradingChart";
 
 export const StrategyDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<"overview" | "parameters" | "decision_log" | "history" | "simulation">("overview");
-  const queryClient = useQueryClient();
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
 
@@ -44,6 +44,8 @@ export const StrategyDashboard: React.FC = () => {
     queryKey: ["strategy_status"],
     queryFn: fetchStrategyStatus,
     refetchInterval: 1500,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   });
 
   const handleArmToggle = async () => {
@@ -111,7 +113,7 @@ export const StrategyDashboard: React.FC = () => {
   const handleModeChange = async (newMode: "PAPER" | "LIVE") => {
     if (!status || status.config.mode === newMode) return;
     if (newMode === "LIVE") {
-      if (!confirm("Switching to LIVE mode. Ensure live session token and credentials are valid.")) return;
+      if (!confirm("Switching the production engine to LIVE mode. C and D remain paper-locked frozen candidates until explicit promotion. Ensure live broker credentials are valid.")) return;
     }
     try {
       setActionLoading(true);
@@ -143,13 +145,16 @@ export const StrategyDashboard: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Strategy A V3 uses futures-only signals and delta-based option selection; Strategy B retains premium-cap selection.
+            A/B production engine + frozen C/D paper candidates. Status refreshes every 1.5s; charts refresh candles every 3s and live quotes every 1s.
           </p>
-          <div className="flex items-center gap-2 mt-2 text-[10px] font-bold tracking-wider">
-            <span className="px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">STRATEGY A V3 · REV {status?.config.strategy_a_revision ?? 5}</span>
-            <span className="px-2 py-1 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">A PUT — PAPER</span>
-            <span className="px-2 py-1 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">A CALL — SHADOW ONLY</span>
-            <span className="px-2 py-1 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">STRATEGY LIVE ROUTING — DISABLED</span>
+          <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] font-bold tracking-wider">
+            <span className={`px-2 py-1 rounded border ${status?.scheduler?.running ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-rose-500/15 text-rose-300 border-rose-500/30"}`}>
+              SCHEDULER {status?.scheduler?.running ? "RUNNING" : "STOPPED"} · {status?.scheduler?.evaluation_interval_seconds ?? "--"}s
+            </span>
+            <span className="px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">A V3 · REV {status?.config.strategy_a_revision ?? 5}</span>
+            <span className="px-2 py-1 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">B · {status?.strategies?.volatility_breakout?.execution_mode ?? "PAPER"}</span>
+            <span className="px-2 py-1 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">C · PAPER LOCKED</span>
+            <span className="px-2 py-1 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">D · PAPER LOCKED</span>
           </div>
         </div>
 
@@ -310,7 +315,31 @@ export const StrategyDashboard: React.FC = () => {
       {/* Main Tab Content */}
       <div className="p-6">
         {activeTab === "overview" && (
-          <TabOverview status={status} onRefresh={loadStatus} />
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <div className="h-[300px] rounded-xl overflow-hidden border border-slate-800 bg-slate-950">
+                <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider font-bold text-cyan-300 border-b border-slate-800">
+                  Spot feed · Strategy B / D
+                </div>
+                <div className="h-[270px]">
+                  <TradingChart instrumentId="INST-NIFTY-INDEX" symbol="NIFTY 50 SPOT" fixedInterval="5m" compact showIntervalSelector={false} />
+                </div>
+              </div>
+              <div className="h-[300px] rounded-xl overflow-hidden border border-slate-800 bg-slate-950">
+                <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider font-bold text-indigo-300 border-b border-slate-800">
+                  Futures feed · Strategy A / C
+                </div>
+                <div className="h-[270px]">
+                  {status?.market_data?.futures_instrument ? (
+                    <TradingChart instrumentId={status.market_data.futures_instrument} symbol="NIFTY ACTIVE FUTURES" fixedInterval="5m" compact showIntervalSelector={false} />
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-xs text-slate-500">Waiting for active NIFTY futures contract...</div>
+                  )}
+                </div>
+              </div>
+            </div>
+            <TabOverview status={status} onRefresh={loadStatus} />
+          </div>
         )}
         {activeTab === "parameters" && (
           <TabParameters status={status} onRefresh={loadStatus} />

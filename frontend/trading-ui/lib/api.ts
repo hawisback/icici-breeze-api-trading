@@ -256,7 +256,52 @@ export async function fetchLoginUrl(): Promise<{ login_url: string; api_key: str
 // Auto-Trading Strategy API
 // ==============================================================================
 
+export interface StrategyFleetStatusData {
+  enabled: boolean;
+  label?: string;
+  state: string;
+  execution_mode?: string;
+  live_trading_allowed?: boolean;
+  candidate_id?: string | null;
+  candidate_spec_fingerprint?: string | null;
+  paper_open_trades?: number;
+  paper_closed_trades?: number;
+  paper_net_pnl?: number;
+  current_r?: number | null;
+  current_trailing_stop?: number | null;
+  active_trade_id?: string | null;
+}
+
+export interface CandidatePaperStatusData {
+  status: string;
+  candidate_id?: string;
+  candidate_spec_fingerprint?: string;
+  execution_mode?: string;
+  live_trading_allowed?: boolean;
+  broker_called?: boolean;
+  orders_created?: boolean;
+  paper_open_trades?: number;
+  paper_closed_trades?: number;
+  paper_incomplete_trades?: number;
+  paper_net_pnl?: number;
+  active_candidate_trade?: Record<string, any> | null;
+  active_paper_trade?: Record<string, any> | null;
+  paper_trades?: Record<string, any>[];
+  latest_signal?: Record<string, any> | null;
+  market?: Record<string, any> | null;
+  [key: string]: any;
+}
+
 export interface StrategyStatusData {
+  scheduler?: {
+    running: boolean;
+    task_done?: boolean | null;
+    cycle_count: number;
+    last_cycle_status?: string | null;
+    last_evaluation_time?: string | null;
+    last_evaluation_age_seconds?: number | null;
+    evaluation_interval_seconds: number;
+  };
   market_data?: {
     provider: string;
     provider_active: boolean;
@@ -384,9 +429,14 @@ export interface StrategyStatusData {
   };
   active_trades: AutoTradeData[];
   signals: any[];
+  strategy_c_shadow?: CandidatePaperStatusData;
+  strategy_c_paper?: CandidatePaperStatusData;
+  strategy_d_paper?: CandidatePaperStatusData;
   strategies: {
-    trend_pullback: { enabled: boolean; state: string };
-    volatility_breakout: { enabled: boolean; state: string };
+    trend_pullback: StrategyFleetStatusData;
+    volatility_breakout: StrategyFleetStatusData;
+    di_continuation: StrategyFleetStatusData;
+    sr_momentum_breakout: StrategyFleetStatusData;
   };
   trigger_diagnostics?: TriggerDiagnosticsResponseData;
   active_overrides?: ThresholdOverridesData;
@@ -409,7 +459,7 @@ export interface StrategyTriggerDiagnosticsData {
   strategy_label: string;
   direction: "BULLISH" | "BEARISH";
   option_type: "CALL" | "PUT";
-  overall_status: "READY_TO_TRIGGER" | "WAITING" | "BLOCKED";
+  overall_status: "READY_TO_TRIGGER" | "WAITING" | "BLOCKED" | "PAPER_OPEN";
   phase_state?: string;
   phase_summary?: {
     regime?: {

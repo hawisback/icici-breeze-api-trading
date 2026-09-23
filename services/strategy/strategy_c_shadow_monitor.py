@@ -835,6 +835,17 @@ class StrategyCShadowMonitor:
             row for row in tracked_values
             if row.get("paper_status") == "INCOMPLETE_EXIT_QUOTE"
         ]
+        active_candidate_trade = None
+        for row in report.get("candidate_entries") or []:
+            lifecycle = row.get("lifecycle") or {}
+            if lifecycle.get("status") == "OPEN":
+                active_candidate_trade = row
+                break
+        recent_paper_trades = sorted(
+            tracked_values,
+            key=lambda row: str(row.get("entry_time") or ""),
+            reverse=True,
+        )[:10]
         return {
             "status": report.get("status"),
             "candidate_id": CANDIDATE_ID,
@@ -851,6 +862,9 @@ class StrategyCShadowMonitor:
             "paper_incomplete_trades": len(incomplete_paper),
             "paper_net_pnl": round(sum(float(row.get("paper_net_pnl") or 0.0) for row in closed_paper), 2),
             "active_raw_trade": report.get("active_raw_trade"),
+            "active_candidate_trade": active_candidate_trade,
+            "active_paper_trade": open_paper[0] if open_paper else None,
+            "paper_trades": recent_paper_trades,
             "broker_called": False,
             "orders_created": False,
             "live_trading_allowed": False,

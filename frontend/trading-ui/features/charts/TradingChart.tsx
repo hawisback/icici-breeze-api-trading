@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useMemo } from "react";
+import React, { useEffect, useRef, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { createChart, ColorType, IChartApi, ISeriesApi } from "lightweight-charts";
 import { fetchCandles, fetchQuotes } from "@/lib/api";
@@ -38,31 +38,64 @@ function getMarketSessionInfo() {
   };
 }
 
-export function TradingChart() {
+interface TradingChartProps {
+  instrumentId?: string | null;
+  symbol?: string;
+  fixedInterval?: string;
+  compact?: boolean;
+  showIntervalSelector?: boolean;
+}
+
+export function TradingChart({
+  instrumentId,
+  symbol,
+  fixedInterval,
+  compact = false,
+  showIntervalSelector = true,
+}: TradingChartProps = {}) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
 
-  const { selectedSymbol, selectedInstrumentId, chartInterval, setChartInterval } = useTradingStore();
+  const {
+    selectedSymbol: storeSymbol,
+    selectedInstrumentId: storeInstrumentId,
+    chartInterval,
+    setChartInterval,
+  } = useTradingStore();
+  const selectedSymbol = symbol || storeSymbol;
+  const selectedInstrumentId = instrumentId || storeInstrumentId;
+  const effectiveInterval = fixedInterval || chartInterval;
 
   const { data: candles, isLoading } = useQuery({
-    queryKey: ["candles", selectedInstrumentId, chartInterval],
-    queryFn: () => fetchCandles(selectedInstrumentId, chartInterval),
+    queryKey: ["candles", selectedInstrumentId, effectiveInterval],
+    queryFn: () => fetchCandles(selectedInstrumentId, effectiveInterval),
     refetchInterval: 3000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   });
 
   const { data: quotes } = useQuery({
     queryKey: ["quotes"],
     queryFn: fetchQuotes,
     refetchInterval: 1000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   });
 
   const lastCandle = useMemo(() => {
     return candles && candles.length > 0 ? candles[candles.length - 1] : null;
   }, [candles]);
 
-  const sessionInfo = useMemo(() => getMarketSessionInfo(), []);
+  const [sessionInfo, setSessionInfo] = useState(getMarketSessionInfo);
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setSessionInfo(getMarketSessionInfo()),
+      30000,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
   const liveSource = lastCandle?.source;
   const isLive = liveSource === "BREEZE" || liveSource === "KITE" || liveSource === "LIVE";
   const liveLabel = liveSource === "KITE" ? "KITE" : "BREEZE";
@@ -228,25 +261,31 @@ export function TradingChart() {
         </div>
 
         {/* Interval Selector */}
-        <div className="flex items-center space-x-1 bg-slate-900 border border-slate-800 rounded p-0.5">
-          {["1m", "5m", "15m", "1D"].map((int) => (
-            <button
-              key={int}
-              onClick={() => setChartInterval(int)}
-              className={`px-2 py-0.5 rounded text-[10px] font-mono transition ${
-                chartInterval === int
-                  ? "bg-blue-600 text-white font-bold"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              {int}
-            </button>
-          ))}
-        </div>
+        {showIntervalSelector && !fixedInterval ? (
+          <div className="flex items-center space-x-1 bg-slate-900 border border-slate-800 rounded p-0.5">
+            {["1m", "5m", "15m", "1D"].map((int) => (
+              <button
+                key={int}
+                onClick={() => setChartInterval(int)}
+                className={`px-2 py-0.5 rounded text-[10px] font-mono transition ${
+                  chartInterval === int
+                    ? "bg-blue-600 text-white font-bold"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {int}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900 border border-slate-800 text-cyan-300">
+            {effectiveInterval} · AUTO 3s
+          </span>
+        )}
       </div>
 
       {/* Chart Canvas */}
-      <div className="flex-1 relative w-full h-full min-h-[300px]">
+      <div className={`flex-1 relative w-full h-full ${compact ? "min-h-[230px]" : "min-h-[300px]"}`}>
         {isLoading && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#0a0e17]/80 text-slate-500 font-mono text-xs">
             Loading chart data...

@@ -21,6 +21,9 @@ async def test_strategy_api_endpoints():
         assert "features" in data
         assert "active_trades" in data
         assert "strategies" in data
+        assert set(data["strategies"]) == {"trend_pullback", "volatility_breakout", "di_continuation", "sr_momentum_breakout"}
+        assert "strategy_c_paper" in data
+        assert "strategy_d_paper" in data
 
         # 2. GET /api/v1/strategies/config
         res = await client.get("/api/v1/strategies/config")
@@ -70,7 +73,7 @@ async def test_strategy_api_endpoints():
         assert "gates" in diag
         assert "strategies" in diag
         assert "active_overrides" in diag
-        assert len(diag["strategies"]) == 4  # Bullish & Bearish for Strategy A and B
+        assert len(diag["strategies"]) == 8  # CALL/PUT diagnostics for Strategies A, B, C and D
 
         # 10. GET & POST /api/v1/strategies/overrides
         res = await client.get("/api/v1/strategies/overrides")
@@ -104,6 +107,20 @@ async def test_strategy_api_endpoints():
         assert force_res["status"] == "STRATEGY_A_FORCE_ENTRY_DISABLED"
         assert "trade" not in force_res
 
+        for frozen_strategy in ("DI_CONTINUATION", "SR_MOMENTUM_BREAKOUT"):
+            res = await client.post(
+                "/api/v1/strategies/force-entry",
+                json={
+                    "strategy": frozen_strategy,
+                    "direction": "BULLISH",
+                    "option_type": "CALL",
+                    "override_premium_cap": 250.0,
+                },
+            )
+            assert res.status_code == 200
+            assert res.json()["status"] == "FROZEN_CANDIDATE_FORCE_ENTRY_DISABLED"
+            assert "trade" not in res.json()
+
         # 12. POST /api/v1/strategies/overrides/reset
         res = await client.post("/api/v1/strategies/overrides/reset")
         assert res.status_code == 200
@@ -113,13 +130,13 @@ async def test_strategy_api_endpoints():
         res = await client.get("/api/v1/strategies/triggers/diagnostics")
         assert res.status_code == 200
         diag = res.json()
-        assert len(diag["strategies"]) == 4
+        assert len(diag["strategies"]) == 8
         for s in diag["strategies"]:
             assert len(s["conditions"]) >= 0
             for c in s["conditions"]:
                 assert c["id"]
                 assert c["name"]
-                assert c["status"] in ("PASSED", "PENDING")
+                assert c["status"] in ("PASSED", "PENDING", "BLOCKED", "N/A")
                 assert c["current_value"] != ""
                 assert c["target_threshold"] != ""
                 assert c["gap_description"] != ""

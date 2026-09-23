@@ -9,6 +9,9 @@ from pydantic import ValidationError
 
 from services.strategy.models import (
     AutoTradingConfig,
+    AutoTradingMode,
+    OptionType,
+    StrategyName,
     SetupInvalidationState,
     StrategyDirection,
     StrategySetup,
@@ -186,6 +189,19 @@ def test_existing_strategy_public_imports_remain_available():
     # replay, and callers that use Strategy B directly.
     assert TrendPullbackStrategy is not None
     assert VolatilityBreakoutStrategy is not None
+
+
+def test_frozen_candidate_names_are_paper_locked_by_execution_policy():
+    service = StrategyService(oms_service=Mock(), repository=Mock())
+
+    assert service._execution_mode_for_strategy(
+        StrategyName.DI_CONTINUATION,
+        OptionType.CALL,
+    ) is AutoTradingMode.PAPER
+    assert service._execution_mode_for_strategy(
+        StrategyName.SR_MOMENTUM_BREAKOUT,
+        OptionType.PUT,
+    ) is AutoTradingMode.PAPER
 
 
 @pytest.mark.parametrize("old_adx", [20.0, 25.0, 18.0])

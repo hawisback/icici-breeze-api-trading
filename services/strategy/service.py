@@ -45,6 +45,8 @@ from services.strategy.models import (
     ThresholdOverrides,
     TradeDirection,
     TradeLifecycleState,
+    TriggerCondition,
+    StrategyTriggerDiagnostics,
     TriggerDiagnosticsResponse,
 )
 from services.strategy.position_manager import PositionManager, UnderlyingRiskSizer, calculate_realized_trade_r, underlying_r_for_price
@@ -59,6 +61,7 @@ from services.strategy.simulation import SimulationEngine
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 from services.strategy.strategy_c_shadow_monitor import StrategyCShadowMonitor
+from services.strategy.strategy_d_paper_monitor import StrategyDPaperMonitor
 from services.strategy.telemetry import StrategyAEvaluationRecord, StrategyATelemetryStore
 
 logger = logging.getLogger(__name__)
@@ -97,6 +100,16 @@ class StrategyService:
             risk_config=self.config.risk,
         )
         self._last_strategy_c_shadow_status: dict[str, Any] = {"status": "NOT_INITIALIZED"}
+        self.strategy_d_paper = StrategyDPaperMonitor(
+            repository=self.repo,
+            historical_service=self.hist_svc,
+            option_chain_service=self.chain_svc,
+            market_data_service=self.mkt_svc,
+            contract_selector=self.contract_selector,
+            risk_config=self.config.risk,
+            session_config=self.config.session,
+        )
+        self._last_strategy_d_paper_status: dict[str, Any] = {"status": "NOT_INITIALIZED"}
 
         self.strategy_a = TrendPullbackStrategy(config=self.config.tunables)
         self.strategy_b = VolatilityBreakoutStrategy(
@@ -242,6 +255,11 @@ class StrategyService:
         except Exception:
             logger.exception("Strategy C shadow initialization failed; Strategy A/B remain unaffected")
             self._last_strategy_c_shadow_status = {"status": "INITIALIZATION_FAILED"}
+        try:
+            await self.strategy_d_paper.initialize()
+        except Exception:
+            logger.exception("Strategy D paper initialization failed; Strategy A/B/C remain unaffected")
+            self._last_strategy_d_paper_status = {"status": "INITIALIZATION_FAILED"}
         # Telemetry is an audit stream, not process-local state.  Restore the
         # persisted Strategy A records before the scheduler can emit a new
         # evaluation, so summaries survive a service restart.
@@ -296,6 +314,11 @@ class StrategyService:
             risk_sizer=self.risk_sizer,
             risk_config=self.config.risk,
         )
+        self.strategy_d_paper.refresh_dependencies(
+            contract_selector=self.contract_selector,
+            risk_config=self.config.risk,
+            session_config=self.config.session,
+        )
         self.strategy_a = TrendPullbackStrategy(config=self.config.tunables)
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
@@ -326,10 +349,22 @@ class StrategyService:
         strategy: StrategyName,
         option_type: OptionType,
     ) -> AutoTradingMode:
-        """Resolve a strategy's execution mode without allowing B to go live."""
+        """Resolve execution mode while validation candidates remain non-live."""
+        if strategy in {
+            StrategyName.DI_CONTINUATION,
+            StrategyName.SR_MOMENTUM_BREAKOUT,
+        }:
+            return AutoTradingMode.PAPER
         if self._is_strategy_a(strategy):
-            return AutoTradingMode.SHADOW_ONLY if option_type == OptionType.CALL else AutoTradingMode.PAPER
-        if strategy == StrategyName.VOLATILITY_BREAKOUT and self.config.mode == AutoTradingMode.LIVE:
+            return (
+                AutoTradingMode.SHADOW_ONLY
+                if option_type == OptionType.CALL
+                else AutoTradingMode.PAPER
+            )
+        if (
+            strategy == StrategyName.VOLATILITY_BREAKOUT
+            and self.config.mode == AutoTradingMode.LIVE
+        ):
             return AutoTradingMode.SHADOW_ONLY
         return self.config.mode
 
@@ -674,6 +709,17 @@ class StrategyService:
         except Exception:
             logger.exception("Strategy C shadow observation failed; Strategy A/B evaluation continues")
             self._last_strategy_c_shadow_status = {"status": "OBSERVATION_FAILED"}
+
+        # Strategy D is a frozen paper sidecar. It runs on the same scheduler
+        # heartbeat but remains isolated from OMS/live routing until promoted.
+        try:
+            self._last_strategy_d_paper_status = await self.strategy_d_paper.observe(
+                active_futures_instrument=self._market_data_status.get("futures_instrument"),
+                now=now,
+            )
+        except Exception:
+            logger.exception("Strategy D paper observation failed; Strategy A/B/C evaluation continues")
+            self._last_strategy_d_paper_status = {"status": "OBSERVATION_FAILED"}
 
         # 3. Manage active trades (trailing stops, thesis reversal, square-off)
         active_trades = await self.repo.get_active_trades()
@@ -1766,6 +1812,127 @@ class StrategyService:
         )
         return self._active_overrides
 
+    def _candidate_monitor_diagnostics(
+        self,
+        *,
+        strategy: StrategyName,
+        label: str,
+        status: dict[str, Any],
+        current_price: float,
+        active_direction: str | None,
+        target_entry_level: float | None = None,
+    ) -> list[StrategyTriggerDiagnostics]:
+        """Adapt frozen paper sidecars to the common UI trigger-radar contract."""
+        raw_status = str(status.get("status") or "NOT_INITIALIZED")
+        blocked = raw_status in {
+            "DISABLED",
+            "INITIALIZATION_FAILED",
+            "OBSERVATION_FAILED",
+            "DATA_RETRIEVAL_FAILED",
+            "MARKET_DATA_UNAVAILABLE",
+            "NATIVE_FUTURES_UNAVAILABLE",
+            "NO_ACTIVE_FUTURES_DATA",
+        }
+        fingerprint_ok = bool(status.get("candidate_spec_fingerprint"))
+        data_ready = not blocked
+        paper_mode = status.get("execution_mode") == AutoTradingMode.PAPER.value
+        rows: list[StrategyTriggerDiagnostics] = []
+        for option_type, direction in (
+            (OptionType.CALL, TradeDirection.BULLISH),
+            (OptionType.PUT, TradeDirection.BEARISH),
+        ):
+            is_active = active_direction == option_type.value
+            conditions = [
+                TriggerCondition(
+                    id="frozen_candidate",
+                    name="Frozen candidate fingerprint",
+                    current_value="VALID" if fingerprint_ok else "MISSING",
+                    target_threshold="Frozen spec must match",
+                    status="PASSED" if fingerprint_ok else "BLOCKED",
+                    gap_description=(
+                        "Candidate fingerprint verified"
+                        if fingerprint_ok
+                        else "Candidate fingerprint unavailable"
+                    ),
+                ),
+                TriggerCondition(
+                    id="market_data",
+                    name="Real market data",
+                    current_value=raw_status,
+                    target_threshold="Native real-market candles available",
+                    status="PASSED" if data_ready else "BLOCKED",
+                    gap_description=(
+                        "Paper monitor is receiving its required candles"
+                        if data_ready
+                        else raw_status
+                    ),
+                ),
+                TriggerCondition(
+                    id="paper_execution",
+                    name="Candidate execution mode",
+                    current_value=str(status.get("execution_mode") or "N/A"),
+                    target_threshold="PAPER (live locked until promotion)",
+                    status="PASSED" if paper_mode else "PENDING",
+                    gap_description=(
+                        "Candidate remains isolated from live OMS"
+                        if paper_mode
+                        else "Waiting for paper monitor initialization"
+                    ),
+                ),
+                TriggerCondition(
+                    id="candidate_signal",
+                    name="Frozen setup signal",
+                    current_value="ACTIVE" if is_active else "WAITING",
+                    target_threshold=f"{option_type.value} candidate signal",
+                    status="PASSED" if is_active else "PENDING",
+                    gap_description=(
+                        "Paper position is open and stop management is active"
+                        if is_active
+                        else "Waiting for all frozen signal conditions"
+                    ),
+                ),
+            ]
+            passed = sum(item.status == "PASSED" for item in conditions)
+            if blocked:
+                overall = "BLOCKED"
+                blocker = raw_status
+            elif is_active:
+                overall = "PAPER_OPEN"
+                blocker = "Paper position open; frozen stop lifecycle is active"
+            else:
+                overall = "WAITING"
+                blocker = "Waiting for frozen candidate signal"
+            rows.append(
+                StrategyTriggerDiagnostics(
+                    strategy=strategy,
+                    strategy_label=f"{label} {option_type.value}",
+                    direction=direction,
+                    option_type=option_type,
+                    overall_status=overall,
+                    passed_count=passed,
+                    total_count=len(conditions),
+                    ready_pct=round(100.0 * passed / len(conditions), 1),
+                    key_blocker=blocker,
+                    target_entry_level=target_entry_level,
+                    current_spot=float(current_price or 0.0),
+                    phase_state=overall,
+                    phase_summary={
+                        "candidate_id": status.get("candidate_id"),
+                        "candidate_spec_fingerprint": status.get(
+                            "candidate_spec_fingerprint"
+                        ),
+                        "execution_mode": status.get("execution_mode"),
+                        "live_trading_allowed": status.get(
+                            "live_trading_allowed",
+                            False,
+                        ),
+                        "monitor_status": raw_status,
+                    },
+                    conditions=conditions,
+                )
+            )
+        return rows
+
     async def get_trigger_diagnostics(self) -> TriggerDiagnosticsResponse:
         """Gathers granular condition diagnostics across all strategies and session gates."""
         features = self._last_features or MarketFeatures(timestamp=utc_now(), data_reason="Awaiting first completed evaluation")
@@ -1865,10 +2032,48 @@ class StrategyService:
             primary_blocker=primary,
         )
 
+        c_active = (
+            self._last_strategy_c_shadow_status.get("active_candidate_trade")
+            or {}
+        )
+        c_direction = c_active.get("direction")
+        d_active = (
+            self._last_strategy_d_paper_status.get("active_paper_trade")
+            or {}
+        )
+        d_signal = d_active.get("signal") or {}
+        d_direction = d_signal.get("option_type")
+        d_market = self._last_strategy_d_paper_status.get("market") or {}
+        d_latest = self._last_strategy_d_paper_status.get("latest_signal") or {}
+
+        diag_c = self._candidate_monitor_diagnostics(
+            strategy=StrategyName.DI_CONTINUATION,
+            label="Strategy C · DI Continuation",
+            status=self._last_strategy_c_shadow_status,
+            current_price=float(features.futures_price or 0.0),
+            active_direction=c_direction,
+        )
+        diag_d = self._candidate_monitor_diagnostics(
+            strategy=StrategyName.SR_MOMENTUM_BREAKOUT,
+            label="Strategy D · S&R Momentum",
+            status=self._last_strategy_d_paper_status,
+            current_price=float(
+                d_market.get("spot_price")
+                or features.spot_price
+                or 0.0
+            ),
+            active_direction=d_direction,
+            target_entry_level=(
+                float(d_latest["breakout_level"])
+                if d_latest.get("breakout_level") is not None
+                else None
+            ),
+        )
+
         return TriggerDiagnosticsResponse(
             system_time=now,
             gates=gates,
-            strategies=[*diag_a, *diag_b],
+            strategies=[*diag_a, *diag_b, *diag_c, *diag_d],
             active_overrides=self._active_overrides,
         )
 
@@ -1888,6 +2093,17 @@ class StrategyService:
             return {
                 "status": "STRATEGY_A_FORCE_ENTRY_DISABLED",
                 "reason": "Strategy A entries must originate from the validated futures TrendPullback state machine",
+            }
+        if strategy in {
+            StrategyName.DI_CONTINUATION,
+            StrategyName.SR_MOMENTUM_BREAKOUT,
+        }:
+            return {
+                "status": "FROZEN_CANDIDATE_FORCE_ENTRY_DISABLED",
+                "reason": (
+                    "Strategies C and D must originate from their frozen "
+                    "paper candidate monitors and cannot be force-entered."
+                ),
             }
 
         now = utc_now()
@@ -2120,6 +2336,34 @@ class StrategyService:
         latest_signals = await self.repo.list_strategy_signals(limit=10)
         diagnostics = await self.get_trigger_diagnostics()
 
+        strategy_a_trade = next(
+            (
+                trade for trade in active_trades
+                if trade.strategy == StrategyName.TREND_PULLBACK
+            ),
+            None,
+        )
+        strategy_b_trade = next(
+            (
+                trade for trade in active_trades
+                if trade.strategy == StrategyName.VOLATILITY_BREAKOUT
+            ),
+            None,
+        )
+        c_candidate = (
+            self._last_strategy_c_shadow_status.get("active_candidate_trade")
+            or {}
+        )
+        c_lifecycle = c_candidate.get("lifecycle") or {}
+        c_paper = (
+            self._last_strategy_c_shadow_status.get("active_paper_trade")
+            or {}
+        )
+        d_paper = (
+            self._last_strategy_d_paper_status.get("active_paper_trade")
+            or {}
+        )
+
         return {
             "config": self.config.model_dump(mode="json"),
             "scheduler": {
@@ -2142,17 +2386,142 @@ class StrategyService:
             "market_data": {**self._market_data_status, "last_evaluation_time": (self._last_eval_time.isoformat() if self._last_eval_time > datetime.min.replace(tzinfo=timezone.utc) else None)},
             "strategy_c_shadow": self._last_strategy_c_shadow_status,
             "strategy_c_paper": self._last_strategy_c_shadow_status,
+            "strategy_d_paper": self._last_strategy_d_paper_status,
             "features": features.model_dump(mode="json"),
             "active_trades": [t.model_dump(mode="json") for t in active_trades],
             "signals": latest_signals,
             "strategies": {
                 "trend_pullback": {
                     "enabled": self.config.tunables.trend_pullback_enabled,
-                    "state": "TRIGGERED" if any(t.strategy == StrategyName.TREND_PULLBACK for t in active_trades) else "SEARCHING",
+                    "label": "Strategy A · Trend Pullback V3",
+                    "state": (
+                        strategy_a_trade.state.value
+                        if strategy_a_trade is not None
+                        else self.strategy_a.snapshot.state.value
+                    ),
+                    "execution_mode": (
+                        strategy_a_trade.mode.value
+                        if strategy_a_trade is not None
+                        else "PAPER/SHADOW_VALIDATION"
+                    ),
+                    "live_trading_allowed": False,
+                    "current_r": (
+                        strategy_a_trade.current_r
+                        if strategy_a_trade is not None
+                        else None
+                    ),
+                    "current_trailing_stop": (
+                        strategy_a_trade.current_trailing_stop
+                        if strategy_a_trade is not None
+                        else None
+                    ),
+                    "active_trade_id": (
+                        strategy_a_trade.trade_id
+                        if strategy_a_trade is not None
+                        else None
+                    ),
                 },
                 "volatility_breakout": {
                     "enabled": self.config.tunables.volatility_breakout_enabled,
-                    "state": "TRIGGERED" if any(t.strategy == StrategyName.VOLATILITY_BREAKOUT for t in active_trades) else "SEARCHING",
+                    "label": "Strategy B · Volatility Breakout",
+                    "state": (
+                        strategy_b_trade.state.value
+                        if strategy_b_trade is not None
+                        else "SEARCHING"
+                    ),
+                    "execution_mode": (
+                        strategy_b_trade.mode.value
+                        if strategy_b_trade is not None
+                        else (
+                            "SHADOW_ONLY"
+                            if self.config.mode == AutoTradingMode.LIVE
+                            else self.config.mode.value
+                        )
+                    ),
+                    "live_trading_allowed": False,
+                    "current_r": (
+                        strategy_b_trade.current_r
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                    "current_trailing_stop": (
+                        strategy_b_trade.current_trailing_stop
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                    "active_trade_id": (
+                        strategy_b_trade.trade_id
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                },
+                "di_continuation": {
+                    "enabled": True,
+                    "label": "Strategy C · DI Continuation V1 Candidate",
+                    "state": str(
+                        self._last_strategy_c_shadow_status.get("status")
+                        or "NOT_INITIALIZED"
+                    ),
+                    "execution_mode": AutoTradingMode.PAPER.value,
+                    "live_trading_allowed": False,
+                    "candidate_id": self._last_strategy_c_shadow_status.get(
+                        "candidate_id"
+                    ),
+                    "candidate_spec_fingerprint": (
+                        self._last_strategy_c_shadow_status.get(
+                            "candidate_spec_fingerprint"
+                        )
+                    ),
+                    "paper_open_trades": self._last_strategy_c_shadow_status.get(
+                        "paper_open_trades",
+                        0,
+                    ),
+                    "paper_closed_trades": self._last_strategy_c_shadow_status.get(
+                        "paper_closed_trades",
+                        0,
+                    ),
+                    "paper_net_pnl": self._last_strategy_c_shadow_status.get(
+                        "paper_net_pnl",
+                        0.0,
+                    ),
+                    "current_r": c_lifecycle.get("current_r"),
+                    "current_trailing_stop": c_lifecycle.get("current_stop"),
+                    "active_trade_id": c_paper.get("signal_id"),
+                },
+                "sr_momentum_breakout": {
+                    "enabled": True,
+                    "label": "Strategy D · S&R Momentum V2 Candidate",
+                    "state": str(
+                        self._last_strategy_d_paper_status.get("status")
+                        or "NOT_INITIALIZED"
+                    ),
+                    "execution_mode": AutoTradingMode.PAPER.value,
+                    "live_trading_allowed": False,
+                    "candidate_id": self._last_strategy_d_paper_status.get(
+                        "candidate_id"
+                    ),
+                    "candidate_spec_fingerprint": (
+                        self._last_strategy_d_paper_status.get(
+                            "candidate_spec_fingerprint"
+                        )
+                    ),
+                    "paper_open_trades": self._last_strategy_d_paper_status.get(
+                        "paper_open_trades",
+                        0,
+                    ),
+                    "paper_closed_trades": self._last_strategy_d_paper_status.get(
+                        "paper_closed_trades",
+                        0,
+                    ),
+                    "paper_net_pnl": self._last_strategy_d_paper_status.get(
+                        "paper_net_pnl",
+                        0.0,
+                    ),
+                    "current_r": d_paper.get("current_r"),
+                    "current_trailing_stop": d_paper.get(
+                        "current_underlying_stop"
+                    ),
+                    "active_trade_id": d_paper.get("signal_id"),
                 },
             },
             "trigger_diagnostics": diagnostics.model_dump(mode="json"),
