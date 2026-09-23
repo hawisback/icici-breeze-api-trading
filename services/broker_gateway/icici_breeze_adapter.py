@@ -485,11 +485,13 @@ class IciciBreezeAdapter(BrokerAdapter):
             return None
 
         return BrokerOrderResponse(
-            success=True,
+            success=order.normalized_status not in {"REJECTED", "CANCELLED"},
             broker_order_id=order.broker_order_id,
             client_order_id=order.client_reference or "",
             status=order.normalized_status,
             message=order.raw_status,
+            filled_quantity=int(order.filled_quantity or 0),
+            average_price=float(order.average_price or 0),
         )
 
     async def get_positions(self) -> list[BrokerPositionResponse]:
@@ -500,12 +502,16 @@ class IciciBreezeAdapter(BrokerAdapter):
         positions = await self.clean_service.get_positions()
         return [
             BrokerPositionResponse(
-                symbol=pos.instrument.stock_code,
-                exchange=pos.instrument.exchange.value,
+                stock_code=pos.instrument.stock_code,
+                exchange_code=pos.instrument.exchange.value,
+                product_type=pos.instrument.product_type.value,
                 quantity=pos.quantity,
                 average_price=float(pos.average_price),
                 ltp=float(pos.ltp),
                 pnl=float(pos.total_pnl),
+                strike_price=float(pos.instrument.strike) if pos.instrument.strike is not None else None,
+                right=pos.instrument.option_right.value if pos.instrument.option_right else None,
+                expiry_date=pos.instrument.expiry.isoformat() if pos.instrument.expiry else None,
             )
             for pos in positions
         ]
@@ -520,12 +526,12 @@ class IciciBreezeAdapter(BrokerAdapter):
             BrokerTradeResponse(
                 trade_id=t.trade_id,
                 broker_order_id=t.broker_order_id,
-                symbol=t.instrument.stock_code,
-                exchange=t.instrument.exchange.value,
-                side=t.side.value,
+                stock_code=t.instrument.stock_code,
+                exchange_code=t.instrument.exchange.value,
+                action=t.side.value,
                 quantity=t.quantity,
                 price=float(t.execution_price),
-                executed_at=t.trade_time,
+                trade_time=t.trade_time,
             )
             for t in trades
         ]
