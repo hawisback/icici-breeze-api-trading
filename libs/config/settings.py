@@ -65,6 +65,17 @@ class PlatformSettings(BaseSettings):
     default_trading_mode: TradingMode = Field(default=TradingMode.PAPER, alias="DEFAULT_TRADING_MODE")
     live_trading_enabled: bool = Field(default=False, alias="LIVE_TRADING_ENABLED")
     live_allowed_accounts: list[str] = Field(default_factory=list, alias="LIVE_ALLOWED_ACCOUNTS")
+    live_max_order_notional: float = Field(
+        default=50000.0,
+        gt=0,
+        alias="LIVE_MAX_ORDER_NOTIONAL",
+    )
+    live_max_open_positions: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        alias="LIVE_MAX_OPEN_POSITIONS",
+    )
 
     # API & Network & Boundary Security
     api_host: str = Field(default="0.0.0.0", alias="API_HOST")
@@ -269,6 +280,8 @@ class PlatformSettings(BaseSettings):
             "default_trading_mode": self.default_trading_mode.value,
             "live_trading_enabled": self.live_trading_enabled,
             "live_allowed_accounts": self.live_allowed_accounts,
+            "live_max_order_notional": self.live_max_order_notional,
+            "live_max_open_positions": self.live_max_open_positions,
             "cors_allowed_origins": self.cors_allowed_origins,
             "market_data_backend": self.market_data_backend.value,
             "broker_backend": self.broker_backend.value,
