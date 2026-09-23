@@ -28,24 +28,63 @@ from services.strategy.position_manager import PositionManager
 
 
 IST = ZoneInfo("Asia/Kolkata")
-STRATEGY_D_ID = "STRATEGY_D_SR_MOMENTUM_BREAKOUT_V1"
+STRATEGY_D_V1_ID = "STRATEGY_D_SR_MOMENTUM_BREAKOUT_V1"
+STRATEGY_D_V2_ID = "STRATEGY_D_SR_MOMENTUM_BREAKOUT_V2_CANDIDATE"
+# Backward-compatible public alias. Production wiring must use the explicit
+# config strategy_id rather than assuming this alias is the active candidate.
+STRATEGY_D_ID = STRATEGY_D_V1_ID
 REAL_SOURCES = {"BREEZE", "KITE", "LIVE"}
 
 
 @dataclass(frozen=True)
 class StrategyDConfig:
+    """Frozen Strategy D hypothesis.
+
+    v1_control preserves the original signal contract. v2_candidate changes
+    only the two entry-quality filters supported across both 2025 and 2026 in
+    the first Breeze research sample. The lifecycle/risk hypothesis is
+    intentionally unchanged so the next backtest isolates entry improvements.
+    """
+
+    variant: str = "V1_CONTROL"
     rsi_period: int = 14
     long_rsi_cross: float = 60.0
     short_rsi_cross: float = 40.0
+    minimum_rsi_clearance_points: float = 0.0
     trap_rsi_low: float = 45.0
     trap_rsi_high: float = 55.0
     atr_period: int = 14
+    max_previous_day_range_atr: float | None = None
     atr_stop_multiple: float = 1.50
     scale_out_r: float = 1.50
     scale_out_fraction: float = 0.50
     entry_start: str = "09:20"
     entry_end: str = "14:45"
     force_exit: str = "15:20"
+
+    @classmethod
+    def v1_control(cls) -> "StrategyDConfig":
+        return cls()
+
+    @classmethod
+    def v2_candidate(cls) -> "StrategyDConfig":
+        return cls(
+            variant="V2_CANDIDATE",
+            minimum_rsi_clearance_points=2.0,
+            max_previous_day_range_atr=8.0,
+        )
+
+    @property
+    def strategy_id(self) -> str:
+        return (
+            STRATEGY_D_V2_ID
+            if self.variant == "V2_CANDIDATE"
+            else STRATEGY_D_V1_ID
+        )
+
+    @property
+    def ruleset_version(self) -> int:
+        return 2 if self.variant == "V2_CANDIDATE" else 1
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -85,6 +124,8 @@ class StrategyDSignal:
     atr_5m: float
     rsi_previous: float
     rsi_current: float
+    rsi_clearance_points: float
+    previous_day_range_atr: float
     vwap_reference_price: float
     vwap: float
     vwap_source: str
@@ -290,6 +331,12 @@ def evaluate_strategy_d_signal(
     atr = FeatureEngine.calculate_atr(list(spot_history), cfg.atr_period)
     if atr <= 0:
         return None
+    previous_day_range_atr = (levels.pdh - levels.pdl) / float(atr)
+    if (
+        cfg.max_previous_day_range_atr is not None
+        and previous_day_range_atr >= cfg.max_previous_day_range_atr
+    ):
+        return None
     confirmation = _futures_vwap_confirmation(
         futures_history,
         through=current.end_time,
@@ -315,7 +362,9 @@ def evaluate_strategy_d_signal(
     if (
         resistance is not None
         and futures_price > vwap
-        and previous_rsi <= cfg.long_rsi_cross < current_rsi
+        and previous_rsi <= cfg.long_rsi_cross
+        and current_rsi
+        > cfg.long_rsi_cross + cfg.minimum_rsi_clearance_points
     ):
         direction = TradeDirection.BULLISH
         option_type = "CALL"
@@ -323,7 +372,9 @@ def evaluate_strategy_d_signal(
     elif (
         support is not None
         and futures_price < vwap
-        and previous_rsi >= cfg.short_rsi_cross > current_rsi
+        and previous_rsi >= cfg.short_rsi_cross
+        and current_rsi
+        < cfg.short_rsi_cross - cfg.minimum_rsi_clearance_points
     ):
         direction = TradeDirection.BEARISH
         option_type = "PUT"
@@ -347,8 +398,14 @@ def evaluate_strategy_d_signal(
     if next_r <= cfg.scale_out_r:
         next_name, next_price = None, None
 
+    rsi_clearance = (
+        current_rsi - cfg.long_rsi_cross
+        if direction == TradeDirection.BULLISH
+        else cfg.short_rsi_cross - current_rsi
+    )
+
     return StrategyDSignal(
-        strategy_id=STRATEGY_D_ID,
+        strategy_id=cfg.strategy_id,
         direction=direction,
         option_type=option_type,
         timestamp=current.end_time,
@@ -360,6 +417,8 @@ def evaluate_strategy_d_signal(
         atr_5m=round(float(atr), 6),
         rsi_previous=round(float(previous_rsi), 6),
         rsi_current=round(float(current_rsi), 6),
+        rsi_clearance_points=round(float(rsi_clearance), 6),
+        previous_day_range_atr=round(float(previous_day_range_atr), 6),
         vwap_reference_price=round(futures_price, 6),
         vwap=round(vwap, 6),
         vwap_source="ACTIVE_NIFTY_FUTURES_5M",
