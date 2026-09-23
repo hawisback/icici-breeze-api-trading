@@ -187,6 +187,10 @@ class OMSService:
             to_state = OrderState.CANCELLED
         elif broker_status == "REJECTED":
             to_state = OrderState.REJECTED
+        elif broker_status == "EXPIRED":
+            to_state = OrderState.EXPIRED
+        elif broker_status == "FAILED_SAFE":
+            to_state = OrderState.FAILED_SAFE
         elif broker_status == "UNKNOWN":
             to_state = OrderState.SUBMISSION_UNKNOWN
 
