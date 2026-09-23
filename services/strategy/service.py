@@ -380,10 +380,19 @@ class StrategyService:
         remains protected by the platform live-trading flag, system arming,
         kill switch, and all shared risk/session gates.
         """
-        if strategy in {
-            StrategyName.DI_CONTINUATION,
-            StrategyName.SR_MOMENTUM_BREAKOUT,
-        }:
+        if strategy == StrategyName.DI_CONTINUATION:
+            if (
+                self.config.mode == AutoTradingMode.LIVE
+                and not self.config.tunables.di_continuation_live_enabled
+            ):
+                return AutoTradingMode.SHADOW_ONLY
+            return self.config.mode
+        if strategy == StrategyName.SR_MOMENTUM_BREAKOUT:
+            if (
+                self.config.mode == AutoTradingMode.LIVE
+                and not self.config.tunables.sr_momentum_breakout_live_enabled
+            ):
+                return AutoTradingMode.SHADOW_ONLY
             return self.config.mode
         if self._is_strategy_a(strategy):
             return (
@@ -3103,6 +3112,7 @@ class StrategyService:
                     ),
                     "live_trading_allowed": bool(
                         self.config.tunables.di_continuation_enabled
+                        and self.config.tunables.di_continuation_live_enabled
                         and self.config.mode == AutoTradingMode.LIVE
                         and self.config.system_armed
                         and self._live_orders_enabled()
@@ -3161,6 +3171,7 @@ class StrategyService:
                     ),
                     "live_trading_allowed": bool(
                         self.config.tunables.sr_momentum_breakout_enabled
+                        and self.config.tunables.sr_momentum_breakout_live_enabled
                         and self.config.mode == AutoTradingMode.LIVE
                         and self.config.system_armed
                         and self._live_orders_enabled()
