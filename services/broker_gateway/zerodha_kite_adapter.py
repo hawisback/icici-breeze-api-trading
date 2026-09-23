@@ -36,6 +36,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         api_secret: Optional[str] = None,
         product: str = "NRML",
         custom_client: Optional[Any] = None,
+        request_timeout_sec: float = 15.0,
     ) -> None:
         self.api_key = api_key or ""
         self.api_secret = api_secret or ""
@@ -45,6 +46,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         self._write_lock = asyncio.Lock()
         self._nse_instruments: Optional[list[dict[str, Any]]] = None
         self._nfo_instruments: Optional[list[dict[str, Any]]] = None
+        self.request_timeout_sec = request_timeout_sec
 
     @property
     def is_active(self) -> bool:
@@ -192,6 +194,14 @@ class ZerodhaKiteAdapter(BrokerAdapter):
                 status="PLACED",
                 message="Order placed successfully with Kite",
             )
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            logger.error("Kite submission outcome unknown for %s: %s", request.client_order_id, exc)
+            return BrokerOrderResponse(
+                success=False,
+                client_order_id=request.client_order_id,
+                status="UNKNOWN",
+                message="Kite submission timed out; reconciliation required and blind retry is prohibited.",
+            )
         except Exception as exc:
             logger.warning("Kite order rejected for %s: %s", request.client_order_id, exc)
             return _failure(request.client_order_id, str(exc))
@@ -258,6 +268,31 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             )
         except Exception as exc:
             logger.warning("Kite order status lookup failed: %s", exc)
+            return None
+
+    async def find_order_by_client_id(self, client_order_id: str) -> Optional[BrokerOrderResponse]:
+        if not self.is_active:
+            return None
+        try:
+            rows = await self._run(self._kite.orders)
+            row = next(
+                (item for item in reversed(rows or []) if str(item.get("tag") or "") == client_order_id),
+                None,
+            )
+            if row is None:
+                return None
+            status = str(row.get("status", "UNKNOWN")).upper()
+            return BrokerOrderResponse(
+                success=status not in {"REJECTED", "CANCELLED"},
+                broker_order_id=str(row.get("order_id") or ""),
+                client_order_id=client_order_id,
+                status=status,
+                message=row.get("status_message"),
+                filled_quantity=int(row.get("filled_quantity") or 0),
+                average_price=float(row.get("average_price") or 0),
+            )
+        except Exception as exc:
+            logger.warning("Kite client-id reconciliation failed: %s", exc)
             return None
 
     async def get_positions(self) -> list[BrokerPositionResponse]:
@@ -488,7 +523,10 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         return int(futures[0]["instrument_token"]) if futures else None
 
     async def _run(self, callback):
-        return await asyncio.to_thread(callback)
+        return await asyncio.wait_for(
+            asyncio.to_thread(callback),
+            timeout=self.request_timeout_sec,
+        )
 
 
 def _secret_value(value: Any) -> str:
