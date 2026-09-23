@@ -157,6 +157,7 @@ class OrderIntent(BaseDomainModel):
     product: ProductType = ProductType.OPTIONS
     time_in_force: TimeInForce = TimeInForce.DAY
     trading_mode: TradingMode = TradingMode.PAPER
+    reduce_only: bool = False
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -189,6 +190,7 @@ class BrokerOrder(BaseDomainModel):
     status: OrderState = OrderState.CREATED
     status_message: Optional[str] = None
     trading_mode: TradingMode = TradingMode.PAPER
+    reduce_only: bool = False
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
