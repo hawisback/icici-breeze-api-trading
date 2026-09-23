@@ -97,9 +97,14 @@ class ExecutionService:
                 )
                 return
 
+        broker_stock_code = (
+            order.symbol
+            if str(execution_broker).lower() == "kite"
+            else (order.stock_code or order.symbol)
+        )
         req = BrokerOrderRequest(
             client_order_id=order.client_order_id,
-            stock_code=order.stock_code or order.symbol,
+            stock_code=broker_stock_code,
             exchange_code=order.exchange_code or "NFO",
             product="options",
             action=order.side.value.lower(),
