@@ -1116,6 +1116,11 @@ class StrategyDPaperMonitor:
         latest_signal = (
             discovered[-1].to_dict() if discovered else None
         )
+        recent_paper_trades = sorted(
+            tracked_values,
+            key=lambda row: str(row.get("entry_observed_at") or ""),
+            reverse=True,
+        )[:10]
         return {
             "status": (
                 "PAPER_POSITION_OPEN"
@@ -1146,6 +1151,7 @@ class StrategyDPaperMonitor:
             "active_paper_trade": (
                 open_paper[0] if open_paper else None
             ),
+            "paper_trades": recent_paper_trades,
             "latest_signal": latest_signal,
             "market": self._market_snapshot(
                 spot_5m=spot_5m,
