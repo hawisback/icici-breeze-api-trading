@@ -77,6 +77,7 @@ class OMSRepository:
                     filled_quantity INTEGER NOT NULL DEFAULT 0,
                     remaining_quantity INTEGER NOT NULL,
                     price REAL NOT NULL,
+                    trigger_price REAL,
                     average_price REAL NOT NULL DEFAULT 0.0,
                     status TEXT NOT NULL,
                     status_message TEXT,
@@ -105,6 +106,8 @@ class OMSRepository:
             order_columns = {row["name"] for row in await (await conn.execute("PRAGMA table_info(broker_orders)")).fetchall()}
             if "reduce_only" not in order_columns:
                 await conn.execute("ALTER TABLE broker_orders ADD COLUMN reduce_only INTEGER NOT NULL DEFAULT 0")
+            if "trigger_price" not in order_columns:
+                await conn.execute("ALTER TABLE broker_orders ADD COLUMN trigger_price REAL")
 
             # Indexes
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_order_intents_time ON order_intents(created_at);")
@@ -170,13 +173,14 @@ class OMSRepository:
                 INSERT INTO broker_orders (
                     order_id, intent_id, client_order_id, broker_order_id,
                     instrument_id, symbol, side, order_type, quantity,
-                    filled_quantity, remaining_quantity, price, average_price,
+                    filled_quantity, remaining_quantity, price, trigger_price, average_price,
                     status, status_message, trading_mode, reduce_only, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(order_id) DO UPDATE SET
                     broker_order_id = excluded.broker_order_id,
                     filled_quantity = excluded.filled_quantity,
                     remaining_quantity = excluded.remaining_quantity,
+                    trigger_price = excluded.trigger_price,
                     average_price = excluded.average_price,
                     status = excluded.status,
                     status_message = excluded.status_message,
@@ -196,6 +200,7 @@ class OMSRepository:
                     order.filled_quantity,
                     order.remaining_quantity,
                     order.price,
+                    order.trigger_price,
                     order.average_price,
                     to_state.value,
                     order.status_message,
@@ -286,6 +291,7 @@ class OMSRepository:
             filled_quantity=row["filled_quantity"],
             remaining_quantity=row["remaining_quantity"],
             price=row["price"],
+            trigger_price=row["trigger_price"],
             average_price=row["average_price"],
             status=OrderState(row["status"]),
             status_message=row["status_message"],
