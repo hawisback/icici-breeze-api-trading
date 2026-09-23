@@ -35,6 +35,9 @@ class RiskService:
         max_order_qty: int = 1800,
         live_account_id: str = "ICICI_PRIMARY",
         portfolio_service: Any = None,
+        broker_gateway: Any = None,
+        live_max_order_notional: float = 50000.0,
+        live_max_open_positions: int = 1,
     ) -> None:
         self.repo = repository or RiskRepository()
         self.bus = event_bus or get_event_bus()
@@ -42,6 +45,9 @@ class RiskService:
         self.max_order_qty = max_order_qty
         self.live_account_id = live_account_id
         self.portfolio_service = portfolio_service
+        self.broker_gateway = broker_gateway
+        self.live_max_order_notional = float(live_max_order_notional)
+        self.live_max_open_positions = int(live_max_open_positions)
         self._recent_orders: dict[str, datetime] = {}  # symbol:side:qty -> timestamp
         self._outbox_worker_task: Optional[asyncio.Task[None]] = None
         self._outbox_running = False
@@ -120,6 +126,22 @@ class RiskService:
                 system_mode=system_mode,
             )
 
+        if (
+            intent.trading_mode == TradingMode.LIVE
+            and intent.side == OrderSide.SELL
+            and not is_reduce_only_exit
+        ):
+            return await self._record_and_publish(
+                intent=intent,
+                approved=False,
+                rule="LIVE_NAKED_SELL_DISABLED",
+                reason=(
+                    "LIVE SELL orders must be explicit reduce-only exits in "
+                    "the long-options execution model"
+                ),
+                system_mode=system_mode,
+            )
+
         if is_reduce_only_exit:
             if self.portfolio_service is None:
                 return await self._record_and_publish(
@@ -194,6 +216,86 @@ class RiskService:
                 reason=f"Order price {intent.price} is invalid or below tick size",
                 system_mode=system_mode,
             )
+
+        # Independent final LIVE exposure checks. Strategy sizing is not
+        # trusted as the sole capital boundary because manual/alternate callers
+        # also reach this service.
+        if (
+            intent.trading_mode == TradingMode.LIVE
+            and intent.side == OrderSide.BUY
+            and not is_reduce_only_exit
+        ):
+            if self.portfolio_service is None or self.broker_gateway is None:
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="LIVE_RISK_DEPENDENCY_UNAVAILABLE",
+                    reason=(
+                        "LIVE entry rejected because portfolio or broker funds "
+                        "verification is unavailable"
+                    ),
+                    system_mode=system_mode,
+                )
+
+            order_notional = float(intent.price) * int(intent.quantity)
+            if order_notional > self.live_max_order_notional:
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="LIVE_ORDER_NOTIONAL_LIMIT",
+                    reason=(
+                        f"LIVE order notional {order_notional:.2f} exceeds "
+                        f"limit {self.live_max_order_notional:.2f}"
+                    ),
+                    system_mode=system_mode,
+                )
+
+            positions = await self.portfolio_service.get_positions()
+            open_live_positions = [
+                position
+                for position in positions
+                if int(position.quantity) > 0
+                and position.trading_mode == TradingMode.LIVE
+            ]
+            if len(open_live_positions) >= self.live_max_open_positions:
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="LIVE_OPEN_POSITION_LIMIT",
+                    reason=(
+                        f"Open LIVE positions {len(open_live_positions)} reached "
+                        f"limit {self.live_max_open_positions}"
+                    ),
+                    system_mode=system_mode,
+                )
+
+            try:
+                funds = await self.broker_gateway.get_funds(
+                    mode=TradingMode.LIVE
+                )
+            except Exception as exc:
+                logger.exception("LIVE broker funds verification failed")
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="LIVE_FUNDS_UNAVAILABLE",
+                    reason=(
+                        "LIVE entry rejected because broker funds could not be "
+                        f"verified: {type(exc).__name__}"
+                    ),
+                    system_mode=system_mode,
+                )
+            if float(funds.available_margin) < order_notional:
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="LIVE_INSUFFICIENT_MARGIN",
+                    reason=(
+                        f"Available broker margin {float(funds.available_margin):.2f} "
+                        f"is below order notional {order_notional:.2f}"
+                    ),
+                    system_mode=system_mode,
+                )
 
         # Check 5: Duplicate order protection (within 1 second window)
         dup_key = f"{intent.symbol}:{intent.side.value}:{intent.quantity}:{intent.price}"
