@@ -75,77 +75,60 @@ class MarketDataService:
             )
         )
 
+    @staticmethod
+    def _market_session_open(now: Optional[datetime] = None) -> bool:
+        """Return whether the regular NSE cash/derivatives session is open."""
+        now = now or utc_now()
+        ist = timezone(timedelta(hours=5, minutes=30))
+        local = now.astimezone(ist)
+        if local.weekday() >= 5:
+            return False
+        minutes = local.hour * 60 + local.minute
+        return 9 * 60 + 15 <= minutes <= 15 * 60 + 30
+
     def _live_broker_active(self) -> bool:
-        """Return whether the configured market-data provider is active."""
+        """Return whether any configured live-data provider is active."""
         if not self.broker_gateway:
             return False
-        provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
-        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
-        if provider == "kite":
-            return bool(active_adapter and getattr(active_adapter, "is_active", False))
-        breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
-        client_mgr = getattr(breeze_adapter, "client_manager", None)
-        if provider == "breeze":
-            return bool(client_mgr and getattr(client_mgr, "is_active", False))
-        if active_adapter and getattr(active_adapter, "is_active", False):
-            return True
-        return bool(client_mgr and getattr(client_mgr, "is_active", False))
+        order = getattr(self.broker_gateway, "provider_order", None)
+        providers = order("live") if callable(order) else (
+            getattr(self.broker_gateway, "active_broker_name", ""),
+        )
+        for provider in providers:
+            try:
+                if self.broker_gateway.provider_is_active(provider):
+                    return True
+            except Exception:
+                adapter = getattr(self.broker_gateway, "active_adapter", None)
+                if adapter and getattr(adapter, "is_active", False):
+                    return True
+        return False
 
     async def sync_quotes_from_broker(self) -> bool:
-        """Fetch index quotes only from the configured provider."""
+        """Fetch index quotes from the configured primary provider with fallback."""
         if not self.broker_gateway:
             return False
-        provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
-        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
-        if provider == "kite":
-            if not active_adapter or not getattr(active_adapter, "is_active", False):
-                return False
-            fetch = getattr(active_adapter, "get_index_quotes", None)
-            if not callable(fetch):
-                return False
+        order = getattr(self.broker_gateway, "provider_order", None)
+        providers = order("live") if callable(order) else (
+            getattr(self.broker_gateway, "active_broker_name", ""),
+        )
+        for provider in providers:
             try:
+                adapter = self.broker_gateway.get_broker_adapter(provider)
+                if not getattr(adapter, "is_active", False):
+                    continue
+                fetch = getattr(adapter, "get_index_quotes", None)
+                if not callable(fetch):
+                    continue
                 quotes = await fetch()
+                if not quotes:
+                    continue
                 for quote in quotes:
                     await self.ingest_quote(quote)
-                return bool(quotes)
+                return True
             except Exception as exc:
-                logger.warning("Kite live quote sync deferred: %s", exc)
-                return False
-
-        breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
-        client_mgr = getattr(breeze_adapter, "client_manager", None)
-        if provider not in {"", "breeze"} or not client_mgr or not client_mgr.is_active:
-            return False
-        try:
-            sdk = client_mgr.get_sdk_client()
-            now = utc_now()
-            synced_any = False
-            for inst_id, symbol, code in [
-                ("INST-NIFTY-INDEX", "NIFTY 50", "NIFTY"),
-                ("INST-BANKNIFTY-INDEX", "NIFTY BANK", "CNXBAN"),
-            ]:
-                raw_res = await client_mgr.sdk_runner.run(
-                    lambda c=code: sdk.get_quotes(stock_code=c, exchange_code="NSE", product_type="cash"),
-                    timeout_sec=5.0,
-                )
-                rows = raw_res.get("Success", []) if isinstance(raw_res, dict) else []
-                if rows and isinstance(rows, list):
-                    row = rows[0]
-                    lp = float(row.get("ltp") or 0.0)
-                    if lp > 0:
-                        await self.ingest_quote(Quote(
-                            source="BREEZE", instrument_id=inst_id, symbol=symbol,
-                            last_price=lp, open=float(row.get("open") or lp),
-                            high=float(row.get("high") or lp), low=float(row.get("low") or lp),
-                            close=lp, volume=int(row.get("total_quantity_traded") or 0),
-                            change_pct=float(row.get("ltp_percent_change") or 0.0), timestamp=now,
-                        ))
-                        synced_any = True
-                await asyncio.sleep(0.3)
-            return synced_any
-        except Exception as exc:
-            logger.warning("Breeze live quote sync deferred: %s", exc)
-            return False
+                logger.warning("%s live quote sync deferred: %s", provider, exc)
+        return False
 
     def update_quote(self, quote: Quote) -> None:
         """Update live quote cache and feed freshness."""
@@ -236,11 +219,15 @@ class MarketDataService:
     async def _run_feed_loop(self, interval_sec: float) -> None:
         while self._running:
             try:
-                # 1. Attempt sync from live broker
+                # REST polling is limited to the regular market session. The
+                # primary provider is tried first and the secondary provider is
+                # only used on failure/unavailability.
                 synced = False
                 live_broker_active = self._live_broker_active()
-                if live_broker_active:
+                if live_broker_active and self._market_session_open():
                     synced = await self.sync_quotes_from_broker()
+                elif live_broker_active:
+                    synced = True
 
                 # 2. Synthetic ticks are an offline-only aid.  Never overwrite
                 # a failed/stale live broker read with a plausible fake quote:
