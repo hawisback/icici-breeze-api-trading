@@ -1233,6 +1233,330 @@ class StrategyService:
 
         return {"status": "TRADE_OPENED", "trade": new_trade.model_dump(mode="json")}
 
+    def _candidate_runtime_for_trade(self, trade: ActiveTrade) -> dict[str, Any] | None:
+        """Return the frozen C/D lifecycle snapshot for an integrated trade."""
+        if trade.strategy == StrategyName.DI_CONTINUATION:
+            status = self._last_strategy_c_shadow_status
+        elif trade.strategy == StrategyName.SR_MOMENTUM_BREAKOUT:
+            status = self._last_strategy_d_paper_status
+        else:
+            return None
+
+        candidates: list[dict[str, Any]] = []
+        active = status.get("active_paper_trade")
+        if isinstance(active, dict):
+            candidates.append(active)
+        candidates.extend(
+            row for row in (status.get("paper_trades") or [])
+            if isinstance(row, dict)
+        )
+        for row in candidates:
+            if str(row.get("signal_id") or "") == str(trade.signal_id or ""):
+                return row
+
+        # Strategy C's underlying lifecycle exists even when its parallel paper
+        # option observer could not obtain a fill. Preserve that execution
+        # decision rather than coupling live risk management to paper quotes.
+        if trade.strategy == StrategyName.DI_CONTINUATION:
+            row = status.get("active_candidate_trade") or {}
+            if str(row.get("candidate_signal_id") or "") == str(trade.signal_id or ""):
+                lifecycle = row.get("lifecycle") or {}
+                return {
+                    "signal_id": trade.signal_id,
+                    "current_underlying_stop": lifecycle.get("current_stop"),
+                    "current_r": lifecycle.get("current_r"),
+                    "underlying_exit_reason": lifecycle.get("exit_reason"),
+                    "underlying_exit_time": lifecycle.get("exit_time"),
+                    "underlying_exit_price": lifecycle.get("exit_price"),
+                    "underlying_realized_r": lifecycle.get("realized_r"),
+                }
+        return None
+
+    async def _reconcile_partial_exit_order(self, trade: ActiveTrade) -> bool:
+        """Reconcile a live T1 sell. Return True while the order is still pending."""
+        if not trade.partial_exit_order_id:
+            return False
+        order = await self.oms.get_order(trade.partial_exit_order_id)
+        if not order:
+            return True
+        terminal = order.status.value in (
+            "FILLED",
+            "CANCELLED",
+            "REJECTED",
+            "RISK_REJECTED",
+            "EXPIRED",
+            "FAILED_SAFE",
+        )
+        if not terminal:
+            return True
+
+        planned = max(0, int(trade.t1_exit_quantity))
+        already = max(0, int(trade.partial_exit_filled_quantity))
+        reported = max(0, int(order.filled_quantity or 0))
+        applied = min(reported, max(0, planned - already))
+        if applied > 0:
+            fill_price = float(order.average_price or 0.0)
+            if fill_price <= 0:
+                return True
+            old_value = float(trade.partial_exit_price or 0.0) * already
+            new_total = already + applied
+            trade.partial_exit_filled_quantity = new_total
+            trade.partial_exit_price = round((old_value + fill_price * applied) / new_total, 2)
+            trade.partial_exit_raw_bid = trade.partial_exit_price
+            trade.partial_exit_slippage_points = 0.0
+            trade.partial_exit_time = utc_now()
+            trade.partial_exit_reason = "T1_REACHED_PARTIAL_EXIT"
+            original_quantity = int(trade.initial_quantity or (trade.quantity + already))
+            trade.remaining_quantity = max(0, original_quantity - new_total)
+            trade.quantity = trade.remaining_quantity
+            trade.lots = trade.remaining_quantity // trade.lot_size
+            trade.t1_realized_r = trade.t1_decision_r
+            trade.state = TradeLifecycleState.RUNNER_MODE
+            await self._record_execution({
+                "trade_id": trade.trade_id,
+                "side": "SELL",
+                "timestamp": trade.partial_exit_time.isoformat(),
+                "raw_bid": trade.partial_exit_price,
+                "raw_ask": None,
+                "raw_ltp": trade.partial_exit_price,
+                "executable_price": trade.partial_exit_price,
+                "slippage_points": 0.0,
+                "quantity": applied,
+                "source": "LIVE_OMS",
+                "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                "reason": "T1_REACHED_PARTIAL_EXIT",
+            })
+
+        trade.partial_exit_order_id = None
+        trade.t1_exit_pending = trade.partial_exit_filled_quantity < planned
+        await self.repo.save_trade(trade)
+        return False
+
+    async def _submit_live_partial_exit(
+        self,
+        trade: ActiveTrade,
+        quote: dict[str, Any],
+    ) -> bool:
+        """Submit only the remaining Strategy-D T1 quantity through OMS."""
+        remaining = max(
+            0,
+            int(trade.t1_exit_quantity) - int(trade.partial_exit_filled_quantity),
+        )
+        bid = float(quote.get("bid") or 0.0)
+        if remaining <= 0:
+            trade.t1_exit_pending = False
+            await self.repo.save_trade(trade)
+            return False
+        if quote.get("status") != "VALID" or bid <= 0:
+            trade.t1_exit_pending = True
+            await self.repo.save_trade(trade)
+            return False
+        intent = OrderIntent(
+            intent_id=generate_id(),
+            correlation_id=trade.trade_id,
+            strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
+            source=SourceType.STRATEGY,
+            instrument_id=trade.contract_instrument_id,
+            symbol=trade.contract_symbol,
+            side=OrderSide.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=remaining,
+            price=round(bid, 2),
+            product=ProductType.OPTIONS,
+            trading_mode=TradingMode.LIVE,
+        )
+        order = await self.oms.create_order_intent(intent)
+        trade.partial_exit_order_id = order.order_id
+        trade.t1_exit_pending = True
+        await self.repo.save_trade(trade)
+        await self._log_decision(
+            "ORDER",
+            trade.strategy.value,
+            "LIVE T1 partial-exit order submitted",
+            {
+                "trade_id": trade.trade_id,
+                "order_id": order.order_id,
+                "quantity": remaining,
+                "price": round(bid, 2),
+            },
+        )
+        return True
+
+    async def _evaluate_candidate_active_trade(
+        self,
+        trade: ActiveTrade,
+        features: MarketFeatures,
+        quote: dict[str, Any],
+    ) -> None:
+        """Manage integrated C/D positions from their frozen underlying lifecycle."""
+        runtime = self._candidate_runtime_for_trade(trade)
+        if runtime is None:
+            trade.option_data_status = (
+                trade.option_data_status
+                if trade.option_data_status not in {"", "ENTRY_CAPTURED"}
+                else "AWAITING_STRATEGY_LIFECYCLE"
+            )
+            await self.repo.save_trade(trade)
+            return
+
+        try:
+            current_r = float(runtime.get("current_r"))
+        except (TypeError, ValueError):
+            current_r = trade.current_r
+        stop = runtime.get("current_underlying_stop")
+        if stop is not None:
+            trade.current_trailing_stop = float(stop)
+        trade.current_r = round(current_r, 6)
+        trade.peak_r = max(trade.peak_r, trade.current_r)
+
+        entry = float(trade.underlying_entry_price or trade.entry_spot_price)
+        risk = float(trade.underlying_r or trade.initial_r_points)
+        exit_reason = runtime.get("underlying_exit_reason")
+        exit_price_raw = runtime.get("underlying_exit_price")
+        if exit_price_raw is not None:
+            current_underlying = float(exit_price_raw)
+        elif risk > 0:
+            current_underlying = (
+                entry + trade.current_r * risk
+                if trade.direction == TradeDirection.BULLISH
+                else entry - trade.current_r * risk
+            )
+        else:
+            current_underlying = (
+                features.futures_price
+                if trade.strategy == StrategyName.DI_CONTINUATION
+                else features.spot_price
+            )
+        trade.current_spot_price = float(current_underlying)
+        trade.underlying_current_price = float(current_underlying)
+
+        quote_valid = (
+            quote.get("status") == "VALID"
+            and float(quote.get("bid") or 0.0) > 0
+        )
+        current_option = float(quote.get("ltp") or quote.get("bid") or 0.0)
+        if quote_valid and current_option > 0:
+            trade.current_option_price = current_option
+            trade.unrealized_pnl = round(
+                (current_option - trade.entry_option_price) * trade.quantity,
+                2,
+            )
+
+        emergency_exit = bool(
+            quote_valid
+            and current_option > 0
+            and current_option <= trade.option_hard_stop_price
+        )
+        if emergency_exit:
+            exit_reason = (
+                f"OPTION_HARD_STOP_HIT (LTP {current_option} <= SL "
+                f"{trade.option_hard_stop_price})"
+            )
+
+        # Strategy D keeps its tested 1.5R scale-out. Paper/shadow fills are
+        # applied immediately from executable quotes; LIVE uses a reconciled
+        # OMS sell order and never mutates quantity before a confirmed fill.
+        if (
+            trade.strategy == StrategyName.SR_MOMENTUM_BREAKOUT
+            and not emergency_exit
+            and runtime.get("scale_out_time")
+            and not trade.t1_reached
+        ):
+            trade.t1_reached = True
+            original_quantity = int(trade.initial_quantity or trade.quantity)
+            original_lots = original_quantity // trade.lot_size
+            partial_lots = self.strategy_d_paper.manager.scale_out_lots(original_lots)
+            if partial_lots > 0:
+                trade.t1_exit_quantity = partial_lots * trade.lot_size
+                scale_price = float(runtime.get("scale_out_price") or current_underlying)
+                trade.t1_decision_underlying_price = scale_price
+                trade.t1_decision_r = underlying_r_for_price(
+                    trade.direction,
+                    entry,
+                    risk,
+                    scale_price,
+                )
+                trade.t1_exit_pending = True
+            else:
+                trade.t1_exit_quantity = 0
+                trade.t1_exit_pending = False
+
+        if trade.t1_exit_pending and trade.partial_exit_filled_quantity < trade.t1_exit_quantity:
+            if trade.mode == AutoTradingMode.LIVE:
+                if not trade.partial_exit_order_id:
+                    await self._submit_live_partial_exit(trade, quote)
+                return
+            if not quote_valid:
+                await self.repo.save_trade(trade)
+                return
+            trade.state = TradeLifecycleState.RUNNER_MODE
+            await self._execute_strategy_a_partial_exit(trade, features, quote)
+
+        if exit_reason:
+            trade.pending_exit_reason = str(exit_reason)
+            if not emergency_exit:
+                trade.underlying_exit_reason = str(exit_reason)
+                exit_time = runtime.get("underlying_exit_time")
+                trade.underlying_exit_time = (
+                    datetime.fromisoformat(str(exit_time).replace("Z", "+00:00"))
+                    if exit_time
+                    else features.timestamp
+                )
+                trade.pending_underlying_exit_time = trade.underlying_exit_time
+                trade.underlying_exit_price = float(
+                    runtime.get("underlying_exit_price") or current_underlying
+                )
+            if not quote_valid:
+                await self.repo.save_trade(trade)
+                return
+
+            if trade.mode == AutoTradingMode.LIVE:
+                if trade.partial_exit_order_id:
+                    await self.repo.save_trade(trade)
+                    return
+                quantity = max(0, trade.quantity - trade.exit_filled_quantity)
+                if quantity <= 0:
+                    await self.repo.save_trade(trade)
+                    return
+                bid = float(quote["bid"])
+                intent = OrderIntent(
+                    intent_id=generate_id(),
+                    correlation_id=trade.trade_id,
+                    strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
+                    source=SourceType.STRATEGY,
+                    instrument_id=trade.contract_instrument_id,
+                    symbol=trade.contract_symbol,
+                    side=OrderSide.SELL,
+                    order_type=OrderType.LIMIT,
+                    quantity=quantity,
+                    price=round(bid, 2),
+                    product=ProductType.OPTIONS,
+                    trading_mode=TradingMode.LIVE,
+                )
+                order = await self.oms.create_order_intent(intent)
+                trade.exit_order_id = order.order_id
+                trade.state = TradeLifecycleState.EXIT_PENDING
+                await self.repo.save_trade(trade)
+                return
+
+            sell_price = max(
+                0.0,
+                round(float(quote["bid"]) - self._paper_slippage(), 2),
+            )
+            if sell_price <= 0:
+                await self.repo.save_trade(trade)
+                return
+            await self._close_trade(
+                trade,
+                features,
+                sell_price,
+                str(exit_reason),
+                quote=quote,
+            )
+            return
+
+        await self.repo.save_trade(trade)
+
     async def _evaluate_active_trade(self, trade: ActiveTrade, features: MarketFeatures) -> None:
         """Evaluates active position stops, trailing updates, and thesis reversal score."""
         if trade.state == TradeLifecycleState.ENTRY_PENDING and not trade.entry_order_id:
@@ -1268,6 +1592,9 @@ class StrategyService:
                 trade.option_hard_stop_price = round(order.average_price * (1-self.config.risk.option_hard_stop_pct/100), 2)
                 trade.state = TradeLifecycleState.OPEN_INITIAL_RISK
                 await self.repo.save_trade(trade)
+
+        if await self._reconcile_partial_exit_order(trade):
+            return
 
         if trade.exit_order_id:
             order = await self.oms.get_order(trade.exit_order_id)
@@ -1387,6 +1714,10 @@ class StrategyService:
             await self.repo.save_trade(updated_trade)
             return
 
+        if self._is_candidate_execution_strategy(trade.strategy):
+            await self._evaluate_candidate_active_trade(trade, features, quote)
+            return
+
         # Strategy B preserves its established quote-gated management path.
         if quote.get("status") != "VALID" or not current_option_price or float(current_option_price) <= 0:
             await self.repo.save_trade(trade)
@@ -1478,8 +1809,19 @@ class StrategyService:
             "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
             "reason": "T1_REACHED_PARTIAL_EXIT",
         })
-        await self._record_strategy_a_lifecycle_event(trade, features, "PARTIAL_EXIT", "T1_REACHED_PARTIAL_EXIT")
-        await self._log_decision("EXIT", trade.strategy.value, "Strategy A T1 partial exit", trade.model_dump(mode="json"))
+        if self._is_strategy_a(trade.strategy):
+            await self._record_strategy_a_lifecycle_event(
+                trade,
+                features,
+                "PARTIAL_EXIT",
+                "T1_REACHED_PARTIAL_EXIT",
+            )
+        await self._log_decision(
+            "EXIT",
+            trade.strategy.value,
+            f"{trade.strategy.value} T1 partial exit",
+            trade.model_dump(mode="json"),
+        )
         await self.repo.save_trade(trade)
 
     async def _close_trade(self, trade, features, price, reason, quote: Optional[dict[str, Any]] = None):
@@ -1569,8 +1911,10 @@ class StrategyService:
         )
         if trade.gross_pnl < 0:
             self._last_loss_exit_time = trade.exit_time
-        self.strategy_a.on_exit(trade.direction, trade.exit_time)
-        self.strategy_b.reset(trade.exit_time)
+        if self._is_strategy_a(trade.strategy):
+            self.strategy_a.on_exit(trade.direction, trade.exit_time)
+        elif trade.strategy == StrategyName.VOLATILITY_BREAKOUT:
+            self.strategy_b.reset(trade.exit_time)
         self._active_trades_cache = [t for t in self._active_trades_cache if t.trade_id != trade.trade_id]
         await self._save_runtime()
         await self.repo.save_trade(trade)
