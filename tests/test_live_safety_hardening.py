@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
-from libs.broker_models.adapter import BrokerOrderResponse
+from libs.broker_models.adapter import BrokerOrderResponse, BrokerPositionResponse
 from libs.config.settings import PlatformSettings
 from libs.contracts.models import (
     OrderIntent,
@@ -114,6 +114,21 @@ async def test_reduce_only_exit_survives_closed_live_gate_and_reconciles(tmp_pat
         event_bus=bus,
         live_gate=gate,
         portfolio_service=portfolio,
+        broker_gateway=SimpleNamespace(
+            get_positions=AsyncMock(
+                return_value=[
+                    BrokerPositionResponse(
+                        stock_code="NIFTYTESTCE",
+                        exchange_code="NFO",
+                        product_type="options",
+                        quantity=65,
+                        average_price=100.0,
+                        ltp=100.0,
+                        pnl=0.0,
+                    )
+                ]
+            )
+        ),
     )
     await risk.initialize()
 
@@ -193,6 +208,21 @@ async def test_exit_only_and_halted_allow_only_explicit_reductions(tmp_path):
         event_bus=bus,
         live_gate=gate,
         portfolio_service=portfolio,
+        broker_gateway=SimpleNamespace(
+            get_positions=AsyncMock(
+                return_value=[
+                    BrokerPositionResponse(
+                        stock_code="NIFTYTESTCE",
+                        exchange_code="NFO",
+                        product_type="options",
+                        quantity=65,
+                        average_price=100.0,
+                        ltp=100.0,
+                        pnl=0.0,
+                    )
+                ]
+            )
+        ),
     )
     await risk.initialize()
 
@@ -296,7 +326,8 @@ async def test_live_entries_have_independent_notional_position_and_funds_caps(tm
     gateway = SimpleNamespace(
         get_funds=AsyncMock(
             return_value=SimpleNamespace(available_margin=100000.0)
-        )
+        ),
+        get_positions=AsyncMock(return_value=[]),
     )
     risk = RiskService(
         repository=RiskRepository(tmp_path / "risk-caps.db"),
@@ -553,6 +584,21 @@ async def test_reduce_only_stop_limit_geometry_is_fail_closed(tmp_path):
         repository=RiskRepository(tmp_path / "risk-stop.db"),
         event_bus=bus,
         portfolio_service=portfolio,
+        broker_gateway=SimpleNamespace(
+            get_positions=AsyncMock(
+                return_value=[
+                    BrokerPositionResponse(
+                        stock_code="NIFTYLIVECE",
+                        exchange_code="NFO",
+                        product_type="options",
+                        quantity=65,
+                        average_price=100.0,
+                        ltp=100.0,
+                        pnl=0.0,
+                    )
+                ]
+            )
+        ),
     )
     await risk.initialize()
 
