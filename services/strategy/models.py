@@ -196,6 +196,14 @@ class StrategyTunablesConfig(BaseModel):
     evaluation_interval_sec: int = Field(default=2, ge=1, le=10, description="Scheduler loop interval in seconds")
     trend_pullback_enabled: bool = Field(default=True)
     volatility_breakout_enabled: bool = Field(default=True)
+    di_continuation_enabled: bool = Field(
+        default=True,
+        description="Enable Strategy C DI Continuation signal evaluation and execution",
+    )
+    sr_momentum_breakout_enabled: bool = Field(
+        default=True,
+        description="Enable Strategy D S&R Momentum signal evaluation and execution",
+    )
     # Strategy A authoritative defaults.
     ema_fast_period: int = Field(default=20, ge=1, description="Fast EMA period on completed 15m bars")
     ema_slow_period: int = Field(default=50, ge=2, description="Slow EMA period on completed 15m bars")
@@ -542,14 +550,17 @@ class SelectedContract(BaseModel):
 
 
 class StrategySignal(BaseModel):
-    """Directional setup signal emitted by Strategy A or B."""
+    """Directional setup signal emitted by any first-class trading strategy."""
     signal_id: str
     strategy: StrategyName
     direction: TradeDirection
     option_type: OptionType
     timestamp: datetime = Field(default_factory=utc_now)
     spot_reference_price: float
-    underlying_entry_price: Optional[float] = Field(default=None, description="Authoritative Strategy A futures trigger/open fill")
+    underlying_entry_price: Optional[float] = Field(
+        default=None,
+        description="Authoritative underlying entry used by structural-risk strategies",
+    )
     structural_stop: float
     r_points: float
     derivatives_score: float
@@ -589,6 +600,7 @@ class ActiveTrade(BaseModel):
     last_managed_bar: Optional[datetime] = None
     entry_order_id: Optional[str] = None
     exit_order_id: Optional[str] = None
+    partial_exit_order_id: Optional[str] = None
     filled_quantity: int = 0
     pending_exit_reason: Optional[str] = None
     exit_filled_quantity: int = 0
