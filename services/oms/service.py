@@ -193,16 +193,27 @@ class OMSService:
         elif broker_status == "UNKNOWN":
             to_state = OrderState.SUBMISSION_UNKNOWN
 
-        if to_state != order.status:
-            OrderStateMachine.validate_transition(order.status, to_state, broker_status)
-            rem_qty = max(0, order.quantity - filled_qty)
+        state_changed = to_state != order.status
+        fill_changed = (
+            int(filled_qty or 0) != int(order.filled_quantity or 0)
+            or (
+                float(avg_price or 0.0) > 0
+                and float(avg_price or 0.0) != float(order.average_price or 0.0)
+            )
+        )
+        broker_id_changed = bool(broker_order_id and broker_order_id != order.broker_order_id)
+
+        if state_changed or fill_changed or broker_id_changed:
+            if state_changed:
+                OrderStateMachine.validate_transition(order.status, to_state, broker_status)
+            rem_qty = max(0, order.quantity - int(filled_qty or 0))
             updated = order.model_copy(
                 update={
                     "broker_order_id": broker_order_id or order.broker_order_id,
                     "status": to_state,
-                    "filled_quantity": filled_qty,
+                    "filled_quantity": int(filled_qty or 0),
                     "remaining_quantity": rem_qty,
-                    "average_price": avg_price or order.average_price,
+                    "average_price": float(avg_price or 0.0) or order.average_price,
                     "status_message": payload.get("message"),
                 }
             )
