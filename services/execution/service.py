@@ -126,6 +126,7 @@ class ExecutionService:
             order_type=order.order_type.value.lower(),
             quantity=order.quantity,
             price=order.price,
+            user_remark=order.client_order_id,
         )
 
         try:
