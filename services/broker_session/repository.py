@@ -68,9 +68,13 @@ class BrokerSessionRepository:
                 """
                 INSERT OR IGNORE INTO broker_accounts (
                     account_id, broker_name, account_name, api_key, created_at
-                ) VALUES (?, 'ICICI_DIRECT', 'Primary Account', '', ?)
+                ) VALUES (?, ?, 'Primary Account', '', ?)
                 """,
-                (account_id, login_time.isoformat()),
+                (
+                    account_id,
+                    str((metadata or {}).get("broker") or "UNKNOWN").upper(),
+                    login_time.isoformat(),
+                ),
             )
             await conn.execute(
                 """
@@ -89,6 +93,32 @@ class BrokerSessionRepository:
                 ),
             )
             await conn.commit()
+
+    async def get_active_sessions(self) -> list[dict[str, Any]]:
+        """Return all persisted sessions still marked ACTIVE, newest first."""
+        async with self.engine.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT session_id, account_id, session_token_masked, status,
+                       login_time, expires_at, metadata
+                FROM session_history
+                WHERE status = 'ACTIVE'
+                ORDER BY login_time DESC
+                """
+            )
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "session_id": row["session_id"],
+                    "account_id": row["account_id"],
+                    "session_token_masked": row["session_token_masked"],
+                    "status": row["status"],
+                    "login_time": row["login_time"],
+                    "expires_at": row["expires_at"],
+                    "metadata": json.loads(row["metadata"] or "{}"),
+                }
+                for row in rows
+            ]
 
     async def get_active_session(self) -> Optional[dict[str, Any]]:
         async with self.engine.connect() as conn:
