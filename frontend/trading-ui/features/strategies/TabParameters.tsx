@@ -558,6 +558,39 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
             ))}
           </div>
 
+          <div className="rounded-lg border border-rose-900/50 bg-rose-950/20 p-3 space-y-2">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-rose-300">
+              Explicit live-routing authorization
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {([
+                ["di_continuation_live_enabled", "Allow Strategy C real orders"],
+                ["sr_momentum_breakout_live_enabled", "Allow Strategy D real orders"],
+              ] as const).map(([key, label]) => (
+                <label key={key} className="flex items-center gap-2 cursor-pointer text-xs text-slate-200">
+                  <input
+                    type="checkbox"
+                    checked={form.tunables[key]}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        tunables: {
+                          ...form.tunables,
+                          [key]: e.target.checked,
+                        },
+                      })
+                    }
+                    className="rounded accent-rose-500"
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            <p className="text-[10px] text-slate-500">
+              These switches are independent of signal enablement. Real orders require the strategy live switch, global LIVE mode, platform live permission, and an armed system.
+            </p>
+          </div>
+
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="text-xs text-slate-400 block mb-1">Legacy ADX Compatibility</label>
