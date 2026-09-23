@@ -358,7 +358,7 @@ def run_backtest(
             "same_bar_ambiguity": (
                 "resolved with complete native 1m children; same-minute "
                 "ambiguity remains conservative; incomplete 1m falls "
-                "back to 5m without retroactive breakeven activation"
+                "back to explicitly labelled conservative 5m ordering"
             ),
             "option_pnl": "NOT_SYNTHESIZED",
             "lot_execution": (
