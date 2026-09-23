@@ -169,60 +169,84 @@ class OMSService:
             )
 
     async def _handle_broker_order_event(self, envelope: EventEnvelope[Any]) -> None:
-        """Handle status update coming from Broker Gateway / Execution Service."""
+        """Apply broker status updates and emit only newly filled quantity."""
         payload = envelope.payload
         client_order_id = payload["client_order_id"]
         broker_order_id = payload.get("broker_order_id")
-        broker_status = payload.get("status", "").upper()
-        filled_qty = payload.get("filled_quantity", 0)
-        avg_price = payload.get("average_price", 0.0)
+        broker_status = str(payload.get("status", "")).upper()
+        filled_qty = int(payload.get("filled_quantity") or 0)
+        avg_price = float(payload.get("average_price") or 0.0)
 
         order = await self.repo.get_order_by_client_id(client_order_id)
         if not order:
             return
 
         to_state = order.status
-        if broker_status == "FILLED":
+        if broker_status in {"FILLED", "COMPLETE"}:
             to_state = OrderState.FILLED
-        elif broker_status == "OPEN" or broker_status == "PLACED":
+        elif broker_status == "PARTIALLY_FILLED":
+            to_state = OrderState.PARTIALLY_FILLED
+        elif broker_status in {"OPEN", "PLACED"}:
             to_state = OrderState.OPEN
         elif broker_status == "CANCELLED":
             to_state = OrderState.CANCELLED
         elif broker_status == "REJECTED":
             to_state = OrderState.REJECTED
+        elif broker_status == "EXPIRED":
+            to_state = OrderState.EXPIRED
         elif broker_status == "UNKNOWN":
             to_state = OrderState.SUBMISSION_UNKNOWN
 
         state_changed = to_state != order.status
-        fill_changed = (
-            int(filled_qty or 0) != int(order.filled_quantity or 0)
-            or (
-                float(avg_price or 0.0) > 0
-                and float(avg_price or 0.0) != float(order.average_price or 0.0)
-            )
+        data_changed = (
+            filled_qty != order.filled_quantity
+            or (avg_price > 0 and avg_price != order.average_price)
+            or (broker_order_id and broker_order_id != order.broker_order_id)
+            or payload.get("message") != order.status_message
         )
-        broker_id_changed = bool(broker_order_id and broker_order_id != order.broker_order_id)
+        if not state_changed and not data_changed:
+            return
 
-        if state_changed or fill_changed or broker_id_changed:
-            if state_changed:
-                OrderStateMachine.validate_transition(order.status, to_state, broker_status)
-            rem_qty = max(0, order.quantity - int(filled_qty or 0))
-            updated = order.model_copy(
-                update={
-                    "broker_order_id": broker_order_id or order.broker_order_id,
-                    "status": to_state,
-                    "filled_quantity": int(filled_qty or 0),
-                    "remaining_quantity": rem_qty,
-                    "average_price": float(avg_price or 0.0) or order.average_price,
-                    "status_message": payload.get("message"),
-                }
-            )
-            await self.repo.save_broker_order_with_transition(
-                order=updated,
-                from_state=order.status,
-                to_state=to_state,
-                reason=f"Broker status: {broker_status}",
-                outbox_topic=Topics.ORDER_STATE,
+        if state_changed:
+            OrderStateMachine.validate_transition(order.status, to_state, broker_status)
+
+        rem_qty = max(0, order.quantity - filled_qty)
+        updated = order.model_copy(
+            update={
+                "broker_order_id": broker_order_id or order.broker_order_id,
+                "status": to_state,
+                "filled_quantity": filled_qty,
+                "remaining_quantity": rem_qty,
+                "average_price": avg_price or order.average_price,
+                "status_message": payload.get("message"),
+            }
+        )
+        await self.repo.save_broker_order_with_transition(
+            order=updated,
+            from_state=order.status,
+            to_state=to_state,
+            reason=f"Broker status: {broker_status}",
+            outbox_topic=Topics.ORDER_STATE,
+        )
+
+        fill_delta = max(0, filled_qty - order.filled_quantity)
+        if fill_delta > 0:
+            await self.bus.publish(
+                EventEnvelope(
+                    topic=Topics.BROKER_TRADE_EVENT,
+                    payload={
+                        "order_id": order.order_id,
+                        "client_order_id": order.client_order_id,
+                        "instrument_id": order.instrument_id,
+                        "symbol": order.symbol,
+                        "side": order.side.value,
+                        "quantity": fill_delta,
+                        "price": avg_price or order.average_price or order.price,
+                        "trading_mode": order.trading_mode.value,
+                        "execution_broker": order.execution_broker,
+                        "execution_time": utc_now().isoformat(),
+                    },
+                )
             )
 
     async def _outbox_loop(self, poll_interval_sec: float) -> None:
