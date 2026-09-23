@@ -2838,6 +2838,20 @@ class StrategyService:
             ),
             None,
         )
+        strategy_c_trade = next(
+            (
+                trade for trade in active_trades
+                if trade.strategy == StrategyName.DI_CONTINUATION
+            ),
+            None,
+        )
+        strategy_d_trade = next(
+            (
+                trade for trade in active_trades
+                if trade.strategy == StrategyName.SR_MOMENTUM_BREAKOUT
+            ),
+            None,
+        )
         c_candidate = (
             self._last_strategy_c_shadow_status.get("active_candidate_trade")
             or {}
@@ -2944,14 +2958,27 @@ class StrategyService:
                     ),
                 },
                 "di_continuation": {
-                    "enabled": True,
-                    "label": "Strategy C · DI Continuation V1 Candidate",
-                    "state": str(
-                        self._last_strategy_c_shadow_status.get("status")
-                        or "NOT_INITIALIZED"
+                    "enabled": self.config.tunables.di_continuation_enabled,
+                    "label": "Strategy C · DI Continuation V1",
+                    "state": (
+                        strategy_c_trade.state.value
+                        if strategy_c_trade is not None
+                        else str(
+                            self._last_strategy_c_shadow_status.get("status")
+                            or "SEARCHING"
+                        )
                     ),
-                    "execution_mode": AutoTradingMode.PAPER.value,
-                    "live_trading_allowed": False,
+                    "execution_mode": (
+                        strategy_c_trade.mode.value
+                        if strategy_c_trade is not None
+                        else self.config.mode.value
+                    ),
+                    "live_trading_allowed": bool(
+                        self.config.tunables.di_continuation_enabled
+                        and self.config.mode == AutoTradingMode.LIVE
+                        and self.config.system_armed
+                        and self._live_orders_enabled()
+                    ),
                     "candidate_id": self._last_strategy_c_shadow_status.get(
                         "candidate_id"
                     ),
@@ -2972,19 +2999,44 @@ class StrategyService:
                         "paper_net_pnl",
                         0.0,
                     ),
-                    "current_r": c_lifecycle.get("current_r"),
-                    "current_trailing_stop": c_lifecycle.get("current_stop"),
-                    "active_trade_id": c_paper.get("signal_id"),
+                    "current_r": (
+                        strategy_c_trade.current_r
+                        if strategy_c_trade is not None
+                        else c_lifecycle.get("current_r")
+                    ),
+                    "current_trailing_stop": (
+                        strategy_c_trade.current_trailing_stop
+                        if strategy_c_trade is not None
+                        else c_lifecycle.get("current_stop")
+                    ),
+                    "active_trade_id": (
+                        strategy_c_trade.trade_id
+                        if strategy_c_trade is not None
+                        else c_paper.get("signal_id")
+                    ),
                 },
                 "sr_momentum_breakout": {
-                    "enabled": True,
-                    "label": "Strategy D · S&R Momentum V2 Candidate",
-                    "state": str(
-                        self._last_strategy_d_paper_status.get("status")
-                        or "NOT_INITIALIZED"
+                    "enabled": self.config.tunables.sr_momentum_breakout_enabled,
+                    "label": "Strategy D · S&R Momentum V2",
+                    "state": (
+                        strategy_d_trade.state.value
+                        if strategy_d_trade is not None
+                        else str(
+                            self._last_strategy_d_paper_status.get("status")
+                            or "SEARCHING"
+                        )
                     ),
-                    "execution_mode": AutoTradingMode.PAPER.value,
-                    "live_trading_allowed": False,
+                    "execution_mode": (
+                        strategy_d_trade.mode.value
+                        if strategy_d_trade is not None
+                        else self.config.mode.value
+                    ),
+                    "live_trading_allowed": bool(
+                        self.config.tunables.sr_momentum_breakout_enabled
+                        and self.config.mode == AutoTradingMode.LIVE
+                        and self.config.system_armed
+                        and self._live_orders_enabled()
+                    ),
                     "candidate_id": self._last_strategy_d_paper_status.get(
                         "candidate_id"
                     ),
@@ -3005,22 +3057,39 @@ class StrategyService:
                         "paper_net_pnl",
                         0.0,
                     ),
-                    "current_r": d_paper.get("current_r"),
-                    "current_trailing_stop": d_paper.get(
-                        "current_underlying_stop"
+                    "current_r": (
+                        strategy_d_trade.current_r
+                        if strategy_d_trade is not None
+                        else d_paper.get("current_r")
                     ),
-                    "active_trade_id": d_paper.get("signal_id"),
+                    "current_trailing_stop": (
+                        strategy_d_trade.current_trailing_stop
+                        if strategy_d_trade is not None
+                        else d_paper.get("current_underlying_stop")
+                    ),
+                    "active_trade_id": (
+                        strategy_d_trade.trade_id
+                        if strategy_d_trade is not None
+                        else d_paper.get("signal_id")
+                    ),
                 },
             },
             "trigger_diagnostics": diagnostics.model_dump(mode="json"),
             "active_overrides": self._active_overrides.model_dump(mode="json"),
             "system_time": utc_now().isoformat(),
-            "in_trading_window": (
-                self.position_manager.is_within_strategy_a_entry_window(utc_now())
-                if self.config.tunables.trend_pullback_enabled and not self.config.tunables.volatility_breakout_enabled
-                else self.position_manager.is_within_entry_window()
-                if self.config.tunables.volatility_breakout_enabled and not self.config.tunables.trend_pullback_enabled
-                else self.position_manager.is_within_strategy_a_entry_window(utc_now()) or self.position_manager.is_within_entry_window()
+            "in_trading_window": bool(
+                (
+                    self.config.tunables.trend_pullback_enabled
+                    and self.position_manager.is_within_strategy_a_entry_window(utc_now())
+                )
+                or (
+                    (
+                        self.config.tunables.volatility_breakout_enabled
+                        or self.config.tunables.di_continuation_enabled
+                        or self.config.tunables.sr_momentum_breakout_enabled
+                    )
+                    and self.position_manager.is_within_entry_window()
+                )
             ),
         }
 
