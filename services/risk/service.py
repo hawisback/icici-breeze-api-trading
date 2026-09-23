@@ -89,8 +89,20 @@ class RiskService:
 
     async def _handle_order_intent_event(self, envelope: EventEnvelope[Any]) -> None:
         intent = OrderIntent.model_validate(envelope.payload)
-        decision = await self.evaluate_intent(intent)
-        # Decision is automatically published inside evaluate_intent
+        existing = await self.repo.get_decision_by_intent(intent.intent_id)
+        if existing is not None:
+            # ORDER_INTENT may arrive through both fast-path and durable outbox.
+            # Reuse the persisted decision rather than re-running mutable risk
+            # checks and potentially producing a conflicting result.
+            await self.bus.publish(
+                EventEnvelope(
+                    topic=Topics.RISK_DECISION,
+                    correlation_id=intent.correlation_id,
+                    payload=existing.model_dump(),
+                )
+            )
+            return
+        await self.evaluate_intent(intent)
 
     async def evaluate_intent(self, intent: OrderIntent) -> RiskDecision:
         """Run sequential pre-trade checks on intent."""
