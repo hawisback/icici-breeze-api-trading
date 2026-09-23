@@ -59,9 +59,10 @@ class OptionChainService:
         provider_order = ()
         if self.broker_gateway:
             route = getattr(self.broker_gateway, "provider_order", None)
+            routed = route("option_chain") if callable(route) else None
             provider_order = (
-                route("option_chain")
-                if callable(route)
+                tuple(routed)
+                if isinstance(routed, (list, tuple)) and routed
                 else (getattr(self.broker_gateway, "active_broker_name", ""),)
             )
 
