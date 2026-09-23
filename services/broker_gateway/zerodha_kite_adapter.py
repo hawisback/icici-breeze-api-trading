@@ -169,6 +169,8 @@ class ZerodhaKiteAdapter(BrokerAdapter):
     async def place_order(self, request: BrokerOrderRequest) -> BrokerOrderResponse:
         if not self.is_active:
             return _failure(request.client_order_id, "Kite session is not active")
+        normalized_order_type = request.order_type.upper().replace("_", "-")
+        kite_order_type = "SL" if normalized_order_type in {"STOP-LIMIT", "STOPLOSS"} else normalized_order_type
         params: dict[str, Any] = {
             "variety": "regular",
             "exchange": request.exchange_code.upper(),
@@ -176,11 +178,18 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             "transaction_type": "BUY" if request.action.lower() == "buy" else "SELL",
             "quantity": request.quantity,
             "product": self.product if request.product.lower() != "cash" else "CNC",
-            "order_type": request.order_type.upper(),
+            "order_type": kite_order_type,
             "validity": request.validity.upper(),
         }
-        if params["order_type"] == "LIMIT":
+        if params["order_type"] in {"LIMIT", "SL"}:
             params["price"] = request.price
+        if params["order_type"] == "SL":
+            if request.trigger_price is None:
+                return _failure(
+                    request.client_order_id,
+                    "STOP_LIMIT requires trigger_price",
+                )
+            params["trigger_price"] = request.trigger_price
         if request.user_remark:
             params["tag"] = request.user_remark[:20]
 
