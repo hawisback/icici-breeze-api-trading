@@ -231,6 +231,15 @@ class OMSService:
 
         fill_delta = max(0, filled_qty - order.filled_quantity)
         if fill_delta > 0:
+            new_cumulative_avg = avg_price or order.average_price or order.price
+            old_cumulative_avg = order.average_price or order.price
+            old_notional = float(old_cumulative_avg) * int(order.filled_quantity or 0)
+            new_notional = float(new_cumulative_avg) * int(filled_qty)
+            incremental_price = (
+                (new_notional - old_notional) / fill_delta
+                if fill_delta > 0
+                else float(new_cumulative_avg)
+            )
             await self.bus.publish(
                 EventEnvelope(
                     topic=Topics.BROKER_TRADE_EVENT,
@@ -241,7 +250,7 @@ class OMSService:
                         "symbol": order.symbol,
                         "side": order.side.value,
                         "quantity": fill_delta,
-                        "price": avg_price or order.average_price or order.price,
+                        "price": round(incremental_price, 6),
                         "trading_mode": order.trading_mode.value,
                         "execution_broker": order.execution_broker,
                         "execution_time": utc_now().isoformat(),
