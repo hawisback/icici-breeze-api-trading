@@ -180,8 +180,11 @@ class BreezeMarketDataAdapter(BrokerMarketDataPort):
         expiry: date,
         exchange: str = "NFO",
     ) -> OptionChainSnapshot:
-        """Fetch full option chain quote snapshot."""
-        await self.rate_limiter.acquire_read()
+        """Fetch full option chain quote snapshot.
+
+        Breeze requires separate CALL and PUT requests, so each SDK request
+        consumes its own read token.
+        """
         sdk = self.client_manager.get_sdk_client()
 
         stock_code = "CNXBAN" if "BANK" in underlying.upper() else "NIFTY"
@@ -190,6 +193,7 @@ class BreezeMarketDataAdapter(BrokerMarketDataPort):
         rows: list[dict[str, Any]] = []
         for opt_right in ["call", "put"]:
             try:
+                await self.rate_limiter.acquire_read()
                 raw_resp = await self.client_manager.sdk_runner.run(
                     lambda r=opt_right: sdk.get_option_chain_quotes(
                         stock_code=stock_code,
