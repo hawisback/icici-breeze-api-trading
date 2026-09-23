@@ -32,6 +32,7 @@ from services.broker_gateway.service import BrokerGatewayService
 from services.execution.service import ExecutionService
 from services.oms.repository import OMSRepository
 from services.oms.service import OMSService
+from services.risk.live_gate import LiveTradingGate
 
 
 class _Adapter:
@@ -379,4 +380,35 @@ async def test_execution_boundary_maps_option_identifier_per_broker(
     assert request.expiry_date == "2026-09-29"
     assert request.strike_price == 25000.0
     assert request.right == "call"
+    await bus.stop()
+
+
+@pytest.mark.asyncio
+async def test_live_gate_defaults_to_configured_execution_broker(tmp_path: Path):
+    settings = PlatformSettings(
+        _env_file=None,
+        data_root=tmp_path,
+        broker_backend=BrokerBackend.KITE,
+        live_trading_enabled=True,
+        live_allowed_accounts=[],
+    )
+    bus = InMemoryEventBus()
+    await bus.start()
+    gate = LiveTradingGate(settings=settings, event_bus=bus)
+
+    challenge = await gate.request_activation_challenge(
+        operator_id="operator",
+        account_id="ZERODHA_PRIMARY",
+        duration_minutes=30,
+    )
+    assert await gate.confirm_activation(
+        challenge_id=challenge["challenge_id"],
+        challenge_token=challenge["challenge_token"],
+        operator_id="operator",
+    )
+
+    authorized, reason = gate.validate_live_order()
+    assert authorized is True
+    assert reason == "Authorized"
+    assert "ZERODHA_PRIMARY" in gate.get_status()["allowed_accounts"]
     await bus.stop()
