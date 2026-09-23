@@ -204,6 +204,14 @@ class StrategyTunablesConfig(BaseModel):
         default=True,
         description="Enable Strategy D S&R Momentum signal evaluation and execution",
     )
+    di_continuation_live_enabled: bool = Field(
+        default=False,
+        description="Explicit opt-in for Strategy C real broker order routing when global mode is LIVE",
+    )
+    sr_momentum_breakout_live_enabled: bool = Field(
+        default=False,
+        description="Explicit opt-in for Strategy D real broker order routing when global mode is LIVE",
+    )
     # Strategy A authoritative defaults.
     ema_fast_period: int = Field(default=20, ge=1, description="Fast EMA period on completed 15m bars")
     ema_slow_period: int = Field(default=50, ge=2, description="Slow EMA period on completed 15m bars")
