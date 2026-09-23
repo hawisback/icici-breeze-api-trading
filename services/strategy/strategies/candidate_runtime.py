@@ -8,7 +8,7 @@ engine; it does not relax candidate rules or synthesize signals.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from services.strategy.models import (
@@ -31,8 +31,23 @@ def _aware_timestamp(value: Any) -> datetime | None:
     return None
 
 
-def strategy_c_signal_from_status(status: dict[str, Any]) -> StrategySignal | None:
-    """Translate the current frozen Strategy C candidate into an execution signal."""
+MAX_EXECUTION_SIGNAL_LATENCY_SECONDS = 300.0
+
+
+def _is_fresh(timestamp: datetime, as_of: datetime | None) -> bool:
+    current = as_of or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        return False
+    age = (current - timestamp).total_seconds()
+    return -5.0 <= age <= MAX_EXECUTION_SIGNAL_LATENCY_SECONDS
+
+
+def strategy_c_signal_from_status(
+    status: dict[str, Any],
+    *,
+    as_of: datetime | None = None,
+) -> StrategySignal | None:
+    """Translate a fresh/open frozen Strategy C candidate into an execution signal."""
     row = status.get("active_candidate_trade") or {}
     lifecycle = row.get("lifecycle") or {}
     if lifecycle.get("status") != "OPEN":
@@ -41,7 +56,12 @@ def strategy_c_signal_from_status(status: dict[str, Any]) -> StrategySignal | No
     signal_id = row.get("candidate_signal_id")
     timestamp = _aware_timestamp(row.get("entry_time"))
     direction_value = str(row.get("direction") or "").upper()
-    if not signal_id or timestamp is None or direction_value not in {"CALL", "PUT"}:
+    if (
+        not signal_id
+        or timestamp is None
+        or direction_value not in {"CALL", "PUT"}
+        or not _is_fresh(timestamp, as_of)
+    ):
         return None
 
     try:
@@ -77,16 +97,22 @@ def strategy_c_signal_from_status(status: dict[str, Any]) -> StrategySignal | No
     )
 
 
-def strategy_d_signal_from_status(status: dict[str, Any]) -> StrategySignal | None:
-    """Translate the current frozen Strategy D position candidate into an execution signal."""
-    tracked = status.get("active_paper_trade") or {}
-    payload = tracked.get("signal") or {}
-    if tracked.get("paper_status") not in {"OPEN", "EXIT_QUOTE_PENDING"}:
-        return None
-
-    signal_id = tracked.get("signal_id")
+def strategy_d_signal_from_status(
+    status: dict[str, Any],
+    *,
+    as_of: datetime | None = None,
+) -> StrategySignal | None:
+    """Translate a fresh frozen Strategy D signal into the common execution contract."""
+    payload = status.get("execution_signal") or {}
+    signal_id = status.get("execution_signal_id")
+    if not payload:
+        tracked = status.get("active_paper_trade") or {}
+        payload = tracked.get("signal") or {}
+        signal_id = tracked.get("signal_id")
+        if tracked.get("paper_status") not in {"OPEN", "EXIT_QUOTE_PENDING"}:
+            return None
     timestamp = _aware_timestamp(payload.get("timestamp"))
-    if not signal_id or timestamp is None:
+    if not signal_id or timestamp is None or not _is_fresh(timestamp, as_of):
         return None
     try:
         direction = TradeDirection(str(payload["direction"]))
