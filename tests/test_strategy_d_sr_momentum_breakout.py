@@ -6,6 +6,7 @@ from services.strategy.features import FeatureEngine
 from services.strategy.models import TradeDirection
 from services.strategy.strategies.sr_momentum_breakout import (
     PivotLevels,
+    StrategyDConfig,
     StrategyDPositionManager,
     StrategyDSignal,
     classic_pivot_levels,
@@ -26,15 +27,17 @@ def _bar(
     low: float | None = None,
     volume: int = 100,
     instrument_id: str = "INST-NIFTY-INDEX",
+    interval: str = "5m",
+    duration_minutes: int = 5,
 ) -> Candle:
     open_value = close if open_ is None else open_
     high_value = max(open_value, close) if high is None else high
     low_value = min(open_value, close) if low is None else low
     return Candle(
         instrument_id=instrument_id,
-        interval="5m",
+        interval=interval,
         start_time=start,
-        end_time=start + timedelta(minutes=5),
+        end_time=start + timedelta(minutes=duration_minutes),
         open=open_value,
         high=high_value,
         low=low_value,
@@ -139,6 +142,8 @@ def _signal(
             atr_5m=2.0,
             rsi_previous=59.0,
             rsi_current=61.0,
+            rsi_clearance_points=1.0,
+            previous_day_range_atr=6.666667,
             vwap_reference_price=112.0,
             vwap=110.0,
             vwap_source="ACTIVE_NIFTY_FUTURES_5M",
@@ -166,6 +171,8 @@ def _signal(
         atr_5m=2.0,
         rsi_previous=41.0,
         rsi_current=39.0,
+        rsi_clearance_points=1.0,
+        previous_day_range_atr=6.666667,
         vwap_reference_price=88.0,
         vwap=90.0,
         vwap_source="ACTIVE_NIFTY_FUTURES_5M",
@@ -548,3 +555,190 @@ def test_option_sizing_uses_contract_lot_size():
     )
     assert lots >= 1
     assert quantity == lots * 65
+
+
+def test_v2_rejects_weak_rsi_clearance(monkeypatch):
+    day = date(2026, 9, 23)
+    history = _history(
+        day,
+        previous_close=109.0,
+        current_close=111.0,
+    )
+    monkeypatch.setattr(
+        FeatureEngine,
+        "calculate_rsi",
+        staticmethod(
+            lambda closes, period=14: (
+                59.0 if closes[-1] == 109.0 else 61.0
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        FeatureEngine,
+        "calculate_atr",
+        staticmethod(lambda candles, period=14: 2.0),
+    )
+    monkeypatch.setattr(
+        FeatureEngine,
+        "calculate_futures_vwap",
+        staticmethod(lambda candles: 110.0),
+    )
+    config = StrategyDConfig(
+        variant="V2_CANDIDATE",
+        minimum_rsi_clearance_points=2.0,
+        max_previous_day_range_atr=100.0,
+    )
+    assert (
+        evaluate_strategy_d_signal(
+            history,
+            _futures(day, 112.0),
+            _levels(day),
+            config,
+        )
+        is None
+    )
+
+
+def test_v2_rejects_wide_previous_day_range(monkeypatch):
+    day = date(2026, 9, 23)
+    history = _history(
+        day,
+        previous_close=109.0,
+        current_close=111.0,
+    )
+    monkeypatch.setattr(
+        FeatureEngine,
+        "calculate_rsi",
+        staticmethod(
+            lambda closes, period=14: (
+                59.0 if closes[-1] == 109.0 else 63.0
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        FeatureEngine,
+        "calculate_atr",
+        staticmethod(lambda candles, period=14: 2.0),
+    )
+    monkeypatch.setattr(
+        FeatureEngine,
+        "calculate_futures_vwap",
+        staticmethod(lambda candles: 110.0),
+    )
+    assert (
+        evaluate_strategy_d_signal(
+            history,
+            _futures(day, 112.0),
+            _levels(day),
+            StrategyDConfig.v2_candidate(),
+        )
+        is None
+    )
+
+
+def test_v2_accepts_strong_rsi_in_compact_prior_range(monkeypatch):
+    day = date(2026, 9, 23)
+    levels = classic_pivot_levels(
+        session_date=day,
+        source_session_date=day - timedelta(days=1),
+        high=108.0,
+        low=94.0,
+        close=100.0,
+    )
+    history = _history(
+        day,
+        previous_close=107.0,
+        current_close=109.0,
+    )
+    monkeypatch.setattr(
+        FeatureEngine,
+        "calculate_rsi",
+        staticmethod(
+            lambda closes, period=14: (
+                59.0 if closes[-1] == 107.0 else 63.0
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        FeatureEngine,
+        "calculate_atr",
+        staticmethod(lambda candles, period=14: 2.0),
+    )
+    monkeypatch.setattr(
+        FeatureEngine,
+        "calculate_futures_vwap",
+        staticmethod(lambda candles: 108.0),
+    )
+    signal = evaluate_strategy_d_signal(
+        history,
+        _futures(day, 110.0),
+        levels,
+        StrategyDConfig.v2_candidate(),
+    )
+    assert signal is not None
+    assert signal.strategy_id.endswith("V2_CANDIDATE")
+    assert signal.rsi_clearance_points == 3.0
+    assert signal.previous_day_range_atr == 7.0
+
+
+def test_native_1m_prevents_retroactive_breakeven_on_scale_bar(
+    monkeypatch,
+):
+    signal = _signal()
+    parent_start = signal.timestamp
+    history = [
+        _bar(
+            parent_start - timedelta(minutes=5),
+            close=111.0,
+        )
+    ]
+    future = [
+        _bar(
+            parent_start,
+            open_=111.0,
+            close=115.0,
+            high=116.0,
+            low=110.0,
+        )
+    ]
+    minute_specs = [
+        (111.0, 112.0, 110.0, 111.5),
+        (112.0, 116.0, 112.0, 115.7),
+        (115.7, 116.0, 114.0, 115.0),
+        (115.0, 115.5, 114.5, 115.0),
+        (115.0, 115.2, 114.7, 115.0),
+    ]
+    minutes = [
+        _bar(
+            parent_start + timedelta(minutes=index),
+            open_=open_,
+            high=high,
+            low=low,
+            close=close,
+            interval="1m",
+            duration_minutes=1,
+        )
+        for index, (open_, high, low, close) in enumerate(
+            minute_specs
+        )
+    ]
+    monkeypatch.setattr(
+        FeatureEngine,
+        "calculate_ema",
+        staticmethod(lambda closes, period=9: 100.0),
+    )
+
+    result = (
+        StrategyDPositionManager()
+        .replay_underlying_lifecycle(
+            signal,
+            history_through_entry=history,
+            future_bars=future,
+            one_minute_bars=minutes,
+        )
+    )
+
+    assert result.scale_out_time == minutes[1].end_time
+    assert result.scale_out_price == 115.5
+    assert result.runner_exit_reason == "DATA_END"
+    assert result.runner_exit_price == 115.0
