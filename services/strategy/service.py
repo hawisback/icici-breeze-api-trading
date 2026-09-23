@@ -2313,6 +2313,34 @@ class StrategyService:
         latest_signals = await self.repo.list_strategy_signals(limit=10)
         diagnostics = await self.get_trigger_diagnostics()
 
+        strategy_a_trade = next(
+            (
+                trade for trade in active_trades
+                if trade.strategy == StrategyName.TREND_PULLBACK
+            ),
+            None,
+        )
+        strategy_b_trade = next(
+            (
+                trade for trade in active_trades
+                if trade.strategy == StrategyName.VOLATILITY_BREAKOUT
+            ),
+            None,
+        )
+        c_candidate = (
+            self._last_strategy_c_shadow_status.get("active_candidate_trade")
+            or {}
+        )
+        c_lifecycle = c_candidate.get("lifecycle") or {}
+        c_paper = (
+            self._last_strategy_c_shadow_status.get("active_paper_trade")
+            or {}
+        )
+        d_paper = (
+            self._last_strategy_d_paper_status.get("active_paper_trade")
+            or {}
+        )
+
         return {
             "config": self.config.model_dump(mode="json"),
             "scheduler": {
@@ -2335,17 +2363,142 @@ class StrategyService:
             "market_data": {**self._market_data_status, "last_evaluation_time": (self._last_eval_time.isoformat() if self._last_eval_time > datetime.min.replace(tzinfo=timezone.utc) else None)},
             "strategy_c_shadow": self._last_strategy_c_shadow_status,
             "strategy_c_paper": self._last_strategy_c_shadow_status,
+            "strategy_d_paper": self._last_strategy_d_paper_status,
             "features": features.model_dump(mode="json"),
             "active_trades": [t.model_dump(mode="json") for t in active_trades],
             "signals": latest_signals,
             "strategies": {
                 "trend_pullback": {
                     "enabled": self.config.tunables.trend_pullback_enabled,
-                    "state": "TRIGGERED" if any(t.strategy == StrategyName.TREND_PULLBACK for t in active_trades) else "SEARCHING",
+                    "label": "Strategy A · Trend Pullback V3",
+                    "state": (
+                        strategy_a_trade.state.value
+                        if strategy_a_trade is not None
+                        else self.strategy_a.snapshot.state.value
+                    ),
+                    "execution_mode": (
+                        strategy_a_trade.mode.value
+                        if strategy_a_trade is not None
+                        else "PAPER/SHADOW_VALIDATION"
+                    ),
+                    "live_trading_allowed": False,
+                    "current_r": (
+                        strategy_a_trade.current_r
+                        if strategy_a_trade is not None
+                        else None
+                    ),
+                    "current_trailing_stop": (
+                        strategy_a_trade.current_trailing_stop
+                        if strategy_a_trade is not None
+                        else None
+                    ),
+                    "active_trade_id": (
+                        strategy_a_trade.trade_id
+                        if strategy_a_trade is not None
+                        else None
+                    ),
                 },
                 "volatility_breakout": {
                     "enabled": self.config.tunables.volatility_breakout_enabled,
-                    "state": "TRIGGERED" if any(t.strategy == StrategyName.VOLATILITY_BREAKOUT for t in active_trades) else "SEARCHING",
+                    "label": "Strategy B · Volatility Breakout",
+                    "state": (
+                        strategy_b_trade.state.value
+                        if strategy_b_trade is not None
+                        else "SEARCHING"
+                    ),
+                    "execution_mode": (
+                        strategy_b_trade.mode.value
+                        if strategy_b_trade is not None
+                        else (
+                            "SHADOW_ONLY"
+                            if self.config.mode == AutoTradingMode.LIVE
+                            else self.config.mode.value
+                        )
+                    ),
+                    "live_trading_allowed": False,
+                    "current_r": (
+                        strategy_b_trade.current_r
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                    "current_trailing_stop": (
+                        strategy_b_trade.current_trailing_stop
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                    "active_trade_id": (
+                        strategy_b_trade.trade_id
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                },
+                "di_continuation": {
+                    "enabled": True,
+                    "label": "Strategy C · DI Continuation V1 Candidate",
+                    "state": str(
+                        self._last_strategy_c_shadow_status.get("status")
+                        or "NOT_INITIALIZED"
+                    ),
+                    "execution_mode": AutoTradingMode.PAPER.value,
+                    "live_trading_allowed": False,
+                    "candidate_id": self._last_strategy_c_shadow_status.get(
+                        "candidate_id"
+                    ),
+                    "candidate_spec_fingerprint": (
+                        self._last_strategy_c_shadow_status.get(
+                            "candidate_spec_fingerprint"
+                        )
+                    ),
+                    "paper_open_trades": self._last_strategy_c_shadow_status.get(
+                        "paper_open_trades",
+                        0,
+                    ),
+                    "paper_closed_trades": self._last_strategy_c_shadow_status.get(
+                        "paper_closed_trades",
+                        0,
+                    ),
+                    "paper_net_pnl": self._last_strategy_c_shadow_status.get(
+                        "paper_net_pnl",
+                        0.0,
+                    ),
+                    "current_r": c_lifecycle.get("current_r"),
+                    "current_trailing_stop": c_lifecycle.get("current_stop"),
+                    "active_trade_id": c_paper.get("signal_id"),
+                },
+                "sr_momentum_breakout": {
+                    "enabled": True,
+                    "label": "Strategy D · S&R Momentum V2 Candidate",
+                    "state": str(
+                        self._last_strategy_d_paper_status.get("status")
+                        or "NOT_INITIALIZED"
+                    ),
+                    "execution_mode": AutoTradingMode.PAPER.value,
+                    "live_trading_allowed": False,
+                    "candidate_id": self._last_strategy_d_paper_status.get(
+                        "candidate_id"
+                    ),
+                    "candidate_spec_fingerprint": (
+                        self._last_strategy_d_paper_status.get(
+                            "candidate_spec_fingerprint"
+                        )
+                    ),
+                    "paper_open_trades": self._last_strategy_d_paper_status.get(
+                        "paper_open_trades",
+                        0,
+                    ),
+                    "paper_closed_trades": self._last_strategy_d_paper_status.get(
+                        "paper_closed_trades",
+                        0,
+                    ),
+                    "paper_net_pnl": self._last_strategy_d_paper_status.get(
+                        "paper_net_pnl",
+                        0.0,
+                    ),
+                    "current_r": d_paper.get("current_r"),
+                    "current_trailing_stop": d_paper.get(
+                        "current_underlying_stop"
+                    ),
+                    "active_trade_id": d_paper.get("signal_id"),
                 },
             },
             "trigger_diagnostics": diagnostics.model_dump(mode="json"),
