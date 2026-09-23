@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from statistics import mean
@@ -27,11 +27,11 @@ from services.historical.strategy_a_data_audit import (
     _default_db_path,
     _load_rows,
     _open_read_only,
+    _row_to_candle,
     _source_predicate,
 )
 from services.strategy.strategies.sr_momentum_breakout import (
     REAL_SOURCES,
-    STRATEGY_D_ID,
     StrategyDConfig,
     StrategyDPositionManager,
     evaluate_strategy_d_signal,
@@ -48,10 +48,14 @@ def _session_date(candle: Candle) -> date:
     return candle.start_time.astimezone(IST).date()
 
 
-def _group_by_day(candles: Sequence[Candle]) -> dict[date, list[Candle]]:
+def _group_by_day(
+    candles: Sequence[Candle],
+    *,
+    interval: str = "5m",
+) -> dict[date, list[Candle]]:
     result: dict[date, list[Candle]] = {}
     for candle in candles:
-        if candle.interval != "5m" or candle.source not in REAL_SOURCES:
+        if candle.interval != interval or candle.source not in REAL_SOURCES:
             continue
         result.setdefault(_session_date(candle), []).append(candle)
     for day in result:
@@ -60,7 +64,7 @@ def _group_by_day(candles: Sequence[Candle]) -> dict[date, list[Candle]]:
 
 
 def _active_futures_by_day(candles: Sequence[Candle]) -> dict[date, list[Candle]]:
-    grouped = _group_by_day(candles)
+    grouped = _group_by_day(candles, interval="5m")
     result: dict[date, list[Candle]] = {}
     for day, bars in grouped.items():
         contract = _active_contract(day, bars)
