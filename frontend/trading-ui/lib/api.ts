@@ -288,6 +288,8 @@ export interface CandidatePaperStatusData {
   active_paper_trade?: Record<string, any> | null;
   paper_trades?: Record<string, any>[];
   latest_signal?: Record<string, any> | null;
+  execution_signal?: Record<string, any> | null;
+  execution_signal_id?: string | null;
   market?: Record<string, any> | null;
   [key: string]: any;
 }
@@ -365,6 +367,8 @@ export interface StrategyStatusData {
       evaluation_interval_sec: number;
       trend_pullback_enabled: boolean;
       volatility_breakout_enabled: boolean;
+      di_continuation_enabled: boolean;
+      sr_momentum_breakout_enabled: boolean;
       ema_fast_period: number;
       ema_slow_period: number;
       adx_period: number;
@@ -459,7 +463,7 @@ export interface StrategyTriggerDiagnosticsData {
   strategy_label: string;
   direction: "BULLISH" | "BEARISH";
   option_type: "CALL" | "PUT";
-  overall_status: "READY_TO_TRIGGER" | "WAITING" | "BLOCKED" | "PAPER_OPEN";
+  overall_status: "READY_TO_TRIGGER" | "WAITING" | "BLOCKED" | "ACTIVE" | "DISABLED" | "PAPER_OPEN";
   phase_state?: string;
   phase_summary?: {
     regime?: {
@@ -653,6 +657,7 @@ export interface AutoTradeData {
   partial_exit_filled_quantity?: number;
   partial_exit_price?: number | null;
   partial_exit_reason?: string | null;
+  partial_exit_order_id?: string | null;
   selected_option_delta?: number | null;
   selected_option_delta_source?: string;
   selected_option_gamma?: number | null;
