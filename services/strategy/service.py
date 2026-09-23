@@ -1232,6 +1232,7 @@ class StrategyService:
             }:
                 cancelled_for_exit = trade.protective_stop_cancel_for_exit
                 trade.protective_stop_order_id = None
+                trade.protective_stop_filled_quantity = 0
                 trade.protective_stop_cancel_for_exit = False
                 await self.repo.save_trade(trade)
                 return cancelled_for_exit
@@ -1265,6 +1266,7 @@ class StrategyService:
         )
         order = await self.oms.create_order_intent(intent)
         trade.protective_stop_order_id = order.order_id
+        trade.protective_stop_filled_quantity = 0
         trade.protective_stop_status = order.status.value
         trade.protective_stop_trigger_price = trigger_price
         trade.protective_stop_limit_price = limit_price
@@ -1314,6 +1316,7 @@ class StrategyService:
             "FAILED_SAFE",
         }:
             trade.protective_stop_order_id = None
+            trade.protective_stop_filled_quantity = 0
             trade.protective_stop_cancel_for_exit = False
             await self.repo.save_trade(trade)
             return True
