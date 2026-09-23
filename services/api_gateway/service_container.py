@@ -173,12 +173,19 @@ async def initialize_services(
 
     live_gate = LiveTradingGate(settings=app_settings, event_bus=bus)
 
+    live_account_id = (
+        "ZERODHA_PRIMARY"
+        if app_settings.broker_backend == BrokerBackend.KITE
+        else "ICICI_PRIMARY"
+    )
+
     risk_repo = RiskRepository(db_path=app_settings.risk_db_path)
     risk_svc = RiskService(
         repository=risk_repo,
         event_bus=bus,
         live_gate=live_gate,
         max_order_qty=1800,
+        live_account_id=live_account_id,
     )
     await risk_svc.initialize()
 
@@ -187,6 +194,7 @@ async def initialize_services(
         oms_service=oms_svc,
         live_gate=live_gate,
         event_bus=bus,
+        live_account_id=live_account_id,
     )
     await exec_svc.initialize()
 
