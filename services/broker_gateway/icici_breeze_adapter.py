@@ -362,7 +362,12 @@ class IciciBreezeAdapter(BrokerAdapter):
             quantity=request.quantity,
             order_style=order_style,
             limit_price=Decimal(str(request.price)),
-            stop_price=Decimal(str(request.price)) if order_style == OrderStyle.STOP_LIMIT else None,
+            stop_price=(
+                Decimal(str(request.trigger_price))
+                if order_style == OrderStyle.STOP_LIMIT
+                and request.trigger_price is not None
+                else None
+            ),
             validity=OrderValidity.DAY if request.validity.lower() == "day" else OrderValidity.IOC,
             client_reference=request.client_order_id,
             user_remark=request.user_remark,
