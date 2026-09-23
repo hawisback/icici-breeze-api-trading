@@ -421,6 +421,35 @@ class StrategyService:
         except Exception:
             return False
 
+    def _live_intent_for_trade(
+        self,
+        trade: ActiveTrade,
+        *,
+        side: OrderSide,
+        quantity: int,
+        price: float,
+    ) -> OrderIntent:
+        """Build a broker-owned derivative intent without losing contract identity."""
+        return OrderIntent(
+            correlation_id=trade.trade_id,
+            strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
+            source=SourceType.STRATEGY,
+            instrument_id=trade.contract_instrument_id,
+            symbol=trade.contract_symbol,
+            execution_broker=trade.execution_broker or get_platform_settings().broker_backend.value,
+            stock_code=trade.broker_stock_code,
+            exchange_code="NFO",
+            expiry_date=trade.expiry,
+            strike_price=trade.strike,
+            option_right=trade.option_type.value,
+            side=side,
+            order_type=OrderType.LIMIT,
+            quantity=quantity,
+            price=price,
+            product=ProductType.OPTIONS,
+            trading_mode=TradingMode.LIVE,
+        )
+
     def _cost_metadata(self) -> dict[str, Any]:
         r = self.config.risk
         return {
@@ -1131,6 +1160,8 @@ class StrategyService:
             option_type=signal.option_type,
             contract_symbol=selected_contract.symbol,
             contract_instrument_id=selected_contract.instrument_id,
+            execution_broker=get_platform_settings().broker_backend.value,
+            broker_stock_code=("CNXBAN" if "BANK" in str(chain.get("underlying") or "").upper() else "NIFTY"),
             expiry=selected_contract.expiry,
             strike=selected_contract.strike,
             quantity=quantity,
@@ -1228,19 +1259,11 @@ class StrategyService:
 
         # In LIVE mode, dispatch OrderIntent to OMS
         if execution_mode == AutoTradingMode.LIVE and not self._is_strategy_a(signal.strategy):
-            intent = OrderIntent(
-                intent_id=generate_id(),
-                correlation_id=trade_id,
-                strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
-                source=SourceType.STRATEGY,
-                instrument_id=selected_contract.instrument_id,
-                symbol=selected_contract.symbol,
+            intent = self._live_intent_for_trade(
+                new_trade,
                 side=OrderSide.BUY,
-                order_type=OrderType.LIMIT,
                 quantity=quantity,
                 price=selected_contract.ask_price,
-                product=ProductType.OPTIONS,
-                trading_mode=TradingMode.LIVE,
             )
             order = await self.oms.create_order_intent(intent)
             new_trade.entry_order_id = order.order_id
@@ -1375,19 +1398,11 @@ class StrategyService:
             trade.t1_exit_pending = True
             await self.repo.save_trade(trade)
             return False
-        intent = OrderIntent(
-            intent_id=generate_id(),
-            correlation_id=trade.trade_id,
-            strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
-            source=SourceType.STRATEGY,
-            instrument_id=trade.contract_instrument_id,
-            symbol=trade.contract_symbol,
+        intent = self._live_intent_for_trade(
+            trade,
             side=OrderSide.SELL,
-            order_type=OrderType.LIMIT,
             quantity=remaining,
             price=round(bid, 2),
-            product=ProductType.OPTIONS,
-            trading_mode=TradingMode.LIVE,
         )
         order = await self.oms.create_order_intent(intent)
         trade.partial_exit_order_id = order.order_id
@@ -1544,19 +1559,11 @@ class StrategyService:
                     await self.repo.save_trade(trade)
                     return
                 bid = float(quote["bid"])
-                intent = OrderIntent(
-                    intent_id=generate_id(),
-                    correlation_id=trade.trade_id,
-                    strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
-                    source=SourceType.STRATEGY,
-                    instrument_id=trade.contract_instrument_id,
-                    symbol=trade.contract_symbol,
+                intent = self._live_intent_for_trade(
+                    trade,
                     side=OrderSide.SELL,
-                    order_type=OrderType.LIMIT,
                     quantity=quantity,
                     price=round(bid, 2),
-                    product=ProductType.OPTIONS,
-                    trading_mode=TradingMode.LIVE,
                 )
                 order = await self.oms.create_order_intent(intent)
                 trade.exit_order_id = order.order_id
@@ -1811,12 +1818,12 @@ class StrategyService:
                     await self.repo.save_trade(trade)
                     return
                 order_price = round(float(bid) - self._paper_slippage(), 2)
-                intent = OrderIntent(
-                    correlation_id=trade.trade_id, strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
-                    source=SourceType.STRATEGY, instrument_id=trade.contract_instrument_id,
-                    symbol=trade.contract_symbol, side=OrderSide.SELL, order_type=OrderType.LIMIT,
-                    quantity=trade.quantity-trade.exit_filled_quantity, price=order_price,
-                    product=ProductType.OPTIONS, trading_mode=TradingMode.LIVE)
+                intent = self._live_intent_for_trade(
+                    trade,
+                    side=OrderSide.SELL,
+                    quantity=trade.quantity - trade.exit_filled_quantity,
+                    price=order_price,
+                )
                 order = await self.oms.create_order_intent(intent)
                 trade.exit_order_id = order.order_id
                 trade.pending_exit_reason = exit_reason
@@ -2063,18 +2070,11 @@ class StrategyService:
             await self._close_trade(target, features, exit_price, reason, quote=quote)
             return target
         else:
-            intent = OrderIntent(
-                correlation_id=target.trade_id,
-                strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
-                source=SourceType.STRATEGY,
-                instrument_id=target.contract_instrument_id,
-                symbol=target.contract_symbol,
+            intent = self._live_intent_for_trade(
+                target,
                 side=OrderSide.SELL,
-                order_type=OrderType.LIMIT,
                 quantity=target.quantity - target.exit_filled_quantity,
                 price=exit_price,
-                product=ProductType.OPTIONS,
-                trading_mode=TradingMode.LIVE,
             )
             order = await self.oms.create_order_intent(intent)
             target.exit_order_id = order.order_id
@@ -2085,17 +2085,24 @@ class StrategyService:
 
     # --- Market Data & Chain Fetching ---
     def _active_broker_context(self) -> tuple[str, Any | None, bool]:
-        gateway = getattr(self.chain_svc, "broker_gateway", None) or getattr(self.hist_svc, "broker_gateway", None)
+        gateway = getattr(self.chain_svc, "broker_gateway", None) or getattr(
+            self.hist_svc, "broker_gateway", None
+        )
         if not gateway:
             return "unknown", None, False
-        provider = str(getattr(gateway, "active_broker_name", "unknown") or "unknown").lower()
-        adapter = getattr(gateway, "active_adapter", None)
-        if provider == "breeze":
-            client = getattr(getattr(gateway, "breeze_adapter", None), "client_manager", None)
-            active = bool(client and getattr(client, "is_active", False))
-        else:
-            active = bool(adapter and getattr(adapter, "is_active", False))
-        return provider, adapter, active
+        route = getattr(gateway, "provider_order", None)
+        providers = route("live") if callable(route) else (
+            getattr(gateway, "active_broker_name", "unknown"),
+        )
+        for provider in providers:
+            name = provider.value if hasattr(provider, "value") else str(provider)
+            try:
+                adapter = gateway.get_broker_adapter(provider)
+            except Exception:
+                continue
+            if getattr(adapter, "is_active", False):
+                return name.lower(), adapter, True
+        return "unknown", None, False
 
     async def _resolve_strategy_a_futures_instrument(self) -> Optional[str]:
         inst_svc = getattr(self.chain_svc, "inst_svc", None)
@@ -2932,19 +2939,11 @@ class StrategyService:
 
         # In LIVE mode, dispatch OrderIntent
         if execution_mode == AutoTradingMode.LIVE and strategy != StrategyName.TREND_PULLBACK:
-            intent = OrderIntent(
-                intent_id=generate_id(),
-                correlation_id=trade_id,
-                strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
-                source=SourceType.STRATEGY,
-                instrument_id=selected_contract.instrument_id,
-                symbol=selected_contract.symbol,
+            intent = self._live_intent_for_trade(
+                new_trade,
                 side=OrderSide.BUY,
-                order_type=OrderType.LIMIT,
                 quantity=quantity,
                 price=selected_contract.ask_price,
-                product=ProductType.OPTIONS,
-                trading_mode=TradingMode.LIVE,
             )
             order = await self.oms.create_order_intent(intent)
             new_trade.entry_order_id = order.order_id
@@ -3368,6 +3367,12 @@ class StrategyService:
             source=SourceType.STRATEGY,
             instrument_id=instrument_id,
             symbol=symbol,
+            execution_broker=get_platform_settings().broker_backend.value,
+            stock_code=str((metadata or {}).get("stock_code") or symbol),
+            exchange_code=str((metadata or {}).get("exchange_code") or "NFO"),
+            expiry_date=(metadata or {}).get("expiry_date"),
+            strike_price=(metadata or {}).get("strike_price"),
+            option_right=(metadata or {}).get("option_right"),
             side=side,
             order_type=OrderType.LIMIT,
             quantity=quantity,
