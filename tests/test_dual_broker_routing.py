@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import SecretStr
@@ -16,6 +17,7 @@ from libs.config.settings import (
 )
 from libs.contracts.models import (
     BrokerOrder,
+    Candle,
     OptionRight,
     OrderIntent,
     OrderSide,
@@ -30,6 +32,8 @@ from libs.contracts.models import (
 from libs.events.bus import EventEnvelope, InMemoryEventBus, Topics
 from services.broker_gateway.service import BrokerGatewayService
 from services.execution.service import ExecutionService
+from services.historical.repository import HistoricalRepository
+from services.historical.service import HistoricalService
 from services.oms.repository import OMSRepository
 from services.oms.service import OMSService
 from services.risk.live_gate import LiveTradingGate
@@ -427,3 +431,57 @@ async def test_live_gate_defaults_to_configured_execution_broker(tmp_path: Path)
     assert reason == "Authorized"
     assert "ZERODHA_PRIMARY" in gate.get_status()["allowed_accounts"]
     await bus.stop()
+
+
+class _HistoricalAdapter:
+    def __init__(self, *, candles=None):
+        self.is_active = True
+        self.fetch_historical_candles = AsyncMock(return_value=candles or [])
+
+
+class _HistoricalGateway:
+    def __init__(self, breeze, kite):
+        self.breeze = breeze
+        self.kite = kite
+
+    def provider_order(self, capability):
+        assert capability == "historical"
+        return (BrokerBackend.BREEZE, BrokerBackend.KITE)
+
+    def get_broker_adapter(self, broker):
+        return self.breeze if broker == BrokerBackend.BREEZE else self.kite
+
+
+@pytest.mark.asyncio
+async def test_historical_primary_request_can_fall_back_to_secondary(tmp_path: Path):
+    repo = HistoricalRepository(db_path=tmp_path / "historical-dual.db")
+    await repo.initialize()
+    candle = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-29",
+        interval="15m",
+        start_time=utc_now().replace(hour=4, minute=0, second=0, microsecond=0),
+        end_time=utc_now().replace(hour=4, minute=15, second=0, microsecond=0),
+        open=25000.0,
+        high=25020.0,
+        low=24990.0,
+        close=25010.0,
+        volume=100,
+        source="KITE",
+    )
+    breeze = _HistoricalAdapter()
+    kite = _HistoricalAdapter(candles=[candle])
+    gateway = _HistoricalGateway(breeze, kite)
+    service = HistoricalService(repository=repo, broker_gateway=gateway)
+    service.fetch_candles_from_breeze = AsyncMock(return_value=[])
+
+    candles = await service.get_candles(
+        candle.instrument_id,
+        "15m",
+        requested_source="MIXED",
+        allow_synthetic_fallback=False,
+    )
+
+    assert candles
+    assert all(item.source == "KITE" for item in candles)
+    service.fetch_candles_from_breeze.assert_awaited()
+    kite.fetch_historical_candles.assert_awaited()
