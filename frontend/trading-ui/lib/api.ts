@@ -7,6 +7,10 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v
 export interface SystemHealth {
   status: string;
   timestamp: string;
+  broker_sessions?: {
+    breeze?: { connected: boolean; status: string; account_id?: string | null; expires_at?: string | null };
+    kite?: { connected: boolean; status: string; account_id?: string | null; expires_at?: string | null };
+  };
   services: {
     api_gateway: string;
     broker_session: string;
@@ -246,8 +250,9 @@ export async function setSystemMode(mode: string): Promise<any> {
   return res.json();
 }
 
-export async function fetchLoginUrl(): Promise<{ login_url: string; api_key: string; broker?: "breeze" | "kite" }> {
-  const res = await fetch(`${API_BASE}/broker/session/login-url`);
+export async function fetchLoginUrl(broker?: "breeze" | "kite"): Promise<{ login_url: string; api_key: string; broker?: "breeze" | "kite" }> {
+  const suffix = broker ? `?broker=${broker}` : "";
+  const res = await fetch(`${API_BASE}/broker/session/login-url${suffix}`);
   if (!res.ok) throw new Error("Failed to fetch login URL");
   return res.json();
 }
