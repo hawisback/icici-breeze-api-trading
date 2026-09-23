@@ -369,6 +369,8 @@ export interface StrategyStatusData {
       volatility_breakout_enabled: boolean;
       di_continuation_enabled: boolean;
       sr_momentum_breakout_enabled: boolean;
+      di_continuation_live_enabled: boolean;
+      sr_momentum_breakout_live_enabled: boolean;
       ema_fast_period: number;
       ema_slow_period: number;
       adx_period: number;
