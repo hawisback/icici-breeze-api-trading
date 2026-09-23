@@ -42,9 +42,10 @@ class HistoricalService:
 
         route = getattr(self.broker_gateway, "provider_order", None)
         resolver = getattr(self.broker_gateway, "get_broker_adapter", None)
-        if callable(route) and callable(resolver):
+        providers = route("historical") if callable(route) else None
+        if callable(resolver) and isinstance(providers, (list, tuple)) and providers:
             result: list[tuple[str, Any]] = []
-            for provider in route("historical"):
+            for provider in providers:
                 name = provider.value if hasattr(provider, "value") else str(provider)
                 try:
                     adapter = resolver(provider)
