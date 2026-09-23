@@ -3,9 +3,13 @@
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDownRight, ArrowUpRight, BarChart2, CheckCircle2, History, RefreshCw, TrendingUp } from "lucide-react";
-import { AutoTradeData, fetchStrategyTrades } from "../../lib/api";
+import { AutoTradeData, StrategyStatusData, fetchStrategyTrades } from "../../lib/api";
 
-export const TabHistory: React.FC = () => {
+interface TabHistoryProps {
+  status?: StrategyStatusData | null;
+}
+
+export const TabHistory: React.FC<TabHistoryProps> = ({ status }) => {
   const {
     data: trades = [],
     isLoading,
@@ -14,6 +18,8 @@ export const TabHistory: React.FC = () => {
     queryKey: ["strategy_trades"],
     queryFn: () => fetchStrategyTrades(50),
     refetchInterval: 3000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   });
 
   const closedTrades = trades.filter((t) => t.state === "CLOSED");
@@ -22,6 +28,59 @@ export const TabHistory: React.FC = () => {
   const winRate = totalTrades > 0 ? (winningTrades.length / totalTrades) * 100 : 0;
   const totalNetPnL = closedTrades.reduce((acc, t) => acc + (t.net_pnl || 0), 0);
   const totalR = closedTrades.reduce((acc, t) => acc + (t.realized_r || 0), 0);
+  const candidateRows = [
+    ...(status?.strategy_c_paper?.paper_trades || []).map((row) => {
+      const isActive =
+        status?.strategy_c_paper?.active_paper_trade?.signal_id === row.signal_id;
+      return {
+        key: `C-${row.signal_id || row.entry_time || Math.random()}`,
+        strategy: "C",
+        time: row.entry_time || row.entry_observed_at,
+        optionType: row.direction || row.option_type || "--",
+        contract:
+          row.selected_contract?.symbol ||
+          row.selected_contract?.instrument_id ||
+          "--",
+        status: row.paper_status || "--",
+        stop: isActive
+          ? status?.strategies.di_continuation.current_trailing_stop
+          : row.underlying_stop,
+        r: isActive
+          ? status?.strategies.di_continuation.current_r
+          : row.paper_underlying_realized_r,
+        netPnl: row.paper_net_pnl,
+      };
+    }),
+    ...(status?.strategy_d_paper?.paper_trades || []).map((row) => {
+      const isActive =
+        status?.strategy_d_paper?.active_paper_trade?.signal_id === row.signal_id;
+      return {
+        key: `D-${row.signal_id || row.entry_observed_at || Math.random()}`,
+        strategy: "D",
+        time: row.entry_observed_at || row.signal?.timestamp,
+        optionType: row.signal?.option_type || "--",
+        contract:
+          row.selected_contract?.symbol ||
+          row.selected_contract?.instrument_id ||
+          "--",
+        status: row.paper_status || "--",
+        stop:
+          row.current_underlying_stop ??
+          row.signal?.initial_stop ??
+          (isActive
+            ? status?.strategies.sr_momentum_breakout.current_trailing_stop
+            : null),
+        r:
+          row.current_r ??
+          row.paper_underlying_realized_r ??
+          (isActive ? status?.strategies.sr_momentum_breakout.current_r : null),
+        netPnl: row.paper_net_pnl,
+      };
+    }),
+  ].sort(
+    (a, b) =>
+      new Date(b.time || 0).getTime() - new Date(a.time || 0).getTime(),
+  );
 
   return (
     <div className="space-y-6">
@@ -208,6 +267,50 @@ export const TabHistory: React.FC = () => {
             </table>
           )}
         </div>
+      {/* 3. Frozen candidate paper evidence */}
+      <div className="bg-slate-900/90 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
+        <div className="px-5 py-3.5 bg-slate-950 border-b border-slate-800">
+          <h4 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+            <BarChart2 className="w-4 h-4 text-violet-400" />
+            Strategy C / D Paper Candidate Evidence
+          </h4>
+          <p className="text-[10px] text-slate-500 mt-1">Isolated candidate observations; these are intentionally separate from A/B ActiveTrade history.</p>
+        </div>
+        <div className="overflow-x-auto">
+          {candidateRows.length === 0 ? (
+            <div className="p-8 text-center text-slate-500 text-xs">No C/D paper candidate trades recorded yet.</div>
+          ) : (
+            <table className="w-full text-xs text-left">
+              <thead className="bg-slate-950/80 text-slate-400 border-b border-slate-800">
+                <tr>
+                  <th className="py-2.5 px-4">TIME</th>
+                  <th className="py-2.5 px-4">STRATEGY</th>
+                  <th className="py-2.5 px-4">TYPE</th>
+                  <th className="py-2.5 px-4">CONTRACT</th>
+                  <th className="py-2.5 px-4">PAPER STATUS</th>
+                  <th className="py-2.5 px-4 text-right">STOP</th>
+                  <th className="py-2.5 px-4 text-right">R</th>
+                  <th className="py-2.5 px-4 text-right">NET PnL</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {candidateRows.map((row) => (
+                  <tr key={row.key} className="hover:bg-slate-850/40">
+                    <td className="py-2.5 px-4 text-slate-400 font-mono">{row.time ? new Date(row.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "--"}</td>
+                    <td className="py-2.5 px-4 font-bold text-violet-300">Strategy {row.strategy}</td>
+                    <td className="py-2.5 px-4"><span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${row.optionType === "CALL" ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"}`}>{row.optionType}</span></td>
+                    <td className="py-2.5 px-4 text-slate-200 font-mono">{row.contract}</td>
+                    <td className="py-2.5 px-4 text-slate-300">{row.status}</td>
+                    <td className="py-2.5 px-4 text-right font-mono text-rose-300">{row.stop == null ? "--" : `₹${Number(row.stop).toFixed(2)}`}</td>
+                    <td className="py-2.5 px-4 text-right font-mono text-cyan-300">{row.r == null ? "--" : `${Number(row.r).toFixed(2)}R`}</td>
+                    <td className={`py-2.5 px-4 text-right font-bold ${Number(row.netPnl || 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{row.netPnl == null ? "--" : `₹${Number(row.netPnl).toFixed(2)}`}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
       </div>
     </div>
   );
