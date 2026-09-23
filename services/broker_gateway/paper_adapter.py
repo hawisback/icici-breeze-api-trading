@@ -210,6 +210,19 @@ class PaperBrokerAdapter(BrokerAdapter):
             average_price=order.get("average_price", 0.0),
         )
 
+    async def find_order_by_client_id(self, client_order_id: str) -> Optional[BrokerOrderResponse]:
+        for order in self._orders.values():
+            if order.get("client_order_id") == client_order_id:
+                return BrokerOrderResponse(
+                    success=order.get("status") not in {"REJECTED", "CANCELLED"},
+                    broker_order_id=order.get("broker_order_id"),
+                    client_order_id=client_order_id,
+                    status=str(order.get("status") or "UNKNOWN"),
+                    filled_quantity=int(order.get("filled_quantity") or 0),
+                    average_price=float(order.get("average_price") or 0.0),
+                )
+        return None
+
     async def get_positions(self) -> list[BrokerPositionResponse]:
         results = []
         for symbol, pos in self._positions.items():
