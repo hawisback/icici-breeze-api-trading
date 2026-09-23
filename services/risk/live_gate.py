@@ -64,8 +64,14 @@ class LiveTradingGate:
             return False
         return True
 
-    def validate_live_order(self, account_id: str = "ICICI_PRIMARY") -> tuple[bool, str]:
+    def validate_live_order(self, account_id: Optional[str] = None) -> tuple[bool, str]:
         """Fail-closed validation before any live order intent or execution is processed."""
+        if account_id is None:
+            account_id = (
+                "ZERODHA_PRIMARY"
+                if self.settings.broker_backend.value == "kite"
+                else "ICICI_PRIMARY"
+            )
         if not self.is_live_active():
             return False, "LIVE trading is not authorized or active window has expired."
 
