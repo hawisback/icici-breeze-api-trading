@@ -31,6 +31,8 @@ class AutoTradingMode(str, Enum):
 class StrategyName(str, Enum):
     TREND_PULLBACK = "TREND_PULLBACK"
     VOLATILITY_BREAKOUT = "VOLATILITY_BREAKOUT"
+    DI_CONTINUATION = "DI_CONTINUATION"
+    SR_MOMENTUM_BREAKOUT = "SR_MOMENTUM_BREAKOUT"
 
 
 class StrategyState(str, Enum):
