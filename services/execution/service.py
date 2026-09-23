@@ -97,11 +97,42 @@ class ExecutionService:
                 )
                 return
 
-        broker_stock_code = (
-            order.symbol
-            if str(execution_broker).lower() == "kite"
-            else (order.stock_code or order.symbol)
-        )
+        broker_stock_code = order.stock_code or order.symbol
+        if (
+            str(execution_broker).lower() == "kite"
+            and order.expiry_date
+            and order.strike_price is not None
+            and order.option_right is not None
+        ):
+            adapter = self.gateway.get_broker_adapter("kite")
+            resolver = getattr(adapter, "resolve_option_contract", None)
+            resolved = (
+                await resolver(
+                    underlying=order.stock_code or order.symbol,
+                    expiry=order.expiry_date,
+                    strike=float(order.strike_price),
+                    right=order.option_right.value,
+                )
+                if callable(resolver)
+                else None
+            )
+            tradingsymbol = str((resolved or {}).get("tradingsymbol") or "")
+            if not tradingsymbol:
+                await self._publish_order_status(
+                    order,
+                    broker_order_id=None,
+                    status="REJECTED",
+                    message=(
+                        "Execution rejected: Kite contract could not be resolved "
+                        "from expiry/strike/right; no guessed tradingsymbol was submitted."
+                    ),
+                )
+                return
+            broker_stock_code = tradingsymbol
+        elif str(execution_broker).lower() == "kite":
+            # Non-option/manual compatibility path. For options the canonical
+            # contract fields above are mandatory and exact resolution is used.
+            broker_stock_code = order.symbol
         req = BrokerOrderRequest(
             client_order_id=order.client_order_id,
             stock_code=broker_stock_code,
