@@ -219,7 +219,7 @@ async def initialize_services(
     audit_svc = AuditService(repository=audit_repo, event_bus=bus)
     await audit_svc.initialize()
 
-    auth_repo = AuthRepository(db_path=app_settings.auth_db_path)
+    auth_repo = AuthRepository(db_path=app_settings.auth_db_path, settings=app_settings)
     auth_svc = AuthService(repository=auth_repo, event_bus=bus, settings=app_settings)
     await auth_svc.initialize()
 
