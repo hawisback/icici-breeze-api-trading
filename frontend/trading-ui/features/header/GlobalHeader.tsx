@@ -56,11 +56,15 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   const [authError, setAuthError] = React.useState("");
   const [authSuccess, setAuthSuccess] = React.useState("");
   const brokerBackend = health?.config?.broker_backend === "kite" ? "kite" : "breeze";
-  const brokerLabel = brokerBackend === "kite" ? "Kite" : "ICICI Breeze";
+  const [authBroker, setAuthBroker] = React.useState<"breeze" | "kite">("kite");
+  React.useEffect(() => {
+    if (!showAuthModal) setAuthBroker(brokerBackend);
+  }, [brokerBackend, showAuthModal]);
+  const brokerLabel = authBroker === "kite" ? "Kite" : "ICICI Breeze";
 
   const handleConnectBroker = async () => {
     try {
-      const data = await fetchLoginUrl();
+      const data = await fetchLoginUrl(authBroker);
       if (data.login_url) {
         window.open(
           data.login_url,
@@ -78,7 +82,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
     let raw = tokenInput.trim();
     if (!raw) return;
 
-    const tokenParam = brokerBackend === "kite" ? "request_token" : "apisession";
+    const tokenParam = authBroker === "kite" ? "request_token" : "apisession";
     if (raw.includes(`${tokenParam}=`)) {
       const match = raw.match(new RegExp(`${tokenParam}=([a-zA-Z0-9_-]+)`));
       if (match) raw = match[1];
@@ -89,7 +93,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
     setAuthSuccess("");
 
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/v1/broker/session/callback?${tokenParam}=${encodeURIComponent(raw)}`, {
+      const res = await fetch(`http://127.0.0.1:8000/api/v1/broker/session/callback?broker=${authBroker}&${tokenParam}=${encodeURIComponent(raw)}`, {
         headers: { Accept: "application/json" },
       });
       const data = await res.json();
@@ -128,8 +132,11 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   );
 
   const brokerSessionStatus = health?.services?.broker_session || "DISCONNECTED";
-  const isBrokerActive = brokerSessionStatus === "CONNECTED";
-  const isBrokerExpired = brokerSessionStatus === "EXPIRED";
+  const breezeConnected = health?.broker_sessions?.breeze?.connected ?? (brokerBackend === "breeze" && brokerSessionStatus === "CONNECTED");
+  const kiteConnected = health?.broker_sessions?.kite?.connected ?? (brokerBackend === "kite" && brokerSessionStatus === "CONNECTED");
+  const connectedBrokerCount = Number(breezeConnected) + Number(kiteConnected);
+  const isBrokerActive = connectedBrokerCount > 0;
+  const isBrokerExpired = !isBrokerActive && brokerSessionStatus === "EXPIRED";
   const marketFeedStatus = health?.services?.market_feed || "LIVE";
 
   return (
@@ -139,7 +146,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
         <div className="flex items-center space-x-2">
           <div className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse" />
           <span className="font-bold tracking-wider text-sm bg-gradient-to-r from-blue-400 to-teal-300 bg-clip-text text-transparent">
-            ICICI BREEZE TERMINAL
+            MULTI-BROKER TRADING TERMINAL
           </span>
           <span className="text-[10px] px-1.5 py-0.5 bg-slate-800 text-slate-400 rounded font-mono border border-slate-700">
             v2.0
@@ -219,19 +226,19 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
           }`}
           title={
             isBrokerActive
-              ? "Broker Connected (Click to view session)"
+              ? `Broker sessions: ${connectedBrokerCount}/2 connected`
               : isBrokerExpired
-              ? `Daily ${brokerLabel} session expired. Click to authenticate today's token.`
-              : `Click to Connect ${brokerLabel}`
+              ? "Broker session expired. Click to reconnect Breeze or Kite."
+              : "Click to connect Breeze and/or Kite"
           }
         >
           <Lock className="w-3 h-3" />
           <span>
             {isBrokerActive
-              ? "BROKER CONNECTED"
+              ? `BROKERS ${connectedBrokerCount}/2`
               : isBrokerExpired
               ? "SESSION EXPIRED"
-              : "CONNECT BROKER"}
+              : "CONNECT BROKERS"}
           </span>
         </button>
 
@@ -297,7 +304,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
               <div className="flex items-center space-x-2">
                 <Lock className="w-4 h-4 text-blue-400" />
                 <h3 className="text-sm font-bold text-slate-100 uppercase tracking-wider">
-                  Connect {brokerLabel} Session
+                  Broker Sessions
                 </h3>
               </div>
               <button
@@ -309,8 +316,32 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
             </div>
 
             <div className="space-y-3 text-xs leading-relaxed text-slate-400">
+              <div className="grid grid-cols-2 gap-2">
+                {(["kite", "breeze"] as const).map((broker) => {
+                  const connected = broker === "kite" ? kiteConnected : breezeConnected;
+                  return (
+                    <button
+                      key={broker}
+                      type="button"
+                      onClick={() => {
+                        setAuthBroker(broker);
+                        setTokenInput("");
+                        setAuthError("");
+                        setAuthSuccess("");
+                      }}
+                      className={`rounded-lg border px-3 py-2 text-xs font-bold transition ${
+                        authBroker === broker
+                          ? "bg-blue-600/20 text-blue-300 border-blue-500/60"
+                          : "bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200"
+                      }`}
+                    >
+                      {broker === "kite" ? "Kite" : "ICICI Breeze"} · {connected ? "CONNECTED" : "DISCONNECTED"}
+                    </button>
+                  );
+                })}
+              </div>
               <p>
-                To authenticate your daily broker session, log in on the official {brokerLabel} portal.
+                Authenticate {brokerLabel} independently. Connecting it does not disconnect the other broker or change the default execution broker.
               </p>
 
               {/* Step 1 */}
@@ -333,7 +364,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
               <form onSubmit={handleManualActivate} className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-2.5">
                 <div className="font-semibold text-slate-200 flex items-center space-x-1.5">
                   <span className="w-4 h-4 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px]">2</span>
-                  <span>Paste Redirect URL or {brokerBackend === "kite" ? "Request Token" : "Session Token"}</span>
+                  <span>Paste Redirect URL or {authBroker === "kite" ? "Request Token" : "Session Token"}</span>
                 </div>
                 <p className="text-[11px] text-slate-500">
                   If redirected to <em>&quot;This site can&apos;t be reached&quot;</em>, copy the URL from your browser address bar and paste it here:
@@ -342,7 +373,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
                   type="text"
                   value={tokenInput}
                   onChange={(e) => setTokenInput(e.target.value)}
-                  placeholder={brokerBackend === "kite"
+                  placeholder={authBroker === "kite"
                     ? "e.g. https://127.0.0.1/?request_token=..."
                     : "e.g. https://127.0.0.1/?apisession=57052722"}
                   className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-xs text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500"
@@ -368,7 +399,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
               </form>
 
               <div className="text-[10px] text-slate-500 leading-normal">
-                💡 <span className="font-medium text-slate-400">Zero-copy auto-redirect:</span> In your ICICI Direct Developer Console, set your Redirect URL to <code className="text-blue-400">http://127.0.0.1:8000/api/v1/broker/session/callback</code>.
+                💡 <span className="font-medium text-slate-400">Callback:</span> Configure the selected broker to return to <code className="text-blue-400">http://127.0.0.1:8000/api/v1/broker/session/callback</code>.
               </div>
             </div>
           </div>
