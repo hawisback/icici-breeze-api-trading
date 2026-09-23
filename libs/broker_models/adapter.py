@@ -119,6 +119,10 @@ class BrokerAdapter(Protocol):
         """Query current status of an order."""
         ...
 
+    async def find_order_by_client_id(self, client_order_id: str) -> Optional[BrokerOrderResponse]:
+        """Recover a broker order from the persisted client id/tag after an ambiguous submit."""
+        ...
+
     async def get_positions(self) -> list[BrokerPositionResponse]:
         """Fetch all open/closed positions."""
         ...
