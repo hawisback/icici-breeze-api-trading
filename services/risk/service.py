@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import logging
 from typing import Any, Optional
@@ -42,11 +43,46 @@ class RiskService:
         self.live_account_id = live_account_id
         self.portfolio_service = portfolio_service
         self._recent_orders: dict[str, datetime] = {}  # symbol:side:qty -> timestamp
+        self._outbox_worker_task: Optional[asyncio.Task[None]] = None
+        self._outbox_running = False
 
     async def initialize(self) -> None:
         await self.repo.initialize()
         # Subscribe to order intents
         await self.bus.subscribe(Topics.ORDER_INTENT, self._handle_order_intent_event)
+        if not self._outbox_worker_task or self._outbox_worker_task.done():
+            self._outbox_running = True
+            self._outbox_worker_task = asyncio.create_task(self._outbox_loop())
+
+    async def stop(self) -> None:
+        self._outbox_running = False
+        if self._outbox_worker_task:
+            self._outbox_worker_task.cancel()
+            try:
+                await self._outbox_worker_task
+            except asyncio.CancelledError:
+                pass
+            self._outbox_worker_task = None
+
+    async def _outbox_loop(self, poll_interval_sec: float = 0.2) -> None:
+        while self._outbox_running:
+            try:
+                events = await self.repo.get_outbox_events_to_publish(limit=20)
+                for event in events:
+                    await self.bus.publish(
+                        EventEnvelope(
+                            event_id=event["event_id"],
+                            topic=event["topic"],
+                            payload=event["payload"],
+                        )
+                    )
+                    await self.repo.mark_outbox_published(event["event_id"])
+                await asyncio.sleep(poll_interval_sec)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Risk outbox replay failed")
+                await asyncio.sleep(poll_interval_sec)
 
     def set_portfolio_service(self, portfolio_service: Any) -> None:
         self.portfolio_service = portfolio_service
