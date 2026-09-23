@@ -1237,6 +1237,8 @@ class StrategyService:
                 return cancelled_for_exit
 
             await self.repo.save_trade(trade)
+            if trade.protective_stop_cancel_for_exit:
+                return False
             return status in {"OPEN", "ACKNOWLEDGED", "PARTIALLY_FILLED"}
 
         # An already-decided exit must not create a new protective order while
@@ -1296,6 +1298,8 @@ class StrategyService:
             return False
         if not trade.protective_stop_order_id:
             return may_continue
+        if trade.protective_stop_cancel_for_exit:
+            return False
 
         protective = await self.oms.get_order(trade.protective_stop_order_id)
         if protective is None:
