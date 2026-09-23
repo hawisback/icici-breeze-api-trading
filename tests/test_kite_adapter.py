@@ -78,7 +78,8 @@ class FakeKiteMarket(FakeKite):
             {"name": "NIFTY", "instrument_type": "FUT", "expiry": date(2026, 10, 27),
              "tradingsymbol": "NIFTY26OCTFUT", "instrument_token": 9002, "lot_size": 65, "tick_size": 0.05},
             {"name": "NIFTY", "instrument_type": "CE", "expiry": date.today() + timedelta(days=1),
-             "tradingsymbol": "NIFTY26SEP23400CE", "instrument_token": 9101, "lot_size": 65, "tick_size": 0.05},
+             "strike": 23400.0, "tradingsymbol": "NIFTY26SEP23400CE",
+             "instrument_token": 9101, "lot_size": 65, "tick_size": 0.05},
         ]
 
     def historical_data(self, instrument_token, from_date, to_date, interval, oi):
@@ -97,6 +98,14 @@ async def test_kite_resolves_exact_active_future_from_instrument_master():
     assert contract["lot_size"] == 65
     expected_option_expiry = (date.today() + timedelta(days=1)).isoformat()
     assert await adapter.get_option_expiries("NIFTY") == [expected_option_expiry]
+    option = await adapter.resolve_option_contract(
+        underlying="NIFTY",
+        expiry=expected_option_expiry,
+        strike=23400.0,
+        right="CALL",
+    )
+    assert option and option["tradingsymbol"] == "NIFTY26SEP23400CE"
+    assert option["instrument_token"] == "9101"
     candles = await adapter.fetch_historical_candles("INST-NIFTY-FUT-2026-09-29", "15m", 1)
     assert candles and candles[0].source == "KITE"
     assert await adapter._find_instrument_token("INST-NIFTY-FUT-2026-09-28") is None
