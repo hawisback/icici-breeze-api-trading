@@ -425,6 +425,7 @@ async def get_system_health():
             "portfolio": "ACTIVE",
             "system_mode": system_mode.value,
         },
+        "broker_sessions": session_status.get("brokers", {}),
         "config": services.settings.get_redacted_summary(),
     }
 
