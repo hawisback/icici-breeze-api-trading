@@ -138,6 +138,27 @@ class PlatformSettings(BaseSettings):
                 "REDPANDA_BROKERS must be configured when EVENT_BUS_BACKEND is set to 'redpanda'."
             )
 
+        # Any process capable of LIVE trading must carry production-grade
+        # identity and real-market safeguards, even if APP_ENV was left in a
+        # non-production profile.
+        if self.live_trading_enabled:
+            if not self.auth_signing_key or not self.auth_signing_key.get_secret_value():
+                raise ValueError(
+                    "AUTH_SIGNING_KEY is mandatory whenever LIVE_TRADING_ENABLED=true."
+                )
+            if not self.live_allowed_accounts:
+                raise ValueError(
+                    "LIVE_ALLOWED_ACCOUNTS must contain at least one account when live trading is enabled."
+                )
+            if self.market_data_backend == MarketDataBackend.SIMULATED:
+                raise ValueError(
+                    "Simulated market data is prohibited when LIVE_TRADING_ENABLED=true."
+                )
+            if not self.rate_limit_enabled:
+                raise ValueError(
+                    "RATE_LIMIT_ENABLED must remain true when live trading is enabled."
+                )
+
         # Production restrictions
         if self.app_env == AppEnv.PRODUCTION:
             if self.event_bus_backend == EventBusBackend.MEMORY:
