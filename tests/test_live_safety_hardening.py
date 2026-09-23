@@ -1,6 +1,8 @@
 """Regression coverage for live-trading safety hardening."""
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -57,6 +59,9 @@ class _FakeLiveAdapter:
     async def get_order_status(self, broker_order_id: str):
         return self.reconcile_response
 
+    async def find_order_by_client_id(self, client_order_id: str):
+        return None
+
     async def get_trades(self):
         return []
 
@@ -89,10 +94,18 @@ async def test_reduce_only_exit_survives_closed_live_gate_and_reconciles(tmp_pat
         event_bus=bus,
     )
     await oms.initialize()
+    portfolio = SimpleNamespace(
+        repo=SimpleNamespace(
+            get_position=AsyncMock(
+                return_value=SimpleNamespace(quantity=65)
+            )
+        )
+    )
     risk = RiskService(
         repository=RiskRepository(tmp_path / "risk.db"),
         event_bus=bus,
         live_gate=gate,
+        portfolio_service=portfolio,
     )
     await risk.initialize()
 
@@ -159,10 +172,18 @@ async def test_exit_only_and_halted_allow_only_explicit_reductions(tmp_path):
         settings=PlatformSettings(data_root=str(tmp_path), live_trading_enabled=False),
         event_bus=bus,
     )
+    portfolio = SimpleNamespace(
+        repo=SimpleNamespace(
+            get_position=AsyncMock(
+                return_value=SimpleNamespace(quantity=65)
+            )
+        )
+    )
     risk = RiskService(
         repository=RiskRepository(tmp_path / "risk.db"),
         event_bus=bus,
         live_gate=gate,
+        portfolio_service=portfolio,
     )
     await risk.initialize()
 
@@ -214,6 +235,13 @@ async def test_exit_only_and_halted_allow_only_explicit_reductions(tmp_path):
     )
     allowed_halted = await risk.evaluate_intent(halted_reduction)
     assert allowed_halted.approved is True
+
+    oversized = reduce_exit.model_copy(
+        update={"intent_id": "OVERSIZED-REDUCTION", "quantity": 130}
+    )
+    oversized_decision = await risk.evaluate_intent(oversized)
+    assert oversized_decision.approved is False
+    assert oversized_decision.rule_name == "REDUCE_ONLY_QUANTITY_EXCEEDED"
 
     halted_entry = OrderIntent(
         instrument_id="INST-NIFTY-TEST-CE",
@@ -334,3 +362,31 @@ async def test_production_auth_db_refuses_predictable_bootstrap_users(tmp_path):
 
     with pytest.raises(RuntimeError, match="Predictable bootstrap credentials are disabled"):
         await repo.initialize()
+
+
+@pytest.mark.asyncio
+async def test_live_enabled_rejects_existing_known_bootstrap_passwords(tmp_path):
+    dev_settings = PlatformSettings(
+        data_root=str(tmp_path),
+        live_trading_enabled=False,
+    )
+    dev_repo = AuthRepository(
+        db_path=tmp_path / "auth-existing.db",
+        settings=dev_settings,
+    )
+    await dev_repo.initialize()
+
+    live_settings = PlatformSettings(
+        data_root=str(tmp_path),
+        live_trading_enabled=True,
+        live_allowed_accounts=["ICICI_PRIMARY"],
+    )
+    live_repo = AuthRepository(
+        db_path=tmp_path / "auth-existing.db",
+        settings=live_settings,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="known development bootstrap passwords",
+    ):
+        await live_repo.initialize()
