@@ -137,6 +137,7 @@ class ExecutionService:
             order_type=order.order_type.value.lower(),
             quantity=order.quantity,
             price=order.price,
+            trigger_price=order.trigger_price,
             user_remark=order.client_order_id,
         )
 
