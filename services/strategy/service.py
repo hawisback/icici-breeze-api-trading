@@ -2090,18 +2090,34 @@ class StrategyService:
         )
         if not gateway:
             return "unknown", None, False
+
         route = getattr(gateway, "provider_order", None)
-        providers = route("live") if callable(route) else (
-            getattr(gateway, "active_broker_name", "unknown"),
-        )
-        for provider in providers:
-            name = provider.value if hasattr(provider, "value") else str(provider)
-            try:
-                adapter = gateway.get_broker_adapter(provider)
-            except Exception:
-                continue
-            if getattr(adapter, "is_active", False):
-                return name.lower(), adapter, True
+        resolver = getattr(gateway, "get_broker_adapter", None)
+        if callable(route) and callable(resolver):
+            for provider in route("live"):
+                name = provider.value if hasattr(provider, "value") else str(provider)
+                try:
+                    adapter = resolver(provider)
+                except Exception:
+                    continue
+                if getattr(adapter, "is_active", False):
+                    return name.lower(), adapter, True
+            return "unknown", None, False
+
+        # Backward-compatible gateway/test-double shape.
+        provider = str(getattr(gateway, "active_broker_name", "") or "").lower()
+        adapter = getattr(gateway, "active_adapter", None)
+        breeze = getattr(gateway, "breeze_adapter", None)
+        breeze_client = getattr(breeze, "client_manager", None)
+        if provider == "kite":
+            return "kite", adapter, bool(adapter and getattr(adapter, "is_active", False))
+        if provider == "breeze":
+            return "breeze", breeze, bool(breeze_client and getattr(breeze_client, "is_active", False))
+        if breeze_client and getattr(breeze_client, "is_active", False):
+            return "breeze", breeze, True
+        if adapter and getattr(adapter, "is_active", False):
+            inferred = "kite" if "kite" in type(adapter).__name__.lower() else "breeze"
+            return inferred, adapter, True
         return "unknown", None, False
 
     async def _resolve_strategy_a_futures_instrument(self) -> Optional[str]:
