@@ -29,10 +29,10 @@ class OptionChainService:
         self.inst_svc = instrument_service
         self.mkt_svc = market_data_service
         self.broker_gateway = broker_gateway
-        self._kite_chain_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
-        self._kite_chain_cache_ttl = 10.0
-        self._kite_chain_retry_after = 0.0
-        self._kite_chain_lock = asyncio.Lock()
+        self._live_chain_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+        self._live_chain_cache_ttl = 5.0
+        self._provider_retry_after: dict[str, float] = {}
+        self._live_chain_lock = asyncio.Lock()
 
     def set_broker_gateway(self, broker_gateway: Any) -> None:
         self.broker_gateway = broker_gateway
@@ -56,22 +56,37 @@ class OptionChainService:
 
         expiries = await self.inst_svc.get_expiries(clean_underlying)
         all_expiries = sorted(e for e in (expiries or []) if e >= date.today().isoformat())
-        active_provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower() if self.broker_gateway else ""
-        active_adapter = getattr(self.broker_gateway, "active_adapter", None) if self.broker_gateway else None
-        if active_provider == "kite" and active_adapter and getattr(active_adapter, "is_active", False):
-            get_expiries = getattr(active_adapter, "get_option_expiries", None)
-            if callable(get_expiries):
-                try:
-                    live_expiries = await get_expiries(clean_underlying)
-                    if live_expiries:
-                        all_expiries = live_expiries
-                except Exception as exc:
-                    logger.warning("Unable to refresh Kite option expiries: %s", exc)
+        provider_order = ()
+        if self.broker_gateway:
+            route = getattr(self.broker_gateway, "provider_order", None)
+            provider_order = (
+                route("option_chain")
+                if callable(route)
+                else (getattr(self.broker_gateway, "active_broker_name", ""),)
+            )
+
+        # Prefer the primary provider's authoritative expiry universe when available.
+        for provider in provider_order:
+            name = provider.value if hasattr(provider, "value") else str(provider)
+            if name.lower() != "kite":
+                continue
+            try:
+                adapter = self.broker_gateway.get_broker_adapter(provider)
+                if getattr(adapter, "is_active", False):
+                    get_expiries = getattr(adapter, "get_option_expiries", None)
+                    if callable(get_expiries):
+                        live_expiries = await get_expiries(clean_underlying)
+                        if live_expiries:
+                            all_expiries = live_expiries
+            except Exception as exc:
+                logger.warning("Unable to refresh Kite option expiries: %s", exc)
+            break
+
         if not all_expiries:
             return {"underlying": clean_underlying, "source": "UNAVAILABLE", "strikes": []}
         selected_expiry = expiry if (expiry and expiry in all_expiries) else all_expiries[0]
 
-        # 1. Resolve realistic spot price
+        # 1. Resolve realistic spot price from the shared quote cache.
         inst_spot_id = f"INST-{clean_underlying}-INDEX"
         spot_quote = self.mkt_svc.get_latest_quote(inst_spot_id)
         if spot_quote:
@@ -82,107 +97,101 @@ class OptionChainService:
         step = 100 if clean_underlying == "BANKNIFTY" else 50
         atm_strike = round(spot_price / step) * step
 
-        # 2. Attempt to fetch live option chain directly from ICICI Breeze SDK
-        breeze_active = False
-        if self.broker_gateway and active_provider == "breeze":
-            breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
-            if breeze_adapter and hasattr(breeze_adapter, "client_manager"):
-                breeze_active = getattr(breeze_adapter.client_manager, "is_active", False)
-
-        if breeze_active:
+        # 2. Use a shared provider-aware cache and only fall back when the
+        # configured primary is unavailable or fails. This prevents strategy/UI
+        # callers from multiplying broker REST traffic.
+        for provider in provider_order:
+            name = (provider.value if hasattr(provider, "value") else str(provider)).lower()
+            cache_key = (name, clean_underlying, selected_expiry)
+            cached = self._live_chain_cache.get(cache_key)
+            if cached and monotonic() - cached[0] < self._live_chain_cache_ttl:
+                return deepcopy(cached[1])
+            if monotonic() < self._provider_retry_after.get(name, 0.0):
+                continue
             try:
-                try:
-                    exp_date = datetime.strptime(selected_expiry, "%Y-%m-%d").date()
-                except Exception:
-                    exp_date = date(2026, 9, 24)
+                adapter = self.broker_gateway.get_broker_adapter(provider)
+                if not getattr(adapter, "is_active", False):
+                    continue
 
-                logger.info(
-                    "Fetching live Option Chain from ICICI Breeze: underlying=%s expiry=%s",
-                    clean_underlying,
-                    exp_date,
-                )
-                breeze_chain = await self.broker_gateway.clean_breeze_service.get_option_chain(
-                    underlying=clean_underlying,
-                    expiry=exp_date,
-                    exchange="NFO",
-                )
-
-                if breeze_chain and breeze_chain.contracts:
-                    strikes_map: dict[float, dict[str, Any]] = {}
-                    for c in breeze_chain.contracts:
-                        s = float(c.strike_price)
-                        if s not in strikes_map:
-                            strikes_map[s] = {"strike": s, "call": None, "put": None}
-
-                        right_key = "call" if c.right == OptionRight.CALL else "put"
-                        opt_code = f"{clean_underlying}{int(s)}{'CE' if c.right == OptionRight.CALL else 'PE'}"
-                        inst_id = f"INST-{clean_underlying}-{selected_expiry}-{int(s)}-{'CE' if c.right == OptionRight.CALL else 'PE'}"
-                        metadata = await self.inst_svc.get_instrument(inst_id)
-                        if not metadata or not metadata.tradable or metadata.lot_size <= 0:
-                            continue
-
-                        strikes_map[s][right_key] = {
-                            "instrument_id": inst_id,
-                            "symbol": opt_code,
-                            "ltp": float(c.ltp),
-                            "change_pct": 0.0,
-                            "volume": c.volume or 0,
-                            "open_interest": c.open_interest or 0,
-                            "oi_change": c.oi_change,
-                            "bid": float(c.bid or 0),
-                            "ask": float(c.ask or 0),
-                            "lot_size": metadata.lot_size,
-                        }
-
-                    sorted_strikes = [strikes_map[k] for k in sorted(strikes_map.keys())]
-                    live_spot = float(breeze_chain.spot_price) if breeze_chain.spot_price else spot_price
-
-                    return {
-                        "underlying": clean_underlying,
-                        "spot_price": live_spot,
-                        "expiry": selected_expiry,
-                        "available_expiries": all_expiries,
-                        "atm_strike": round(live_spot / step) * step,
-                        "source": "BREEZE",
-                        "captured_at": datetime.now(timezone.utc).isoformat(),
-                        "strikes": sorted_strikes,
-                    }
-            except Exception as exc:
-                logger.warning("Live Breeze option chain query error: %s; falling back to complete synthetic strikes.", exc)
-
-        # Kite returns exchange-valid tradingsymbols, so route its live chain directly
-        # to the UI shape and avoid rebuilding contracts from synthetic local symbols.
-        if self.broker_gateway:
-            active_adapter = getattr(self.broker_gateway, "active_adapter", None)
-            if (
-                getattr(self.broker_gateway, "active_broker_name", None) == "kite"
-                and active_adapter
-                and callable(getattr(active_adapter, "get_option_chain_view", None))
-            ):
-                cache_key = (clean_underlying, selected_expiry)
-                cached = self._kite_chain_cache.get(cache_key)
-                if cached and monotonic() - cached[0] < self._kite_chain_cache_ttl:
-                    return deepcopy(cached[1])
-
-                async with self._kite_chain_lock:
-                    cached = self._kite_chain_cache.get(cache_key)
-                    if cached and monotonic() - cached[0] < self._kite_chain_cache_ttl:
+                async with self._live_chain_lock:
+                    cached = self._live_chain_cache.get(cache_key)
+                    if cached and monotonic() - cached[0] < self._live_chain_cache_ttl:
                         return deepcopy(cached[1])
 
-                    if monotonic() >= self._kite_chain_retry_after:
-                        try:
-                            kite_chain = await active_adapter.get_option_chain_view(
-                                underlying=clean_underlying,
-                                expiry=selected_expiry,
+                    if name == "kite":
+                        fetch = getattr(adapter, "get_option_chain_view", None)
+                        if not callable(fetch):
+                            continue
+                        chain = await fetch(
+                            underlying=clean_underlying,
+                            expiry=selected_expiry,
+                        )
+                        if chain.get("strikes"):
+                            chain["available_expiries"] = all_expiries
+                            chain["captured_at"] = datetime.now(timezone.utc).isoformat()
+                            self._live_chain_cache[cache_key] = (monotonic(), chain)
+                            self._provider_retry_after.pop(name, None)
+                            return deepcopy(chain)
+
+                    elif name == "breeze":
+                        exp_date = datetime.strptime(selected_expiry, "%Y-%m-%d").date()
+                        breeze_chain = await self.broker_gateway.clean_breeze_service.get_option_chain(
+                            underlying=clean_underlying,
+                            expiry=exp_date,
+                            exchange="NFO",
+                        )
+                        if breeze_chain and breeze_chain.contracts:
+                            strikes_map: dict[float, dict[str, Any]] = {}
+                            for contract in breeze_chain.contracts:
+                                strike = float(contract.strike_price)
+                                strikes_map.setdefault(
+                                    strike,
+                                    {"strike": strike, "call": None, "put": None},
+                                )
+                                right_key = "call" if contract.right == OptionRight.CALL else "put"
+                                suffix = "CE" if contract.right == OptionRight.CALL else "PE"
+                                instrument_id = (
+                                    f"INST-{clean_underlying}-{selected_expiry}-{int(strike)}-{suffix}"
+                                )
+                                metadata = await self.inst_svc.get_instrument(instrument_id)
+                                if not metadata or not metadata.tradable or metadata.lot_size <= 0:
+                                    continue
+                                strikes_map[strike][right_key] = {
+                                    "instrument_id": instrument_id,
+                                    "symbol": f"{clean_underlying}{int(strike)}{suffix}",
+                                    "ltp": float(contract.ltp),
+                                    "change_pct": 0.0,
+                                    "volume": contract.volume or 0,
+                                    "open_interest": contract.open_interest or 0,
+                                    "oi_change": contract.oi_change,
+                                    "bid": float(contract.bid or 0),
+                                    "ask": float(contract.ask or 0),
+                                    "lot_size": metadata.lot_size,
+                                }
+                            live_spot = (
+                                float(breeze_chain.spot_price)
+                                if breeze_chain.spot_price
+                                else spot_price
                             )
-                            if kite_chain.get("strikes"):
-                                kite_chain["available_expiries"] = all_expiries or kite_chain.get("available_expiries", [])
-                                self._kite_chain_cache[cache_key] = (monotonic(), kite_chain)
-                                self._kite_chain_retry_after = 0.0
-                                return deepcopy(kite_chain)
-                        except Exception as exc:
-                            self._kite_chain_retry_after = monotonic() + 15.0
-                            logger.warning("Live Kite option chain query error: %s; falling back to local instruments.", exc)
+                            chain = {
+                                "underlying": clean_underlying,
+                                "spot_price": live_spot,
+                                "expiry": selected_expiry,
+                                "available_expiries": all_expiries,
+                                "atm_strike": round(live_spot / step) * step,
+                                "source": "BREEZE",
+                                "captured_at": datetime.now(timezone.utc).isoformat(),
+                                "strikes": [
+                                    strikes_map[key] for key in sorted(strikes_map)
+                                ],
+                            }
+                            if chain["strikes"]:
+                                self._live_chain_cache[cache_key] = (monotonic(), chain)
+                                self._provider_retry_after.pop(name, None)
+                                return deepcopy(chain)
+            except Exception as exc:
+                self._provider_retry_after[name] = monotonic() + 10.0
+                logger.warning("%s option chain query failed: %s", name, exc)
 
         # 3. Fallback / Offline / Market Closed Complete Strike Matrix
         instruments = await self.inst_svc.get_option_chain_instruments(
