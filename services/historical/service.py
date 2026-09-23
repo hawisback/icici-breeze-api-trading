@@ -583,6 +583,12 @@ class HistoricalService:
             attempted = True
             fetched = await self.fetch_candles_from_active_provider(instrument_id, interval)
             if fetched:
+                # The configured primary may be connected yet fail a specific
+                # request. If the secondary succeeds, the actual fetched
+                # provider becomes authoritative for this MIXED/live request.
+                fetched_source = str(fetched[0].source or "").upper()
+                if requested_source in (None, "MIXED") and fetched_source in {"BREEZE", "KITE"}:
+                    expected_source = fetched_source
                 await self.repo.purge_simulated_candles(instrument_id, interval)
                 await self.repo.save_candles(fetched)
 
