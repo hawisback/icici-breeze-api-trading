@@ -33,18 +33,23 @@ class RiskService:
         live_gate: Optional[LiveTradingGate] = None,
         max_order_qty: int = 1800,
         live_account_id: str = "ICICI_PRIMARY",
+        portfolio_service: Any = None,
     ) -> None:
         self.repo = repository or RiskRepository()
         self.bus = event_bus or get_event_bus()
         self.live_gate = live_gate or LiveTradingGate(event_bus=self.bus)
         self.max_order_qty = max_order_qty
         self.live_account_id = live_account_id
+        self.portfolio_service = portfolio_service
         self._recent_orders: dict[str, datetime] = {}  # symbol:side:qty -> timestamp
 
     async def initialize(self) -> None:
         await self.repo.initialize()
         # Subscribe to order intents
         await self.bus.subscribe(Topics.ORDER_INTENT, self._handle_order_intent_event)
+
+    def set_portfolio_service(self, portfolio_service: Any) -> None:
+        self.portfolio_service = portfolio_service
 
     async def _handle_order_intent_event(self, envelope: EventEnvelope[Any]) -> None:
         intent = OrderIntent.model_validate(envelope.payload)
@@ -66,6 +71,31 @@ class RiskService:
                 reason="Reduce-only orders must be SELL orders in the long-options execution model",
                 system_mode=system_mode,
             )
+
+        if is_reduce_only_exit:
+            if self.portfolio_service is None:
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="REDUCE_ONLY_POSITION_UNVERIFIED",
+                    reason="Reduce-only exit rejected because position service is unavailable",
+                    system_mode=system_mode,
+                )
+            position = await self.portfolio_service.repo.get_position(
+                intent.instrument_id
+            )
+            held_quantity = int(position.quantity) if position is not None else 0
+            if held_quantity <= 0 or intent.quantity > held_quantity:
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="REDUCE_ONLY_QUANTITY_EXCEEDED",
+                    reason=(
+                        f"Reduce-only exit quantity {intent.quantity} exceeds "
+                        f"verified long position {max(0, held_quantity)}"
+                    ),
+                    system_mode=system_mode,
+                )
 
         # LIVE authorization gates exposure increases. Verified reduce-only exits
         # remain available after gate expiry/revocation so emergency controls
