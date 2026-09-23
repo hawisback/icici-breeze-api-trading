@@ -79,6 +79,7 @@ class OMSService:
             price=intent.price,
             status=OrderState.CREATED,
             trading_mode=intent.trading_mode,
+            reduce_only=intent.reduce_only,
             created_at=now,
             updated_at=now,
         )
