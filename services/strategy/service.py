@@ -1377,6 +1377,14 @@ class StrategyService:
                 trade.state = TradeLifecycleState.OPEN_INITIAL_RISK
                 await self.repo.save_trade(trade)
 
+        if trade.mode == AutoTradingMode.LIVE and trade.filled_quantity > 0:
+            protection_ready = await self._sync_live_protective_stop(
+                trade,
+                features,
+            )
+            if trade.state == TradeLifecycleState.CLOSED or not protection_ready:
+                return
+
         if trade.exit_order_id:
             order = await self.oms.get_order(trade.exit_order_id)
             if not order:
@@ -1523,6 +1531,21 @@ class StrategyService:
             if trade.mode == AutoTradingMode.LIVE:
                 if self._is_strategy_a(trade.strategy) and trade.selected_contract_snapshot and not self._live_orders_enabled():
                     trade.option_data_status = "LIVE_TRADING_DISABLED"
+                    await self.repo.save_trade(trade)
+                    return
+                if is_option_emergency_stop(exit_reason):
+                    # The broker-held SL-limit is already the emergency exit.
+                    # Do not cancel it and race a second SELL against the same
+                    # position.
+                    trade.pending_exit_reason = OPTION_EMERGENCY_STOP
+                    trade.option_exit_reason = OPTION_EMERGENCY_STOP
+                    await self.repo.save_trade(trade)
+                    return
+                if not await self._cancel_live_protective_stop_for_exit(
+                    trade,
+                    features,
+                ):
+                    trade.pending_exit_reason = exit_reason
                     await self.repo.save_trade(trade)
                     return
                 bid = quote.get("bid")
@@ -1735,6 +1758,13 @@ class StrategyService:
             await self._close_trade(target, features, exit_price, reason, quote=quote)
             return target
         else:
+            if not await self._cancel_live_protective_stop_for_exit(
+                target,
+                features,
+            ):
+                target.pending_exit_reason = reason
+                await self.repo.save_trade(target)
+                return target
             intent = OrderIntent(
                 correlation_id=target.trade_id,
                 strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
