@@ -349,10 +349,22 @@ class StrategyService:
         strategy: StrategyName,
         option_type: OptionType,
     ) -> AutoTradingMode:
-        """Resolve a strategy's execution mode without allowing B to go live."""
+        """Resolve execution mode while validation candidates remain non-live."""
+        if strategy in {
+            StrategyName.DI_CONTINUATION,
+            StrategyName.SR_MOMENTUM_BREAKOUT,
+        }:
+            return AutoTradingMode.PAPER
         if self._is_strategy_a(strategy):
-            return AutoTradingMode.SHADOW_ONLY if option_type == OptionType.CALL else AutoTradingMode.PAPER
-        if strategy == StrategyName.VOLATILITY_BREAKOUT and self.config.mode == AutoTradingMode.LIVE:
+            return (
+                AutoTradingMode.SHADOW_ONLY
+                if option_type == OptionType.CALL
+                else AutoTradingMode.PAPER
+            )
+        if (
+            strategy == StrategyName.VOLATILITY_BREAKOUT
+            and self.config.mode == AutoTradingMode.LIVE
+        ):
             return AutoTradingMode.SHADOW_ONLY
         return self.config.mode
 
@@ -2081,6 +2093,17 @@ class StrategyService:
             return {
                 "status": "STRATEGY_A_FORCE_ENTRY_DISABLED",
                 "reason": "Strategy A entries must originate from the validated futures TrendPullback state machine",
+            }
+        if strategy in {
+            StrategyName.DI_CONTINUATION,
+            StrategyName.SR_MOMENTUM_BREAKOUT,
+        }:
+            return {
+                "status": "FROZEN_CANDIDATE_FORCE_ENTRY_DISABLED",
+                "reason": (
+                    "Strategies C and D must originate from their frozen "
+                    "paper candidate monitors and cannot be force-entered."
+                ),
             }
 
         now = utc_now()
