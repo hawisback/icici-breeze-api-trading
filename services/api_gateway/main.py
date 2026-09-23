@@ -27,6 +27,7 @@ from services.api_gateway.rate_limiter import RateLimiter
 
 from libs.contracts.models import (
     OrderIntent,
+    OptionRight,
     OrderSide,
     OrderType,
     ProductType,
