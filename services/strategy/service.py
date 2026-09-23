@@ -2306,14 +2306,17 @@ class StrategyService:
         strategy: StrategyName,
         label: str,
         status: dict[str, Any],
+        enabled: bool,
+        execution_mode: AutoTradingMode,
         current_price: float,
         active_direction: str | None,
         target_entry_level: float | None = None,
     ) -> list[StrategyTriggerDiagnostics]:
-        """Adapt frozen paper sidecars to the common UI trigger-radar contract."""
+        """Adapt frozen C/D signal engines to the common executable-strategy UI."""
         raw_status = str(status.get("status") or "NOT_INITIALIZED")
         blocked = raw_status in {
             "DISABLED",
+            "DISABLED_BY_CONFIG",
             "INITIALIZATION_FAILED",
             "OBSERVATION_FAILED",
             "DATA_RETRIEVAL_FAILED",
@@ -2322,8 +2325,15 @@ class StrategyService:
             "NO_ACTIVE_FUTURES_DATA",
         }
         fingerprint_ok = bool(status.get("candidate_spec_fingerprint"))
-        data_ready = not blocked
-        paper_mode = status.get("execution_mode") == AutoTradingMode.PAPER.value
+        data_ready = enabled and not blocked
+        execution_ready = bool(
+            enabled
+            and execution_mode != AutoTradingMode.DISABLED
+            and (
+                execution_mode != AutoTradingMode.LIVE
+                or (self.config.system_armed and self._live_orders_enabled())
+            )
+        )
         rows: list[StrategyTriggerDiagnostics] = []
         for option_type, direction in (
             (OptionType.CALL, TradeDirection.BULLISH),
@@ -2332,64 +2342,86 @@ class StrategyService:
             is_active = active_direction == option_type.value
             conditions = [
                 TriggerCondition(
+                    id="strategy_enabled",
+                    name="Strategy enabled",
+                    current_value="ENABLED" if enabled else "DISABLED",
+                    target_threshold="Enabled in strategy configuration",
+                    status="PASSED" if enabled else "BLOCKED",
+                    gap_description=(
+                        "Strategy is enabled"
+                        if enabled
+                        else "Strategy disabled by configuration"
+                    ),
+                ),
+                TriggerCondition(
                     id="frozen_candidate",
-                    name="Frozen candidate fingerprint",
+                    name="Frozen strategy fingerprint",
                     current_value="VALID" if fingerprint_ok else "MISSING",
                     target_threshold="Frozen spec must match",
                     status="PASSED" if fingerprint_ok else "BLOCKED",
                     gap_description=(
-                        "Candidate fingerprint verified"
+                        "Strategy fingerprint verified"
                         if fingerprint_ok
-                        else "Candidate fingerprint unavailable"
+                        else "Strategy fingerprint unavailable"
                     ),
                 ),
                 TriggerCondition(
                     id="market_data",
                     name="Real market data",
                     current_value=raw_status,
-                    target_threshold="Native real-market candles available",
+                    target_threshold="Required native real-market candles available",
                     status="PASSED" if data_ready else "BLOCKED",
                     gap_description=(
-                        "Paper monitor is receiving its required candles"
+                        "Signal engine is receiving its required market data"
                         if data_ready
                         else raw_status
                     ),
                 ),
                 TriggerCondition(
-                    id="paper_execution",
-                    name="Candidate execution mode",
-                    current_value=str(status.get("execution_mode") or "N/A"),
-                    target_threshold="PAPER (live locked until promotion)",
-                    status="PASSED" if paper_mode else "PENDING",
+                    id="execution_mode",
+                    name="Execution mode",
+                    current_value=execution_mode.value,
+                    target_threshold="PAPER/SHADOW or armed LIVE execution",
+                    status="PASSED" if execution_ready else "BLOCKED",
                     gap_description=(
-                        "Candidate remains isolated from live OMS"
-                        if paper_mode
-                        else "Waiting for paper monitor initialization"
+                        f"{execution_mode.value} execution path is ready"
+                        if execution_ready
+                        else (
+                            "LIVE mode requires system arming and platform live-trading permission"
+                            if execution_mode == AutoTradingMode.LIVE
+                            else "Execution is disabled"
+                        )
                     ),
                 ),
                 TriggerCondition(
-                    id="candidate_signal",
+                    id="strategy_signal",
                     name="Frozen setup signal",
                     current_value="ACTIVE" if is_active else "WAITING",
-                    target_threshold=f"{option_type.value} candidate signal",
+                    target_threshold=f"{option_type.value} strategy signal",
                     status="PASSED" if is_active else "PENDING",
                     gap_description=(
-                        "Paper position is open and stop management is active"
+                        "Signal/lifecycle is active in the integrated strategy engine"
                         if is_active
                         else "Waiting for all frozen signal conditions"
                     ),
                 ),
             ]
             passed = sum(item.status == "PASSED" for item in conditions)
-            if blocked:
+            if not enabled:
+                overall = "DISABLED"
+                blocker = "Strategy disabled by configuration"
+            elif blocked:
                 overall = "BLOCKED"
                 blocker = raw_status
+            elif not execution_ready:
+                overall = "BLOCKED"
+                blocker = "Execution mode is not ready"
             elif is_active:
-                overall = "PAPER_OPEN"
-                blocker = "Paper position open; frozen stop lifecycle is active"
+                overall = "ACTIVE"
+                blocker = "Integrated signal/lifecycle is active"
             else:
                 overall = "WAITING"
-                blocker = "Waiting for frozen candidate signal"
+                blocker = "Waiting for strategy signal"
             rows.append(
                 StrategyTriggerDiagnostics(
                     strategy=strategy,
@@ -2409,10 +2441,11 @@ class StrategyService:
                         "candidate_spec_fingerprint": status.get(
                             "candidate_spec_fingerprint"
                         ),
-                        "execution_mode": status.get("execution_mode"),
-                        "live_trading_allowed": status.get(
-                            "live_trading_allowed",
-                            False,
+                        "execution_mode": execution_mode.value,
+                        "observer_mode": status.get("execution_mode"),
+                        "live_trading_allowed": bool(
+                            execution_mode == AutoTradingMode.LIVE
+                            and execution_ready
                         ),
                         "monitor_status": raw_status,
                     },
@@ -2431,12 +2464,17 @@ class StrategyService:
 
         now = utc_now()
         strategy_a_window = self.position_manager.is_within_strategy_a_entry_window(now)
-        strategy_b_window = self.position_manager.is_within_entry_window()
-        is_window = (
-            strategy_a_window if self.config.tunables.trend_pullback_enabled and not self.config.tunables.volatility_breakout_enabled
-            else strategy_b_window if self.config.tunables.volatility_breakout_enabled and not self.config.tunables.trend_pullback_enabled
-            else strategy_a_window or strategy_b_window
-        )
+        shared_window = self.position_manager.is_within_entry_window()
+        enabled_windows: list[bool] = []
+        if self.config.tunables.trend_pullback_enabled:
+            enabled_windows.append(strategy_a_window)
+        if self.config.tunables.volatility_breakout_enabled:
+            enabled_windows.append(shared_window)
+        if self.config.tunables.di_continuation_enabled:
+            enabled_windows.append(shared_window)
+        if self.config.tunables.sr_momentum_breakout_enabled:
+            enabled_windows.append(shared_window)
+        is_window = any(enabled_windows)
         bypass_win = self._active_overrides.bypass_entry_window
         effective_window = is_window or bypass_win
 
@@ -2457,29 +2495,49 @@ class StrategyService:
         today_count = sum(1 for t in today_trades if t.entry_time.strftime("%Y-%m-%d") == today_str)
         max_daily = self.config.risk.max_trades_per_day
 
-        strategy_a_market_ready = (
-            not self.config.tunables.trend_pullback_enabled
-            or (
-                bool(futures_candles)
-                and bool(self._market_data_status.get("provider_active"))
-            )
+        candidate_blocked = {
+            "NOT_INITIALIZED",
+            "INITIALIZATION_FAILED",
+            "OBSERVATION_FAILED",
+            "DATA_RETRIEVAL_FAILED",
+            "MARKET_DATA_UNAVAILABLE",
+            "NATIVE_FUTURES_UNAVAILABLE",
+            "NO_ACTIVE_FUTURES_DATA",
+            "DISABLED",
+            "DISABLED_BY_CONFIG",
+        }
+        a_market_ready = bool(
+            self.config.tunables.trend_pullback_enabled
+            and futures_candles
+            and self._market_data_status.get("provider_active")
         )
-        strategy_a_market_reason = None
-        if not strategy_a_market_ready:
-            strategy_a_market_reason = str(
-                self._market_data_status.get("last_error")
-                or "NO_FUTURES_MARKET_DATA"
-            )
+        b_market_ready = bool(
+            self.config.tunables.volatility_breakout_enabled
+            and (features.data_ready or features.breakout_data_ready)
+        )
+        c_market_ready = bool(
+            self.config.tunables.di_continuation_enabled
+            and str(self._last_strategy_c_shadow_status.get("status")) not in candidate_blocked
+        )
+        d_market_ready = bool(
+            self.config.tunables.sr_momentum_breakout_enabled
+            and str(self._last_strategy_d_paper_status.get("status")) not in candidate_blocked
+        )
+        market_ready = a_market_ready or b_market_ready or c_market_ready or d_market_ready
+        market_reason = None if market_ready else str(
+            self._market_data_status.get("last_error")
+            or "NO_ENABLED_STRATEGY_HAS_EXECUTABLE_MARKET_DATA"
+        )
 
         primary = "All system gates clear — monitoring live market candles for technical trigger"
         if self.config.kill_switch:
             primary = "Emergency Kill Switch is ACTIVE"
         elif not self.config.auto_trade_enabled:
             primary = "Auto-Trading Execution is DISABLED"
-        elif not strategy_a_market_ready:
-            primary = f"Strategy A market data unavailable: {strategy_a_market_reason}"
+        elif not market_ready:
+            primary = f"Executable strategy market data unavailable: {market_reason}"
         elif not effective_window:
-            primary = "Outside strategy entry window (Strategy A 09:45-14:45; Strategy B legacy schedule). Set 'Bypass Entry Window' in Overrides to test now."
+            primary = "Outside all enabled strategy entry windows. Set 'Bypass Entry Window' in Overrides only for controlled testing."
         elif pos_blocked:
             primary = f"Max concurrent positions reached ({active_count}/{max_pos})"
         elif in_cooldown:
@@ -2492,8 +2550,8 @@ class StrategyService:
         gates = GateBlockers(
             kill_switch_active=self.config.kill_switch,
             auto_trade_enabled=self.config.auto_trade_enabled,
-            market_data_ready=strategy_a_market_ready,
-            market_data_reason=strategy_a_market_reason,
+            market_data_ready=market_ready,
+            market_data_reason=market_reason,
             within_trading_window=effective_window,
             max_positions_reached=pos_blocked,
             in_cooldown=in_cooldown,
@@ -2505,7 +2563,7 @@ class StrategyService:
             can_enter_new_trades=bool(
                 not self.config.kill_switch
                 and self.config.auto_trade_enabled
-                and strategy_a_market_ready
+                and market_ready
                 and effective_window
                 and not pos_blocked
                 and not in_cooldown
@@ -2520,17 +2578,39 @@ class StrategyService:
             primary_blocker=primary,
         )
 
+        c_integrated = next(
+            (
+                trade for trade in self._active_trades_cache
+                if trade.strategy == StrategyName.DI_CONTINUATION
+            ),
+            None,
+        )
+        d_integrated = next(
+            (
+                trade for trade in self._active_trades_cache
+                if trade.strategy == StrategyName.SR_MOMENTUM_BREAKOUT
+            ),
+            None,
+        )
         c_active = (
             self._last_strategy_c_shadow_status.get("active_candidate_trade")
             or {}
         )
-        c_direction = c_active.get("direction")
+        c_direction = (
+            c_integrated.option_type.value
+            if c_integrated is not None
+            else c_active.get("direction")
+        )
         d_active = (
             self._last_strategy_d_paper_status.get("active_paper_trade")
             or {}
         )
         d_signal = d_active.get("signal") or {}
-        d_direction = d_signal.get("option_type")
+        d_direction = (
+            d_integrated.option_type.value
+            if d_integrated is not None
+            else d_signal.get("option_type")
+        )
         d_market = self._last_strategy_d_paper_status.get("market") or {}
         d_latest = self._last_strategy_d_paper_status.get("latest_signal") or {}
 
@@ -2538,6 +2618,11 @@ class StrategyService:
             strategy=StrategyName.DI_CONTINUATION,
             label="Strategy C · DI Continuation",
             status=self._last_strategy_c_shadow_status,
+            enabled=self.config.tunables.di_continuation_enabled,
+            execution_mode=self._execution_mode_for_strategy(
+                StrategyName.DI_CONTINUATION,
+                OptionType.CALL,
+            ),
             current_price=float(features.futures_price or 0.0),
             active_direction=c_direction,
         )
@@ -2545,6 +2630,11 @@ class StrategyService:
             strategy=StrategyName.SR_MOMENTUM_BREAKOUT,
             label="Strategy D · S&R Momentum",
             status=self._last_strategy_d_paper_status,
+            enabled=self.config.tunables.sr_momentum_breakout_enabled,
+            execution_mode=self._execution_mode_for_strategy(
+                StrategyName.SR_MOMENTUM_BREAKOUT,
+                OptionType.CALL,
+            ),
             current_price=float(
                 d_market.get("spot_price")
                 or features.spot_price
@@ -2587,10 +2677,10 @@ class StrategyService:
             StrategyName.SR_MOMENTUM_BREAKOUT,
         }:
             return {
-                "status": "FROZEN_CANDIDATE_FORCE_ENTRY_DISABLED",
+                "status": "STRATEGY_FORCE_ENTRY_DISABLED",
                 "reason": (
-                    "Strategies C and D must originate from their frozen "
-                    "paper candidate monitors and cannot be force-entered."
+                    "Strategies C and D are executable first-class strategies, "
+                    "but entries must originate from their validated frozen signal engines."
                 ),
             }
 
