@@ -36,28 +36,31 @@ class HistoricalService:
     async def initialize(self) -> None:
         await self.repo.initialize()
 
-    def _active_provider(self) -> tuple[str, Any | None]:
+    def _provider_candidates(self) -> list[tuple[str, Any]]:
         if not self.broker_gateway:
-            return "", None
-        adapter = getattr(self.broker_gateway, "active_adapter", None)
-        name = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
-        if name not in {"breeze", "kite"}:
-            breeze = getattr(self.broker_gateway, "breeze_adapter", None)
-            client = getattr(breeze, "client_manager", None)
-            if client and getattr(client, "is_active", False):
-                name = "breeze"
-            elif adapter and getattr(adapter, "is_active", False) and "kite" in type(adapter).__name__.lower():
-                name = "kite"
-        return name, adapter
+            return []
+        order = getattr(self.broker_gateway, "provider_order", None)
+        providers = order("historical") if callable(order) else (
+            getattr(self.broker_gateway, "active_broker_name", ""),
+        )
+        result: list[tuple[str, Any]] = []
+        for provider in providers:
+            name = provider.value if hasattr(provider, "value") else str(provider)
+            try:
+                adapter = self.broker_gateway.get_broker_adapter(provider)
+            except Exception:
+                continue
+            result.append((name.lower(), adapter))
+        return result
+
+    def _active_provider(self) -> tuple[str, Any | None]:
+        for name, adapter in self._provider_candidates():
+            if getattr(adapter, "is_active", False):
+                return name, adapter
+        return "", None
 
     def _provider_is_active(self) -> bool:
-        name, adapter = self._active_provider()
-        if name == "kite":
-            return bool(adapter and getattr(adapter, "is_active", False))
-        if name == "breeze":
-            client = getattr(getattr(self.broker_gateway, "breeze_adapter", None), "client_manager", None)
-            return bool(client and getattr(client, "is_active", False))
-        return False
+        return self._active_provider()[1] is not None
 
     @staticmethod
     def _expected_completed_end(interval: str, now: datetime) -> Optional[datetime]:
@@ -79,29 +82,40 @@ class HistoricalService:
             boundary -= timedelta(minutes=step)
         return boundary.astimezone(timezone.utc) if boundary >= session_open else None
 
-    async def fetch_candles_from_active_provider(self, instrument_id: str, interval: str = "5m", days_back: int = 5) -> list[Candle]:
-        name, adapter = self._active_provider()
-        retry_key = (name, instrument_id, interval)
-        if monotonic() < self._provider_retry_after.get(retry_key, 0.0):
-            return []
-        if name == "kite":
-            if not adapter or not getattr(adapter, "is_active", False):
-                return []
-            fetch = getattr(adapter, "fetch_historical_candles", None)
-            if not callable(fetch):
-                return []
+    async def fetch_candles_from_active_provider(
+        self,
+        instrument_id: str,
+        interval: str = "5m",
+        days_back: int = 5,
+    ) -> list[Candle]:
+        """Try the configured historical primary, then the secondary provider."""
+        for name, adapter in self._provider_candidates():
+            if not getattr(adapter, "is_active", False):
+                continue
+            retry_key = (name, instrument_id, interval)
+            if monotonic() < self._provider_retry_after.get(retry_key, 0.0):
+                continue
             try:
-                candles = await fetch(instrument_id=instrument_id, interval=interval, days_back=days_back)
-                self._provider_retry_after.pop(retry_key, None) if candles else self._provider_retry_after.__setitem__(retry_key, monotonic() + 30.0)
-                return candles
+                if name == "breeze":
+                    candles = await self.fetch_candles_from_breeze(
+                        instrument_id, interval, days_back
+                    )
+                else:
+                    fetch = getattr(adapter, "fetch_historical_candles", None)
+                    if not callable(fetch):
+                        continue
+                    candles = await fetch(
+                        instrument_id=instrument_id,
+                        interval=interval,
+                        days_back=days_back,
+                    )
             except Exception as exc:
-                logger.warning("Kite historical fetch failed for %s: %s", instrument_id, exc)
-                self._provider_retry_after[retry_key] = monotonic() + 30.0
-                return []
-        if name == "breeze":
-            candles = await self.fetch_candles_from_breeze(instrument_id, interval, days_back)
-            self._provider_retry_after.pop(retry_key, None) if candles else self._provider_retry_after.__setitem__(retry_key, monotonic() + 30.0)
-            return candles
+                logger.warning("%s historical fetch failed for %s: %s", name, instrument_id, exc)
+                candles = []
+            if candles:
+                self._provider_retry_after.pop(retry_key, None)
+                return candles
+            self._provider_retry_after[retry_key] = monotonic() + 30.0
         return []
 
     async def fetch_candles_from_provider_window(
