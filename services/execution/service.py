@@ -42,6 +42,17 @@ class ExecutionService:
         if not self._reconciliation_task or self._reconciliation_task.done():
             self._reconciliation_running = True
             self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
+        await self._recover_approved_orders()
+
+    async def _recover_approved_orders(self) -> None:
+        """Resume persisted APPROVED orders after a process restart."""
+        for order in await self.oms.list_orders(limit=500):
+            if order.status != OrderState.APPROVED:
+                continue
+            await self.execute_order(
+                order_id=order.order_id,
+                client_order_id=order.client_order_id,
+            )
 
     async def stop(self) -> None:
         self._reconciliation_running = False
