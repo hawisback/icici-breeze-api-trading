@@ -318,7 +318,7 @@ class SystemModeRequest(BaseModel):
 
 class LiveGateChallengeRequest(BaseModel):
     operator_id: str = "OPERATOR"
-    account_id: str = "ICICI_PRIMARY"
+    account_id: Optional[str] = None
     duration_minutes: int = Field(default=30, ge=1, le=480)
 
 
@@ -1034,9 +1034,14 @@ async def request_live_gate_challenge(
     current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     services = get_services()
+    account_id = req.account_id or (
+        "ZERODHA_PRIMARY"
+        if services.settings.broker_backend.value == "kite"
+        else "ICICI_PRIMARY"
+    )
     return await services.live_gate.request_activation_challenge(
         operator_id=req.operator_id,
-        account_id=req.account_id,
+        account_id=account_id,
         duration_minutes=req.duration_minutes,
     )
 
