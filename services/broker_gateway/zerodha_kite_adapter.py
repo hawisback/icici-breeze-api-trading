@@ -246,14 +246,21 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             row = rows[-1] if rows else None
             if not row:
                 return None
-            status = str(row.get("status", "UNKNOWN")).upper()
+            raw_status = str(row.get("status", "UNKNOWN")).upper()
+            filled_quantity = int(row.get("filled_quantity") or 0)
+            if raw_status == "COMPLETE":
+                status = "FILLED"
+            elif raw_status == "OPEN" and filled_quantity > 0:
+                status = "PARTIALLY_FILLED"
+            else:
+                status = raw_status
             return BrokerOrderResponse(
                 success=status not in {"REJECTED", "CANCELLED"},
                 broker_order_id=broker_order_id,
                 client_order_id=str(row.get("tag") or ""),
                 status=status,
-                message=row.get("status_message"),
-                filled_quantity=int(row.get("filled_quantity") or 0),
+                message=row.get("status_message") or raw_status,
+                filled_quantity=filled_quantity,
                 average_price=float(row.get("average_price") or 0),
             )
         except Exception as exc:
