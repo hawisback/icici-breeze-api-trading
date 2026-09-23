@@ -768,6 +768,7 @@ class StrategyCShadowMonitor:
                 "current_r": lifecycle.get("current_r"),
                 "underlying_exit_reason": lifecycle.get("exit_reason"),
                 "underlying_exit_time": lifecycle.get("exit_time"),
+                "underlying_exit_price": lifecycle.get("exit_price"),
                 "underlying_realized_r": lifecycle.get("realized_r"),
             }
             if any(tracked.get(key) != value for key, value in lifecycle_snapshot.items()):
