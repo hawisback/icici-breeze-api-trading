@@ -430,14 +430,22 @@ class StrategyService:
         price: float,
     ) -> OrderIntent:
         """Build a broker-owned derivative intent without losing contract identity."""
+        execution_broker = (
+            trade.execution_broker or get_platform_settings().broker_backend.value
+        )
+        broker_stock_code = (
+            trade.contract_symbol
+            if execution_broker == "kite"
+            else trade.broker_stock_code
+        )
         return OrderIntent(
             correlation_id=trade.trade_id,
             strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
             source=SourceType.STRATEGY,
             instrument_id=trade.contract_instrument_id,
             symbol=trade.contract_symbol,
-            execution_broker=trade.execution_broker or get_platform_settings().broker_backend.value,
-            stock_code=trade.broker_stock_code,
+            execution_broker=execution_broker,
+            stock_code=broker_stock_code,
             exchange_code="NFO",
             expiry_date=trade.expiry,
             strike_price=trade.strike,
