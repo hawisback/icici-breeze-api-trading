@@ -555,17 +555,48 @@ class StrategyDPositionManager(PositionManager):
             final_stop=round(stop, 6),
         )
 
+    @staticmethod
+    def _complete_minutes(
+        parent: Candle,
+        one_minute_bars: Sequence[Candle],
+    ) -> list[Candle]:
+        """Return the five native 1m children only when coverage is complete."""
+        minutes = sorted(
+            [
+                bar
+                for bar in one_minute_bars
+                if bar.interval == "1m"
+                and bar.source in REAL_SOURCES
+                and bar.start_time >= parent.start_time
+                and bar.end_time <= parent.end_time
+            ],
+            key=lambda item: item.start_time,
+        )
+        if len(minutes) != 5:
+            return []
+        cursor = parent.start_time
+        for minute in minutes:
+            if minute.start_time != cursor:
+                return []
+            cursor = minute.end_time
+        return minutes if cursor == parent.end_time else []
+
     def replay_underlying_lifecycle(
         self,
         signal: StrategyDSignal,
         *,
         history_through_entry: Sequence[Candle],
         future_bars: Sequence[Candle],
+        one_minute_bars: Sequence[Candle] | None = None,
     ) -> StrategyDLifecycleResult:
-        """Replay ATR/T1/breakeven/EMA9/pivot rules on completed spot bars.
+        """Replay Strategy D using native 1m ordering whenever it is complete.
 
-        Same-bar stop/target ambiguity is conservatively resolved in favor of
-        the protective stop because this layer assumes only 5m OHLC.
+        The signal and EMA9 remain completed-5m decisions. Native 1m children
+        are used only to order intrabar ATR stop, +1.5R scale-out, breakeven,
+        and next-pivot events. If a 5m parent lacks a complete five-minute
+        child set, the replay falls back conservatively to 5m OHLC. A newly
+        activated breakeven stop is never applied retroactively to earlier
+        prices in that same 5m fallback bar.
         """
         cfg = self.strategy_d_config
         if not future_bars:
@@ -580,6 +611,7 @@ class StrategyDPositionManager(PositionManager):
             else signal.entry_price - cfg.scale_out_r * signal.risk_points
         )
         running = list(history_through_entry)
+        minute_source = list(one_minute_bars or [])
         scale_time: datetime | None = None
         scale_fill: float | None = None
         remaining_fraction = 1.0
@@ -587,6 +619,13 @@ class StrategyDPositionManager(PositionManager):
         mfe_r = 0.0
         mae_r = 0.0
         last_bar: Candle | None = None
+
+        def update_excursions(price_bar: Candle) -> None:
+            nonlocal mfe_r, mae_r
+            high_r = self._r(signal, float(price_bar.high))
+            low_r = self._r(signal, float(price_bar.low))
+            mfe_r = max(mfe_r, high_r, low_r)
+            mae_r = min(mae_r, high_r, low_r)
 
         for bar in future_bars:
             if bar.interval != "5m" or bar.source not in REAL_SOURCES:
@@ -597,103 +636,264 @@ class StrategyDPositionManager(PositionManager):
             ):
                 continue
             last_bar = bar
-            high_r = self._r(signal, float(bar.high))
-            low_r = self._r(signal, float(bar.low))
-            mfe_r = max(mfe_r, high_r, low_r)
-            mae_r = min(mae_r, high_r, low_r)
+            minutes = self._complete_minutes(bar, minute_source)
+            newly_scaled_without_minutes = False
 
-            if scale_time is None:
-                if self._stop_hit(signal.direction, bar, stop):
-                    stop_fill = self._stop_fill(signal.direction, bar, stop)
-                    return self._result(
-                        signal,
-                        bar=bar,
-                        stop=stop,
-                        scale_time=None,
-                        scale_fill=None,
-                        scale_fraction=0.0,
-                        exit_price=stop_fill,
-                        exit_reason="ATR_HARD_STOP",
-                        realized_component=0.0,
-                        remaining_fraction=1.0,
-                        mfe_r=mfe_r,
-                        mae_r=mae_r,
-                    )
-                if self._target_hit(signal.direction, bar, scale_price):
-                    scale_time = bar.end_time
-                    scale_fill = scale_price
-                    realized_component = (
-                        cfg.scale_out_fraction * cfg.scale_out_r
-                    )
-                    remaining_fraction = 1.0 - cfg.scale_out_fraction
-                    stop = signal.entry_price
+            if minutes:
+                for minute in minutes:
+                    update_excursions(minute)
+                    if scale_time is None:
+                        stop_hit = self._stop_hit(
+                            signal.direction,
+                            minute,
+                            stop,
+                        )
+                        scale_hit = self._target_hit(
+                            signal.direction,
+                            minute,
+                            scale_price,
+                        )
+                        # Same-minute initial stop/target ambiguity remains
+                        # conservative: the pre-existing protective stop wins.
+                        if stop_hit:
+                            stop_fill = self._stop_fill(
+                                signal.direction,
+                                minute,
+                                stop,
+                            )
+                            return self._result(
+                                signal,
+                                bar=minute,
+                                stop=stop,
+                                scale_time=None,
+                                scale_fill=None,
+                                scale_fraction=0.0,
+                                exit_price=stop_fill,
+                                exit_reason="ATR_HARD_STOP",
+                                realized_component=0.0,
+                                remaining_fraction=1.0,
+                                mfe_r=mfe_r,
+                                mae_r=mae_r,
+                            )
+                        if scale_hit:
+                            scale_time = minute.end_time
+                            scale_fill = scale_price
+                            realized_component = (
+                                cfg.scale_out_fraction * cfg.scale_out_r
+                            )
+                            remaining_fraction = (
+                                1.0 - cfg.scale_out_fraction
+                            )
+                            stop = signal.entry_price
+
+                            # If the activation minute itself spans both +1.5R
+                            # and the newly armed breakeven, 1m OHLC still
+                            # cannot prove order. Conservatively realize the
+                            # runner at breakeven.
+                            if self._stop_hit(
+                                signal.direction,
+                                minute,
+                                stop,
+                            ):
+                                return self._result(
+                                    signal,
+                                    bar=minute,
+                                    stop=stop,
+                                    scale_time=scale_time,
+                                    scale_fill=scale_fill,
+                                    scale_fraction=cfg.scale_out_fraction,
+                                    exit_price=stop,
+                                    exit_reason="BREAKEVEN_STOP",
+                                    realized_component=realized_component,
+                                    remaining_fraction=remaining_fraction,
+                                    mfe_r=mfe_r,
+                                    mae_r=mae_r,
+                                )
+                            if (
+                                signal.next_pivot_price is not None
+                                and self._target_hit(
+                                    signal.direction,
+                                    minute,
+                                    signal.next_pivot_price,
+                                )
+                            ):
+                                return self._result(
+                                    signal,
+                                    bar=minute,
+                                    stop=stop,
+                                    scale_time=scale_time,
+                                    scale_fill=scale_fill,
+                                    scale_fraction=cfg.scale_out_fraction,
+                                    exit_price=signal.next_pivot_price,
+                                    exit_reason=(
+                                        f"NEXT_PIVOT_{signal.next_pivot_name}"
+                                    ),
+                                    realized_component=realized_component,
+                                    remaining_fraction=remaining_fraction,
+                                    mfe_r=mfe_r,
+                                    mae_r=mae_r,
+                                )
+                            continue
+                    else:
+                        if self._stop_hit(
+                            signal.direction,
+                            minute,
+                            stop,
+                        ):
+                            stop_fill = self._stop_fill(
+                                signal.direction,
+                                minute,
+                                stop,
+                            )
+                            return self._result(
+                                signal,
+                                bar=minute,
+                                stop=stop,
+                                scale_time=scale_time,
+                                scale_fill=scale_fill,
+                                scale_fraction=cfg.scale_out_fraction,
+                                exit_price=stop_fill,
+                                exit_reason="BREAKEVEN_STOP",
+                                realized_component=realized_component,
+                                remaining_fraction=remaining_fraction,
+                                mfe_r=mfe_r,
+                                mae_r=mae_r,
+                            )
+                        if (
+                            signal.next_pivot_price is not None
+                            and self._target_hit(
+                                signal.direction,
+                                minute,
+                                signal.next_pivot_price,
+                            )
+                        ):
+                            return self._result(
+                                signal,
+                                bar=minute,
+                                stop=stop,
+                                scale_time=scale_time,
+                                scale_fill=scale_fill,
+                                scale_fraction=cfg.scale_out_fraction,
+                                exit_price=signal.next_pivot_price,
+                                exit_reason=(
+                                    f"NEXT_PIVOT_{signal.next_pivot_name}"
+                                ),
+                                realized_component=realized_component,
+                                remaining_fraction=remaining_fraction,
+                                mfe_r=mfe_r,
+                                mae_r=mae_r,
+                            )
+            else:
+                update_excursions(bar)
+                if scale_time is None:
+                    if self._stop_hit(signal.direction, bar, stop):
+                        stop_fill = self._stop_fill(
+                            signal.direction,
+                            bar,
+                            stop,
+                        )
+                        return self._result(
+                            signal,
+                            bar=bar,
+                            stop=stop,
+                            scale_time=None,
+                            scale_fill=None,
+                            scale_fraction=0.0,
+                            exit_price=stop_fill,
+                            exit_reason="ATR_HARD_STOP",
+                            realized_component=0.0,
+                            remaining_fraction=1.0,
+                            mfe_r=mfe_r,
+                            mae_r=mae_r,
+                        )
+                    if self._target_hit(
+                        signal.direction,
+                        bar,
+                        scale_price,
+                    ):
+                        scale_time = bar.end_time
+                        scale_fill = scale_price
+                        realized_component = (
+                            cfg.scale_out_fraction * cfg.scale_out_r
+                        )
+                        remaining_fraction = 1.0 - cfg.scale_out_fraction
+                        stop = signal.entry_price
+                        newly_scaled_without_minutes = True
+                if (
+                    scale_time is not None
+                    and not newly_scaled_without_minutes
+                ):
+                    if self._stop_hit(signal.direction, bar, stop):
+                        stop_fill = self._stop_fill(
+                            signal.direction,
+                            bar,
+                            stop,
+                        )
+                        return self._result(
+                            signal,
+                            bar=bar,
+                            stop=stop,
+                            scale_time=scale_time,
+                            scale_fill=scale_fill,
+                            scale_fraction=cfg.scale_out_fraction,
+                            exit_price=stop_fill,
+                            exit_reason="BREAKEVEN_STOP",
+                            realized_component=realized_component,
+                            remaining_fraction=remaining_fraction,
+                            mfe_r=mfe_r,
+                            mae_r=mae_r,
+                        )
+                    if (
+                        signal.next_pivot_price is not None
+                        and self._target_hit(
+                            signal.direction,
+                            bar,
+                            signal.next_pivot_price,
+                        )
+                    ):
+                        return self._result(
+                            signal,
+                            bar=bar,
+                            stop=stop,
+                            scale_time=scale_time,
+                            scale_fill=scale_fill,
+                            scale_fraction=cfg.scale_out_fraction,
+                            exit_price=signal.next_pivot_price,
+                            exit_reason=(
+                                f"NEXT_PIVOT_{signal.next_pivot_name}"
+                            ),
+                            realized_component=realized_component,
+                            remaining_fraction=remaining_fraction,
+                            mfe_r=mfe_r,
+                            mae_r=mae_r,
+                        )
 
             running.append(bar)
             closes = [float(item.close) for item in running]
             ema9 = FeatureEngine.calculate_ema(closes, 9)
 
-            if scale_time is not None:
-                if self._stop_hit(signal.direction, bar, stop):
-                    stop_fill = self._stop_fill(
-                        signal.direction,
-                        bar,
-                        stop,
-                    )
-                    return self._result(
-                        signal,
-                        bar=bar,
-                        stop=stop,
-                        scale_time=scale_time,
-                        scale_fill=scale_fill,
-                        scale_fraction=cfg.scale_out_fraction,
-                        exit_price=stop_fill,
-                        exit_reason="BREAKEVEN_STOP",
-                        realized_component=realized_component,
-                        remaining_fraction=remaining_fraction,
-                        mfe_r=mfe_r,
-                        mae_r=mae_r,
-                    )
-                if (
-                    signal.next_pivot_price is not None
-                    and self._target_hit(
-                        signal.direction,
-                        bar,
-                        signal.next_pivot_price,
-                    )
-                ):
-                    return self._result(
-                        signal,
-                        bar=bar,
-                        stop=stop,
-                        scale_time=scale_time,
-                        scale_fill=scale_fill,
-                        scale_fraction=cfg.scale_out_fraction,
-                        exit_price=signal.next_pivot_price,
-                        exit_reason=f"NEXT_PIVOT_{signal.next_pivot_name}",
-                        realized_component=realized_component,
-                        remaining_fraction=remaining_fraction,
-                        mfe_r=mfe_r,
-                        mae_r=mae_r,
-                    )
-                if self._ema_exit(
+            if (
+                scale_time is not None
+                and self._ema_exit(
                     signal.direction,
                     float(bar.close),
                     ema9,
-                ):
-                    return self._result(
-                        signal,
-                        bar=bar,
-                        stop=stop,
-                        scale_time=scale_time,
-                        scale_fill=scale_fill,
-                        scale_fraction=cfg.scale_out_fraction,
-                        exit_price=float(bar.close),
-                        exit_reason="EMA9_CLOSE_CROSS",
-                        realized_component=realized_component,
-                        remaining_fraction=remaining_fraction,
-                        mfe_r=mfe_r,
-                        mae_r=mae_r,
-                    )
+                )
+            ):
+                return self._result(
+                    signal,
+                    bar=bar,
+                    stop=stop,
+                    scale_time=scale_time,
+                    scale_fill=scale_fill,
+                    scale_fraction=cfg.scale_out_fraction,
+                    exit_price=float(bar.close),
+                    exit_reason="EMA9_CLOSE_CROSS",
+                    realized_component=realized_component,
+                    remaining_fraction=remaining_fraction,
+                    mfe_r=mfe_r,
+                    mae_r=mae_r,
+                )
 
             if self.is_strategy_d_force_exit_time(bar.end_time):
                 return self._result(
@@ -735,3 +935,4 @@ class StrategyDPositionManager(PositionManager):
             mfe_r=mfe_r,
             mae_r=mae_r,
         )
+
