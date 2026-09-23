@@ -179,8 +179,10 @@ class OMSService:
         to_state = order.status
         if broker_status == "FILLED":
             to_state = OrderState.FILLED
-        elif broker_status == "OPEN" or broker_status == "PLACED":
-            to_state = OrderState.OPEN
+        elif broker_status in {"PARTIAL", "PARTIALLY_FILLED", "PARTIALLY FILLED"}:
+            to_state = OrderState.PARTIALLY_FILLED
+        elif broker_status in {"OPEN", "PLACED"}:
+            to_state = OrderState.PARTIALLY_FILLED if filled_qty > 0 else OrderState.OPEN
         elif broker_status == "CANCELLED":
             to_state = OrderState.CANCELLED
         elif broker_status == "REJECTED":
@@ -188,16 +190,23 @@ class OMSService:
         elif broker_status == "UNKNOWN":
             to_state = OrderState.SUBMISSION_UNKNOWN
 
-        if to_state != order.status:
-            OrderStateMachine.validate_transition(order.status, to_state, broker_status)
-            rem_qty = max(0, order.quantity - filled_qty)
+        state_changed = to_state != order.status
+        fill_changed = (
+            int(filled_qty or 0) != order.filled_quantity
+            or float(avg_price or 0.0) != float(order.average_price or 0.0)
+            or (broker_order_id and broker_order_id != order.broker_order_id)
+        )
+        if state_changed or fill_changed:
+            if state_changed:
+                OrderStateMachine.validate_transition(order.status, to_state, broker_status)
+            rem_qty = max(0, order.quantity - int(filled_qty or 0))
             updated = order.model_copy(
                 update={
                     "broker_order_id": broker_order_id or order.broker_order_id,
                     "status": to_state,
-                    "filled_quantity": filled_qty,
+                    "filled_quantity": int(filled_qty or 0),
                     "remaining_quantity": rem_qty,
-                    "average_price": avg_price or order.average_price,
+                    "average_price": float(avg_price or order.average_price),
                     "status_message": payload.get("message"),
                 }
             )
@@ -205,7 +214,7 @@ class OMSService:
                 order=updated,
                 from_state=order.status,
                 to_state=to_state,
-                reason=f"Broker status: {broker_status}",
+                reason=f"Broker reconciliation: {broker_status}",
                 outbox_topic=Topics.ORDER_STATE,
             )
 
