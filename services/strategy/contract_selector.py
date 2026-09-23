@@ -121,7 +121,9 @@ class ContractSelector:
                 "quote_timestamp": quote_timestamp.isoformat() if quote_timestamp else None,
                 "quote_freshness_seconds": freshness, "open_interest": int(leg.get("open_interest", 0) or 0),
                 "volume": int(leg.get("volume", 0) or 0), "lot_size": int(leg.get("lot_size", 0) or 0),
-                "instrument_id": leg.get("instrument_id"), "instrument_token": leg.get("instrument_token") or leg.get("token"),
+                "instrument_id": leg.get("instrument_id"),
+                "symbol": leg.get("symbol"),
+                "instrument_token": leg.get("instrument_token") or leg.get("token"),
                 "ltp": float(leg.get("ltp", 0) or 0),
             }
             info["status"] = "INSPECTED"
@@ -166,7 +168,8 @@ class ContractSelector:
             candidates.sort(key=lambda x: (-x["ask"], x["spread_pct"], -x["open_interest"], x["strike"], x["instrument_id"] or ""))
         best = candidates[0]
         selected = SelectedContract(
-            instrument_id=best["instrument_id"], symbol=f"NIFTY {best['strike']} {best['option_type']}",
+            instrument_id=best["instrument_id"],
+            symbol=str(best.get("symbol") or f"NIFTY{int(best['strike'])}{'CE' if best['option_type'] == 'CALL' else 'PE'}"),
             expiry=best["expiry"], strike=best["strike"], option_type=option_type,
             ask_price=best["ask"], bid_price=best["bid"], open_interest=best["open_interest"], volume=best["volume"],
             spread_pct=float(best["spread_pct"] or 0), lot_size=best["lot_size"], ltp=best["ltp"],
