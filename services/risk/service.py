@@ -32,11 +32,13 @@ class RiskService:
         event_bus: Optional[EventBus] = None,
         live_gate: Optional[LiveTradingGate] = None,
         max_order_qty: int = 1800,
+        live_account_id: str = "ICICI_PRIMARY",
     ) -> None:
         self.repo = repository or RiskRepository()
         self.bus = event_bus or get_event_bus()
         self.live_gate = live_gate or LiveTradingGate(event_bus=self.bus)
         self.max_order_qty = max_order_qty
+        self.live_account_id = live_account_id
         self._recent_orders: dict[str, datetime] = {}  # symbol:side:qty -> timestamp
 
     async def initialize(self) -> None:
@@ -53,9 +55,23 @@ class RiskService:
         """Run sequential pre-trade checks on intent."""
         system_mode = await self.repo.get_system_mode()
 
-        # Check 0: Server-Side LIVE Mode Gate (Invariant 1 & 12)
-        if intent.trading_mode == TradingMode.LIVE:
-            authorized, reason = self.live_gate.validate_live_order(account_id="ICICI_PRIMARY")
+        is_reduce_only_exit = intent.reduce_only and intent.side == OrderSide.SELL
+
+        # Reduce-only is an explicit safety property, never an alias for SELL.
+        if intent.reduce_only and intent.side != OrderSide.SELL:
+            return await self._record_and_publish(
+                intent=intent,
+                approved=False,
+                rule="INVALID_REDUCE_ONLY",
+                reason="Reduce-only orders must be SELL orders in the long-options execution model",
+                system_mode=system_mode,
+            )
+
+        # LIVE authorization gates exposure increases. Verified reduce-only exits
+        # remain available after gate expiry/revocation so emergency controls
+        # cannot trap an already-open position.
+        if intent.trading_mode == TradingMode.LIVE and not is_reduce_only_exit:
+            authorized, reason = self.live_gate.validate_live_order(account_id=self.live_account_id)
             if not authorized:
                 return await self._record_and_publish(
                     intent=intent,
@@ -65,23 +81,19 @@ class RiskService:
                     system_mode=system_mode,
                 )
 
-        # Check 1: System mode HALTED
-        if system_mode == SystemMode.HALTED:
+        # All emergency modes are entry-blocking. Explicit reduce-only exits
+        # remain permitted so HALT/EXIT_ONLY cannot disable risk reduction.
+        if system_mode in (SystemMode.HALTED, SystemMode.EXIT_ONLY, SystemMode.ENTRY_BLOCKED) and not is_reduce_only_exit:
+            rule = {
+                SystemMode.HALTED: "SYSTEM_HALTED",
+                SystemMode.EXIT_ONLY: "EXIT_ONLY",
+                SystemMode.ENTRY_BLOCKED: "ENTRY_BLOCKED",
+            }[system_mode]
             return await self._record_and_publish(
                 intent=intent,
                 approved=False,
-                rule="SYSTEM_HALTED",
-                reason="System trading is currently HALTED",
-                system_mode=system_mode,
-            )
-
-        # Check 2: System mode ENTRY_BLOCKED
-        if system_mode == SystemMode.ENTRY_BLOCKED and intent.side == OrderSide.BUY:
-            return await self._record_and_publish(
-                intent=intent,
-                approved=False,
-                rule="ENTRY_BLOCKED",
-                reason="New entry orders are blocked by operator",
+                rule=rule,
+                reason=f"System mode {system_mode.value} permits only explicit reduce-only exits",
                 system_mode=system_mode,
             )
 
