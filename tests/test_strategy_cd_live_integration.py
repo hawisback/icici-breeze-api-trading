@@ -108,10 +108,21 @@ def test_strategy_d_execution_signal_does_not_depend_on_paper_fill():
     assert signal.r_points == 75.0
 
 
-def test_c_and_d_follow_configured_execution_mode():
+def test_c_and_d_require_explicit_live_opt_in():
     service = StrategyService.__new__(StrategyService)
     service.config = AutoTradingConfig(mode=AutoTradingMode.LIVE)
 
+    assert service._execution_mode_for_strategy(
+        StrategyName.DI_CONTINUATION,
+        OptionType.CALL,
+    ) == AutoTradingMode.SHADOW_ONLY
+    assert service._execution_mode_for_strategy(
+        StrategyName.SR_MOMENTUM_BREAKOUT,
+        OptionType.PUT,
+    ) == AutoTradingMode.SHADOW_ONLY
+
+    service.config.tunables.di_continuation_live_enabled = True
+    service.config.tunables.sr_momentum_breakout_live_enabled = True
     assert service._execution_mode_for_strategy(
         StrategyName.DI_CONTINUATION,
         OptionType.CALL,
@@ -151,3 +162,5 @@ def test_c_and_d_have_first_class_enable_flags():
     config = AutoTradingConfig()
     assert config.tunables.di_continuation_enabled is True
     assert config.tunables.sr_momentum_breakout_enabled is True
+    assert config.tunables.di_continuation_live_enabled is False
+    assert config.tunables.sr_momentum_breakout_live_enabled is False
