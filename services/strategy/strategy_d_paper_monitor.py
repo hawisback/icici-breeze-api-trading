@@ -840,6 +840,8 @@ class StrategyDPaperMonitor:
                 if lifecycle.scale_out_time
                 else None
             )
+            tracked["scale_out_price"] = lifecycle.scale_out_price
+            tracked["scale_out_fraction"] = lifecycle.scale_out_fraction
             tracked["lifecycle_state"] = (
                 "PROTECTED_BREAKEVEN"
                 if lifecycle.scale_out_time is not None
@@ -855,6 +857,11 @@ class StrategyDPaperMonitor:
                 if lifecycle.runner_exit_reason == "DATA_END"
                 else lifecycle.exit_time.isoformat()
             )
+            tracked["underlying_exit_price"] = (
+                None
+                if lifecycle.runner_exit_reason == "DATA_END"
+                else lifecycle.runner_exit_price
+            )
             tracked["underlying_realized_r"] = (
                 None
                 if lifecycle.runner_exit_reason == "DATA_END"
@@ -865,7 +872,11 @@ class StrategyDPaperMonitor:
             tracked["lifecycle_state"] = "OPEN_INITIAL_RISK"
             tracked["underlying_exit_reason"] = None
             tracked["underlying_exit_time"] = None
+            tracked["underlying_exit_price"] = None
             tracked["underlying_realized_r"] = None
+            tracked["scale_out_time"] = None
+            tracked["scale_out_price"] = None
+            tracked["scale_out_fraction"] = None
 
         selected = tracked.get("selected_contract") or {}
         quote = await self._quote_for_contract(selected, now=now)
