@@ -107,6 +107,13 @@ class BrokerGatewayService:
     ) -> Optional[BrokerOrderResponse]:
         return await self.get_adapter(mode).get_order_status(broker_order_id)
 
+    async def find_order_by_client_id(
+        self,
+        client_order_id: str,
+        mode: TradingMode = TradingMode.PAPER,
+    ) -> Optional[BrokerOrderResponse]:
+        return await self.get_adapter(mode).find_order_by_client_id(client_order_id)
+
     async def get_positions(
         self,
         mode: TradingMode = TradingMode.PAPER,
