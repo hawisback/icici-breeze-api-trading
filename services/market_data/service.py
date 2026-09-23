@@ -90,44 +90,115 @@ class MarketDataService:
         """Return whether any configured live-data provider is active."""
         if not self.broker_gateway:
             return False
+
         order = getattr(self.broker_gateway, "provider_order", None)
-        providers = order("live") if callable(order) else (
-            getattr(self.broker_gateway, "active_broker_name", ""),
-        )
-        for provider in providers:
-            try:
-                if self.broker_gateway.provider_is_active(provider):
-                    return True
-            except Exception:
-                adapter = getattr(self.broker_gateway, "active_adapter", None)
-                if adapter and getattr(adapter, "is_active", False):
-                    return True
-        return False
+        resolver = getattr(self.broker_gateway, "get_broker_adapter", None)
+        if callable(order) and callable(resolver):
+            for provider in order("live"):
+                try:
+                    if self.broker_gateway.provider_is_active(provider):
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        # Backward-compatible gateway/test-double shape.
+        provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
+        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
+        breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
+        client_mgr = getattr(breeze_adapter, "client_manager", None)
+        if provider == "kite":
+            return bool(active_adapter and getattr(active_adapter, "is_active", False))
+        if provider == "breeze":
+            return bool(client_mgr and getattr(client_mgr, "is_active", False))
+        if active_adapter and getattr(active_adapter, "is_active", False):
+            return True
+        return bool(client_mgr and getattr(client_mgr, "is_active", False))
 
     async def sync_quotes_from_broker(self) -> bool:
         """Fetch index quotes from the configured primary provider with fallback."""
         if not self.broker_gateway:
             return False
+
         order = getattr(self.broker_gateway, "provider_order", None)
-        providers = order("live") if callable(order) else (
-            getattr(self.broker_gateway, "active_broker_name", ""),
-        )
-        for provider in providers:
-            try:
-                adapter = self.broker_gateway.get_broker_adapter(provider)
-                if not getattr(adapter, "is_active", False):
+        resolver = getattr(self.broker_gateway, "get_broker_adapter", None)
+        if callable(order) and callable(resolver):
+            candidates = []
+            for provider in order("live"):
+                try:
+                    candidates.append((provider, resolver(provider)))
+                except Exception:
                     continue
-                fetch = getattr(adapter, "get_index_quotes", None)
-                if not callable(fetch):
+        else:
+            provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
+            if provider == "kite":
+                candidates = [("kite", getattr(self.broker_gateway, "active_adapter", None))]
+            else:
+                candidates = [("breeze", getattr(self.broker_gateway, "breeze_adapter", None))]
+
+        for provider, adapter in candidates:
+            if adapter is None:
+                continue
+            active = bool(getattr(adapter, "is_active", False))
+            client_mgr = getattr(adapter, "client_manager", None)
+            active = active or bool(client_mgr and getattr(client_mgr, "is_active", False))
+            if not active:
+                continue
+            fetch = getattr(adapter, "get_index_quotes", None)
+            if callable(fetch):
+                try:
+                    quotes = await fetch()
+                    if quotes:
+                        for quote in quotes:
+                            await self.ingest_quote(quote)
+                        return True
+                except Exception as exc:
+                    logger.warning("%s live quote sync deferred: %s", provider, exc)
                     continue
-                quotes = await fetch()
-                if not quotes:
-                    continue
-                for quote in quotes:
-                    await self.ingest_quote(quote)
-                return True
-            except Exception as exc:
-                logger.warning("%s live quote sync deferred: %s", provider, exc)
+
+            # Legacy Breeze adapter/test-double path only.
+            if client_mgr is not None:
+                try:
+                    sdk = client_mgr.get_sdk_client()
+                    now = utc_now()
+                    synced_any = False
+                    for inst_id, symbol, code in (
+                        ("INST-NIFTY-INDEX", "NIFTY 50", "NIFTY"),
+                        ("INST-BANKNIFTY-INDEX", "NIFTY BANK", "CNXBAN"),
+                    ):
+                        raw = await client_mgr.sdk_runner.run(
+                            lambda c=code: sdk.get_quotes(
+                                stock_code=c,
+                                exchange_code="NSE",
+                                product_type="cash",
+                            ),
+                            timeout_sec=5.0,
+                        )
+                        rows = raw.get("Success", []) if isinstance(raw, dict) else []
+                        if rows and isinstance(rows, list):
+                            row = rows[0]
+                            last = float(row.get("ltp") or 0.0)
+                            if last > 0:
+                                await self.ingest_quote(
+                                    Quote(
+                                        source="BREEZE",
+                                        instrument_id=inst_id,
+                                        symbol=symbol,
+                                        last_price=last,
+                                        open=float(row.get("open") or last),
+                                        high=float(row.get("high") or last),
+                                        low=float(row.get("low") or last),
+                                        close=last,
+                                        volume=int(row.get("total_quantity_traded") or 0),
+                                        change_pct=float(row.get("ltp_percent_change") or 0.0),
+                                        timestamp=now,
+                                    )
+                                )
+                                synced_any = True
+                    if synced_any:
+                        return True
+                except Exception as exc:
+                    logger.warning("Legacy Breeze live quote sync deferred: %s", exc)
         return False
 
     def update_quote(self, quote: Quote) -> None:
