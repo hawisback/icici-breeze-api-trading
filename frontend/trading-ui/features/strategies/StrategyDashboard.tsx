@@ -113,7 +113,7 @@ export const StrategyDashboard: React.FC = () => {
   const handleModeChange = async (newMode: "PAPER" | "LIVE") => {
     if (!status || status.config.mode === newMode) return;
     if (newMode === "LIVE") {
-      if (!confirm("Switching the four-strategy engine to LIVE mode. Enabled Strategies C and D can route real orders once the system is armed. Ensure live broker credentials and risk limits are correct.")) return;
+      if (!confirm("Switching the four-strategy engine to LIVE mode. Strategies C and D route real orders only when their explicit live-routing switches are enabled and the system is armed. Ensure broker credentials and risk limits are correct.")) return;
     }
     try {
       setActionLoading(true);
