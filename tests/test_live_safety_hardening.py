@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -28,7 +28,15 @@ from services.oms.service import OMSService
 from services.risk.live_gate import LiveTradingGate
 from services.risk.repository import RiskRepository
 from services.risk.service import RiskService
-from services.strategy.models import MarketFeatures
+from services.strategy.models import (
+    ActiveTrade,
+    AutoTradingMode,
+    MarketFeatures,
+    OptionType,
+    StrategyName,
+    TradeDirection,
+    TradeLifecycleState,
+)
 from services.strategy.service import StrategyService
 
 
@@ -374,6 +382,196 @@ async def test_live_entries_have_independent_notional_position_and_funds_caps(tm
     )
     assert funds.approved is False
     assert funds.rule_name == "LIVE_INSUFFICIENT_MARGIN"
+
+    await risk.stop()
+    await bus.stop()
+
+
+def _live_trade_with_fill() -> ActiveTrade:
+    return ActiveTrade(
+        trade_id="TRD-LIVE-PROTECT",
+        mode=AutoTradingMode.LIVE,
+        strategy=StrategyName.VOLATILITY_BREAKOUT,
+        direction=TradeDirection.BULLISH,
+        option_type=OptionType.CALL,
+        contract_symbol="NIFTY26SEP25000CE",
+        contract_instrument_id="INST-NIFTY-LIVE-CE",
+        expiry="2026-09-29",
+        strike=25000.0,
+        quantity=65,
+        lot_size=65,
+        lots=1,
+        entry_option_price=100.0,
+        entry_spot_price=25000.0,
+        initial_structural_stop=24950.0,
+        initial_r_points=50.0,
+        current_option_price=100.0,
+        current_spot_price=25000.0,
+        current_trailing_stop=24950.0,
+        option_hard_stop_price=75.0,
+        state=TradeLifecycleState.OPEN_INITIAL_RISK,
+        entry_order_id="ENTRY-1",
+        filled_quantity=65,
+        initial_quantity=65,
+        remaining_quantity=65,
+    )
+
+
+def _strategy_service_for_protection(oms, gateway):
+    repo = SimpleNamespace(save_trade=AsyncMock())
+    service = StrategyService(
+        oms_service=oms,
+        repository=repo,
+        historical_service=SimpleNamespace(broker_gateway=gateway),
+        event_bus=SimpleNamespace(publish=AsyncMock()),
+    )
+    service._log_decision = AsyncMock()
+    return service, repo
+
+
+@pytest.mark.asyncio
+async def test_live_fill_creates_reduce_only_broker_stop_limit():
+    oms = SimpleNamespace(
+        create_order_intent=AsyncMock(
+            return_value=SimpleNamespace(
+                order_id="PROTECT-1",
+                status=OrderState.VALIDATING,
+            )
+        ),
+        get_order=AsyncMock(),
+    )
+    gateway = SimpleNamespace(cancel_order=AsyncMock())
+    service, repo = _strategy_service_for_protection(oms, gateway)
+    trade = _live_trade_with_fill()
+
+    ready = await service._sync_live_protective_stop(
+        trade,
+        MarketFeatures(spot_price=25000.0),
+    )
+
+    assert ready is False
+    intent = oms.create_order_intent.await_args.args[0]
+    assert intent.side == OrderSide.SELL
+    assert intent.order_type == OrderType.STOP_LIMIT
+    assert intent.reduce_only is True
+    assert intent.quantity == 65
+    assert intent.trigger_price == 75.0
+    assert intent.price == 67.5
+    assert trade.protective_stop_order_id == "PROTECT-1"
+    assert trade.protective_stop_status == OrderState.VALIDATING.value
+    repo.save_trade.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_discretionary_exit_cancels_protection_before_second_sell():
+    protective_order = SimpleNamespace(
+        status=OrderState.OPEN,
+        filled_quantity=0,
+        average_price=0.0,
+        broker_order_id="BROKER-PROTECT-1",
+        trading_mode=TradingMode.LIVE,
+    )
+    oms = SimpleNamespace(
+        create_order_intent=AsyncMock(),
+        get_order=AsyncMock(return_value=protective_order),
+    )
+    gateway = SimpleNamespace(
+        cancel_order=AsyncMock(
+            return_value=SimpleNamespace(success=True, status="CANCELLED")
+        )
+    )
+    service, _ = _strategy_service_for_protection(oms, gateway)
+    trade = _live_trade_with_fill()
+    trade.protective_stop_order_id = "PROTECT-1"
+    trade.protective_stop_status = "OPEN"
+
+    may_exit = await service._cancel_live_protective_stop_for_exit(
+        trade,
+        MarketFeatures(spot_price=25000.0),
+    )
+
+    assert may_exit is False
+    gateway.cancel_order.assert_awaited_once_with(
+        "BROKER-PROTECT-1",
+        mode=TradingMode.LIVE,
+    )
+    assert trade.protective_stop_cancel_for_exit is True
+    assert trade.protective_stop_status == "CANCEL_REQUESTED"
+
+    protective_order.status = OrderState.CANCELLED
+    may_exit_after_cancel = await service._cancel_live_protective_stop_for_exit(
+        trade,
+        MarketFeatures(spot_price=25000.0),
+    )
+    assert may_exit_after_cancel is True
+    assert trade.protective_stop_order_id is None
+
+
+@pytest.mark.asyncio
+async def test_filled_broker_protection_closes_trade_as_emergency_stop():
+    protective_order = SimpleNamespace(
+        status=OrderState.FILLED,
+        filled_quantity=65,
+        average_price=72.0,
+        broker_order_id="BROKER-PROTECT-1",
+        trading_mode=TradingMode.LIVE,
+    )
+    oms = SimpleNamespace(
+        create_order_intent=AsyncMock(),
+        get_order=AsyncMock(return_value=protective_order),
+    )
+    service, _ = _strategy_service_for_protection(
+        oms,
+        SimpleNamespace(cancel_order=AsyncMock()),
+    )
+    service._close_trade = AsyncMock()
+    trade = _live_trade_with_fill()
+    trade.protective_stop_order_id = "PROTECT-1"
+
+    ready = await service._sync_live_protective_stop(
+        trade,
+        MarketFeatures(spot_price=25000.0),
+    )
+
+    assert ready is False
+    assert trade.exit_filled_quantity == 65
+    assert trade.exit_proceeds == 72.0 * 65
+    service._close_trade.assert_awaited_once()
+    assert service._close_trade.await_args.args[3] == "OPTION_EMERGENCY_STOP"
+
+
+@pytest.mark.asyncio
+async def test_reduce_only_stop_limit_geometry_is_fail_closed(tmp_path):
+    bus = InMemoryEventBus()
+    await bus.start()
+    portfolio = SimpleNamespace(
+        repo=SimpleNamespace(
+            get_position=AsyncMock(return_value=SimpleNamespace(quantity=65))
+        )
+    )
+    risk = RiskService(
+        repository=RiskRepository(tmp_path / "risk-stop.db"),
+        event_bus=bus,
+        portfolio_service=portfolio,
+    )
+    await risk.initialize()
+
+    invalid = await risk.evaluate_intent(
+        OrderIntent(
+            intent_id="BAD-PROTECTIVE-STOP",
+            instrument_id="INST-NIFTY-LIVE-CE",
+            symbol="NIFTYLIVECE",
+            side=OrderSide.SELL,
+            order_type=OrderType.STOP_LIMIT,
+            quantity=65,
+            price=80.0,
+            trigger_price=75.0,
+            trading_mode=TradingMode.LIVE,
+            reduce_only=True,
+        )
+    )
+    assert invalid.approved is False
+    assert invalid.rule_name == "STOP_LIMIT_PRICE_INVALID"
 
     await risk.stop()
     await bus.stop()
