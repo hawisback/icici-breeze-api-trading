@@ -2093,8 +2093,9 @@ class StrategyService:
 
         route = getattr(gateway, "provider_order", None)
         resolver = getattr(gateway, "get_broker_adapter", None)
-        if callable(route) and callable(resolver):
-            for provider in route("live"):
+        providers = route("live") if callable(route) else None
+        if callable(resolver) and isinstance(providers, (list, tuple)) and providers:
+            for provider in providers:
                 name = provider.value if hasattr(provider, "value") else str(provider)
                 try:
                     adapter = resolver(provider)
