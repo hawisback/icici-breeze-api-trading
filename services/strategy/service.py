@@ -2738,7 +2738,7 @@ class StrategyService:
             StrategyName.SR_MOMENTUM_BREAKOUT,
         }:
             return {
-                "status": "STRATEGY_FORCE_ENTRY_DISABLED",
+                "status": "FROZEN_CANDIDATE_FORCE_ENTRY_DISABLED",
                 "reason": (
                     "Strategies C and D are executable first-class strategies, "
                     "but entries must originate from their validated frozen signal engines."
