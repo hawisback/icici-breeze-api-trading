@@ -1,1 +1,35 @@
-import subprocess\nimport sys\n\n\ndef test_strategy_d_backtest_imports_without_strategy_package_cycle():\n    """Standalone Strategy D module import must not initialize the service graph."""\n    result = subprocess.run(\n        [\n            sys.executable,\n            "-c",\n            "import services.historical.strategy_d_sr_momentum_backtest",\n        ],\n        capture_output=True,\n        text=True,\n        check=False,\n    )\n    assert result.returncode == 0, result.stderr\n\n\ndef test_strategy_package_public_service_export_remains_available():\n    """Lazy loading preserves the existing package-level public API."""\n    result = subprocess.run(\n        [\n            sys.executable,\n            "-c",\n            (\n                "from services.strategy import StrategyRepository, StrategyService; "\n                "assert StrategyRepository is not None; assert StrategyService is not None"\n            ),\n        ],\n        capture_output=True,\n        text=True,\n        check=False,\n    )\n    assert result.returncode == 0, result.stderr\n
+import subprocess
+import sys
+
+
+def test_strategy_d_backtest_imports_without_strategy_package_cycle():
+    """Standalone Strategy D module import must not initialize the service graph."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import services.historical.strategy_d_sr_momentum_backtest",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_strategy_package_public_service_export_remains_available():
+    """Lazy loading preserves the existing package-level public API."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from services.strategy import StrategyRepository, StrategyService; "
+                "assert StrategyRepository is not None; assert StrategyService is not None"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
