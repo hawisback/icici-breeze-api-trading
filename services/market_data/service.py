@@ -93,8 +93,9 @@ class MarketDataService:
 
         order = getattr(self.broker_gateway, "provider_order", None)
         resolver = getattr(self.broker_gateway, "get_broker_adapter", None)
-        if callable(order) and callable(resolver):
-            for provider in order("live"):
+        providers = order("live") if callable(order) else None
+        if callable(resolver) and isinstance(providers, (list, tuple)) and providers:
+            for provider in providers:
                 try:
                     if self.broker_gateway.provider_is_active(provider):
                         return True
@@ -122,9 +123,10 @@ class MarketDataService:
 
         order = getattr(self.broker_gateway, "provider_order", None)
         resolver = getattr(self.broker_gateway, "get_broker_adapter", None)
-        if callable(order) and callable(resolver):
+        providers = order("live") if callable(order) else None
+        if callable(resolver) and isinstance(providers, (list, tuple)) and providers:
             candidates = []
-            for provider in order("live"):
+            for provider in providers:
                 try:
                     candidates.append((provider, resolver(provider)))
                 except Exception:
