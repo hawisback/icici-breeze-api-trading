@@ -1,5 +1,6 @@
 """Regression tests for concurrent Breeze/Kite routing and broker-owned execution."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -211,6 +212,7 @@ async def test_reconciliation_uses_order_owning_broker(tmp_path: Path):
         event_bus=bus,
     )
     await execution.reconcile_live_orders()
+    await asyncio.sleep(0.05)
 
     assert gateway.calls == [("breeze", "BR-2")]
     reconciled = await repo.get_order_by_id(order.order_id)
