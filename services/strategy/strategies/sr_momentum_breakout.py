@@ -594,9 +594,9 @@ class StrategyDPositionManager(PositionManager):
         The signal and EMA9 remain completed-5m decisions. Native 1m children
         are used only to order intrabar ATR stop, +1.5R scale-out, breakeven,
         and next-pivot events. If a 5m parent lacks a complete five-minute
-        child set, the replay falls back conservatively to 5m OHLC. A newly
-        activated breakeven stop is never applied retroactively to earlier
-        prices in that same 5m fallback bar.
+        child set, the replay falls back conservatively to 5m OHLC and
+        explicitly labels activation-bar breakeven ambiguity rather than
+        treating the inferred ordering as exact.
         """
         cfg = self.strategy_d_config
         if not future_bars:
