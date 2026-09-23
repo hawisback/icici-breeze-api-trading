@@ -12,6 +12,7 @@ from libs.contracts.models import (
     BrokerOrder,
     OrderEvent,
     OrderIntent,
+    OptionRight,
     OrderSide,
     OrderState,
     OrderType,
@@ -51,6 +52,12 @@ class OMSRepository:
                     source TEXT NOT NULL,
                     instrument_id TEXT NOT NULL,
                     symbol TEXT NOT NULL,
+                    execution_broker TEXT,
+                    stock_code TEXT,
+                    exchange_code TEXT NOT NULL DEFAULT 'NFO',
+                    expiry_date TEXT,
+                    strike_price REAL,
+                    option_right TEXT,
                     side TEXT NOT NULL,
                     order_type TEXT NOT NULL,
                     quantity INTEGER NOT NULL,
@@ -70,6 +77,12 @@ class OMSRepository:
                     broker_order_id TEXT,
                     instrument_id TEXT NOT NULL,
                     symbol TEXT NOT NULL,
+                    execution_broker TEXT,
+                    stock_code TEXT,
+                    exchange_code TEXT NOT NULL DEFAULT 'NFO',
+                    expiry_date TEXT,
+                    strike_price REAL,
+                    option_right TEXT,
                     side TEXT NOT NULL,
                     order_type TEXT NOT NULL,
                     quantity INTEGER NOT NULL,
@@ -97,6 +110,23 @@ class OMSRepository:
                     FOREIGN KEY (order_id) REFERENCES broker_orders(order_id)
                 );
             """)
+            # Forward-compatible broker routing / derivative identity columns.
+            for table_name in ("order_intents", "broker_orders"):
+                columns = await (await conn.execute(f"PRAGMA table_info({table_name})")).fetchall()
+                existing = {row["name"] for row in columns}
+                for column_name, column_type in (
+                    ("execution_broker", "TEXT"),
+                    ("stock_code", "TEXT"),
+                    ("exchange_code", "TEXT NOT NULL DEFAULT 'NFO'"),
+                    ("expiry_date", "TEXT"),
+                    ("strike_price", "REAL"),
+                    ("option_right", "TEXT"),
+                ):
+                    if column_name not in existing:
+                        await conn.execute(
+                            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                        )
+
             # Indexes
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_order_intents_time ON order_intents(created_at);")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON broker_orders(status);")
@@ -112,9 +142,10 @@ class OMSRepository:
                 """
                 INSERT INTO order_intents (
                     intent_id, correlation_id, strategy_instance_id, source,
-                    instrument_id, symbol, side, order_type, quantity, price,
+                    instrument_id, symbol, execution_broker, stock_code, exchange_code,
+                    expiry_date, strike_price, option_right, side, order_type, quantity, price,
                     trigger_price, product, time_in_force, trading_mode, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     intent.intent_id,
@@ -123,6 +154,12 @@ class OMSRepository:
                     intent.source.value,
                     intent.instrument_id,
                     intent.symbol,
+                    intent.execution_broker,
+                    intent.stock_code,
+                    intent.exchange_code,
+                    intent.expiry_date,
+                    intent.strike_price,
+                    intent.option_right.value if intent.option_right else None,
                     intent.side.value,
                     intent.order_type.value,
                     intent.quantity,
@@ -159,10 +196,11 @@ class OMSRepository:
                 """
                 INSERT INTO broker_orders (
                     order_id, intent_id, client_order_id, broker_order_id,
-                    instrument_id, symbol, side, order_type, quantity,
+                    instrument_id, symbol, execution_broker, stock_code, exchange_code,
+                    expiry_date, strike_price, option_right, side, order_type, quantity,
                     filled_quantity, remaining_quantity, price, average_price,
                     status, status_message, trading_mode, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(order_id) DO UPDATE SET
                     broker_order_id = excluded.broker_order_id,
                     filled_quantity = excluded.filled_quantity,
@@ -179,6 +217,12 @@ class OMSRepository:
                     order.broker_order_id,
                     order.instrument_id,
                     order.symbol,
+                    order.execution_broker,
+                    order.stock_code,
+                    order.exchange_code,
+                    order.expiry_date,
+                    order.strike_price,
+                    order.option_right.value if order.option_right else None,
                     order.side.value,
                     order.order_type.value,
                     order.quantity,
@@ -268,6 +312,16 @@ class OMSRepository:
             broker_order_id=row["broker_order_id"],
             instrument_id=row["instrument_id"],
             symbol=row["symbol"],
+            execution_broker=row["execution_broker"] if "execution_broker" in row.keys() else None,
+            stock_code=row["stock_code"] if "stock_code" in row.keys() else None,
+            exchange_code=(row["exchange_code"] if "exchange_code" in row.keys() else None) or "NFO",
+            expiry_date=row["expiry_date"] if "expiry_date" in row.keys() else None,
+            strike_price=row["strike_price"] if "strike_price" in row.keys() else None,
+            option_right=(
+                OptionRight(row["option_right"])
+                if "option_right" in row.keys() and row["option_right"]
+                else None
+            ),
             side=OrderSide(row["side"]),
             order_type=OrderType(row["order_type"]),
             quantity=row["quantity"],
