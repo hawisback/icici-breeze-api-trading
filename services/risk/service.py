@@ -11,6 +11,7 @@ from typing import Any, Optional
 from libs.contracts.models import (
     OrderIntent,
     OrderSide,
+    OrderType,
     RiskDecision,
     SystemMode,
     TradingMode,
@@ -206,6 +207,49 @@ class RiskService:
                 reason=f"Order quantity {intent.quantity} violates limits (1 - {self.max_order_qty})",
                 system_mode=system_mode,
             )
+
+        if (
+            intent.trading_mode == TradingMode.LIVE
+            and intent.order_type == OrderType.MARKET
+        ):
+            return await self._record_and_publish(
+                intent=intent,
+                approved=False,
+                rule="LIVE_MARKET_ORDER_DISABLED",
+                reason=(
+                    "LIVE market orders are disabled; use bounded LIMIT or "
+                    "STOP_LIMIT orders"
+                ),
+                system_mode=system_mode,
+            )
+
+        if intent.order_type == OrderType.STOP_LIMIT:
+            trigger = float(intent.trigger_price or 0.0)
+            if trigger <= 0.05:
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="STOP_TRIGGER_INVALID",
+                    reason="STOP_LIMIT requires a positive trigger price",
+                    system_mode=system_mode,
+                )
+            if (
+                intent.side == OrderSide.SELL
+                and float(intent.price) > trigger
+            ) or (
+                intent.side == OrderSide.BUY
+                and float(intent.price) < trigger
+            ):
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="STOP_LIMIT_PRICE_INVALID",
+                    reason=(
+                        "SELL stop-limit requires limit <= trigger and BUY "
+                        "stop-limit requires limit >= trigger"
+                    ),
+                    system_mode=system_mode,
+                )
 
         # Check 4: Price sanity
         if intent.price <= 0.05:
