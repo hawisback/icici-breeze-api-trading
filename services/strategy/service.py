@@ -249,6 +249,11 @@ class StrategyService:
     async def initialize(self) -> None:
         await self.repo.initialize()
         self.config = await self.repo.get_auto_config()
+        # Arming is deliberately process-local in effect. A restart must never
+        # silently restore authority to create new LIVE exposure.
+        if self.config.system_armed:
+            self.config.system_armed = False
+            await self.repo.save_auto_config(self.config)
         self._sync_subcomponents()
         try:
             await self.strategy_c_shadow.initialize()
@@ -689,13 +694,8 @@ class StrategyService:
         now = utc_now()
         self._last_eval_time = now  # track for get_status() freshness check
 
-        # 1. Check Kill Switch
-        if self.config.kill_switch:
-            self._reset_setups(now)
-            await self._save_runtime()
-            return {"status": "HALTED_KILL_SWITCH"}
-
-        # 2. Gather market features
+        # 1. Gather market features. Existing positions must continue to be
+        # managed even when the entry kill switch is active.
         features = await self._gather_features()
         self._last_features = features
 
@@ -729,6 +729,18 @@ class StrategyService:
             await self._evaluate_active_trade(trade, features)
 
         self._active_trades_cache = await self.repo.get_active_trades()
+
+        # The strategy kill switch is entry-blocking, not exit-blocking.
+        # Existing positions have already had stops/session exits evaluated
+        # above, so it is now safe to stop before any new entry logic.
+        if self.config.kill_switch:
+            self._reset_setups(now)
+            await self._save_runtime()
+            return {
+                "status": "HALTED_KILL_SWITCH",
+                "active_positions_managed": len(self._active_trades_cache),
+            }
+
         bypass = getattr(self._active_overrides, "bypass_entry_window", False)
         _, _, futures_candles = self._market_snapshot
         strategy_a_data_ready = self.config.tunables.trend_pullback_enabled and bool(futures_candles)
@@ -1317,7 +1329,8 @@ class StrategyService:
                     source=SourceType.STRATEGY, instrument_id=trade.contract_instrument_id,
                     symbol=trade.contract_symbol, side=OrderSide.SELL, order_type=OrderType.LIMIT,
                     quantity=trade.quantity-trade.exit_filled_quantity, price=order_price,
-                    product=ProductType.OPTIONS, trading_mode=TradingMode.LIVE)
+                    product=ProductType.OPTIONS, trading_mode=TradingMode.LIVE,
+                    reduce_only=True)
                 order = await self.oms.create_order_intent(intent)
                 trade.exit_order_id = order.order_id
                 trade.pending_exit_reason = exit_reason
@@ -1526,6 +1539,7 @@ class StrategyService:
                 price=exit_price,
                 product=ProductType.OPTIONS,
                 trading_mode=TradingMode.LIVE,
+                reduce_only=True,
             )
             order = await self.oms.create_order_intent(intent)
             target.exit_order_id = order.order_id
