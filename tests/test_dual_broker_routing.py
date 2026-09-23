@@ -261,6 +261,13 @@ async def test_oms_accepts_repeated_partial_fill_progress(tmp_path: Path):
         to_state=OrderState.PARTIALLY_FILLED,
     )
 
+    fill_events = []
+
+    async def capture_fill(envelope):
+        fill_events.append(envelope.payload)
+
+    await bus.subscribe(Topics.BROKER_TRADE_EVENT, capture_fill)
+
     await bus.publish(
         EventEnvelope(
             topic=Topics.BROKER_ORDER_EVENT,
@@ -282,6 +289,9 @@ async def test_oms_accepts_repeated_partial_fill_progress(tmp_path: Path):
     assert updated.filled_quantity == 40
     assert updated.remaining_quantity == 25
     assert updated.average_price == 100.75
+    assert len(fill_events) == 1
+    assert fill_events[0]["quantity"] == 20
+    assert fill_events[0]["price"] == 101.0
     await bus.stop()
 
 
