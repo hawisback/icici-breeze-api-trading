@@ -412,8 +412,6 @@ async def test_live_gate_defaults_to_configured_execution_broker(tmp_path: Path)
         live_allowed_accounts=[],
         kite_api_key=SecretStr("kite-key"),
         kite_api_secret=SecretStr("kite-secret"),
-        kite_api_key=SecretStr("kite-key"),
-        kite_api_secret=SecretStr("kite-secret"),
     )
     bus = InMemoryEventBus()
     await bus.start()
