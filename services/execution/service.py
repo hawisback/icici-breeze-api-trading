@@ -26,11 +26,13 @@ class ExecutionService:
         oms_service: OMSService,
         live_gate: Optional[LiveTradingGate] = None,
         event_bus: Optional[EventBus] = None,
+        live_account_id: str = "ICICI_PRIMARY",
     ) -> None:
         self.gateway = broker_gateway
         self.oms = oms_service
         self.bus = event_bus or get_event_bus()
         self.live_gate = live_gate or LiveTradingGate(event_bus=self.bus)
+        self.live_account_id = live_account_id
         self._processed_executions: set[str] = set()
 
     async def initialize(self) -> None:
@@ -55,9 +57,10 @@ class ExecutionService:
             logger.error("ExecutionService: Order %s not found in OMS", order_id)
             return
 
-        # Fail-Closed LIVE check at execution boundary
-        if order.trading_mode == TradingMode.LIVE:
-            authorized, reason = self.live_gate.validate_live_order(account_id="ICICI_PRIMARY")
+        # Fail-closed LIVE check at the final execution boundary. Reduce-only
+        # exits intentionally remain executable after authorization revocation.
+        if order.trading_mode == TradingMode.LIVE and not order.reduce_only:
+            authorized, reason = self.live_gate.validate_live_order(account_id=self.live_account_id)
             if not authorized:
                 logger.error("Execution blocked: LIVE trading unauthorized (%s)", reason)
                 await self.bus.publish(
