@@ -850,9 +850,22 @@ class StrategyDPaperMonitor:
                 if lifecycle.runner_exit_reason == "DATA_END"
                 else lifecycle.runner_exit_reason
             )
+            tracked["underlying_exit_time"] = (
+                None
+                if lifecycle.runner_exit_reason == "DATA_END"
+                else lifecycle.exit_time.isoformat()
+            )
+            tracked["underlying_realized_r"] = (
+                None
+                if lifecycle.runner_exit_reason == "DATA_END"
+                else lifecycle.realized_r
+            )
         else:
             tracked["current_underlying_stop"] = signal.initial_stop
             tracked["lifecycle_state"] = "OPEN_INITIAL_RISK"
+            tracked["underlying_exit_reason"] = None
+            tracked["underlying_exit_time"] = None
+            tracked["underlying_realized_r"] = None
 
         selected = tracked.get("selected_contract") or {}
         quote = await self._quote_for_contract(selected, now=now)
