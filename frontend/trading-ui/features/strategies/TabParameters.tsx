@@ -45,30 +45,30 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
         <div className="bg-slate-900/90 border border-violet-900/60 rounded-xl p-5 shadow-lg space-y-3">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-violet-300">Strategy C · Frozen Candidate</div>
+              <div className="text-xs font-bold uppercase tracking-wider text-violet-300">Strategy C · Validated Runtime</div>
               <div className="text-sm font-bold text-slate-100">DI Continuation V1</div>
             </div>
-            <span className="px-2 py-1 rounded text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/30">PAPER · READ ONLY</span>
+            <span className="px-2 py-1 rounded text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/30">{status.strategies.di_continuation.execution_mode || form.mode}</span>
           </div>
           <div className="grid grid-cols-2 gap-2 text-[10px]">
             <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Monitor</div><div className="font-bold text-slate-200">{strategyC?.status || "NOT_INITIALIZED"}</div></div>
-            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Live routing</div><div className="font-bold text-amber-300">LOCKED</div></div>
+            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Live routing</div><div className={`font-bold ${status.strategies.di_continuation.live_trading_allowed ? "text-rose-300" : "text-slate-400"}`}>{status.strategies.di_continuation.live_trading_allowed ? "ARMED / ALLOWED" : "DISARMED / SAFE"}</div></div>
             <div className="bg-slate-950 rounded p-2 col-span-2"><div className="text-slate-500">Candidate</div><div className="font-mono text-violet-300 truncate">{strategyC?.candidate_id || "--"}</div></div>
           </div>
-          <div className="text-[10px] text-slate-500">15m context → native 5m setup → native 1m trigger. Frozen lifecycle manages initial stop, breakeven, trailing stop, hard target, and forced exit.</div>
+          <div className="text-[10px] text-slate-500">15m context → native 5m setup → native 1m trigger. The frozen lifecycle is now executed through the shared ActiveTrade/risk/OMS pipeline.</div>
           {strategyC?.candidate_spec_fingerprint && <div className="text-[9px] text-slate-600 font-mono break-all">spec {strategyC.candidate_spec_fingerprint}</div>}
         </div>
         <div className="bg-slate-900/90 border border-fuchsia-900/60 rounded-xl p-5 shadow-lg space-y-3">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-fuchsia-300">Strategy D · Frozen Candidate</div>
+              <div className="text-xs font-bold uppercase tracking-wider text-fuchsia-300">Strategy D · Validated Runtime</div>
               <div className="text-sm font-bold text-slate-100">S&amp;R Momentum Breakout V2</div>
             </div>
-            <span className="px-2 py-1 rounded text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/30">PAPER · READ ONLY</span>
+            <span className="px-2 py-1 rounded text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/30">{status.strategies.sr_momentum_breakout.execution_mode || form.mode}</span>
           </div>
           <div className="grid grid-cols-2 gap-2 text-[10px]">
             <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Monitor</div><div className="font-bold text-slate-200">{strategyD?.status || "NOT_INITIALIZED"}</div></div>
-            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Live routing</div><div className="font-bold text-amber-300">LOCKED</div></div>
+            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Live routing</div><div className={`font-bold ${status.strategies.sr_momentum_breakout.live_trading_allowed ? "text-rose-300" : "text-slate-400"}`}>{status.strategies.sr_momentum_breakout.live_trading_allowed ? "ARMED / ALLOWED" : "DISARMED / SAFE"}</div></div>
             <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">RSI clearance</div><div className="font-bold text-fuchsia-300">CALL &gt; 62 · PUT &lt; 38</div></div>
             <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Range regime</div><div className="font-bold text-fuchsia-300">PD range / ATR &lt; 8</div></div>
             <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Initial stop</div><div className="font-bold text-rose-300">1.5 × ATR</div></div>
@@ -190,7 +190,7 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
               className="w-full accent-cyan-500 cursor-pointer"
             />
             <p className="text-[11px] text-slate-400 mt-1">
-              Strategy B uses this premium cap. Strategy A V3 ignores premium caps and selects options from its configured delta/expiry/liquidity bands.
+              Strategies B and D use the premium-cap selector. Strategies A and C use delta/expiry/liquidity selection because their risk is anchored to an underlying structural stop.
             </p>
           </div>
 
@@ -531,42 +531,31 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
             Strategy Tunables & Activation
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-200">
-              <input
-                type="checkbox"
-                checked={form.tunables.trend_pullback_enabled}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    tunables: {
-                      ...form.tunables,
-                      trend_pullback_enabled: e.target.checked,
-                    },
-                  })
-                }
-                className="rounded accent-cyan-500"
-              />
-              Enable Strategy A (Trend Pullback)
-            </label>
-
-            <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-200">
-              <input
-                type="checkbox"
-                checked={form.tunables.volatility_breakout_enabled}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    tunables: {
-                      ...form.tunables,
-                      volatility_breakout_enabled: e.target.checked,
-                    },
-                  })
-                }
-                className="rounded accent-cyan-500"
-              />
-              Enable Strategy B (Volatility Breakout)
-            </label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {([
+              ["trend_pullback_enabled", "Enable Strategy A (Trend Pullback)"],
+              ["volatility_breakout_enabled", "Enable Strategy B (Volatility Breakout)"],
+              ["di_continuation_enabled", "Enable Strategy C (DI Continuation)"],
+              ["sr_momentum_breakout_enabled", "Enable Strategy D (S&R Momentum)"],
+            ] as const).map(([key, label]) => (
+              <label key={key} className="flex items-center gap-2 cursor-pointer text-xs text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={form.tunables[key]}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      tunables: {
+                        ...form.tunables,
+                        [key]: e.target.checked,
+                      },
+                    })
+                  }
+                  className="rounded accent-cyan-500"
+                />
+                {label}
+              </label>
+            ))}
           </div>
 
           <div className="grid grid-cols-3 gap-3">
