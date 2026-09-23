@@ -3108,7 +3108,10 @@ class StrategyService:
                     "execution_mode": (
                         strategy_c_trade.mode.value
                         if strategy_c_trade is not None
-                        else self.config.mode.value
+                        else self._execution_mode_for_strategy(
+                            StrategyName.DI_CONTINUATION,
+                            OptionType.CALL,
+                        ).value
                     ),
                     "live_trading_allowed": bool(
                         self.config.tunables.di_continuation_enabled
@@ -3167,7 +3170,10 @@ class StrategyService:
                     "execution_mode": (
                         strategy_d_trade.mode.value
                         if strategy_d_trade is not None
-                        else self.config.mode.value
+                        else self._execution_mode_for_strategy(
+                            StrategyName.SR_MOMENTUM_BREAKOUT,
+                            OptionType.CALL,
+                        ).value
                     ),
                     "live_trading_allowed": bool(
                         self.config.tunables.sr_momentum_breakout_enabled
