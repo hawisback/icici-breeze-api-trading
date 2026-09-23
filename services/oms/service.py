@@ -238,6 +238,28 @@ class OMSService:
                 logger.error("Error in OMS outbox dispatcher: %s", e)
                 await asyncio.sleep(poll_interval_sec)
 
+    async def mark_order_submitting(self, order_id: str) -> Optional[BrokerOrder]:
+        """Durably reserve an approved order for one broker submission."""
+        order = await self.repo.get_order_by_id(order_id)
+        if order is None:
+            return None
+        if order.status == OrderState.SUBMITTING:
+            return order
+        if order.status != OrderState.APPROVED:
+            return order
+        OrderStateMachine.validate_transition(order.status, OrderState.SUBMITTING, "Execution reserved")
+        updated = order.model_copy(
+            update={"status": OrderState.SUBMITTING, "updated_at": utc_now()}
+        )
+        await self.repo.save_broker_order_with_transition(
+            order=updated,
+            from_state=order.status,
+            to_state=OrderState.SUBMITTING,
+            reason="Execution service reserved broker submission",
+            outbox_topic=Topics.ORDER_STATE,
+        )
+        return updated
+
     async def get_order(self, order_id: str) -> Optional[BrokerOrder]:
         return await self.repo.get_order_by_id(order_id)
 
