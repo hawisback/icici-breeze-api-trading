@@ -159,24 +159,6 @@ class ExecutionService:
             "execution_broker": order.execution_broker or self.gateway.active_broker_name,
         }
         await self.bus.publish(EventEnvelope(topic=Topics.BROKER_ORDER_EVENT, payload=payload))
-        if str(status).upper() == "FILLED" and filled_quantity > 0:
-            await self.bus.publish(
-                EventEnvelope(
-                    topic=Topics.BROKER_TRADE_EVENT,
-                    payload={
-                        "order_id": order.order_id,
-                        "client_order_id": order.client_order_id,
-                        "instrument_id": order.instrument_id,
-                        "symbol": order.symbol,
-                        "side": order.side.value,
-                        "quantity": filled_quantity,
-                        "price": average_price,
-                        "trading_mode": order.trading_mode.value,
-                        "execution_broker": order.execution_broker or self.gateway.active_broker_name,
-                        "execution_time": utc_now().isoformat(),
-                    },
-                )
-            )
 
     async def _reconciliation_loop(self, interval_sec: float) -> None:
         while self._reconciliation_running:
