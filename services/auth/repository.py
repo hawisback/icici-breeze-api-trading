@@ -98,7 +98,10 @@ class AuthRepository:
             count = row[0] if row else 0
 
         if count > 0:
-            if self.settings.app_env == AppEnv.PRODUCTION:
+            if (
+                self.settings.app_env == AppEnv.PRODUCTION
+                or self.settings.live_trading_enabled
+            ):
                 known_defaults = {
                     "admin": "Admin@Trading123!",
                     "operator": "Operator@Trading123!",
@@ -128,10 +131,13 @@ class AuthRepository:
                     )
             return
 
-        if self.settings.app_env == AppEnv.PRODUCTION:
+        if (
+            self.settings.app_env == AppEnv.PRODUCTION
+            or self.settings.live_trading_enabled
+        ):
             raise RuntimeError(
-                "Production auth.db has no users. Predictable bootstrap credentials are disabled; "
-                "provision production users before starting the live platform."
+                "Live-capable auth.db has no users. Predictable bootstrap credentials are disabled; "
+                "provision non-default users before starting the live platform."
             )
 
         logger.info("Seeding default bootstrap users into auth.db for non-production use only...")
