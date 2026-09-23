@@ -205,6 +205,7 @@ async def initialize_services(
         repository=portfolio_repo, market_data_service=market_svc, event_bus=bus
     )
     await portfolio_svc.initialize()
+    risk_svc.set_portfolio_service(portfolio_svc)
 
     strategy_repo = StrategyRepository(db_path=app_settings.strategy_db_path)
     strategy_svc = StrategyService(
