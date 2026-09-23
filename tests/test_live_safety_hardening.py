@@ -1,0 +1,336 @@
+"""Regression coverage for live-trading safety hardening."""
+
+import asyncio
+
+import httpx
+import pytest
+
+from libs.broker_models.adapter import BrokerOrderResponse
+from libs.config.settings import PlatformSettings
+from libs.contracts.models import (
+    OrderIntent,
+    OrderSide,
+    OrderState,
+    OrderType,
+    SystemMode,
+    TradingMode,
+)
+from libs.events.bus import InMemoryEventBus
+from services.api_gateway.main import app
+from services.api_gateway.service_container import initialize_services
+from services.auth.repository import AuthRepository
+from services.broker_gateway.service import BrokerGatewayService
+from services.execution.service import ExecutionService
+from services.oms.repository import OMSRepository
+from services.oms.service import OMSService
+from services.risk.live_gate import LiveTradingGate
+from services.risk.repository import RiskRepository
+from services.risk.service import RiskService
+from services.strategy.models import MarketFeatures
+from services.strategy.service import StrategyService
+
+
+async def _wait_for_order_state(oms: OMSService, order_id: str, state: OrderState):
+    latest = None
+    for _ in range(50):
+        latest = await oms.get_order(order_id)
+        if latest and latest.status == state:
+            return latest
+        await asyncio.sleep(0.02)
+    return latest
+
+
+class _FakeLiveAdapter:
+    def __init__(self) -> None:
+        self.place_calls = 0
+        self.reconcile_response = None
+
+    async def place_order(self, request):
+        self.place_calls += 1
+        return BrokerOrderResponse(
+            success=True,
+            broker_order_id="LIVE-ORDER-1",
+            client_order_id=request.client_order_id,
+            status="PLACED",
+        )
+
+    async def get_order_status(self, broker_order_id: str):
+        return self.reconcile_response
+
+    async def get_trades(self):
+        return []
+
+    async def get_positions(self):
+        return []
+
+    async def get_funds(self):
+        raise AssertionError("funds are not used in this test")
+
+    async def modify_order(self, *args, **kwargs):
+        raise AssertionError("modify_order is not used in this test")
+
+    async def cancel_order(self, *args, **kwargs):
+        raise AssertionError("cancel_order is not used in this test")
+
+
+@pytest.mark.asyncio
+async def test_reduce_only_exit_survives_closed_live_gate_and_reconciles(tmp_path):
+    bus = InMemoryEventBus()
+    await bus.start()
+    settings = PlatformSettings(
+        data_root=str(tmp_path),
+        live_trading_enabled=False,
+        live_allowed_accounts=["ICICI_PRIMARY"],
+    )
+    gate = LiveTradingGate(settings=settings, event_bus=bus)
+
+    oms = OMSService(
+        repository=OMSRepository(tmp_path / "oms.db"),
+        event_bus=bus,
+    )
+    await oms.initialize()
+    risk = RiskService(
+        repository=RiskRepository(tmp_path / "risk.db"),
+        event_bus=bus,
+        live_gate=gate,
+    )
+    await risk.initialize()
+
+    adapter = _FakeLiveAdapter()
+    gateway = BrokerGatewayService(
+        breeze_adapter=adapter,  # type: ignore[arg-type]
+        settings=settings,
+    )
+    execution = ExecutionService(
+        broker_gateway=gateway,
+        oms_service=oms,
+        live_gate=gate,
+        event_bus=bus,
+    )
+    await execution.initialize()
+
+    intent = OrderIntent(
+        instrument_id="INST-NIFTY-TEST-CE",
+        symbol="NIFTYTESTCE",
+        side=OrderSide.SELL,
+        order_type=OrderType.LIMIT,
+        quantity=65,
+        price=100.0,
+        trading_mode=TradingMode.LIVE,
+        reduce_only=True,
+    )
+    created = await oms.create_order_intent(intent)
+    opened = await _wait_for_order_state(oms, created.order_id, OrderState.OPEN)
+
+    assert opened is not None
+    assert opened.reduce_only is True
+    assert adapter.place_calls == 1
+    assert gate.is_live_active() is False
+
+    # Replaying the execution command after the durable state transition must
+    # never submit the broker order a second time.
+    await execution.execute_order(created.order_id, created.client_order_id)
+    assert adapter.place_calls == 1
+
+    adapter.reconcile_response = BrokerOrderResponse(
+        success=True,
+        broker_order_id="LIVE-ORDER-1",
+        client_order_id=created.client_order_id,
+        status="COMPLETE",
+        filled_quantity=65,
+        average_price=98.5,
+    )
+    await execution.reconcile_live_orders()
+    filled = await _wait_for_order_state(oms, created.order_id, OrderState.FILLED)
+
+    assert filled is not None
+    assert filled.filled_quantity == 65
+    assert filled.average_price == 98.5
+
+    await execution.stop()
+    await bus.stop()
+
+
+@pytest.mark.asyncio
+async def test_exit_only_and_halted_allow_only_explicit_reductions(tmp_path):
+    bus = InMemoryEventBus()
+    await bus.start()
+    gate = LiveTradingGate(
+        settings=PlatformSettings(data_root=str(tmp_path), live_trading_enabled=False),
+        event_bus=bus,
+    )
+    risk = RiskService(
+        repository=RiskRepository(tmp_path / "risk.db"),
+        event_bus=bus,
+        live_gate=gate,
+    )
+    await risk.initialize()
+
+    reduce_exit = OrderIntent(
+        instrument_id="INST-NIFTY-TEST-CE",
+        symbol="NIFTYTESTCE",
+        side=OrderSide.SELL,
+        quantity=65,
+        price=101.0,
+        trading_mode=TradingMode.LIVE,
+        reduce_only=True,
+    )
+    closed_gate_decision = await risk.evaluate_intent(reduce_exit)
+    assert closed_gate_decision.approved is True
+
+    invalid_reduce = reduce_exit.model_copy(
+        update={
+            "intent_id": "INVALID-REDUCE-BUY",
+            "side": OrderSide.BUY,
+            "price": 102.0,
+        }
+    )
+    invalid_decision = await risk.evaluate_intent(invalid_reduce)
+    assert invalid_decision.approved is False
+    assert invalid_decision.rule_name == "INVALID_REDUCE_ONLY"
+
+    await risk.set_system_mode(SystemMode.EXIT_ONLY)
+    opening_sell = OrderIntent(
+        instrument_id="INST-NIFTY-TEST-PE",
+        symbol="NIFTYTESTPE",
+        side=OrderSide.SELL,
+        quantity=65,
+        price=103.0,
+        trading_mode=TradingMode.PAPER,
+    )
+    blocked = await risk.evaluate_intent(opening_sell)
+    assert blocked.approved is False
+    assert blocked.rule_name == "EXIT_ONLY"
+
+    exit_only_reduction = reduce_exit.model_copy(
+        update={"intent_id": "EXIT-ONLY-REDUCTION", "price": 104.0}
+    )
+    allowed = await risk.evaluate_intent(exit_only_reduction)
+    assert allowed.approved is True
+
+    await risk.set_system_mode(SystemMode.HALTED)
+    halted_reduction = reduce_exit.model_copy(
+        update={"intent_id": "HALTED-REDUCTION", "price": 105.0}
+    )
+    allowed_halted = await risk.evaluate_intent(halted_reduction)
+    assert allowed_halted.approved is True
+
+    halted_entry = OrderIntent(
+        instrument_id="INST-NIFTY-TEST-CE",
+        symbol="NIFTYTESTCE",
+        side=OrderSide.BUY,
+        quantity=65,
+        price=106.0,
+        trading_mode=TradingMode.PAPER,
+    )
+    denied_halted = await risk.evaluate_intent(halted_entry)
+    assert denied_halted.approved is False
+    assert denied_halted.rule_name == "SYSTEM_HALTED"
+
+    await bus.stop()
+
+
+@pytest.mark.asyncio
+async def test_strategy_kill_switch_still_manages_existing_positions():
+    class _Oms:
+        pass
+
+    service = StrategyService(oms_service=_Oms())  # type: ignore[arg-type]
+    service.config.kill_switch = True
+    fake_trade = object()
+    managed = []
+
+    async def gather():
+        return MarketFeatures(spot_price=24000.0)
+
+    async def get_active_trades():
+        return [fake_trade]
+
+    async def manage(trade, features):
+        managed.append((trade, features.spot_price))
+
+    async def no_save():
+        return None
+
+    async def observe(**kwargs):
+        return {"status": "DISABLED"}
+
+    service._gather_features = gather  # type: ignore[method-assign]
+    service.repo.get_active_trades = get_active_trades  # type: ignore[method-assign]
+    service._evaluate_active_trade = manage  # type: ignore[method-assign]
+    service._save_runtime = no_save  # type: ignore[method-assign]
+    service.strategy_c_shadow.observe = observe  # type: ignore[method-assign]
+    service.strategy_d_paper.observe = observe  # type: ignore[method-assign]
+
+    result = await service._evaluate_cycle()
+
+    assert result["status"] == "HALTED_KILL_SWITCH"
+    assert result["active_positions_managed"] == 1
+    assert managed == [(fake_trade, 24000.0)]
+
+
+@pytest.mark.asyncio
+async def test_internal_http_broker_writes_are_not_a_bypass(tmp_path):
+    settings = PlatformSettings(data_root=str(tmp_path), live_trading_enabled=False)
+    container = await initialize_services(settings=settings, force_reinit=True)
+    transport = httpx.ASGITransport(app=app)
+
+    payload = {
+        "request_id": "REQ-DIRECT-BYPASS",
+        "account_id": "ICICI_PRIMARY",
+        "instrument": {
+            "exchange": "NFO",
+            "stock_code": "NIFTY",
+            "product_type": "options",
+        },
+        "side": "BUY",
+        "quantity": 65,
+        "order_style": "LIMIT",
+        "limit_price": "100.00",
+        "client_reference": "DIRECT-BYPASS",
+    }
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        unauth = await client.post("/internal/v1/orders", json=payload)
+        assert unauth.status_code == 401
+
+        login = await client.post(
+            "/api/v1/auth/login",
+            json={"username": "operator", "password": "Operator@Trading123!"},
+        )
+        assert login.status_code == 200
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        blocked = await client.post(
+            "/internal/v1/orders",
+            json=payload,
+            headers=headers,
+        )
+        assert blocked.status_code == 403
+        assert "Direct broker writes are disabled" in blocked.json()["detail"]
+
+    await container.strategy_svc.stop()
+    await container.exec_svc.stop()
+    await container.market_svc.stop_simulated_feed()
+    await container.oms_svc.stop_outbox_worker()
+    await container.event_bus.stop()
+
+
+@pytest.mark.asyncio
+async def test_production_auth_db_refuses_predictable_bootstrap_users(tmp_path):
+    settings = PlatformSettings(
+        app_env="production",
+        data_root=str(tmp_path),
+        event_bus_backend="redpanda",
+        redpanda_brokers="localhost:19092",
+        market_data_backend="breeze",
+        breeze_api_key="prod-key",
+        breeze_secret_key="prod-secret",
+        auth_signing_key="a-production-signing-key-that-is-not-a-default",
+    )
+    repo = AuthRepository(
+        db_path=tmp_path / "auth.db",
+        settings=settings,
+    )
+
+    with pytest.raises(RuntimeError, match="Predictable bootstrap credentials are disabled"):
+        await repo.initialize()
