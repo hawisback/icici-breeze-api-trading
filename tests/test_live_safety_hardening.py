@@ -380,6 +380,10 @@ async def test_live_enabled_rejects_existing_known_bootstrap_passwords(tmp_path)
         data_root=str(tmp_path),
         live_trading_enabled=True,
         live_allowed_accounts=["ICICI_PRIMARY"],
+        auth_signing_key="live-test-signing-key-that-is-not-default",
+        market_data_backend="breeze",
+        breeze_api_key="live-test-key",
+        breeze_secret_key="live-test-secret",
     )
     live_repo = AuthRepository(
         db_path=tmp_path / "auth-existing.db",
