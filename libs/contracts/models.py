@@ -149,6 +149,15 @@ class OrderIntent(BaseDomainModel):
     source: SourceType = SourceType.MANUAL
     instrument_id: str
     symbol: str
+    # Broker-neutral execution identity. symbol is the display/tradingsymbol;
+    # stock_code/expiry/strike/right preserve the derivative contract identity
+    # required by brokers such as Breeze.
+    execution_broker: Optional[str] = None
+    stock_code: Optional[str] = None
+    exchange_code: str = "NFO"
+    expiry_date: Optional[str] = None
+    strike_price: Optional[float] = None
+    option_right: Optional[OptionRight] = None
     side: OrderSide
     order_type: OrderType = OrderType.LIMIT
     quantity: int
@@ -179,6 +188,12 @@ class BrokerOrder(BaseDomainModel):
     broker_order_id: Optional[str] = None
     instrument_id: str
     symbol: str
+    execution_broker: Optional[str] = None
+    stock_code: Optional[str] = None
+    exchange_code: str = "NFO"
+    expiry_date: Optional[str] = None
+    strike_price: Optional[float] = None
+    option_right: Optional[OptionRight] = None
     side: OrderSide
     order_type: OrderType
     quantity: int
