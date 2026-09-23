@@ -286,6 +286,7 @@ export interface CandidatePaperStatusData {
   paper_net_pnl?: number;
   active_candidate_trade?: Record<string, any> | null;
   active_paper_trade?: Record<string, any> | null;
+  paper_trades?: Record<string, any>[];
   latest_signal?: Record<string, any> | null;
   market?: Record<string, any> | null;
   [key: string]: any;
