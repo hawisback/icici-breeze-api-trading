@@ -58,6 +58,10 @@ from services.strategy.reason_codes import (
 )
 from services.strategy.repository import StrategyRepository
 from services.strategy.simulation import SimulationEngine
+from services.strategy.strategies.candidate_runtime import (
+    strategy_c_signal_from_status,
+    strategy_d_signal_from_status,
+)
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 from services.strategy.strategy_c_shadow_monitor import StrategyCShadowMonitor
@@ -344,17 +348,43 @@ class StrategyService:
     def _is_strategy_a(strategy: StrategyName) -> bool:
         return strategy == StrategyName.TREND_PULLBACK
 
+    @staticmethod
+    def _is_candidate_execution_strategy(strategy: StrategyName) -> bool:
+        return strategy in {
+            StrategyName.DI_CONTINUATION,
+            StrategyName.SR_MOMENTUM_BREAKOUT,
+        }
+
+    @staticmethod
+    def _uses_delta_aware_selector(strategy: StrategyName) -> bool:
+        return strategy in {
+            StrategyName.TREND_PULLBACK,
+            StrategyName.DI_CONTINUATION,
+        }
+
+    @staticmethod
+    def _uses_underlying_risk_sizing(strategy: StrategyName) -> bool:
+        return strategy in {
+            StrategyName.TREND_PULLBACK,
+            StrategyName.DI_CONTINUATION,
+        }
+
     def _execution_mode_for_strategy(
         self,
         strategy: StrategyName,
         option_type: OptionType,
     ) -> AutoTradingMode:
-        """Resolve execution mode while validation candidates remain non-live."""
+        """Resolve execution mode for the selected first-class strategy.
+
+        Strategies C and D follow the configured engine mode. LIVE routing
+        remains protected by the platform live-trading flag, system arming,
+        kill switch, and all shared risk/session gates.
+        """
         if strategy in {
             StrategyName.DI_CONTINUATION,
             StrategyName.SR_MOMENTUM_BREAKOUT,
         }:
-            return AutoTradingMode.PAPER
+            return self.config.mode
         if self._is_strategy_a(strategy):
             return (
                 AutoTradingMode.SHADOW_ONLY
@@ -369,7 +399,7 @@ class StrategyService:
         return self.config.mode
 
     def _execution_mode_for_signal(self, signal: StrategySignal) -> AutoTradingMode:
-        """Resolve signal execution while keeping Strategy B non-live during validation."""
+        """Resolve the execution mode for a common strategy signal."""
         return self._execution_mode_for_strategy(signal.strategy, signal.option_type)
 
     def _paper_slippage(self) -> float:
