@@ -27,7 +27,7 @@ from libs.contracts.models import (
     TradingMode,
     utc_now,
 )
-from libs.events.bus import InMemoryEventBus, Topics
+from libs.events.bus import EventEnvelope, InMemoryEventBus, Topics
 from services.broker_gateway.service import BrokerGatewayService
 from services.execution.service import ExecutionService
 from services.oms.repository import OMSRepository
@@ -220,4 +220,66 @@ async def test_reconciliation_uses_order_owning_broker(tmp_path: Path):
     assert reconciled.status == OrderState.FILLED
     assert reconciled.filled_quantity == 65
     assert reconciled.average_price == 101.5
+    await bus.stop()
+
+
+@pytest.mark.asyncio
+async def test_oms_accepts_repeated_partial_fill_progress(tmp_path: Path):
+    bus = InMemoryEventBus()
+    await bus.start()
+    repo = OMSRepository(db_path=tmp_path / "oms-partial.db")
+    oms = OMSService(repository=repo, event_bus=bus)
+    await oms.initialize()
+
+    intent = OrderIntent(
+        correlation_id="trade-partial",
+        instrument_id="INST-NIFTY-2026-09-29-25000-CE",
+        symbol="NIFTY26SEP25000CE",
+        execution_broker="kite",
+        stock_code="NIFTY26SEP25000CE",
+        expiry_date="2026-09-29",
+        strike_price=25000.0,
+        option_right=OptionRight.CALL,
+        side=OrderSide.BUY,
+        quantity=65,
+        price=100.0,
+        trading_mode=TradingMode.LIVE,
+    )
+    order = await oms.create_order_intent(intent)
+    partial = order.model_copy(
+        update={
+            "broker_order_id": "KITE-PARTIAL",
+            "status": OrderState.PARTIALLY_FILLED,
+            "filled_quantity": 20,
+            "remaining_quantity": 45,
+            "average_price": 100.5,
+        }
+    )
+    await repo.save_broker_order_with_transition(
+        partial,
+        from_state=OrderState.VALIDATING,
+        to_state=OrderState.PARTIALLY_FILLED,
+    )
+
+    await bus.publish(
+        EventEnvelope(
+            topic=Topics.BROKER_ORDER_EVENT,
+            payload={
+                "client_order_id": order.client_order_id,
+                "broker_order_id": "KITE-PARTIAL",
+                "status": "PARTIALLY_FILLED",
+                "filled_quantity": 40,
+                "average_price": 100.75,
+                "execution_broker": "kite",
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    updated = await repo.get_order_by_id(order.order_id)
+    assert updated is not None
+    assert updated.status == OrderState.PARTIALLY_FILLED
+    assert updated.filled_quantity == 40
+    assert updated.remaining_quantity == 25
+    assert updated.average_price == 100.75
     await bus.stop()
