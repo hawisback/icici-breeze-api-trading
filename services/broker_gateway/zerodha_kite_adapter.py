@@ -142,6 +142,48 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             "lot_size": int(row.get("lot_size") or 1), "tick_size": float(row.get("tick_size") or 0.05),
         }
 
+    async def resolve_option_contract(
+        self,
+        *,
+        underlying: str,
+        expiry: str,
+        strike: float,
+        right: str,
+    ) -> Optional[dict[str, object]]:
+        """Resolve canonical option identity to Kite's exact NFO tradingsymbol."""
+        if not self.is_active:
+            return None
+        if self._nfo_instruments is None:
+            self._nfo_instruments = await self._run(lambda: self._kite.instruments("NFO"))
+        clean = "BANKNIFTY" if "BANK" in underlying.upper() else "NIFTY"
+        right_code = "CE" if str(right).upper() in {"CALL", "CE"} else "PE"
+        target_expiry = str(expiry)[:10]
+        target_strike = float(strike)
+        for row in self._nfo_instruments or []:
+            if str(row.get("name", "")).upper() != clean:
+                continue
+            if str(row.get("expiry", ""))[:10] != target_expiry:
+                continue
+            if str(row.get("instrument_type", "")).upper() != right_code:
+                continue
+            try:
+                row_strike = float(row.get("strike") or 0)
+            except (TypeError, ValueError):
+                continue
+            if abs(row_strike - target_strike) > 1e-6:
+                continue
+            return {
+                "underlying": clean,
+                "expiry": target_expiry,
+                "strike": row_strike,
+                "right": right_code,
+                "tradingsymbol": str(row.get("tradingsymbol") or ""),
+                "instrument_token": str(row.get("instrument_token") or ""),
+                "lot_size": int(row.get("lot_size") or 1),
+                "tick_size": float(row.get("tick_size") or 0.05),
+            }
+        return None
+
     async def get_option_expiries(self, underlying: str = "NIFTY") -> list[str]:
         if not self.is_active:
             return []
