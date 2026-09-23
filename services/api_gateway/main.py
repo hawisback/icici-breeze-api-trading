@@ -1083,7 +1083,10 @@ async def get_strategy_config():
 
 
 @app.post("/api/v1/strategies/config")
-async def update_strategy_config(config_data: dict[str, Any]):
+async def update_strategy_config(
+    config_data: dict[str, Any],
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     try:
         cfg = AutoTradingConfig.model_validate(config_data)
@@ -1094,28 +1097,39 @@ async def update_strategy_config(config_data: dict[str, Any]):
 
 
 @app.post("/api/v1/strategies/arm")
-async def arm_strategy_system(req: StrategyArmRequest):
+async def arm_strategy_system(
+    req: StrategyArmRequest,
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     updated = await services.strategy_svc.arm_system(req.armed)
     return {"status": "SUCCESS", "config": updated.model_dump(mode="json")}
 
 
 @app.post("/api/v1/strategies/auto-trade")
-async def set_strategy_auto_trade(req: StrategyAutoTradeRequest):
+async def set_strategy_auto_trade(
+    req: StrategyAutoTradeRequest,
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     updated = await services.strategy_svc.set_auto_trade(req.enabled)
     return {"status": "SUCCESS", "config": updated.model_dump(mode="json")}
 
 
 @app.post("/api/v1/strategies/kill-switch")
-async def toggle_strategy_kill_switch(req: StrategyKillSwitchRequest):
+async def toggle_strategy_kill_switch(
+    req: StrategyKillSwitchRequest,
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     updated = await services.strategy_svc.toggle_kill_switch(req.active)
     return {"status": "SUCCESS", "config": updated.model_dump(mode="json")}
 
 
 @app.post("/api/v1/strategies/evaluate-now")
-async def evaluate_strategy_now():
+async def evaluate_strategy_now(
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     result = await services.strategy_svc.evaluate_cycle()
     return {"status": "SUCCESS", "result": result}
@@ -1140,7 +1154,11 @@ async def get_strategy_eod_report(session_date: Optional[str] = Query(default=No
 
 
 @app.post("/api/v1/strategies/trades/{trade_id}/exit")
-async def exit_strategy_trade(trade_id: str, req: StrategyExitRequest = StrategyExitRequest()):
+async def exit_strategy_trade(
+    trade_id: str,
+    req: StrategyExitRequest = StrategyExitRequest(),
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     exited = await services.strategy_svc.manual_exit_trade(trade_id, reason=req.reason or "MANUAL_UI_EXIT")
     if not exited:
@@ -1163,7 +1181,10 @@ async def get_strategy_overrides():
 
 
 @app.post("/api/v1/strategies/overrides")
-async def update_strategy_overrides(req: StrategyOverridesRequest):
+async def update_strategy_overrides(
+    req: StrategyOverridesRequest,
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     overrides = ThresholdOverrides(**req.model_dump())
     updated = await services.strategy_svc.update_overrides(overrides)
@@ -1171,14 +1192,19 @@ async def update_strategy_overrides(req: StrategyOverridesRequest):
 
 
 @app.post("/api/v1/strategies/overrides/reset")
-async def reset_strategy_overrides():
+async def reset_strategy_overrides(
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     reset = await services.strategy_svc.reset_overrides()
     return {"status": "SUCCESS", "overrides": reset.model_dump(mode="json")}
 
 
 @app.post("/api/v1/strategies/force-entry")
-async def force_strategy_entry(req: StrategyForceEntryRequest):
+async def force_strategy_entry(
+    req: StrategyForceEntryRequest,
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     res = await services.strategy_svc.force_entry(
         strategy=req.strategy,
