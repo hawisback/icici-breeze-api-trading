@@ -1,8 +1,8 @@
 """Strategy D: Support & Resistance Momentum Breakout.
 
-This module is intentionally isolated from the production Strategy A/B/C
-scheduler. It contains the deterministic Strategy D V1 signal contract and
-underlying lifecycle used by the read-only Breeze backtest harness.
+This module contains the deterministic Strategy D signal contract and frozen
+underlying lifecycle used by research, paper observation, and the promoted
+StrategyService execution adapter.
 
 Execution contract:
 - NIFTY spot completed 5m candles provide PDH/PDL/pivot breakouts, RSI and ATR.
