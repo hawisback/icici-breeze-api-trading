@@ -30,6 +30,7 @@ class ExecutionService:
         live_account_id: str = "ICICI_PRIMARY",
         broker_session_service: Any = None,
         market_data_service: Any = None,
+        portfolio_service: Any = None,
         live_market_data_max_age_seconds: float = 5.0,
     ) -> None:
         self.gateway = broker_gateway
@@ -39,6 +40,7 @@ class ExecutionService:
         self.live_account_id = live_account_id
         self.broker_session_service = broker_session_service
         self.market_data_service = market_data_service
+        self.portfolio_service = portfolio_service
         self.live_market_data_max_age_seconds = float(
             live_market_data_max_age_seconds
         )
@@ -345,13 +347,42 @@ class ExecutionService:
         orders = [
             order
             for order in await self.oms.list_orders(limit=500)
-            if order.trading_mode == TradingMode.LIVE and order.status in pending_states
+            if order.trading_mode == TradingMode.LIVE
+            and (
+                order.status in pending_states
+                or order.status == OrderState.FILLED
+            )
         ]
         if not orders:
             return
 
         broker_trades = None
         for order in orders:
+            portfolio_filled = 0
+            if self.portfolio_service is not None:
+                portfolio_filled = (
+                    await self.portfolio_service.repo
+                    .get_executed_quantity_for_order(order.order_id)
+                )
+
+            # A crash may occur after OMS persisted FILLED but before Portfolio
+            # consumed the fill event. Recover that missing delta directly from
+            # the durable OMS broker evidence without resubmitting anything.
+            if order.status == OrderState.FILLED:
+                missing_fill = max(
+                    0,
+                    int(order.filled_quantity or 0) - portfolio_filled,
+                )
+                if missing_fill > 0:
+                    await self._publish_trade_fill(
+                        order=order,
+                        quantity=missing_fill,
+                        cumulative_filled_quantity=int(
+                            order.filled_quantity or 0
+                        ),
+                        price=float(order.average_price or order.price),
+                    )
+                continue
             try:
                 response: Optional[BrokerOrderResponse] = None
                 if order.broker_order_id:
@@ -407,7 +438,10 @@ class ExecutionService:
 
                 normalized_status = self._normalize_broker_status(response.status)
                 new_filled = int(response.filled_quantity or 0)
-                delta_fill = max(0, new_filled - order.filled_quantity)
+                # Portfolio fill progress, not only OMS state, determines the
+                # missing execution delta. This repairs a crash after OMS
+                # persisted the broker update but before Portfolio consumed it.
+                delta_fill = max(0, new_filled - portfolio_filled)
                 await self.bus.publish(
                     EventEnvelope(
                         topic=Topics.BROKER_ORDER_EVENT,
