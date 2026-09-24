@@ -275,6 +275,7 @@ class LoginRequest(BaseModel):
     session_token: str = ""
     access_token: Optional[str] = None
     account_id: str = "ICICI_PRIMARY"
+    broker: Optional[str] = Field(default=None, pattern=r"^(breeze|kite)$")
 
 
 class OrderRequest(BaseModel):
@@ -491,25 +492,40 @@ async def create_ws_ticket(current_user: UserPrincipal = Depends(get_current_use
 @app.get("/api/v1/broker/session/login-url")
 @app.get("/api/v1/session/login-url")
 async def get_session_login_url(
+    broker: Optional[str] = Query(default=None, pattern=r"^(breeze|kite)$"),
     current_user: UserPrincipal = Depends(
         require_roles(UserRole.ADMIN, UserRole.OPERATOR)
     ),
 ):
-    """Issue an authenticated, one-time broker login flow."""
+    """Issue a one-time login flow for either configured broker."""
     settings = get_platform_settings()
     services = get_services()
+    selected_broker = (
+        broker
+        or getattr(
+            services.gateway_svc,
+            "execution_broker_name",
+            settings.broker_backend.value,
+        )
+    )
     challenge = services.session_svc.issue_login_challenge(
         initiated_by=current_user.user_id,
+        broker_backend=selected_broker,
     )
     api_key_secret = (
         settings.kite_api_key
-        if settings.broker_backend.value == "kite"
+        if selected_broker == "kite"
         else settings.breeze_api_key
     )
     api_key = api_key_secret.get_secret_value() if api_key_secret else ""
     start_url = (
         "http://127.0.0.1:8000/api/v1/broker/session/start?"
-        + urlencode({"state": challenge["state"]})
+        + urlencode(
+            {
+                "state": challenge["state"],
+                "broker": selected_broker,
+            }
+        )
     )
     return {
         "login_url": start_url,
@@ -517,7 +533,7 @@ async def get_session_login_url(
         "callback_state": challenge["state"],
         "state_expires_at": challenge["expires_at"],
         "redirect_url_hint": "http://127.0.0.1:8000/api/v1/broker/session/callback",
-        "broker": settings.broker_backend.value,
+        "broker": selected_broker,
         "instructions": (
             "Open this URL in the broker login flow. The callback is accepted "
             "only for this short-lived, one-time authenticated login state."
@@ -527,18 +543,26 @@ async def get_session_login_url(
 
 @app.get("/api/v1/broker/session/start")
 @app.get("/api/v1/session/start")
-async def start_broker_session_login(state: str = Query(..., min_length=20)):
-    """Bootstrap browser correlation, then redirect to the official broker."""
+async def start_broker_session_login(
+    state: str = Query(..., min_length=20),
+    broker: Optional[str] = Query(default=None, pattern=r"^(breeze|kite)$"),
+):
+    """Bootstrap broker-specific correlation, then redirect to the official broker."""
     services = get_services()
-    if not services.session_svc.validate_login_challenge(state):
+    selected_broker = services.session_svc._normalize_broker(broker)
+    if not services.session_svc.validate_login_challenge(
+        state,
+        broker_backend=selected_broker,
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Broker login state is invalid or expired.",
+            detail="Broker login state is invalid, expired, or broker-mismatched.",
         )
 
-    settings = get_platform_settings()
-    login_url = services.session_svc.get_login_url()
-    if settings.broker_backend.value == "kite":
+    login_url = services.session_svc.get_login_url(
+        broker_backend=selected_broker,
+    )
+    if selected_broker == "kite":
         redirect_params = urlencode({"state": state})
         login_url += "&" + urlencode({"redirect_params": redirect_params})
 
@@ -558,9 +582,18 @@ async def start_broker_session_login(state: str = Query(..., min_length=20)):
 
 @app.get("/api/v1/broker/session/status")
 @app.get("/api/v1/session/status")
-async def get_session_status():
+async def get_session_status(
+    broker: Optional[str] = Query(default=None, pattern=r"^(breeze|kite)$"),
+):
     services = get_services()
-    return await services.session_svc.get_session_status()
+    if broker:
+        return await services.session_svc.get_session_status(broker)
+    execution = await services.session_svc.get_session_status()
+    execution["sessions"] = await services.session_svc.get_all_session_statuses()
+    execution["execution_broker"] = services.gateway_svc.execution_broker_name
+    execution["frequent_data_broker"] = services.gateway_svc.frequent_data_broker_name
+    execution["reference_data_broker"] = services.gateway_svc.reference_data_broker_name
+    return execution
 
 
 @app.post("/api/v1/broker/session/login")
@@ -578,6 +611,7 @@ async def session_login(
         session_token=req.session_token,
         access_token=req.access_token,
         account_id=req.account_id,
+        broker_backend=req.broker,
     )
     return result
 
@@ -599,7 +633,19 @@ async def broker_session_callback(
     and activates running broker sessions across all services.
     """
     settings = get_platform_settings()
-    is_kite = settings.broker_backend.value == "kite"
+    # The one-time challenge, not execution ownership, determines which broker
+    # this callback is authenticating.
+    raw_hint = (
+        request.query_params.get("broker")
+        or (
+            "kite"
+            if request_token
+            else "breeze"
+            if (apisession or session_token or token)
+            else None
+        )
+    )
+    is_kite = raw_hint == "kite"
     broker_display_name = "Kite" if is_kite else "ICICI Breeze"
     success_event_type = "KITE_SESSION_SUCCESS" if is_kite else "BREEZE_SESSION_SUCCESS"
     raw_token = request_token if is_kite else (apisession or session_token or token)
@@ -677,6 +723,15 @@ a {{ color: #38bdf8; text-decoration: none; }}
 <body><h1>Authentication Rejected</h1><p>{msg}</p></body></html>""",
         )
 
+    challenge_broker = str(
+        challenge.get("broker_backend")
+        or raw_hint
+        or settings.broker_backend.value
+    ).lower()
+    is_kite = challenge_broker == "kite"
+    broker_display_name = "Kite" if is_kite else "ICICI Breeze"
+    success_event_type = "KITE_SESSION_SUCCESS" if is_kite else "BREEZE_SESSION_SUCCESS"
+
     # 1. Update .env file directly and sync runtime PlatformSettings
     # Breeze can persist its callback token. Kite request tokens are one-time and
     # short-lived, so the exchanged access token is persisted after activation.
@@ -700,6 +755,7 @@ a {{ color: #38bdf8; text-decoration: none; }}
                 secret_key=secret_key,
                 session_token=token_clean,
                 account_id="ZERODHA_PRIMARY" if is_kite else "ICICI_PRIMARY",
+                broker_backend=challenge_broker,
             )
         except Exception as exc:
             logger.warning("Session service activation produced warning: %s", exc)
@@ -730,7 +786,7 @@ a {{ color: #38bdf8; text-decoration: none; }}
         return JSONResponse(
             content={
                 "status": "SUCCESS",
-                "message": f"{settings.broker_backend.value.title()} session token captured, persisted to .env, and activated.",
+                "message": f"{broker_display_name} session token captured, persisted to .env, and activated.",
                 "token_masked": masked,
                 "env_updated": env_updated,
                 "session": session_result,
