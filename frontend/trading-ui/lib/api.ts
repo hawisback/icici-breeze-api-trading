@@ -123,6 +123,8 @@ async function authenticatedFetch(
 export interface LiveGateStatus {
   live_authorized: boolean;
   system_setting_enabled: boolean;
+  local_single_user_mode?: boolean;
+  authorization_required?: boolean;
   expires_at: string | null;
   allowed_account_count: number;
   time_remaining_sec: number;
@@ -150,6 +152,8 @@ export interface SystemHealth {
   };
   config?: {
     broker_backend?: "breeze" | "kite";
+    local_single_user_mode?: boolean;
+    live_trading_enabled?: boolean;
     [key: string]: unknown;
   };
 }
@@ -955,6 +959,31 @@ export async function fetchStrategyConfig(): Promise<any> {
   const res = await fetch(`${API_BASE}/strategies/config`);
   if (!res.ok) throw new Error("Failed to fetch strategy config");
   return res.json();
+}
+
+export async function setLocalStrategyMode(
+  mode: "PAPER" | "SHADOW_ONLY" | "LIVE",
+): Promise<{
+  status: string;
+  mode: "PAPER" | "SHADOW_ONLY" | "LIVE";
+  system_armed: boolean;
+  auto_trade_enabled: boolean;
+  config: StrategyStatusData["config"];
+}> {
+  const res = await fetch(`${API_BASE}/strategies/mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof data.detail === "string"
+        ? data.detail
+        : "Failed to switch trading mode",
+    );
+  }
+  return data;
 }
 
 export async function updateStrategyConfig(config: any): Promise<any> {
