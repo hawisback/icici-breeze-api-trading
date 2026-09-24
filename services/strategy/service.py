@@ -158,6 +158,10 @@ class StrategyService:
             "status": "NOT_CHECKED",
             "issues": [],
         }
+        self._last_live_reconciliation: dict[str, Any] = {
+            "status": "NOT_CHECKED",
+            "issues": [],
+        }
         self.strategy_a_telemetry = StrategyATelemetryStore()
 
 
@@ -210,6 +214,7 @@ class StrategyService:
         orders: list[Any],
         broker_verified: bool,
         broker_error: str | None = None,
+        record_as_startup: bool = False,
     ) -> dict[str, Any]:
         """Compare durable local LIVE state with the broker before re-arming."""
         active_trades = await self.repo.get_active_trades()
@@ -354,7 +359,9 @@ class StrategyService:
                 for order in unresolved_orders
             ],
         }
-        self._startup_reconciliation = report
+        self._last_live_reconciliation = report
+        if record_as_startup:
+            self._startup_reconciliation = report
         return report
 
     def _reset_setups(self, at):
@@ -3422,6 +3429,7 @@ class StrategyService:
             "strategy_c_paper": self._last_strategy_c_shadow_status,
             "strategy_d_paper": self._last_strategy_d_paper_status,
             "startup_reconciliation": self._startup_reconciliation,
+            "live_reconciliation": self._last_live_reconciliation,
             "features": features.model_dump(mode="json"),
             "active_trades": [t.model_dump(mode="json") for t in active_trades],
             "signals": latest_signals,
