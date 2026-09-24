@@ -9,12 +9,47 @@ import logging
 import math
 import random
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from libs.contracts.models import Candle, Quote, utc_now
 from libs.events.bus import EventBus, EventEnvelope, Topics, get_event_bus
 from services.market_data.candle_builder import CandleBuilder
 
 logger = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _parse_exchange_quote_timestamp(value: Any) -> Optional[datetime]:
+    """Parse broker/exchange tick time without ever substituting local now."""
+    if isinstance(value, datetime):
+        parsed = value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=IST)
+        return parsed.astimezone(timezone.utc)
+    if value in (None, ""):
+        return None
+
+    text = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=IST)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        pass
+
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%d-%b-%Y %H:%M:%S",
+        "%d-%b-%Y %H:%M:%S.%f",
+    ):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=IST).astimezone(
+                timezone.utc
+            )
+        except ValueError:
+            continue
+    return None
 
 
 class MarketDataService:
@@ -118,7 +153,6 @@ class MarketDataService:
             return False
         try:
             sdk = client_mgr.get_sdk_client()
-            now = utc_now()
             synced_any = False
             for inst_id, symbol, code in [
                 ("INST-NIFTY-INDEX", "NIFTY 50", "NIFTY"),
@@ -132,15 +166,26 @@ class MarketDataService:
                 if rows and isinstance(rows, list):
                     row = rows[0]
                     lp = float(row.get("ltp") or 0.0)
-                    if lp > 0:
+                    exchange_timestamp = _parse_exchange_quote_timestamp(
+                        row.get("datetime")
+                        or row.get("quote_time")
+                        or row.get("ltt")
+                    )
+                    if lp > 0 and exchange_timestamp is not None:
                         await self.ingest_quote(Quote(
                             source="BREEZE", instrument_id=inst_id, symbol=symbol,
                             last_price=lp, open=float(row.get("open") or lp),
                             high=float(row.get("high") or lp), low=float(row.get("low") or lp),
                             close=lp, volume=int(row.get("total_quantity_traded") or 0),
-                            change_pct=float(row.get("ltp_percent_change") or 0.0), timestamp=now,
+                            change_pct=float(row.get("ltp_percent_change") or 0.0),
+                            timestamp=exchange_timestamp,
                         ))
                         synced_any = True
+                    elif lp > 0:
+                        logger.warning(
+                            "Breeze quote for %s omitted: broker timestamp missing/unparseable",
+                            inst_id,
+                        )
                 await asyncio.sleep(0.3)
             return synced_any
         except Exception as exc:
@@ -215,10 +260,11 @@ class MarketDataService:
                 continue
 
             source = str(getattr(quote, "source", "UNKNOWN") or "UNKNOWN").upper()
-            age_seconds = max(0.0, (now - quote.timestamp).total_seconds())
+            raw_age_seconds = (now - quote.timestamp).total_seconds()
+            age_seconds = max(0.0, raw_age_seconds)
             quotes[instrument_id] = {
                 "source": source,
-                "timestamp": quote.timestamp.isoformat(),
+                "exchange_timestamp": quote.timestamp.isoformat(),
                 "age_seconds": round(age_seconds, 3),
                 "last_price": float(quote.last_price or 0.0),
             }
@@ -226,9 +272,13 @@ class MarketDataService:
                 reasons.append(f"NON_REAL_QUOTE:{instrument_id}:{source}")
             if quote.last_price <= 0:
                 reasons.append(f"INVALID_QUOTE_PRICE:{instrument_id}")
+            if raw_age_seconds < -1.0:
+                reasons.append(
+                    f"FUTURE_EXCHANGE_TIMESTAMP:{instrument_id}:{raw_age_seconds:.3f}s"
+                )
             if age_seconds > max_age_seconds:
                 reasons.append(
-                    f"STALE_QUOTE:{instrument_id}:{age_seconds:.3f}s"
+                    f"STALE_EXCHANGE_QUOTE:{instrument_id}:{age_seconds:.3f}s"
                 )
 
         return {
