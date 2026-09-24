@@ -117,3 +117,21 @@ def test_safe_database_path_derivation(tmp_path):
     assert settings.broker_session_db_path == tmp_path / "broker-session" / "broker_session.db"
     assert settings.instruments_db_path == tmp_path / "instruments" / "instruments.db"
 
+
+def test_local_single_user_mode_requires_loopback_host():
+    with pytest.raises(
+        ValueError,
+        match="LOCAL_SINGLE_USER_MODE=true requires API_HOST to be loopback",
+    ):
+        PlatformSettings(
+            local_single_user_mode=True,
+            api_host="0.0.0.0",
+        )
+
+    settings = PlatformSettings(
+        local_single_user_mode=True,
+        api_host="127.0.0.1",
+    )
+    assert settings.local_single_user_mode is True
+    assert settings.get_redacted_summary()["local_single_user_mode"] is True
+
