@@ -643,6 +643,14 @@ def _execution_cycle_service(at, *, selected_contract=None, sizing=None):
         source="BREEZE",
     )
     service._market_snapshot = ([], [], [candle])
+    service._market_data_status.update({
+        "execution_feed_healthy": True,
+        "execution_feed_reasons": [],
+        "strategy_a_signal_data_fresh": True,
+        "strategy_b_signal_data_fresh": True,
+        "strategy_a_option_execution_ready": True,
+        "strategy_a_option_execution_reason": None,
+    })
     service.strategy_a = _armed_execution_strategy(at)
     service._get_option_chain = AsyncMock(return_value={"source": "BREEZE", "contracts": []})
     if selected_contract is None:
