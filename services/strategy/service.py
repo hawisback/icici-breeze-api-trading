@@ -896,6 +896,31 @@ class StrategyService:
     async def get_config(self) -> AutoTradingConfig:
         return self.config
 
+    async def set_execution_mode(
+        self,
+        mode: AutoTradingMode,
+    ) -> AutoTradingConfig:
+        """Switch PAPER/SHADOW/LIVE authority while forcing the system disarmed."""
+        if mode == AutoTradingMode.DISABLED:
+            raise ValueError("DISABLED is not available from the trading-mode switch.")
+
+        active_trades = await self.repo.get_active_trades()
+        if active_trades and mode != self.config.mode:
+            raise ValueError(
+                "Cannot switch trading mode while positions are active."
+            )
+
+        if self.config.system_armed:
+            await self.arm_system(False)
+
+        updated = self.config.model_copy(
+            update={
+                "mode": mode,
+                "system_armed": False,
+            }
+        )
+        return await self.update_config(updated)
+
     async def update_config(self, new_config: AutoTradingConfig) -> AutoTradingConfig:
         # Mode transitions with active positions are never safe because the
         # lifecycle authority must remain stable until those positions close.
