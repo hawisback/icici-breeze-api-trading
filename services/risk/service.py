@@ -38,8 +38,11 @@ class RiskService:
         live_account_id: str = "ICICI_PRIMARY",
         portfolio_service: Any = None,
         broker_gateway: Any = None,
+        broker_session_service: Any = None,
+        market_data_service: Any = None,
         live_max_order_notional: float = 50000.0,
         live_max_open_positions: int = 1,
+        live_market_data_max_age_seconds: float = 5.0,
     ) -> None:
         self.repo = repository or RiskRepository()
         self.bus = event_bus or get_event_bus()
@@ -48,8 +51,13 @@ class RiskService:
         self.live_account_id = live_account_id
         self.portfolio_service = portfolio_service
         self.broker_gateway = broker_gateway
+        self.broker_session_service = broker_session_service
+        self.market_data_service = market_data_service
         self.live_max_order_notional = float(live_max_order_notional)
         self.live_max_open_positions = int(live_max_open_positions)
+        self.live_market_data_max_age_seconds = float(
+            live_market_data_max_age_seconds
+        )
         self._recent_orders: dict[str, datetime] = {}  # symbol:side:qty -> timestamp
         self._outbox_worker_task: Optional[asyncio.Task[None]] = None
         self._outbox_running = False
@@ -271,6 +279,61 @@ class RiskService:
                     reason=(
                         f"Reduce-only exit quantity {intent.quantity} exceeds "
                         f"verified long position {max(0, held_quantity)}"
+                    ),
+                    system_mode=system_mode,
+                )
+
+        # Operational LIVE-entry health is independent of strategy logic.
+        # Reduce-only exits intentionally bypass these checks so a disconnect
+        # or stale feed cannot trap an already-open position.
+        if intent.trading_mode == TradingMode.LIVE and not is_reduce_only_exit:
+            if self.broker_session_service is None:
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="LIVE_BROKER_SESSION_UNVERIFIED",
+                    reason=(
+                        "LIVE entry rejected because broker session health "
+                        "cannot be verified"
+                    ),
+                    system_mode=system_mode,
+                )
+            session_status = await self.broker_session_service.get_session_status()
+            if not bool(session_status.get("connected")):
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="LIVE_BROKER_SESSION_DISCONNECTED",
+                    reason=(
+                        "LIVE entry rejected because broker session is not "
+                        f"connected: {session_status.get('status', 'UNKNOWN')}"
+                    ),
+                    system_mode=system_mode,
+                )
+
+            if self.market_data_service is None:
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="LIVE_MARKET_DATA_UNVERIFIED",
+                    reason=(
+                        "LIVE entry rejected because execution feed health "
+                        "cannot be verified"
+                    ),
+                    system_mode=system_mode,
+                )
+            feed_health = self.market_data_service.get_execution_feed_health(
+                max_age_seconds=self.live_market_data_max_age_seconds,
+            )
+            if not bool(feed_health.get("healthy")):
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="LIVE_MARKET_DATA_STALE_OR_DOWN",
+                    reason=(
+                        "LIVE entry rejected because execution feed is not "
+                        "healthy: "
+                        + ";".join(feed_health.get("reasons") or ["UNKNOWN"])
                     ),
                     system_mode=system_mode,
                 )
