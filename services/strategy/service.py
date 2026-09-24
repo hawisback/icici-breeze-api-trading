@@ -2243,8 +2243,19 @@ class StrategyService:
                 trade.state = TradeLifecycleState.CLOSED
                 trade.exit_time = utc_now()
                 trade.exit_reason = "ENTRY_UNFILLED_" + order.status.value
-                self.strategy_a.on_exit(trade.direction, trade.exit_time)
+                if self._is_strategy_a(trade.strategy):
+                    self.strategy_a.on_execution_rejected(
+                        trade.exit_time,
+                        trade.exit_reason,
+                    )
+                else:
+                    self.strategy_a.on_exit(trade.direction, trade.exit_time)
                 self.strategy_b.reset(trade.exit_time)
+                self._active_trades_cache = [
+                    item
+                    for item in self._active_trades_cache
+                    if item.trade_id != trade.trade_id
+                ]
                 await self._save_runtime()
                 await self.repo.save_trade(trade)
                 return
