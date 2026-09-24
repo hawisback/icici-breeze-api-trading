@@ -855,6 +855,19 @@ async def test_internal_http_broker_writes_are_not_a_bypass(tmp_path):
     await container.event_bus.stop()
 
 
+def test_live_capable_settings_require_strong_signing_key(tmp_path):
+    with pytest.raises(ValueError, match="AUTH_SIGNING_KEY must be at least 32 bytes"):
+        PlatformSettings(
+            data_root=str(tmp_path),
+            live_trading_enabled=True,
+            live_allowed_accounts=["ICICI_PRIMARY"],
+            auth_signing_key="too-short",
+            market_data_backend="breeze",
+            breeze_api_key="live-test-key",
+            breeze_secret_key="live-test-secret",
+        )
+
+
 @pytest.mark.asyncio
 async def test_production_auth_db_refuses_predictable_bootstrap_users(tmp_path):
     settings = PlatformSettings(
