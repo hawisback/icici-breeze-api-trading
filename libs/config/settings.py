@@ -115,6 +115,7 @@ class PlatformSettings(BaseSettings):
     broker_backend: BrokerBackend = Field(
         default=BrokerBackend.BREEZE,
         validation_alias=AliasChoices(
+            "broker_backend",
             "LIVE_EXECUTION_BROKER",
             "BROKER_BACKEND",
         ),
