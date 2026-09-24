@@ -826,25 +826,111 @@ class StrategyService:
             await self._save_runtime()
             return {"status": "LIVE_SYSTEM_NOT_ARMED"}
 
-        # 9. Evaluate Strategy Entry Signals
+        # 9. Evaluate Strategy Entry Signals only on fresh real-time input.
+        # Existing positions were managed above; these gates affect new
+        # exposure only.
         candles_5m, candles_15m, futures_candles = self._market_snapshot
 
+        execution_feed_healthy = bool(
+            self._market_data_status.get("execution_feed_healthy")
+        )
+        strategy_a_entry_data_ready = bool(
+            execution_feed_healthy
+            and self._market_data_status.get(
+                "strategy_a_signal_data_fresh",
+                False,
+            )
+        )
+        strategy_b_entry_data_ready = bool(
+            execution_feed_healthy
+            and self._market_data_status.get(
+                "strategy_b_signal_data_fresh",
+                False,
+            )
+        )
+
         signal: Optional[StrategySignal] = None
+        entry_data_blockers: dict[str, list[str]] = {}
 
         if self.config.tunables.trend_pullback_enabled:
-            signal = self.strategy_a.evaluate(features, candles_5m, candles_15m, futures_candles=futures_candles, overrides=self._active_overrides)
-            await self._record_strategy_a_evaluation(features, signal)
-            await self._save_runtime()
+            if strategy_a_entry_data_ready:
+                signal = self.strategy_a.evaluate(
+                    features,
+                    candles_5m,
+                    candles_15m,
+                    futures_candles=futures_candles,
+                    overrides=self._active_overrides,
+                )
+                await self._record_strategy_a_evaluation(features, signal)
+                await self._save_runtime()
+            else:
+                self.strategy_a.reset(now)
+                reasons = list(
+                    self._market_data_status.get(
+                        "execution_feed_reasons",
+                        [],
+                    )
+                )
+                if not self._market_data_status.get(
+                    "strategy_a_signal_data_fresh",
+                    False,
+                ):
+                    reasons.append("STALE_OR_MISSING_FUTURES_15M_CANDLE")
+                entry_data_blockers["TREND_PULLBACK"] = list(
+                    dict.fromkeys(reasons)
+                )
+                await self._save_runtime()
 
         if not signal and self.config.tunables.volatility_breakout_enabled:
-            signal = self.strategy_b.evaluate(features, candles_5m, candles_15m, overrides=self._active_overrides)
-            await self._save_runtime()
+            if strategy_b_entry_data_ready:
+                signal = self.strategy_b.evaluate(
+                    features,
+                    candles_5m,
+                    candles_15m,
+                    overrides=self._active_overrides,
+                )
+                await self._save_runtime()
+            else:
+                self.strategy_b.reset(now)
+                reasons = list(
+                    self._market_data_status.get(
+                        "execution_feed_reasons",
+                        [],
+                    )
+                )
+                if not self._market_data_status.get(
+                    "strategy_b_signal_data_fresh",
+                    False,
+                ):
+                    reasons.append("STALE_OR_MISSING_SPOT_5M_CANDLE")
+                entry_data_blockers["VOLATILITY_BREAKOUT"] = list(
+                    dict.fromkeys(reasons)
+                )
+                await self._save_runtime()
         elif not self.config.tunables.volatility_breakout_enabled:
             self.strategy_b.reset(now)
             await self._save_runtime()
 
         if not signal:
-            return {"status": "NO_SIGNAL", "features": features.model_dump(mode="json")}
+            enabled_blocked = (
+                (
+                    self.config.tunables.trend_pullback_enabled
+                    and not strategy_a_entry_data_ready
+                )
+                or (
+                    self.config.tunables.volatility_breakout_enabled
+                    and not strategy_b_entry_data_ready
+                )
+            )
+            return {
+                "status": (
+                    "ENTRY_DATA_UNHEALTHY"
+                    if enabled_blocked
+                    else "NO_SIGNAL"
+                ),
+                "entry_data_blockers": entry_data_blockers,
+                "features": features.model_dump(mode="json"),
+            }
 
         if sum(t.strategy == signal.strategy for t in today_trades) >= self.config.risk.max_trades_per_strategy_per_day:
             return {"status":"STRATEGY_DAILY_TRADE_LIMIT_REACHED"}
