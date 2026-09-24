@@ -27,15 +27,18 @@ class BrokerSessionService:
         self.repo = repository or BrokerSessionRepository()
         self.bus = event_bus or get_event_bus()
         self.broker_gateway = broker_gateway
+        # Compatibility fields mirror the configured LIVE execution broker.
         self._active_token: Optional[str] = None
         self._active_api_key: Optional[str] = None
         self._active_secret_key: Optional[str] = None
+        self._active_credentials_by_broker: dict[str, dict[str, str]] = {}
         self._login_challenges: dict[str, dict[str, Any]] = {}
 
     def issue_login_challenge(
         self,
         *,
         initiated_by: str,
+        broker_backend: Optional[str] = None,
         ttl_seconds: int = 600,
     ) -> dict[str, Any]:
         """Issue a short-lived, one-time correlation state for broker login."""
@@ -45,6 +48,11 @@ class BrokerSessionService:
         expires_at = now + timedelta(seconds=max(60, int(ttl_seconds)))
         self._login_challenges[state] = {
             "initiated_by": initiated_by,
+            "broker_backend": (
+                str(broker_backend).lower()
+                if broker_backend
+                else None
+            ),
             "expires_at": expires_at,
         }
         return {
@@ -85,23 +93,51 @@ class BrokerSessionService:
         """Inject broker gateway to wire live adapter session activation."""
         self.broker_gateway = broker_gateway
 
-    def get_login_url(self, api_key: Optional[str] = None) -> str:
-        """Return the selected broker's daily login URL."""
-        key = api_key or self._active_api_key
+    def _normalize_broker(self, broker_backend: Optional[str] = None) -> str:
+        if broker_backend:
+            broker = str(broker_backend).lower()
+            if broker in {"breeze", "kite"}:
+                return broker
+        if self.broker_gateway:
+            return str(
+                getattr(
+                    self.broker_gateway,
+                    "execution_broker_name",
+                    getattr(self.broker_gateway, "active_broker_name", "breeze"),
+                )
+                or "breeze"
+            ).lower()
+        return "breeze"
+
+    @staticmethod
+    def _account_for_broker(broker: str) -> str:
+        return "ZERODHA_PRIMARY" if broker == "kite" else "ICICI_PRIMARY"
+
+    def get_login_url(
+        self,
+        api_key: Optional[str] = None,
+        broker_backend: Optional[str] = None,
+    ) -> str:
+        """Return the requested broker's daily login URL."""
+        broker = self._normalize_broker(broker_backend)
+        key = api_key
+        if not key:
+            credentials = self._active_credentials_by_broker.get(broker, {})
+            key = credentials.get("api_key", "")
         if not key:
             try:
                 from libs.config import get_platform_settings
                 cfg = get_platform_settings()
-                key_secret = cfg.kite_api_key if cfg.broker_backend.value == "kite" else cfg.breeze_api_key
+                key_secret = (
+                    cfg.kite_api_key
+                    if broker == "kite"
+                    else cfg.breeze_api_key
+                )
                 key = key_secret.get_secret_value() if key_secret else ""
             except Exception:
                 key = ""
-        try:
-            from libs.config import get_platform_settings
-            if get_platform_settings().broker_backend.value == "kite":
-                return f"https://kite.zerodha.com/connect/login?v=3&api_key={key or ''}"
-        except Exception:
-            pass
+        if broker == "kite":
+            return f"https://kite.zerodha.com/connect/login?v=3&api_key={key or ''}"
         return f"https://api.icicidirect.com/apiuser/login?api_key={key or ''}"
 
     async def initialize(self) -> None:
@@ -115,16 +151,35 @@ class BrokerSessionService:
         account_id: str = "ICICI_PRIMARY",
         expiry_hours: int = 24,
         access_token: Optional[str] = None,
+        broker_backend: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Activate daily broker session."""
+        """Activate one broker session without replacing the other broker."""
         session_id = generate_id()
         now = utc_now()
         expires_at = now + timedelta(hours=expiry_hours)
 
-        # Retain raw credentials in memory only
-        self._active_api_key = api_key
-        self._active_secret_key = secret_key
-        self._active_token = access_token or session_token
+        broker = self._normalize_broker(
+            broker_backend
+            or (
+                "kite"
+                if str(account_id).upper().startswith("ZERODHA")
+                else "breeze"
+            )
+        )
+        account_id = account_id or self._account_for_broker(broker)
+
+        # Retain raw credentials in memory only, independently per broker.
+        runtime_token = access_token or session_token
+        self._active_credentials_by_broker[broker] = {
+            "api_key": api_key,
+            "secret_key": secret_key,
+            "session_token": runtime_token,
+        }
+        execution_broker = self._normalize_broker()
+        if broker == execution_broker:
+            self._active_api_key = api_key
+            self._active_secret_key = secret_key
+            self._active_token = runtime_token
 
         # Mask token for persistence
         token_for_mask = access_token or session_token
@@ -136,7 +191,11 @@ class BrokerSessionService:
             session_token_masked=masked,
             login_time=now,
             expires_at=expires_at,
-            metadata={"source": "USER_LOGIN"},
+            metadata={
+                "source": "USER_LOGIN",
+                "broker": broker,
+            },
+            broker_name="ZERODHA" if broker == "kite" else "ICICI_DIRECT",
         )
 
         # Record health check
@@ -155,12 +214,12 @@ class BrokerSessionService:
             )
         )
 
-        # Propagate credentials to live broker adapter if gateway is wired
+        # Propagate credentials only to the requested broker adapter.
         gateway_synced = False
         auth_error: Optional[str] = None
-        if self.broker_gateway and hasattr(self.broker_gateway, "active_adapter"):
+        if self.broker_gateway and hasattr(self.broker_gateway, "adapter_for_broker"):
             try:
-                adapter = self.broker_gateway.active_adapter
+                adapter = self.broker_gateway.adapter_for_broker(broker)
                 if access_token and hasattr(adapter, "authenticate_access_token"):
                     gateway_synced = await adapter.authenticate_access_token(
                         api_key=api_key,
@@ -172,12 +231,20 @@ class BrokerSessionService:
                         secret_key=secret_key,
                         session_token=session_token,
                     )
-                logger.info("%s live adapter authentication result: %s", self.broker_gateway.active_broker_name, gateway_synced)
+                logger.info(
+                    "%s broker adapter authentication result: %s",
+                    broker,
+                    gateway_synced,
+                )
             except Exception as exc:
                 auth_error = str(exc)
-                logger.warning("Breeze live adapter authentication error: %s", exc)
+                logger.warning("%s broker adapter authentication error: %s", broker, exc)
 
-        if not gateway_synced and self.broker_gateway and hasattr(self.broker_gateway, "active_adapter"):
+        if (
+            not gateway_synced
+            and self.broker_gateway
+            and hasattr(self.broker_gateway, "adapter_for_broker")
+        ):
             await self.repo.record_health_check("DISCONNECTED", latency_ms=0.0, message="Authentication failed")
             return {
                 "session_id": session_id,
@@ -186,7 +253,11 @@ class BrokerSessionService:
                 "account_id": account_id,
                 "expires_at": expires_at.isoformat(),
                 "gateway_synced": False,
-                "message": f"Authentication rejected by ICICI Direct: {auth_error or 'Session key is expired or invalid.'}",
+                "broker": broker,
+                "message": (
+                    f"Authentication rejected by {broker.title()}: "
+                    f"{auth_error or 'Session key is expired or invalid.'}"
+                ),
             }
 
         logger.info("Broker session activated successfully: session_id=%s", session_id)
@@ -197,12 +268,19 @@ class BrokerSessionService:
             "account_id": account_id,
             "expires_at": expires_at.isoformat(),
             "gateway_synced": gateway_synced,
+            "broker": broker,
         }
 
-    async def get_session_status(self) -> dict[str, Any]:
-        """Return active session status and expiry countdown."""
-        active = await self.repo.get_active_session()
-        if not active or not self._active_token:
+    async def get_session_status(
+        self,
+        broker_backend: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Return status for one broker; default is the LIVE execution broker."""
+        broker = self._normalize_broker(broker_backend)
+        account_id = self._account_for_broker(broker)
+        credentials = self._active_credentials_by_broker.get(broker)
+        active = await self.repo.get_active_session(account_id=account_id)
+        if not active or not credentials:
             return {
                 "status": "DISCONNECTED",
                 "connected": False,
@@ -213,7 +291,9 @@ class BrokerSessionService:
         expires_at = datetime.fromisoformat(active["expires_at"])
         if utc_now() >= expires_at:
             await self.repo.expire_session(active["session_id"])
-            self._active_token = None
+            self._active_credentials_by_broker.pop(broker, None)
+            if broker == self._normalize_broker():
+                self._active_token = None
             return {
                 "status": "EXPIRED",
                 "connected": False,
@@ -221,9 +301,9 @@ class BrokerSessionService:
                 "message": "Broker session has expired",
             }
 
-        # Check if the selected live adapter is genuinely active.
-        if self.broker_gateway and hasattr(self.broker_gateway, "active_adapter"):
-            adapter = self.broker_gateway.active_adapter
+        # Check whether this broker adapter is genuinely active.
+        if self.broker_gateway and hasattr(self.broker_gateway, "adapter_for_broker"):
+            adapter = self.broker_gateway.adapter_for_broker(broker)
             is_active = getattr(adapter, "is_active", False)
             if not is_active and hasattr(adapter, "client_manager"):
                 is_active = getattr(adapter.client_manager, "is_active", False)
@@ -235,7 +315,11 @@ class BrokerSessionService:
                     "account_id": active["account_id"],
                     "expires_at": active["expires_at"],
                     "token_masked": active["session_token_masked"],
-                    "message": "The selected broker session is no longer active. Please reconnect with today's token.",
+                    "broker": broker,
+                    "message": (
+                        f"The {broker.title()} session is no longer active. "
+                        "Please reconnect with today's token."
+                    ),
                 }
 
         return {
@@ -245,14 +329,22 @@ class BrokerSessionService:
             "account_id": active["account_id"],
             "expires_at": active["expires_at"],
             "token_masked": active["session_token_masked"],
+            "broker": broker,
         }
 
-    def get_runtime_credentials(self) -> Optional[dict[str, str]]:
-        """Return in-memory active credentials for broker requests."""
-        if not self._active_token:
-            return None
+    async def get_all_session_statuses(self) -> dict[str, dict[str, Any]]:
         return {
-            "api_key": self._active_api_key or "",
-            "secret_key": self._active_secret_key or "",
-            "session_token": self._active_token or "",
+            "breeze": await self.get_session_status("breeze"),
+            "kite": await self.get_session_status("kite"),
         }
+
+    def get_runtime_credentials(
+        self,
+        broker_backend: Optional[str] = None,
+    ) -> Optional[dict[str, str]]:
+        """Return in-memory credentials for the requested broker."""
+        broker = self._normalize_broker(broker_backend)
+        credentials = self._active_credentials_by_broker.get(broker)
+        if not credentials:
+            return None
+        return dict(credentials)
