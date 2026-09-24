@@ -26,6 +26,9 @@ from libs.events.bus import EventBus, EventEnvelope, Topics, get_event_bus
 from libs.config.settings import get_platform_settings
 from services.oms.service import OMSService
 from services.strategy.contract_selector import ContractSelector
+from services.strategy.execution_policy import (
+    resolve_strategy_execution_policy,
+)
 from services.strategy.features import FeatureEngine
 from services.strategy.futures_signal import resolve_active_futures_instrument
 from services.strategy.models import (
@@ -349,29 +352,37 @@ class StrategyService:
     def _is_strategy_a(strategy: StrategyName) -> bool:
         return strategy == StrategyName.TREND_PULLBACK
 
+    def _execution_policy_for_strategy(self, strategy: StrategyName):
+        """Return the single authoritative A/B/C/D execution policy."""
+        return resolve_strategy_execution_policy(
+            strategy,
+            self.config.mode,
+            strategy_a_option_execution_ready=bool(
+                self._market_data_status.get(
+                    "strategy_a_option_execution_ready",
+                    False,
+                )
+            ),
+            strategy_a_option_execution_reason=(
+                self._market_data_status.get(
+                    "strategy_a_option_execution_reason"
+                )
+            ),
+        )
+
+    def _execution_policy_matrix(self) -> dict[str, dict[str, Any]]:
+        return {
+            strategy.value: self._execution_policy_for_strategy(strategy).to_dict()
+            for strategy in StrategyName
+        }
+
     def _execution_mode_for_strategy(
         self,
         strategy: StrategyName,
         option_type: OptionType,
     ) -> AutoTradingMode:
-        """Resolve execution mode while validation candidates remain non-live."""
-        if strategy in {
-            StrategyName.DI_CONTINUATION,
-            StrategyName.SR_MOMENTUM_BREAKOUT,
-        }:
-            return AutoTradingMode.PAPER
-        if self._is_strategy_a(strategy):
-            return (
-                AutoTradingMode.SHADOW_ONLY
-                if option_type == OptionType.CALL
-                else AutoTradingMode.PAPER
-            )
-        if (
-            strategy == StrategyName.VOLATILITY_BREAKOUT
-            and self.config.mode == AutoTradingMode.LIVE
-        ):
-            return AutoTradingMode.SHADOW_ONLY
-        return self.config.mode
+        """Resolve execution mode from the authoritative permission policy."""
+        return self._execution_policy_for_strategy(strategy).mode_for(option_type)
 
     def _execution_mode_for_signal(self, signal: StrategySignal) -> AutoTradingMode:
         """Resolve signal execution while keeping Strategy B non-live during validation."""
@@ -2413,21 +2424,12 @@ class StrategyService:
         Strategy A cannot be synthesized here because that would bypass its
         futures-only TrendPullback state machine and contaminate validation.
         """
-        if strategy == StrategyName.TREND_PULLBACK:
+        policy = self._execution_policy_for_strategy(strategy)
+        if not policy.force_entry_allowed:
             return {
-                "status": "STRATEGY_A_FORCE_ENTRY_DISABLED",
-                "reason": "Strategy A entries must originate from the validated futures TrendPullback state machine",
-            }
-        if strategy in {
-            StrategyName.DI_CONTINUATION,
-            StrategyName.SR_MOMENTUM_BREAKOUT,
-        }:
-            return {
-                "status": "FROZEN_CANDIDATE_FORCE_ENTRY_DISABLED",
-                "reason": (
-                    "Strategies C and D must originate from their frozen "
-                    "paper candidate monitors and cannot be force-entered."
-                ),
+                "status": "EXECUTION_POLICY_FORCE_ENTRY_DISABLED",
+                "reason": policy.live_block_reason,
+                "execution_policy": policy.to_dict(),
             }
 
         now = utc_now()
