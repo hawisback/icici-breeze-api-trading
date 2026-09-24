@@ -701,6 +701,10 @@ class ActiveTrade(BaseModel):
     t1_realized_r: Optional[float] = None
     runner_realized_r: Optional[float] = None
     partial_exit_filled_quantity: int = 0
+    partial_exit_proceeds: float = 0.0
+    partial_exit_order_id: Optional[str] = None
+    partial_exit_order_accounted_filled_quantity: int = 0
+    partial_exit_order_accounted_proceeds: float = 0.0
     partial_exit_price: Optional[float] = None
     partial_exit_raw_bid: Optional[float] = None
     partial_exit_slippage_points: Optional[float] = None
