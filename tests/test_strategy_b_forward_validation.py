@@ -80,12 +80,7 @@ async def test_strategy_b_live_compat_signal_never_dispatches_to_oms():
         suggested_price=50, quantity=50, trading_mode=TradingMode.LIVE,
         metadata={"strategy": StrategyName.VOLATILITY_BREAKOUT.value},
     )
-    oms.create_order_intent.assert_awaited_once()
-    intent = oms.create_order_intent.await_args.args[0]
-    assert intent.trading_mode == TradingMode.LIVE
-    assert intent.side == OrderSide.BUY
-    assert result["trade"]["entry_order_id"] == "OMS-B-LIVE-ENTRY"
-    service._record_execution.assert_not_awaited()
+    oms.create_order_intent.assert_not_awaited()
 
 
 def test_strategy_b_global_paper_remains_paper():
@@ -142,7 +137,12 @@ async def test_strategy_b_signal_path_captures_evidence_and_dispatches_live_afte
     assert snapshot["strategy"] == StrategyName.VOLATILITY_BREAKOUT.value
     assert snapshot["execution_mode"] == AutoTradingMode.LIVE.value
     assert snapshot["selected_contract"]["instrument_id"] == "OPT-B-1"
-    oms.create_order_intent.assert_not_awaited()
+    oms.create_order_intent.assert_awaited_once()
+    intent = oms.create_order_intent.await_args.args[0]
+    assert intent.trading_mode == TradingMode.LIVE
+    assert intent.side == OrderSide.BUY
+    assert result["trade"]["entry_order_id"] == "OMS-B-LIVE-ENTRY"
+    service._record_execution.assert_not_awaited()
 
 
 @pytest.mark.asyncio
