@@ -545,6 +545,15 @@ export interface StrategyStatusData {
     option_chain_captured_at?: string | null;
     strategy_a_option_execution_ready?: boolean;
     strategy_a_option_execution_reason?: string | null;
+    execution_feed_healthy?: boolean;
+    execution_feed_status?: string | null;
+    execution_feed_reasons?: string[];
+    execution_feed_checked_at?: string | null;
+    execution_feed_max_age_seconds?: number | null;
+    latest_spot_5m_candle_age_seconds?: number | null;
+    latest_futures_15m_candle_age_seconds?: number | null;
+    strategy_a_signal_data_fresh?: boolean;
+    strategy_b_signal_data_fresh?: boolean;
     last_error?: string | null;
     last_evaluation_time?: string | null;
   };
