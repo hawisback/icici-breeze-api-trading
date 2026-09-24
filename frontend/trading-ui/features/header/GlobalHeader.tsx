@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import {
   AuthSession,
+  activateBrokerSessionCallback,
   confirmLiveGate,
   fetchLiveGateStatus,
   fetchLoginUrl,
@@ -207,12 +208,19 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [authError, setAuthError] = React.useState("");
   const [authSuccess, setAuthSuccess] = React.useState("");
+  const [brokerLoginState, setBrokerLoginState] = React.useState("");
   const brokerBackend = health?.config?.broker_backend === "kite" ? "kite" : "breeze";
   const brokerLabel = brokerBackend === "kite" ? "Kite" : "ICICI Breeze";
 
   const handleConnectBroker = async () => {
+    if (!operatorSession) {
+      setOperatorAuthError("Operator authentication is required before broker login.");
+      setShowOperatorLogin(true);
+      return;
+    }
     try {
       const data = await fetchLoginUrl();
+      setBrokerLoginState(data.callback_state || "");
       if (data.login_url) {
         window.open(
           data.login_url,
@@ -220,8 +228,8 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
           "width=600,height=750,menubar=no,toolbar=no,status=no,scrollbars=yes"
         );
       }
-    } catch (err) {
-      console.error(`Failed to initiate ${brokerLabel} login:`, err);
+    } catch (err: any) {
+      setAuthError(err?.message || `Failed to initiate ${brokerLabel} login.`);
     }
   };
 
@@ -236,21 +244,33 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
       if (match) raw = match[1];
     }
 
+    if (!operatorSession) {
+      setOperatorAuthError("Operator authentication is required before broker activation.");
+      setShowOperatorLogin(true);
+      return;
+    }
+    if (!brokerLoginState) {
+      setAuthError("Start the broker login flow first so a secure callback state is issued.");
+      return;
+    }
+
     setIsSubmitting(true);
     setAuthError("");
     setAuthSuccess("");
 
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/v1/broker/session/callback?${tokenParam}=${encodeURIComponent(raw)}`, {
-        headers: { Accept: "application/json" },
-      });
-      const data = await res.json();
+      const data = await activateBrokerSessionCallback(
+        tokenParam,
+        raw,
+        brokerLoginState,
+      );
       if (data.status === "SUCCESS") {
         setAuthSuccess(`${brokerLabel} successfully authenticated and session saved to .env!`);
         await refetchHealth();
         setTimeout(() => {
           setShowAuthModal(false);
           setTokenInput("");
+          setBrokerLoginState("");
           setAuthSuccess("");
         }, 1200);
       } else {
