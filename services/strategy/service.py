@@ -4956,12 +4956,13 @@ class StrategyService:
                 )
                 return signal
             # The legacy signal endpoint is intentionally non-routing for
-            # Strategies A/B. Strategy A LIVE execution is owned exclusively by
-            # the lifecycle-aware auto-trading path above; Strategy B remains
-            # validation-locked.
+            # all first-class automated strategies. A/B/C/D entries are owned
+            # exclusively by their validated lifecycle-aware paths above.
             if policy_strategy in {
                 StrategyName.TREND_PULLBACK,
                 StrategyName.VOLATILITY_BREAKOUT,
+                StrategyName.DI_CONTINUATION,
+                StrategyName.SR_MOMENTUM_BREAKOUT,
             }:
                 return signal
         if trading_mode == TradingMode.LIVE and not self._live_orders_enabled():
