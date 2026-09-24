@@ -9,10 +9,11 @@ from datetime import datetime, timezone
 import json
 import logging
 from typing import Any, Optional
+from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from services.api_gateway.error_handlers import register_error_handlers
@@ -167,40 +168,29 @@ async def lifespan(app: FastAPI):
                 match = re.search(r"apisession=([a-zA-Z0-9_-]+)", req_line)
                 token = match.group(1) if match else None
 
-                body_msg = ""
                 if token:
-                    from libs.config.env_manager import update_env_variable
-                    update_env_variable("BREEZE_SESSION_TOKEN", token)
-                    settings = get_platform_settings()
-                    api_k = settings.breeze_api_key.get_secret_value() if settings.breeze_api_key else ""
-                    sec_k = settings.breeze_secret_key.get_secret_value() if settings.breeze_secret_key else ""
-                    if api_k and sec_k:
-                        await container.session_svc.activate_session(
-                            api_key=api_k,
-                            secret_key=sec_k,
-                            session_token=token,
-                            account_id="ICICI_PRIMARY",
-                        )
-                    body_msg = f"Session token ({token[:4]}...{token[-4:]}) captured, saved to .env, and activated!"
+                    # Never activate or persist broker credentials on the raw
+                    # port-80 listener. Forward the browser into the hardened
+                    # callback, where the one-time login state is verified.
+                    location = (
+                        "http://127.0.0.1:8000/api/v1/broker/session/callback?"
+                        + urlencode({"apisession": token})
+                    )
+                    raw_resp = (
+                        "HTTP/1.1 302 Found\r\n"
+                        f"Location: {location}\r\n"
+                        "Cache-Control: no-store\r\n"
+                        "Connection: close\r\n\r\n"
+                    )
                 else:
-                    body_msg = "Redirect received, but no apisession token found in URL."
-
-                html_resp = f"""HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!DOCTYPE html>
-<html>
-<head><title>Breeze Authentication</title>
-<style>body {{ background: #020617; color: #f8fafc; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
-.card {{ background: #0f172a; border: 1px solid #10b981; border-radius: 12px; padding: 32px; max-width: 480px; text-align: center; }}
-h1 {{ color: #34d399; margin-top: 0; }} p {{ color: #94a3b8; font-size: 14px; }}
-</style></head>
-<body>
-<div class="card">
-  <h1>Authentication Successful</h1>
-  <p>{body_msg}</p>
-  <p>You can close this tab and return to the Trading Terminal.</p>
-</div>
-<script>setTimeout(() => window.close(), 3000);</script>
-</body></html>"""
-                writer.write(html_resp.encode("utf-8"))
+                    raw_resp = (
+                        "HTTP/1.1 400 Bad Request\r\n"
+                        "Content-Type: text/plain; charset=utf-8\r\n"
+                        "Cache-Control: no-store\r\n"
+                        "Connection: close\r\n\r\n"
+                        "Missing apisession token."
+                    )
+                writer.write(raw_resp.encode("utf-8"))
                 await writer.drain()
             except Exception as e:
                 logger.warning("Error handling port 80 redirect: %s", e)
@@ -495,19 +485,70 @@ async def create_ws_ticket(current_user: UserPrincipal = Depends(get_current_use
 
 @app.get("/api/v1/broker/session/login-url")
 @app.get("/api/v1/session/login-url")
-async def get_session_login_url():
-    """Return the selected broker's official daily login URL."""
+async def get_session_login_url(
+    current_user: UserPrincipal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR)
+    ),
+):
+    """Issue an authenticated, one-time broker login flow."""
     settings = get_platform_settings()
-    login_url = get_services().session_svc.get_login_url()
-    api_key_secret = settings.kite_api_key if settings.broker_backend.value == "kite" else settings.breeze_api_key
+    services = get_services()
+    challenge = services.session_svc.issue_login_challenge(
+        initiated_by=current_user.user_id,
+    )
+    api_key_secret = (
+        settings.kite_api_key
+        if settings.broker_backend.value == "kite"
+        else settings.breeze_api_key
+    )
     api_key = api_key_secret.get_secret_value() if api_key_secret else ""
+    start_url = (
+        "http://127.0.0.1:8000/api/v1/broker/session/start?"
+        + urlencode({"state": challenge["state"]})
+    )
     return {
-        "login_url": login_url,
+        "login_url": start_url,
         "api_key": api_key,
+        "callback_state": challenge["state"],
+        "state_expires_at": challenge["expires_at"],
         "redirect_url_hint": "http://127.0.0.1:8000/api/v1/broker/session/callback",
         "broker": settings.broker_backend.value,
-        "instructions": "Open this URL in your broker's browser login flow. The callback will persist the daily token and activate the selected live adapter.",
+        "instructions": (
+            "Open this URL in the broker login flow. The callback is accepted "
+            "only for this short-lived, one-time authenticated login state."
+        ),
     }
+
+
+@app.get("/api/v1/broker/session/start")
+@app.get("/api/v1/session/start")
+async def start_broker_session_login(state: str = Query(..., min_length=20)):
+    """Bootstrap browser correlation, then redirect to the official broker."""
+    services = get_services()
+    if not services.session_svc.validate_login_challenge(state):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Broker login state is invalid or expired.",
+        )
+
+    settings = get_platform_settings()
+    login_url = services.session_svc.get_login_url()
+    if settings.broker_backend.value == "kite":
+        redirect_params = urlencode({"state": state})
+        login_url += "&" + urlencode({"redirect_params": redirect_params})
+
+    response = RedirectResponse(url=login_url, status_code=302)
+    response.set_cookie(
+        key="broker_login_state",
+        value=state,
+        max_age=600,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/api/v1/broker/session/status")
@@ -519,7 +560,12 @@ async def get_session_status():
 
 @app.post("/api/v1/broker/session/login")
 @app.post("/api/v1/session/login")
-async def session_login(req: LoginRequest):
+async def session_login(
+    req: LoginRequest,
+    current_user: UserPrincipal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR)
+    ),
+):
     services = get_services()
     result = await services.session_svc.activate_session(
         api_key=req.api_key,
@@ -540,6 +586,7 @@ async def broker_session_callback(
     session_token: Optional[str] = None,
     token: Optional[str] = None,
     request_token: Optional[str] = None,
+    state: Optional[str] = None,
 ):
     """OAuth callback endpoint handling ICICI Direct 2FA redirect.
 
@@ -594,6 +641,36 @@ a {{ color: #38bdf8; text-decoration: none; }}
 
     token_clean = raw_token.strip()
     masked = token_clean[:4] + "..." + token_clean[-4:] if len(token_clean) > 8 else "***"
+
+    # Callback requests cannot carry the operator bearer token, so require a
+    # short-lived state that was issued only after RBAC-authenticated login
+    # initiation. Browser redirects may supply it via query (Kite) or the
+    # HttpOnly bootstrap cookie (Breeze/local redirect).
+    cookie_state = request.cookies.get("broker_login_state")
+    query_state = state or request.query_params.get("state")
+    if query_state and cookie_state and query_state != cookie_state:
+        correlation_state = None
+    else:
+        correlation_state = query_state or cookie_state
+
+    challenge = (
+        get_services().session_svc.consume_login_challenge(correlation_state)
+        if correlation_state
+        else None
+    )
+    if challenge is None:
+        msg = "Broker callback rejected: login state is missing, expired, or already used."
+        if wants_json:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "ERROR", "message": msg},
+            )
+        return HTMLResponse(
+            status_code=403,
+            content=f"""<!DOCTYPE html>
+<html><head><title>Authentication Rejected</title></head>
+<body><h1>Authentication Rejected</h1><p>{msg}</p></body></html>""",
+        )
 
     # 1. Update .env file directly and sync runtime PlatformSettings
     # Breeze can persist its callback token. Kite request tokens are one-time and
