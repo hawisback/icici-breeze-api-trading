@@ -3020,13 +3020,38 @@ class StrategyService:
             EventEnvelope(topic=Topics.STRATEGY_SIGNAL, payload=signal.model_dump())
         )
 
-        # Strategy A forward-validation signals are audit/simulation only.
-        # This guard is intentionally before construction of any OMS intent.
+        # Backwards-compatible signal emission may never bypass the
+        # authoritative per-strategy execution policy.
         strategy_tag = str((metadata or {}).get("strategy", "")).upper()
-        is_strategy_a_validation = strategy_tag in {StrategyName.TREND_PULLBACK.value, "STRATEGY_A", "CALL", "PUT"}
-        is_strategy_b_validation = strategy_tag == StrategyName.VOLATILITY_BREAKOUT.value
-        if trading_mode == TradingMode.SHADOW or is_strategy_a_validation or is_strategy_b_validation:
+        strategy_aliases = {
+            StrategyName.TREND_PULLBACK.value: StrategyName.TREND_PULLBACK,
+            "STRATEGY_A": StrategyName.TREND_PULLBACK,
+            StrategyName.VOLATILITY_BREAKOUT.value: StrategyName.VOLATILITY_BREAKOUT,
+            "STRATEGY_B": StrategyName.VOLATILITY_BREAKOUT,
+            StrategyName.DI_CONTINUATION.value: StrategyName.DI_CONTINUATION,
+            "STRATEGY_C": StrategyName.DI_CONTINUATION,
+            StrategyName.SR_MOMENTUM_BREAKOUT.value: StrategyName.SR_MOMENTUM_BREAKOUT,
+            "STRATEGY_D": StrategyName.SR_MOMENTUM_BREAKOUT,
+        }
+        policy_strategy = strategy_aliases.get(strategy_tag)
+        if trading_mode == TradingMode.SHADOW:
             return signal
+        if policy_strategy is not None:
+            policy = self._execution_policy_for_strategy(policy_strategy)
+            if trading_mode == TradingMode.LIVE and not policy.live_trading_allowed:
+                await self._log_decision(
+                    category="SECURITY",
+                    strategy=policy_strategy.value,
+                    message="Legacy signal LIVE routing blocked by execution policy",
+                    details=policy.to_dict(),
+                )
+                return signal
+            # Preserve the existing validation-only legacy behavior for A/B.
+            if policy_strategy in {
+                StrategyName.TREND_PULLBACK,
+                StrategyName.VOLATILITY_BREAKOUT,
+            }:
+                return signal
         if trading_mode == TradingMode.LIVE and not self._live_orders_enabled():
             return signal
 
