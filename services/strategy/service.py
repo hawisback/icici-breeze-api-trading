@@ -1439,7 +1439,7 @@ class StrategyService:
             await self._log_decision(
                 "RISK",
                 signal.strategy.value,
-                "Strategy A LIVE entry blocked: option execution readiness degraded",
+                "Delta-aware LIVE entry blocked: option execution readiness degraded",
                 {"reason": reason, "signal_id": signal.signal_id},
             )
             await self._reject_strategy_a_execution(
@@ -3857,14 +3857,17 @@ class StrategyService:
         strategy: StrategyName,
         label: str,
         status: dict[str, Any],
+        enabled: bool,
+        execution_mode: AutoTradingMode,
         current_price: float,
         active_direction: str | None,
         target_entry_level: float | None = None,
     ) -> list[StrategyTriggerDiagnostics]:
-        """Adapt frozen paper sidecars to the common UI trigger-radar contract."""
+        """Adapt frozen C/D signal engines to the common executable-strategy UI."""
         raw_status = str(status.get("status") or "NOT_INITIALIZED")
         blocked = raw_status in {
             "DISABLED",
+            "DISABLED_BY_CONFIG",
             "INITIALIZATION_FAILED",
             "OBSERVATION_FAILED",
             "DATA_RETRIEVAL_FAILED",
@@ -3873,8 +3876,18 @@ class StrategyService:
             "NO_ACTIVE_FUTURES_DATA",
         }
         fingerprint_ok = bool(status.get("candidate_spec_fingerprint"))
-        data_ready = not blocked
-        paper_mode = status.get("execution_mode") == AutoTradingMode.PAPER.value
+        data_ready = enabled and not blocked
+        execution_ready = bool(
+            enabled
+            and execution_mode != AutoTradingMode.DISABLED
+            and (
+                execution_mode != AutoTradingMode.LIVE
+                or (
+                    self.config.system_armed
+                    and self._live_orders_enabled()
+                )
+            )
+        )
         rows: list[StrategyTriggerDiagnostics] = []
         for option_type, direction in (
             (OptionType.CALL, TradeDirection.BULLISH),
@@ -3883,64 +3896,86 @@ class StrategyService:
             is_active = active_direction == option_type.value
             conditions = [
                 TriggerCondition(
+                    id="strategy_enabled",
+                    name="Strategy enabled",
+                    current_value="ENABLED" if enabled else "DISABLED",
+                    target_threshold="Enabled in strategy configuration",
+                    status="PASSED" if enabled else "BLOCKED",
+                    gap_description=(
+                        "Strategy is enabled"
+                        if enabled
+                        else "Strategy disabled by configuration"
+                    ),
+                ),
+                TriggerCondition(
                     id="frozen_candidate",
-                    name="Frozen candidate fingerprint",
+                    name="Frozen strategy fingerprint",
                     current_value="VALID" if fingerprint_ok else "MISSING",
                     target_threshold="Frozen spec must match",
                     status="PASSED" if fingerprint_ok else "BLOCKED",
                     gap_description=(
-                        "Candidate fingerprint verified"
+                        "Strategy fingerprint verified"
                         if fingerprint_ok
-                        else "Candidate fingerprint unavailable"
+                        else "Strategy fingerprint unavailable"
                     ),
                 ),
                 TriggerCondition(
                     id="market_data",
                     name="Real market data",
                     current_value=raw_status,
-                    target_threshold="Native real-market candles available",
+                    target_threshold="Required native real-market candles available",
                     status="PASSED" if data_ready else "BLOCKED",
                     gap_description=(
-                        "Paper monitor is receiving its required candles"
+                        "Signal engine is receiving its required market data"
                         if data_ready
                         else raw_status
                     ),
                 ),
                 TriggerCondition(
-                    id="paper_execution",
-                    name="Candidate execution mode",
-                    current_value=str(status.get("execution_mode") or "N/A"),
-                    target_threshold="PAPER (live locked until promotion)",
-                    status="PASSED" if paper_mode else "PENDING",
+                    id="execution_mode",
+                    name="Execution mode",
+                    current_value=execution_mode.value,
+                    target_threshold="PAPER/SHADOW or armed LIVE execution",
+                    status="PASSED" if execution_ready else "BLOCKED",
                     gap_description=(
-                        "Candidate remains isolated from live OMS"
-                        if paper_mode
-                        else "Waiting for paper monitor initialization"
+                        f"{execution_mode.value} execution path is ready"
+                        if execution_ready
+                        else (
+                            "LIVE mode requires system arming and platform live-trading permission"
+                            if execution_mode == AutoTradingMode.LIVE
+                            else "Execution is disabled"
+                        )
                     ),
                 ),
                 TriggerCondition(
-                    id="candidate_signal",
+                    id="strategy_signal",
                     name="Frozen setup signal",
                     current_value="ACTIVE" if is_active else "WAITING",
-                    target_threshold=f"{option_type.value} candidate signal",
+                    target_threshold=f"{option_type.value} strategy signal",
                     status="PASSED" if is_active else "PENDING",
                     gap_description=(
-                        "Paper position is open and stop management is active"
+                        "Signal/lifecycle is active in the integrated strategy engine"
                         if is_active
                         else "Waiting for all frozen signal conditions"
                     ),
                 ),
             ]
             passed = sum(item.status == "PASSED" for item in conditions)
-            if blocked:
+            if not enabled:
+                overall = "DISABLED"
+                blocker = "Strategy disabled by configuration"
+            elif blocked:
                 overall = "BLOCKED"
                 blocker = raw_status
+            elif not execution_ready:
+                overall = "BLOCKED"
+                blocker = "Execution mode is not ready"
             elif is_active:
-                overall = "PAPER_OPEN"
-                blocker = "Paper position open; frozen stop lifecycle is active"
+                overall = "ACTIVE"
+                blocker = "Integrated signal/lifecycle is active"
             else:
                 overall = "WAITING"
-                blocker = "Waiting for frozen candidate signal"
+                blocker = "Waiting for strategy signal"
             rows.append(
                 StrategyTriggerDiagnostics(
                     strategy=strategy,
@@ -3950,7 +3985,10 @@ class StrategyService:
                     overall_status=overall,
                     passed_count=passed,
                     total_count=len(conditions),
-                    ready_pct=round(100.0 * passed / len(conditions), 1),
+                    ready_pct=round(
+                        100.0 * passed / len(conditions),
+                        1,
+                    ),
                     key_blocker=blocker,
                     target_entry_level=target_entry_level,
                     current_spot=float(current_price or 0.0),
@@ -3960,10 +3998,11 @@ class StrategyService:
                         "candidate_spec_fingerprint": status.get(
                             "candidate_spec_fingerprint"
                         ),
-                        "execution_mode": status.get("execution_mode"),
-                        "live_trading_allowed": status.get(
-                            "live_trading_allowed",
-                            False,
+                        "execution_mode": execution_mode.value,
+                        "observer_mode": status.get("execution_mode"),
+                        "live_trading_allowed": bool(
+                            execution_mode == AutoTradingMode.LIVE
+                            and execution_ready
                         ),
                         "monitor_status": raw_status,
                     },
@@ -4071,17 +4110,40 @@ class StrategyService:
             primary_blocker=primary,
         )
 
+        c_integrated = next(
+            (
+                trade for trade in self._active_trades_cache
+                if trade.strategy == StrategyName.DI_CONTINUATION
+            ),
+            None,
+        )
+        d_integrated = next(
+            (
+                trade for trade in self._active_trades_cache
+                if trade.strategy == StrategyName.SR_MOMENTUM_BREAKOUT
+            ),
+            None,
+        )
         c_active = (
             self._last_strategy_c_shadow_status.get("active_candidate_trade")
             or {}
         )
-        c_direction = c_active.get("direction")
+        c_direction = (
+            c_integrated.option_type.value
+            if c_integrated is not None
+            else c_active.get("direction")
+        )
         d_active = (
-            self._last_strategy_d_paper_status.get("active_paper_trade")
+            self._last_strategy_d_paper_status.get("active_execution_trade")
+            or self._last_strategy_d_paper_status.get("active_paper_trade")
             or {}
         )
         d_signal = d_active.get("signal") or {}
-        d_direction = d_signal.get("option_type")
+        d_direction = (
+            d_integrated.option_type.value
+            if d_integrated is not None
+            else d_signal.get("option_type")
+        )
         d_market = self._last_strategy_d_paper_status.get("market") or {}
         d_latest = self._last_strategy_d_paper_status.get("latest_signal") or {}
 
@@ -4089,6 +4151,11 @@ class StrategyService:
             strategy=StrategyName.DI_CONTINUATION,
             label="Strategy C · DI Continuation",
             status=self._last_strategy_c_shadow_status,
+            enabled=self.config.tunables.di_continuation_enabled,
+            execution_mode=self._execution_mode_for_strategy(
+                StrategyName.DI_CONTINUATION,
+                OptionType.CALL,
+            ),
             current_price=float(features.futures_price or 0.0),
             active_direction=c_direction,
         )
@@ -4096,6 +4163,11 @@ class StrategyService:
             strategy=StrategyName.SR_MOMENTUM_BREAKOUT,
             label="Strategy D · S&R Momentum",
             status=self._last_strategy_d_paper_status,
+            enabled=self.config.tunables.sr_momentum_breakout_enabled,
+            execution_mode=self._execution_mode_for_strategy(
+                StrategyName.SR_MOMENTUM_BREAKOUT,
+                OptionType.CALL,
+            ),
             current_price=float(
                 d_market.get("spot_price")
                 or features.spot_price
@@ -4428,6 +4500,20 @@ class StrategyService:
             ),
             None,
         )
+        strategy_c_trade = next(
+            (
+                trade for trade in active_trades
+                if trade.strategy == StrategyName.DI_CONTINUATION
+            ),
+            None,
+        )
+        strategy_d_trade = next(
+            (
+                trade for trade in active_trades
+                if trade.strategy == StrategyName.SR_MOMENTUM_BREAKOUT
+            ),
+            None,
+        )
         c_candidate = (
             self._last_strategy_c_shadow_status.get("active_candidate_trade")
             or {}
@@ -4438,7 +4524,8 @@ class StrategyService:
             or {}
         )
         d_paper = (
-            self._last_strategy_d_paper_status.get("active_paper_trade")
+            self._last_strategy_d_paper_status.get("active_execution_trade")
+            or self._last_strategy_d_paper_status.get("active_paper_trade")
             or {}
         )
         policy_a = self._execution_policy_for_strategy(
@@ -4605,13 +4692,21 @@ class StrategyService:
                     ),
                 },
                 "di_continuation": {
-                    "enabled": True,
-                    "label": "Strategy C · DI Continuation V1 Candidate",
-                    "state": str(
-                        self._last_strategy_c_shadow_status.get("status")
-                        or "NOT_INITIALIZED"
+                    "enabled": self.config.tunables.di_continuation_enabled,
+                    "label": "Strategy C · DI Continuation V1",
+                    "state": (
+                        strategy_c_trade.state.value
+                        if strategy_c_trade is not None
+                        else str(
+                            self._last_strategy_c_shadow_status.get("status")
+                            or "NOT_INITIALIZED"
+                        )
                     ),
-                    "execution_mode": policy_c.call_mode.value,
+                    "execution_mode": (
+                        strategy_c_trade.mode.value
+                        if strategy_c_trade is not None
+                        else policy_c.call_mode.value
+                    ),
                     "effective_call_mode": policy_c.call_mode.value,
                     "effective_put_mode": policy_c.put_mode.value,
                     "promotion_state": policy_c.promotion_state,
@@ -4638,18 +4733,43 @@ class StrategyService:
                         "paper_net_pnl",
                         0.0,
                     ),
-                    "current_r": c_lifecycle.get("current_r"),
-                    "current_trailing_stop": c_lifecycle.get("current_stop"),
-                    "active_trade_id": c_paper.get("signal_id"),
+                    "current_r": (
+                        strategy_c_trade.current_r
+                        if strategy_c_trade is not None
+                        else c_lifecycle.get("current_r")
+                    ),
+                    "current_trailing_stop": (
+                        strategy_c_trade.current_trailing_stop
+                        if strategy_c_trade is not None
+                        else c_lifecycle.get("current_stop")
+                    ),
+                    "broker_protective_stop_status": (
+                        strategy_c_trade.protective_stop_status
+                        if strategy_c_trade is not None
+                        else None
+                    ),
+                    "active_trade_id": (
+                        strategy_c_trade.trade_id
+                        if strategy_c_trade is not None
+                        else c_paper.get("signal_id")
+                    ),
                 },
                 "sr_momentum_breakout": {
-                    "enabled": True,
-                    "label": "Strategy D · S&R Momentum V2 Candidate",
-                    "state": str(
-                        self._last_strategy_d_paper_status.get("status")
-                        or "NOT_INITIALIZED"
+                    "enabled": self.config.tunables.sr_momentum_breakout_enabled,
+                    "label": "Strategy D · S&R Momentum V2",
+                    "state": (
+                        strategy_d_trade.state.value
+                        if strategy_d_trade is not None
+                        else str(
+                            self._last_strategy_d_paper_status.get("status")
+                            or "NOT_INITIALIZED"
+                        )
                     ),
-                    "execution_mode": policy_d.call_mode.value,
+                    "execution_mode": (
+                        strategy_d_trade.mode.value
+                        if strategy_d_trade is not None
+                        else policy_d.call_mode.value
+                    ),
                     "effective_call_mode": policy_d.call_mode.value,
                     "effective_put_mode": policy_d.put_mode.value,
                     "promotion_state": policy_d.promotion_state,
@@ -4676,11 +4796,26 @@ class StrategyService:
                         "paper_net_pnl",
                         0.0,
                     ),
-                    "current_r": d_paper.get("current_r"),
-                    "current_trailing_stop": d_paper.get(
-                        "current_underlying_stop"
+                    "current_r": (
+                        strategy_d_trade.current_r
+                        if strategy_d_trade is not None
+                        else d_paper.get("current_r")
                     ),
-                    "active_trade_id": d_paper.get("signal_id"),
+                    "current_trailing_stop": (
+                        strategy_d_trade.current_trailing_stop
+                        if strategy_d_trade is not None
+                        else d_paper.get("current_underlying_stop")
+                    ),
+                    "broker_protective_stop_status": (
+                        strategy_d_trade.protective_stop_status
+                        if strategy_d_trade is not None
+                        else None
+                    ),
+                    "active_trade_id": (
+                        strategy_d_trade.trade_id
+                        if strategy_d_trade is not None
+                        else d_paper.get("signal_id")
+                    ),
                 },
             },
             "trigger_diagnostics": diagnostics.model_dump(mode="json"),
