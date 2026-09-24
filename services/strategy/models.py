@@ -165,6 +165,13 @@ class RiskConfig(BaseModel):
         le=25.0,
         description="SELL SL-limit price buffer below the emergency option trigger",
     )
+    broker_protective_stop_max_failures: int = Field(default=2, ge=1, le=5)
+    broker_protective_stop_cancel_timeout_sec: float = Field(
+        default=5.0, ge=1.0, le=30.0
+    )
+    broker_protective_stop_cancel_max_attempts: int = Field(
+        default=3, ge=1, le=5
+    )
     account_equity: float = Field(default=500000.0, gt=0)
     # Forward option-validation assumptions.  These do not alter signal,
     # selector, PositionManager, or exit rules.
@@ -614,6 +621,10 @@ class ActiveTrade(BaseModel):
     protective_stop_filled_proceeds: float = 0.0
     protective_stop_cancel_for_exit: bool = False
     protective_stop_failures: int = 0
+    protective_stop_last_failure_reason: Optional[str] = None
+    protective_stop_last_failure_at: Optional[datetime] = None
+    protective_stop_cancel_attempts: int = 0
+    protective_stop_cancel_requested_at: Optional[datetime] = None
     current_r: float = 0.0
     peak_r: float = 0.0
     mfe_points: float = 0.0
