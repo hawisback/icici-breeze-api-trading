@@ -228,7 +228,8 @@ async def test_risk_service_enforces_live_gate(tmp_path):
     gateway = SimpleNamespace(
         get_funds=AsyncMock(
             return_value=SimpleNamespace(available_margin=500000.0)
-        )
+        ),
+        get_positions=AsyncMock(return_value=[]),
     )
     risk_svc = RiskService(
         repository=repo,
