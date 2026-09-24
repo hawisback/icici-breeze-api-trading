@@ -1623,6 +1623,33 @@ class StrategyService:
                     trade.exit_proceeds += delta_proceeds
                     trade.protective_stop_filled_quantity = new_filled
                     trade.protective_stop_filled_proceeds = new_proceeds
+                    if delta_filled > 0:
+                        incremental_price = (
+                            delta_proceeds / delta_filled
+                            if delta_proceeds > 0
+                            else cumulative_average
+                        )
+                        await self._record_execution({
+                            "ledger_id": (
+                                f"LIVE-PROTECTIVE-{protective.order_id}-"
+                                f"{new_filled}"
+                            ),
+                            "trade_id": trade.trade_id,
+                            "side": "SELL",
+                            "timestamp": (
+                                getattr(protective, "updated_at", None)
+                                or utc_now()
+                            ).isoformat(),
+                            "raw_bid": None,
+                            "raw_ask": None,
+                            "raw_ltp": None,
+                            "executable_price": incremental_price,
+                            "slippage_points": 0.0,
+                            "quantity": delta_filled,
+                            "source": "BROKER_PROTECTIVE_STOP",
+                            "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                            "reason": OPTION_EMERGENCY_STOP,
+                        })
 
             # Broker reconciliation above may have discovered a partial fill.
             # Any replacement protection must cover only the still-open long
@@ -1884,7 +1911,7 @@ class StrategyService:
     def _apply_exit_order_progress(
         trade: ActiveTrade,
         order: Any,
-    ) -> None:
+    ) -> tuple[int, float, int]:
         """Apply cumulative broker fill progress exactly once per exit order."""
         new_filled = max(
             0,
@@ -1894,7 +1921,7 @@ class StrategyService:
             trade.exit_order_accounted_filled_quantity or 0
         )
         if new_filled < accounted_filled:
-            return
+            return 0, 0.0, new_filled
 
         cumulative_average = float(order.average_price or 0.0)
         new_order_proceeds = cumulative_average * new_filled
@@ -1903,6 +1930,7 @@ class StrategyService:
         )
         delta_filled = new_filled - accounted_filled
         delta_proceeds = new_order_proceeds - accounted_proceeds
+        incremental_price = 0.0
         if delta_filled or abs(delta_proceeds) > 1e-9:
             trade.exit_filled_quantity = min(
                 trade.quantity,
@@ -1911,6 +1939,13 @@ class StrategyService:
             trade.exit_proceeds += delta_proceeds
             trade.exit_order_accounted_filled_quantity = new_filled
             trade.exit_order_accounted_proceeds = new_order_proceeds
+            if delta_filled > 0:
+                incremental_price = (
+                    delta_proceeds / delta_filled
+                    if delta_proceeds > 0
+                    else cumulative_average
+                )
+        return delta_filled, incremental_price, new_filled
 
     @staticmethod
     def _reset_exit_order_progress(trade: ActiveTrade) -> None:
@@ -1921,7 +1956,7 @@ class StrategyService:
     def _apply_live_t1_order_progress(
         trade: ActiveTrade,
         order: Any,
-    ) -> int:
+    ) -> tuple[int, float, int]:
         """Apply cumulative broker fills for a Strategy A T1 order once."""
         new_filled = max(
             0,
@@ -1931,7 +1966,7 @@ class StrategyService:
             trade.partial_exit_order_accounted_filled_quantity or 0
         )
         if new_filled < accounted:
-            return 0
+            return 0, 0.0, new_filled
 
         cumulative_average = float(order.average_price or 0.0)
         new_order_proceeds = cumulative_average * new_filled
@@ -1981,7 +2016,12 @@ class StrategyService:
             )
             if trade.partial_exit_filled_quantity > 0:
                 trade.t1_realized_r = trade.t1_decision_r
-        return delta_filled
+        incremental_price = (
+            delta_proceeds / delta_filled
+            if delta_filled > 0 and delta_proceeds > 0
+            else cumulative_average if delta_filled > 0 else 0.0
+        )
+        return delta_filled, incremental_price, new_filled
 
     @staticmethod
     def _reset_live_t1_order_progress(trade: ActiveTrade) -> None:
@@ -2006,7 +2046,34 @@ class StrategyService:
         was_complete = (
             trade.partial_exit_filled_quantity >= trade.t1_exit_quantity
         )
-        delta_filled = self._apply_live_t1_order_progress(trade, order)
+        (
+            delta_filled,
+            incremental_price,
+            cumulative_filled,
+        ) = self._apply_live_t1_order_progress(trade, order)
+        if delta_filled > 0:
+            await self._record_execution({
+                "ledger_id": (
+                    f"LIVE-T1-{order.order_id}-{cumulative_filled}"
+                ),
+                "trade_id": trade.trade_id,
+                "side": "SELL",
+                "timestamp": (
+                    getattr(order, "updated_at", None) or utc_now()
+                ).isoformat(),
+                "raw_bid": trade.partial_exit_raw_bid,
+                "raw_ask": None,
+                "raw_ltp": None,
+                "executable_price": (
+                    incremental_price
+                    or float(order.average_price or order.price or 0.0)
+                ),
+                "slippage_points": 0.0,
+                "quantity": delta_filled,
+                "source": "BROKER_FILL",
+                "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                "reason": "T1_REACHED_PARTIAL_EXIT",
+            })
         terminal = order.status.value in {
             "FILLED",
             "CANCELLED",
@@ -2333,7 +2400,34 @@ class StrategyService:
             if not order:
                 return
 
-            self._apply_exit_order_progress(trade, order)
+            (
+                delta_filled,
+                incremental_price,
+                cumulative_filled,
+            ) = self._apply_exit_order_progress(trade, order)
+            if delta_filled > 0:
+                await self._record_execution({
+                    "ledger_id": (
+                        f"LIVE-EXIT-{order.order_id}-{cumulative_filled}"
+                    ),
+                    "trade_id": trade.trade_id,
+                    "side": "SELL",
+                    "timestamp": (
+                        getattr(order, "updated_at", None) or utc_now()
+                    ).isoformat(),
+                    "raw_bid": None,
+                    "raw_ask": None,
+                    "raw_ltp": None,
+                    "executable_price": (
+                        incremental_price
+                        or float(order.average_price or order.price or 0.0)
+                    ),
+                    "slippage_points": 0.0,
+                    "quantity": delta_filled,
+                    "source": "BROKER_FILL",
+                    "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                    "reason": trade.pending_exit_reason or "LIVE_EXIT",
+                })
 
             if (
                 order.status.value == "FILLED"
@@ -2696,20 +2790,21 @@ class StrategyService:
         await self.repo.save_trade(trade)
         if self._is_strategy_a(trade.strategy):
             await self._record_strategy_a_lifecycle_event(trade, features, "CLOSED", reason)
-        await self._record_execution({
-            "trade_id": trade.trade_id,
-            "side": "SELL",
-            "timestamp": trade.exit_time.isoformat(),
-            "raw_bid": (quote or {}).get("bid"),
-            "raw_ask": (quote or {}).get("ask"),
-            "raw_ltp": (quote or {}).get("ltp"),
-            "executable_price": price,
-            "slippage_points": self._paper_slippage(),
-            "quantity": final_quantity,
-            "source": (quote or {}).get("source", "UNKNOWN"),
-            "cost_assumption_version": r.paper_cost_assumption_version,
-            "reason": reason,
-        })
+        if trade.mode != AutoTradingMode.LIVE:
+            await self._record_execution({
+                "trade_id": trade.trade_id,
+                "side": "SELL",
+                "timestamp": trade.exit_time.isoformat(),
+                "raw_bid": (quote or {}).get("bid"),
+                "raw_ask": (quote or {}).get("ask"),
+                "raw_ltp": (quote or {}).get("ltp"),
+                "executable_price": price,
+                "slippage_points": self._paper_slippage(),
+                "quantity": final_quantity,
+                "source": (quote or {}).get("source", "UNKNOWN"),
+                "cost_assumption_version": r.paper_cost_assumption_version,
+                "reason": reason,
+            })
         await self._log_decision("EXIT", trade.strategy.value, "Position closed: " + str(reason), trade.model_dump(mode="json"))
         await self.bus.publish(EventEnvelope(topic=Topics.STRATEGY_SIGNAL, payload={"event": "TRADE_CLOSED", "trade": trade.model_dump(mode="json")}))
 
