@@ -68,7 +68,17 @@ class OptionChainService:
                 except Exception as exc:
                     logger.warning("Unable to refresh Kite option expiries: %s", exc)
         if not all_expiries:
-            return {"underlying": clean_underlying, "source": "UNAVAILABLE", "strikes": []}
+            return {
+                "underlying": clean_underlying,
+                "source": "UNAVAILABLE",
+                "strikes": [],
+                "capabilities": {
+                    "verified_delta_available": False,
+                    "verified_greeks_available": False,
+                    "strategy_a_contract_selection_ready": False,
+                    "strategy_a_rejection_reason": "OPTION_CHAIN_UNAVAILABLE",
+                },
+            }
         selected_expiry = expiry if (expiry and expiry in all_expiries) else all_expiries[0]
 
         # 1. Resolve realistic spot price
@@ -137,6 +147,7 @@ class OptionChainService:
                     sorted_strikes = [strikes_map[k] for k in sorted(strikes_map.keys())]
                     live_spot = float(breeze_chain.spot_price) if breeze_chain.spot_price else spot_price
 
+                    captured_at = datetime.now(timezone.utc).isoformat()
                     return {
                         "underlying": clean_underlying,
                         "spot_price": live_spot,
@@ -144,7 +155,16 @@ class OptionChainService:
                         "available_expiries": all_expiries,
                         "atm_strike": round(live_spot / step) * step,
                         "source": "BREEZE",
-                        "captured_at": datetime.now(timezone.utc).isoformat(),
+                        "captured_at": captured_at,
+                        "timestamp": captured_at,
+                        "capabilities": {
+                            "verified_delta_available": False,
+                            "verified_greeks_available": False,
+                            "strategy_a_contract_selection_ready": False,
+                            "strategy_a_rejection_reason": (
+                                "BREEZE_VERIFIED_OPTION_GREEKS_UNAVAILABLE"
+                            ),
+                        },
                         "strikes": sorted_strikes,
                     }
             except Exception as exc:
@@ -177,6 +197,17 @@ class OptionChainService:
                             )
                             if kite_chain.get("strikes"):
                                 kite_chain["available_expiries"] = all_expiries or kite_chain.get("available_expiries", [])
+                                captured_at = datetime.now(timezone.utc).isoformat()
+                                kite_chain["captured_at"] = captured_at
+                                kite_chain["timestamp"] = captured_at
+                                kite_chain["capabilities"] = {
+                                    "verified_delta_available": False,
+                                    "verified_greeks_available": False,
+                                    "strategy_a_contract_selection_ready": False,
+                                    "strategy_a_rejection_reason": (
+                                        "KITE_VERIFIED_OPTION_GREEKS_UNAVAILABLE"
+                                    ),
+                                }
                                 self._kite_chain_cache[cache_key] = (monotonic(), kite_chain)
                                 self._kite_chain_retry_after = 0.0
                                 return deepcopy(kite_chain)
@@ -256,5 +287,13 @@ class OptionChainService:
             "available_expiries": expiries,
             "atm_strike": atm_strike,
             "source": "SIMULATED",
+            "capabilities": {
+                "verified_delta_available": False,
+                "verified_greeks_available": False,
+                "strategy_a_contract_selection_ready": False,
+                "strategy_a_rejection_reason": (
+                    "SIMULATED_OPTION_CHAIN_NOT_EXECUTABLE"
+                ),
+            },
             "strikes": sorted_strikes,
         }
