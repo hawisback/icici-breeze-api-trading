@@ -1229,18 +1229,58 @@ export async function runStrategySimulation(req: SimulationRequestData = {}): Pr
   return res.json();
 }
 
+const simulationDatesCache = new Map<
+  "BREEZE" | "KITE",
+  { expiresAt: number; dates: string[] }
+>();
+const simulationDatesInFlight = new Map<
+  "BREEZE" | "KITE",
+  Promise<string[]>
+>();
+const SIMULATION_DATES_CACHE_MS = 60_000;
+
 export async function fetchSimulationAvailableDates(
   historicalSource: "BREEZE" | "KITE" = "BREEZE",
 ): Promise<string[]> {
-  const res = await fetch(
-    `${API_BASE}/strategies/simulate/available-dates?historical_source=${historicalSource}`,
-  );
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const detail = typeof err?.detail === "string" ? err.detail : "";
-    const developmentDetail = process.env.NODE_ENV === "development" && detail ? `: ${detail}` : "";
-    throw new Error(`Failed to fetch available simulation dates (${res.status})${developmentDetail}`);
+  const now = Date.now();
+  const cached = simulationDatesCache.get(historicalSource);
+  if (cached && cached.expiresAt > now) {
+    return cached.dates;
   }
-  const data = await res.json();
-  return data.dates || [];
+
+  const inFlight = simulationDatesInFlight.get(historicalSource);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const request = (async () => {
+    const res = await fetch(
+      `${API_BASE}/strategies/simulate/available-dates?historical_source=${historicalSource}`,
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const detail = typeof err?.detail === "string" ? err.detail : "";
+      const developmentDetail =
+        process.env.NODE_ENV === "development" && detail
+          ? `: ${detail}`
+          : "";
+      throw new Error(
+        `Failed to fetch available simulation dates (${res.status})${developmentDetail}`,
+      );
+    }
+    const data = await res.json();
+    const dates = Array.isArray(data.dates) ? data.dates : [];
+    simulationDatesCache.set(historicalSource, {
+      expiresAt: Date.now() + SIMULATION_DATES_CACHE_MS,
+      dates,
+    });
+    return dates;
+  })();
+
+  simulationDatesInFlight.set(historicalSource, request);
+  try {
+    return await request;
+  } finally {
+    simulationDatesInFlight.delete(historicalSource);
+  }
 }
