@@ -1028,6 +1028,8 @@ class StrategyDPaperMonitor:
             if bar.end_time.astimezone(IST).date() == local_day
         ]
         discovered: list[StrategyDSignal] = []
+        fresh_execution_signal: StrategyDSignal | None = None
+        fresh_execution_signal_id: str | None = None
         for bar in day_bars:
             history = [
                 item for item in spot_5m
@@ -1070,6 +1072,12 @@ class StrategyDPaperMonitor:
                 seen.add(signal_id)
                 changed = True
                 continue
+
+            # Expose the fresh frozen underlying signal independently of the
+            # parallel paper option fill. StrategyService owns contract
+            # selection, risk sizing, persistence, and OMS execution.
+            fresh_execution_signal = signal
+            fresh_execution_signal_id = signal_id
 
             tracked = await self._capture_entry(
                 signal,
@@ -1153,6 +1161,12 @@ class StrategyDPaperMonitor:
             ),
             "paper_trades": recent_paper_trades,
             "latest_signal": latest_signal,
+            "execution_signal": (
+                fresh_execution_signal.to_dict()
+                if fresh_execution_signal is not None
+                else None
+            ),
+            "execution_signal_id": fresh_execution_signal_id,
             "market": self._market_snapshot(
                 spot_5m=spot_5m,
                 futures_5m=futures_5m,
