@@ -2884,7 +2884,7 @@ class StrategyService:
         await self.repo.save_trade(trade)
 
     async def _close_trade(self, trade, features, price, reason, quote: Optional[dict[str, Any]] = None):
-        emergency_option_stop = self._is_strategy_a(trade.strategy) and is_option_emergency_stop(reason)
+        emergency_option_stop = is_option_emergency_stop(reason)
         if emergency_option_stop:
             reason = OPTION_EMERGENCY_STOP
         trade.state = TradeLifecycleState.CLOSED
