@@ -3,6 +3,7 @@ name: Frontend checks
 on:
   push:
     branches:
+      - main
       - strategy-a-trend-pullback-v2
     paths:
       - "frontend/trading-ui/**"
