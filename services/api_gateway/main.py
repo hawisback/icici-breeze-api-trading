@@ -404,10 +404,6 @@ async def get_system_health():
         "services": {
             "api_gateway": "ONLINE",
             "broker_session": "CONNECTED" if broker_connected else "DISCONNECTED",
-            "broker_sessions": {
-                broker: status_payload.get("status", "DISCONNECTED")
-                for broker, status_payload in broker_sessions.items()
-            },
             "market_feed": feed_status["status"],
             "strategy_scheduler": "RUNNING" if strategy_scheduler.get("running") else "STOPPED",
             "strategy_market_data": "READY" if strategy_ready else "NOT_READY",
@@ -417,6 +413,10 @@ async def get_system_health():
             "oms": "ACTIVE",
             "portfolio": "ACTIVE",
             "system_mode": system_mode.value,
+        },
+        "broker_sessions": {
+            broker: status_payload.get("status", "DISCONNECTED")
+            for broker, status_payload in broker_sessions.items()
         },
         "config": services.settings.get_redacted_summary(),
     }
