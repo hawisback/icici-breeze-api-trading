@@ -63,6 +63,10 @@ from services.strategy.reason_codes import (
 )
 from services.strategy.repository import StrategyRepository
 from services.strategy.simulation import SimulationEngine
+from services.strategy.strategies.candidate_runtime import (
+    strategy_c_signal_from_status,
+    strategy_d_signal_from_status,
+)
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 from services.strategy.strategy_c_shadow_monitor import StrategyCShadowMonitor
@@ -656,6 +660,27 @@ class StrategyService:
     def _is_strategy_a(strategy: StrategyName) -> bool:
         return strategy == StrategyName.TREND_PULLBACK
 
+    @staticmethod
+    def _is_candidate_execution_strategy(strategy: StrategyName) -> bool:
+        return strategy in {
+            StrategyName.DI_CONTINUATION,
+            StrategyName.SR_MOMENTUM_BREAKOUT,
+        }
+
+    @staticmethod
+    def _uses_delta_aware_selector(strategy: StrategyName) -> bool:
+        return strategy in {
+            StrategyName.TREND_PULLBACK,
+            StrategyName.DI_CONTINUATION,
+        }
+
+    @staticmethod
+    def _uses_underlying_risk_sizing(strategy: StrategyName) -> bool:
+        return strategy in {
+            StrategyName.TREND_PULLBACK,
+            StrategyName.DI_CONTINUATION,
+        }
+
     def _execution_policy_for_strategy(self, strategy: StrategyName):
         """Return the single authoritative A/B/C/D execution policy."""
         return resolve_strategy_execution_policy(
@@ -1142,7 +1167,26 @@ class StrategyService:
         bypass = getattr(self._active_overrides, "bypass_entry_window", False)
         _, _, futures_candles = self._market_snapshot
         strategy_a_data_ready = self.config.tunables.trend_pullback_enabled and bool(futures_candles)
-        if not (strategy_a_data_ready or features.data_ready or features.breakout_data_ready or (bypass and features.spot_price > 0)):
+        candidate_entry_available = bool(
+            (
+                self.config.tunables.di_continuation_enabled
+                and self._last_strategy_c_shadow_status.get("active_candidate_trade")
+            )
+            or (
+                self.config.tunables.sr_momentum_breakout_enabled
+                and (
+                    self._last_strategy_d_paper_status.get("execution_signal")
+                    or self._last_strategy_d_paper_status.get("active_execution_trade")
+                )
+            )
+        )
+        if not (
+            strategy_a_data_ready
+            or features.data_ready
+            or features.breakout_data_ready
+            or candidate_entry_available
+            or (bypass and features.spot_price > 0)
+        ):
             self._reset_setups(now)
             await self._save_runtime()
             return {"status": "DATA_UNAVAILABLE", "reason": features.data_reason}
@@ -1298,6 +1342,33 @@ class StrategyService:
             self.strategy_b.reset(now)
             await self._save_runtime()
 
+        if not signal and self.config.tunables.di_continuation_enabled:
+            signal = strategy_c_signal_from_status(
+                self._last_strategy_c_shadow_status,
+                as_of=now,
+            )
+
+        if not signal and self.config.tunables.sr_momentum_breakout_enabled:
+            signal = strategy_d_signal_from_status(
+                self._last_strategy_d_paper_status,
+                as_of=now,
+            )
+
+        candidate_signal_already_persisted = False
+        if signal and self._is_candidate_execution_strategy(signal.strategy):
+            prior_signals = await self.repo.list_strategy_signals(limit=1000)
+            prior_ids = {
+                str(item.get("signal_id"))
+                for item in prior_signals
+                if isinstance(item, dict) and item.get("signal_id")
+            }
+            candidate_signal_already_persisted = signal.signal_id in prior_ids
+            if candidate_signal_already_persisted and any(
+                str(trade.signal_id or "") == signal.signal_id
+                for trade in today_trades
+            ):
+                signal = None
+
         if not signal:
             enabled_blocked = (
                 (
@@ -1326,26 +1397,31 @@ class StrategyService:
         if failures >= self.config.risk.max_failed_trades_per_strategy:
             return {"status": "STRATEGY_FAILURE_LIMIT_REACHED"}
 
-        # Signal detected!
-        await self.repo.save_strategy_signal(signal)
-        await self._log_decision(
-            category="SETUP",
-            strategy=signal.strategy.value,
-            message=f"Setup Triggered: {signal.strategy.value} {signal.direction.value} ({signal.option_type.value})",
-            details={
-                "underlying_entry_price": signal.underlying_entry_price or signal.spot_reference_price,
-                "stop": signal.structural_stop,
-                "r_points": signal.r_points,
-                "derivatives_score": signal.derivatives_score,
-            },
-        )
+        # Persist candidate signals once while allowing a fresh candidate to
+        # retry transient downstream failures until a trade exists or the
+        # frozen signal freshness window expires.
+        if not candidate_signal_already_persisted:
+            await self.repo.save_strategy_signal(signal)
+            await self._log_decision(
+                category="SETUP",
+                strategy=signal.strategy.value,
+                message=f"Setup Triggered: {signal.strategy.value} {signal.direction.value} ({signal.option_type.value})",
+                details={
+                    "underlying_entry_price": signal.underlying_entry_price or signal.spot_reference_price,
+                    "stop": signal.structural_stop,
+                    "r_points": signal.r_points,
+                    "derivatives_score": signal.derivatives_score,
+                },
+            )
 
         # 10. Select execution contract downstream of the underlying signal.
         execution_mode = self._execution_mode_for_signal(signal)
         chain = await self._get_option_chain()
         is_strategy_a = self._is_strategy_a(signal.strategy)
+        delta_aware_selector = self._uses_delta_aware_selector(signal.strategy)
+        underlying_risk_sizing = self._uses_underlying_risk_sizing(signal.strategy)
         if (
-            is_strategy_a
+            delta_aware_selector
             and execution_mode == AutoTradingMode.LIVE
             and not bool(
                 self._market_data_status.get(
@@ -1371,30 +1447,59 @@ class StrategyService:
                 f"EXECUTION_REJECTED_OPTION_READINESS:{reason}",
             )
             return {
-                "status": "STRATEGY_A_OPTION_EXECUTION_BLOCKED",
+                "status": (
+                    "STRATEGY_A_OPTION_EXECUTION_BLOCKED"
+                    if is_strategy_a
+                    else "DELTA_AWARE_OPTION_EXECUTION_BLOCKED"
+                ),
                 "reason": reason,
             }
-        if is_strategy_a and signal.underlying_entry_price is None:
-            await self._log_decision("RISK", signal.strategy.value, "Strategy A signal missing authoritative futures entry", signal.model_dump(mode="json"))
-            await self._reject_strategy_a_execution(signal, "EXECUTION_REJECTED_INVALID_ENTRY_REFERENCE")
-            return {"status": "INVALID_STRATEGY_A_ENTRY_REFERENCE"}
-        underlying_entry = signal.underlying_entry_price if is_strategy_a else signal.spot_reference_price
+        if underlying_risk_sizing and signal.underlying_entry_price is None:
+            await self._log_decision(
+                "RISK",
+                signal.strategy.value,
+                "Structural-risk strategy signal missing authoritative underlying entry",
+                signal.model_dump(mode="json"),
+            )
+            if is_strategy_a:
+                await self._reject_strategy_a_execution(
+                    signal,
+                    "EXECUTION_REJECTED_INVALID_ENTRY_REFERENCE",
+                )
+            return {"status": "INVALID_UNDERLYING_ENTRY_REFERENCE"}
+        underlying_entry = (
+            signal.underlying_entry_price
+            if underlying_risk_sizing
+            else signal.spot_reference_price
+        )
         selector_underlying = underlying_entry
         selected_contract, candidates, rejection_reason = self.contract_selector.select_contract(
             direction=signal.direction,
             spot_price=selector_underlying,
             option_chain=chain,
             override_premium_cap=self._active_overrides.max_option_premium_cap,
-            strategy_a=is_strategy_a,
+            strategy_a=delta_aware_selector,
             as_of=signal.timestamp,
         )
-        if signal.strategy == StrategyName.TREND_PULLBACK and chain.get("source") not in ("BREEZE", "KITE", "LIVE"):
+        if (
+            signal.strategy in {
+                StrategyName.TREND_PULLBACK,
+                StrategyName.DI_CONTINUATION,
+                StrategyName.SR_MOMENTUM_BREAKOUT,
+            }
+            and chain.get("source") not in ("BREEZE", "KITE", "LIVE")
+        ):
             selected_contract = None
             rejection_reason = chain.get("validation_rejection", "NO_REAL_OPTION_QUOTE")
         # Passive shadow capture only. The selector has already run and its
         # result is never changed by this recorder; persistence failures are
         # intentionally non-blocking for paper/live execution paths.
-        if signal.strategy in (StrategyName.TREND_PULLBACK, StrategyName.VOLATILITY_BREAKOUT):
+        if signal.strategy in {
+            StrategyName.TREND_PULLBACK,
+            StrategyName.VOLATILITY_BREAKOUT,
+            StrategyName.DI_CONTINUATION,
+            StrategyName.SR_MOMENTUM_BREAKOUT,
+        }:
             try:
                 await self._capture_option_chain_snapshot(
                     signal=signal,
@@ -1451,8 +1556,10 @@ class StrategyService:
                 spread=selected_contract.spread_pct, management_event="CONTRACT_SELECTED",
             ))
 
-        # 11. Position Sizing
-        if self._is_strategy_a(signal.strategy):
+        # 11. Position sizing. Strategy C, like A, has an explicit
+        # underlying structural stop and therefore uses delta-aware sizing.
+        sizing = None
+        if underlying_risk_sizing:
             sizing = self.risk_sizer.size(
                 underlying_entry=underlying_entry,
                 underlying_stop=signal.structural_stop,
@@ -1480,9 +1587,9 @@ class StrategyService:
                     option_contract=selected_contract.instrument_id, expiry=selected_contract.expiry,
                     delta=selected_contract.delta, delta_source=selected_contract.greek_source,
                     position_size=0, lot_size=selected_contract.lot_size, lots=0,
-                    risk_budget=sizing.risk_budget if is_strategy_a else None,
-                    estimated_option_loss_at_structural_stop=sizing.option_loss_per_lot if is_strategy_a else None,
-                    rejection_or_invalidation_reason=sizing.rejection_reason or "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET",
+                    risk_budget=sizing.risk_budget if sizing is not None else None,
+                    estimated_option_loss_at_structural_stop=sizing.option_loss_per_lot if sizing is not None else None,
+                    rejection_or_invalidation_reason=(sizing.rejection_reason if sizing is not None else None) or "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET",
                     management_event="SIZING_REJECTED",
                 ))
             await self._log_decision(
@@ -1540,7 +1647,7 @@ class StrategyService:
             box_low=signal.features_snapshot.get("box_low"),
             atr_at_lock=signal.features_snapshot.get("atr_at_lock"),
             current_option_price=selected_contract.ltp or selected_contract.ask_price,
-            current_spot_price=(underlying_entry if self._is_strategy_a(signal.strategy) else features.spot_price),
+            current_spot_price=underlying_entry,
             current_trailing_stop=signal.structural_stop,
             option_hard_stop_price=hard_stop_price,
             current_r=0.0,
@@ -1580,8 +1687,12 @@ class StrategyService:
             selected_option_delta_source=selected_contract.greek_source,
             selected_option_gamma=selected_contract.gamma,
             selected_option_gamma_source=selected_contract.greek_source,
-            risk_budget=sizing.risk_budget if is_strategy_a else None,
-            estimated_option_loss_at_structural_stop=(sizing.option_loss_per_lot * lots if is_strategy_a else None),
+            risk_budget=sizing.risk_budget if sizing is not None else None,
+            estimated_option_loss_at_structural_stop=(
+                sizing.option_loss_per_lot * lots
+                if sizing is not None
+                else None
+            ),
         )
 
         await self.repo.save_trade(new_trade)
