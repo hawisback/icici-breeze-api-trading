@@ -1769,7 +1769,8 @@ class StrategyService:
                         )
                         await self._record_execution({
                             "ledger_id": (
-                                f"LIVE-PROTECTIVE-{protective.order_id}-"
+                                f"LIVE-PROTECTIVE-"
+                                f"{getattr(protective, 'order_id', None) or trade.protective_stop_order_id or protective.broker_order_id}-"
                                 f"{new_filled}"
                             ),
                             "trade_id": trade.trade_id,
@@ -3684,7 +3685,11 @@ class StrategyService:
         policy = self._execution_policy_for_strategy(strategy)
         if not policy.force_entry_allowed:
             return {
-                "status": "EXECUTION_POLICY_FORCE_ENTRY_DISABLED",
+                "status": (
+                    "STRATEGY_A_FORCE_ENTRY_DISABLED"
+                    if strategy == StrategyName.TREND_PULLBACK
+                    else "EXECUTION_POLICY_FORCE_ENTRY_DISABLED"
+                ),
                 "reason": (
                     policy.live_block_reason
                     or "FORCE_ENTRY_DISABLED_BY_POLICY"
