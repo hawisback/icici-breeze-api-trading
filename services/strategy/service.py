@@ -154,8 +154,208 @@ class StrategyService:
             "futures_instrument": None, "futures_candle_count": 0,
             "latest_futures_candle": None, "last_error": "Awaiting first evaluation",
         }
+        self._startup_reconciliation: dict[str, Any] = {
+            "status": "NOT_CHECKED",
+            "issues": [],
+        }
         self.strategy_a_telemetry = StrategyATelemetryStore()
 
+
+    @staticmethod
+    def _normalized_option_right(value: object) -> str:
+        text = str(value or "").upper()
+        if text in {"CALL", "CE"}:
+            return "CALL"
+        if text in {"PUT", "PE"}:
+            return "PUT"
+        return text
+
+    def _broker_position_matches_trade(
+        self,
+        position: Any,
+        trade: ActiveTrade,
+    ) -> bool:
+        broker_symbol = str(
+            getattr(position, "stock_code", "") or ""
+        ).upper()
+        if broker_symbol == trade.contract_symbol.upper():
+            return True
+
+        provider = self._active_broker_context()[0]
+        if provider != "breeze":
+            return False
+
+        expiry = str(getattr(position, "expiry_date", "") or "")[:10]
+        strike = getattr(position, "strike_price", None)
+        right = self._normalized_option_right(
+            getattr(position, "right", None)
+        )
+        underlying = (
+            "BANKNIFTY"
+            if trade.contract_symbol.upper().startswith("BANKNIFTY")
+            else "NIFTY"
+        )
+        return bool(
+            broker_symbol == underlying
+            and expiry == str(trade.expiry)[:10]
+            and strike is not None
+            and abs(float(strike) - float(trade.strike)) < 1e-6
+            and right == trade.option_type.value
+        )
+
+    async def build_live_reconciliation_report(
+        self,
+        *,
+        broker_positions: list[Any],
+        orders: list[Any],
+        broker_verified: bool,
+        broker_error: str | None = None,
+    ) -> dict[str, Any]:
+        """Compare durable local LIVE state with the broker before re-arming."""
+        active_trades = await self.repo.get_active_trades()
+        live_trades = [
+            trade
+            for trade in active_trades
+            if trade.mode == AutoTradingMode.LIVE
+            and trade.state != TradeLifecycleState.CLOSED
+        ]
+        unresolved_states = {
+            "CREATED",
+            "VALIDATING",
+            "APPROVED",
+            "SUBMITTING",
+            "SUBMISSION_UNKNOWN",
+            "ACKNOWLEDGED",
+            "OPEN",
+            "PARTIALLY_FILLED",
+        }
+        unresolved_orders = [
+            order
+            for order in orders
+            if order.trading_mode == TradingMode.LIVE
+            and order.status.value in unresolved_states
+        ]
+        issues: list[str] = []
+        matched_position_indexes: set[int] = set()
+        trade_rows: list[dict[str, Any]] = []
+
+        if not broker_verified:
+            issues.append(
+                "BROKER_STATE_UNVERIFIED"
+                + (f":{broker_error}" if broker_error else "")
+            )
+
+        for trade in live_trades:
+            remaining = max(
+                0,
+                int(trade.quantity) - int(trade.exit_filled_quantity),
+            )
+            matches: list[tuple[int, Any]] = []
+            for index, position in enumerate(broker_positions):
+                if self._broker_position_matches_trade(position, trade):
+                    matches.append((index, position))
+                    matched_position_indexes.add(index)
+            broker_quantity = sum(
+                int(getattr(position, "quantity", 0) or 0)
+                for _, position in matches
+            )
+
+            if broker_verified and broker_quantity != remaining:
+                issues.append(
+                    f"LIVE_POSITION_MISMATCH:{trade.trade_id}:"
+                    f"local={remaining}:broker={broker_quantity}"
+                )
+
+            protection_status = "NOT_REQUIRED"
+            if remaining > 0 and not trade.exit_order_id:
+                if not trade.protective_stop_order_id:
+                    protection_status = "MISSING"
+                    issues.append(
+                        f"LIVE_PROTECTIVE_STOP_MISSING:{trade.trade_id}"
+                    )
+                else:
+                    protective = await self.oms.get_order(
+                        trade.protective_stop_order_id
+                    )
+                    if protective is None:
+                        protection_status = "OMS_ORDER_MISSING"
+                        issues.append(
+                            f"LIVE_PROTECTIVE_STOP_UNKNOWN:{trade.trade_id}"
+                        )
+                    else:
+                        protection_status = protective.status.value
+                        if protective.status.value not in {
+                            "OPEN",
+                            "ACKNOWLEDGED",
+                            "PARTIALLY_FILLED",
+                        }:
+                            issues.append(
+                                "LIVE_PROTECTIVE_STOP_NOT_CONFIRMED:"
+                                f"{trade.trade_id}:"
+                                f"{protective.status.value}"
+                            )
+
+            if remaining > 0:
+                issues.append(
+                    f"RECOVERED_LIVE_POSITION_ACTIVE:{trade.trade_id}"
+                )
+
+            trade_rows.append(
+                {
+                    "trade_id": trade.trade_id,
+                    "symbol": trade.contract_symbol,
+                    "local_remaining_quantity": remaining,
+                    "broker_quantity": broker_quantity,
+                    "protective_stop_status": protection_status,
+                    "exit_order_id": trade.exit_order_id,
+                }
+            )
+
+        for index, position in enumerate(broker_positions):
+            quantity = int(getattr(position, "quantity", 0) or 0)
+            if quantity == 0:
+                continue
+            if index not in matched_position_indexes:
+                issues.append(
+                    "ORPHAN_BROKER_POSITION:"
+                    f"{getattr(position, 'stock_code', 'UNKNOWN')}:"
+                    f"{quantity}"
+                )
+            if quantity < 0:
+                issues.append(
+                    "UNEXPECTED_SHORT_BROKER_POSITION:"
+                    f"{getattr(position, 'stock_code', 'UNKNOWN')}:"
+                    f"{quantity}"
+                )
+
+        if unresolved_orders:
+            issues.append("UNRESOLVED_LIVE_ORDERS")
+
+        report = {
+            "status": "BLOCKED" if issues else "CLEAN",
+            "checked_at": utc_now().isoformat(),
+            "broker_verified": broker_verified,
+            "broker_error": broker_error,
+            "issues": list(dict.fromkeys(issues)),
+            "active_live_trades": trade_rows,
+            "open_broker_positions": sum(
+                1
+                for position in broker_positions
+                if int(getattr(position, "quantity", 0) or 0) != 0
+            ),
+            "unresolved_live_orders": [
+                {
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "side": order.side.value,
+                    "status": order.status.value,
+                    "reduce_only": order.reduce_only,
+                }
+                for order in unresolved_orders
+            ],
+        }
+        self._startup_reconciliation = report
+        return report
 
     def _reset_setups(self, at):
         self.strategy_a.reset(at)
