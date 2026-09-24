@@ -1400,11 +1400,30 @@ async def update_strategy_config(
 @app.post("/api/v1/strategies/arm")
 async def arm_strategy_system(
     req: StrategyArmRequest,
-    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+    current_user: UserPrincipal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR)
+    ),
 ):
     services = get_services()
+    current_config = await services.strategy_svc.get_config()
+    if req.armed and current_config.mode == AutoTradingMode.LIVE:
+        preflight = await get_live_preflight(current_user)
+        if preflight.get("readiness") != "READY_FOR_LIVE":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        "LIVE strategy arming blocked by current preflight"
+                    ),
+                    "readiness": preflight.get("readiness"),
+                    "blockers": preflight.get("blockers", []),
+                },
+            )
     updated = await services.strategy_svc.arm_system(req.armed)
-    return {"status": "SUCCESS", "config": updated.model_dump(mode="json")}
+    return {
+        "status": "SUCCESS",
+        "config": updated.model_dump(mode="json"),
+    }
 
 
 @app.post("/api/v1/strategies/auto-trade")
