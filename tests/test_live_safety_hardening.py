@@ -118,19 +118,23 @@ async def test_reduce_only_exit_survives_closed_live_gate_and_reconciles(tmp_pat
         live_gate=gate,
         portfolio_service=portfolio,
         broker_gateway=SimpleNamespace(
+            active_broker_name="breeze",
             get_positions=AsyncMock(
                 return_value=[
                     BrokerPositionResponse(
-                        stock_code="NIFTYTESTCE",
+                        stock_code="NIFTY",
                         exchange_code="NFO",
                         product_type="options",
                         quantity=65,
                         average_price=100.0,
                         ltp=100.0,
                         pnl=0.0,
+                        strike_price=25000.0,
+                        right="call",
+                        expiry_date="2026-09-29",
                     )
                 ]
-            )
+            ),
         ),
     )
     await risk.initialize()
@@ -149,8 +153,8 @@ async def test_reduce_only_exit_survives_closed_live_gate_and_reconciles(tmp_pat
     await execution.initialize()
 
     intent = OrderIntent(
-        instrument_id="INST-NIFTY-TEST-CE",
-        symbol="NIFTYTESTCE",
+        instrument_id="INST-NIFTY-2026-09-29-25000-CE",
+        symbol="NIFTY25000CE",
         side=OrderSide.SELL,
         order_type=OrderType.LIMIT,
         quantity=65,
