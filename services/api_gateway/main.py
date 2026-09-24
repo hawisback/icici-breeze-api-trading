@@ -980,6 +980,183 @@ async def get_live_gate_status():
     return services.live_gate.get_status()
 
 
+@app.get("/api/v1/live-preflight")
+async def get_live_preflight(
+    current_user: UserPrincipal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR)
+    ),
+):
+    """Fail-closed readiness report for opening a server LIVE window."""
+    services = get_services()
+    settings = services.settings
+    session = await services.session_svc.get_session_status()
+    strategy = await services.strategy_svc.get_status()
+    system_mode = await services.risk_svc.get_system_mode()
+    live_gate = services.live_gate.get_status()
+    orders = await services.oms_svc.list_orders(limit=500)
+
+    nonterminal = {
+        "CREATED",
+        "VALIDATING",
+        "APPROVED",
+        "SUBMITTING",
+        "SUBMISSION_UNKNOWN",
+        "ACKNOWLEDGED",
+        "OPEN",
+        "PARTIALLY_FILLED",
+    }
+    unresolved_live_orders = [
+        order
+        for order in orders
+        if order.trading_mode == TradingMode.LIVE
+        and order.status.value in nonterminal
+    ]
+
+    broker_positions = []
+    funds = None
+    broker_error = None
+    if session.get("connected"):
+        try:
+            broker_positions = await services.gateway_svc.get_positions(
+                mode=TradingMode.LIVE
+            )
+            funds = await services.gateway_svc.get_funds(
+                mode=TradingMode.LIVE
+            )
+        except Exception as exc:
+            logger.exception("LIVE preflight broker verification failed")
+            broker_error = type(exc).__name__
+
+    open_broker_positions = [
+        position for position in broker_positions if int(position.quantity) != 0
+    ]
+    market = strategy.get("market_data") or {}
+    scheduler = strategy.get("scheduler") or {}
+    configured_bus = settings.event_bus_backend.value
+    runtime_bus = (
+        "memory"
+        if type(services.event_bus).__name__ == "InMemoryEventBus"
+        else type(services.event_bus).__name__
+    )
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+
+    if not settings.live_trading_enabled:
+        blockers.append("LIVE_TRADING_ENABLED_FALSE")
+    if not settings.live_allowed_accounts:
+        blockers.append("NO_LIVE_ALLOWED_ACCOUNT")
+    if not session.get("connected"):
+        blockers.append("BROKER_SESSION_NOT_CONNECTED")
+    if broker_error:
+        blockers.append(f"BROKER_VERIFICATION_FAILED:{broker_error}")
+    if settings.market_data_backend.value == "simulated":
+        blockers.append("SIMULATED_MARKET_DATA")
+    if not market.get("provider_active"):
+        blockers.append("STRATEGY_MARKET_DATA_NOT_ACTIVE")
+    if not scheduler.get("running"):
+        blockers.append("STRATEGY_SCHEDULER_NOT_RUNNING")
+    if system_mode != SystemMode.NORMAL:
+        blockers.append(f"RISK_MODE_{system_mode.value}")
+    if unresolved_live_orders:
+        blockers.append("UNRESOLVED_LIVE_ORDERS")
+    if open_broker_positions:
+        blockers.append("OPEN_BROKER_POSITIONS")
+    if funds is not None and float(funds.available_margin) <= 0:
+        blockers.append("NO_AVAILABLE_BROKER_MARGIN")
+    if configured_bus != runtime_bus:
+        blockers.append(
+            f"EVENT_BUS_RUNTIME_MISMATCH:{configured_bus}->{runtime_bus}"
+        )
+    elif runtime_bus == "memory":
+        warnings.append(
+            "EVENT_BUS_MEMORY_SINGLE_PROCESS; order path uses durable SQLite "
+            "outboxes and broker reconciliation."
+        )
+
+    if strategy.get("config", {}).get("system_armed"):
+        warnings.append("STRATEGY_SYSTEM_ALREADY_ARMED")
+    if strategy.get("config", {}).get("auto_trade_enabled"):
+        warnings.append("AUTO_TRADE_ALREADY_ENABLED")
+
+    if blockers:
+        readiness = "BLOCKED"
+    elif live_gate.get("live_authorized"):
+        readiness = "READY_FOR_LIVE"
+    else:
+        readiness = "READY_FOR_AUTHORIZATION"
+
+    return {
+        "readiness": readiness,
+        "checked_at": utc_now().isoformat(),
+        "checked_by": current_user.user_id,
+        "blockers": blockers,
+        "warnings": warnings,
+        "broker": {
+            "backend": settings.broker_backend.value,
+            "connected": bool(session.get("connected")),
+            "account_id": session.get("account_id"),
+            "expires_at": session.get("expires_at"),
+            "available_margin": (
+                float(funds.available_margin) if funds is not None else None
+            ),
+            "open_positions": len(open_broker_positions),
+        },
+        "market_data": {
+            "configured_backend": settings.market_data_backend.value,
+            "strategy_provider": market.get("provider"),
+            "provider_active": bool(market.get("provider_active")),
+            "futures_candle_count": market.get("futures_candle_count", 0),
+        },
+        "orders": {
+            "unresolved_live_count": len(unresolved_live_orders),
+            "unresolved_live": [
+                {
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "side": order.side.value,
+                    "status": order.status.value,
+                    "reduce_only": order.reduce_only,
+                }
+                for order in unresolved_live_orders
+            ],
+        },
+        "risk": {
+            "system_mode": system_mode.value,
+            "max_order_notional": settings.live_max_order_notional,
+            "max_open_positions": settings.live_max_open_positions,
+        },
+        "live_gate": live_gate,
+        "strategy": {
+            "scheduler_running": bool(scheduler.get("running")),
+            "system_armed": bool(
+                strategy.get("config", {}).get("system_armed")
+            ),
+            "auto_trade_enabled": bool(
+                strategy.get("config", {}).get("auto_trade_enabled")
+            ),
+            "routing": {
+                key: {
+                    "execution_mode": value.get("execution_mode"),
+                    "live_trading_allowed": value.get(
+                        "live_trading_allowed",
+                        False,
+                    ),
+                }
+                for key, value in (strategy.get("strategies") or {}).items()
+            },
+        },
+        "event_bus": {
+            "configured": configured_bus,
+            "runtime": runtime_bus,
+        },
+        "protective_stop": {
+            "supported": settings.broker_backend.value in {"breeze", "kite"},
+            "order_type": "STOP_LIMIT",
+        },
+    }
+
+
 @app.post("/api/v1/live-gate/challenge")
 async def request_live_gate_challenge(
     req: LiveGateChallengeRequest,
