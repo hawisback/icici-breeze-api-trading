@@ -285,7 +285,11 @@ class PlatformSettings(BaseSettings):
             "redis_url": self.redis_url or "[NONE]",
             "default_trading_mode": self.default_trading_mode.value,
             "live_trading_enabled": self.live_trading_enabled,
-            "live_allowed_accounts": self.live_allowed_accounts,
+            "live_allowed_accounts": (
+                f"[CONFIGURED:{len(self.live_allowed_accounts)}]"
+                if self.live_allowed_accounts
+                else "[NONE]"
+            ),
             "live_max_order_notional": self.live_max_order_notional,
             "live_max_open_positions": self.live_max_open_positions,
             "cors_allowed_origins": self.cors_allowed_origins,
