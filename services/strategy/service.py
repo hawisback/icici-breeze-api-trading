@@ -3036,13 +3036,31 @@ class StrategyService:
 
     # --- Market Data & Chain Fetching ---
     def _active_broker_context(self) -> tuple[str, Any | None, bool]:
-        gateway = getattr(self.chain_svc, "broker_gateway", None) or getattr(self.hist_svc, "broker_gateway", None)
+        """Return the configured frequent market-data provider context."""
+        gateway = (
+            getattr(self.chain_svc, "broker_gateway", None)
+            or getattr(self.hist_svc, "broker_gateway", None)
+        )
         if not gateway:
             return "unknown", None, False
-        provider = str(getattr(gateway, "active_broker_name", "unknown") or "unknown").lower()
-        adapter = getattr(gateway, "active_adapter", None)
-        if provider == "breeze":
-            client = getattr(getattr(gateway, "breeze_adapter", None), "client_manager", None)
+
+        provider = str(
+            getattr(
+                gateway,
+                "frequent_data_broker_name",
+                getattr(gateway, "active_broker_name", "unknown"),
+            )
+            or "unknown"
+        ).lower()
+        adapter = getattr(
+            gateway,
+            "frequent_data_adapter",
+            getattr(gateway, "active_adapter", None),
+        )
+        if hasattr(gateway, "is_broker_active") and provider in {"breeze", "kite"}:
+            active = bool(gateway.is_broker_active(provider))
+        elif provider == "breeze":
+            client = getattr(adapter, "client_manager", None)
             active = bool(client and getattr(client, "is_active", False))
         else:
             active = bool(adapter and getattr(adapter, "is_active", False))
@@ -4033,8 +4051,28 @@ class StrategyService:
             StrategyName.SR_MOMENTUM_BREAKOUT
         )
 
+        gateway = (
+            getattr(self.chain_svc, "broker_gateway", None)
+            or getattr(self.hist_svc, "broker_gateway", None)
+        )
+        broker_routing = {
+            "execution_broker": str(
+                getattr(gateway, "execution_broker_name", "unknown")
+                or "unknown"
+            ).lower(),
+            "frequent_data_broker": str(
+                getattr(gateway, "frequent_data_broker_name", "unknown")
+                or "unknown"
+            ).lower(),
+            "reference_data_broker": str(
+                getattr(gateway, "reference_data_broker_name", "unknown")
+                or "unknown"
+            ).lower(),
+        }
+
         return {
             "config": self.config.model_dump(mode="json"),
+            "broker_routing": broker_routing,
             "execution_policy": self._execution_policy_matrix(),
             "scheduler": {
                 "running": bool(self._is_running and self._loop_task and not self._loop_task.done()),
