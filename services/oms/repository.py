@@ -103,6 +103,8 @@ class OMSRepository:
             intent_columns = {row["name"] for row in await (await conn.execute("PRAGMA table_info(order_intents)")).fetchall()}
             if "reduce_only" not in intent_columns:
                 await conn.execute("ALTER TABLE order_intents ADD COLUMN reduce_only INTEGER NOT NULL DEFAULT 0")
+            if "trigger_price" not in intent_columns:
+                await conn.execute("ALTER TABLE order_intents ADD COLUMN trigger_price REAL")
             order_columns = {row["name"] for row in await (await conn.execute("PRAGMA table_info(broker_orders)")).fetchall()}
             if "reduce_only" not in order_columns:
                 await conn.execute("ALTER TABLE broker_orders ADD COLUMN reduce_only INTEGER NOT NULL DEFAULT 0")
