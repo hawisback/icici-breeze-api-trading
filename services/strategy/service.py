@@ -1889,6 +1889,68 @@ class StrategyService:
         elif futures:
             self._market_data_status["last_error"] = None
         self._market_snapshot = (candles_5m, candles_15m, futures)
+
+        now = utc_now()
+        spot_5m_age = (
+            max(0.0, (now - candles_5m[-1].end_time).total_seconds())
+            if candles_5m
+            else None
+        )
+        futures_15m_age = (
+            max(0.0, (now - futures[-1].end_time).total_seconds())
+            if futures
+            else None
+        )
+        try:
+            max_quote_age = float(
+                get_platform_settings().live_market_data_max_age_seconds
+            )
+        except Exception:
+            max_quote_age = 5.0
+        execution_feed_health = (
+            self.mkt_svc.get_execution_feed_health(
+                max_age_seconds=max_quote_age,
+            )
+            if self.mkt_svc is not None
+            else {
+                "healthy": False,
+                "status": "BLOCKED",
+                "reasons": ["MARKET_DATA_SERVICE_UNAVAILABLE"],
+            }
+        )
+        self._market_data_status.update({
+            "execution_feed_healthy": bool(
+                execution_feed_health.get("healthy")
+            ),
+            "execution_feed_status": execution_feed_health.get("status"),
+            "execution_feed_reasons": execution_feed_health.get(
+                "reasons",
+                [],
+            ),
+            "execution_feed_checked_at": execution_feed_health.get(
+                "checked_at"
+            ),
+            "execution_feed_max_age_seconds": max_quote_age,
+            "latest_spot_5m_candle_age_seconds": (
+                round(spot_5m_age, 3)
+                if spot_5m_age is not None
+                else None
+            ),
+            "latest_futures_15m_candle_age_seconds": (
+                round(futures_15m_age, 3)
+                if futures_15m_age is not None
+                else None
+            ),
+            "strategy_a_signal_data_fresh": bool(
+                futures_15m_age is not None
+                and futures_15m_age <= 1200.0
+            ),
+            "strategy_b_signal_data_fresh": bool(
+                spot_5m_age is not None
+                and spot_5m_age <= 600.0
+            ),
+        })
+
         chain = await self._get_option_chain()
         spot = candles_5m[-1].close if candles_5m else 0.0
         if self.mkt_svc:
