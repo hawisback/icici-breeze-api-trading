@@ -689,7 +689,7 @@ class StrategyService:
         return self._execution_policy_for_strategy(strategy).mode_for(option_type)
 
     def _execution_mode_for_signal(self, signal: StrategySignal) -> AutoTradingMode:
-        """Resolve signal execution while keeping Strategy B non-live during validation."""
+        """Resolve signal execution under the authoritative per-strategy policy."""
         return self._execution_mode_for_strategy(signal.strategy, signal.option_type)
 
     def _paper_slippage(self) -> float:
@@ -882,7 +882,11 @@ class StrategyService:
             instance_id="INST-NIFTY-AUTO-ENGINE",
             definition_id=def_id,
             name="NIFTY Intraday Options Orchestrator",
-            mode=TradingMode.PAPER if self.config.mode == AutoTradingMode.PAPER else TradingMode.LIVE,
+            mode=(
+                TradingMode.LIVE
+                if self.config.mode == AutoTradingMode.LIVE
+                else TradingMode.PAPER
+            ),
             symbol="NIFTY",
             parameters=self.config.model_dump(),
             status="RUNNING",
@@ -893,9 +897,18 @@ class StrategyService:
         return self.config
 
     async def update_config(self, new_config: AutoTradingConfig) -> AutoTradingConfig:
-        # If active positions exist, do not allow mode change between PAPER and LIVE
+        # Mode transitions with active positions are never safe because the
+        # lifecycle authority must remain stable until those positions close.
         if self._active_trades_cache and new_config.mode != self.config.mode:
             raise ValueError("Cannot switch trading mode while positions are active.")
+        if (
+            new_config.mode == AutoTradingMode.LIVE
+            and self.config.mode != AutoTradingMode.LIVE
+            and (self.config.system_armed or new_config.system_armed)
+        ):
+            raise ValueError(
+                "System must be DISARMED before switching strategy mode to LIVE."
+            )
 
         runtime = self.strategy_a.export_state()
         self.config = new_config
@@ -3642,7 +3655,10 @@ class StrategyService:
         if not policy.force_entry_allowed:
             return {
                 "status": "EXECUTION_POLICY_FORCE_ENTRY_DISABLED",
-                "reason": policy.live_block_reason,
+                "reason": (
+                    policy.live_block_reason
+                    or "FORCE_ENTRY_DISABLED_BY_POLICY"
+                ),
                 "execution_policy": policy.to_dict(),
             }
 
@@ -3993,7 +4009,7 @@ class StrategyService:
                     "execution_mode": (
                         strategy_a_trade.mode.value
                         if strategy_a_trade is not None
-                        else "PAPER/SHADOW_VALIDATION"
+                        else policy_a.call_mode.value
                     ),
                     "effective_call_mode": policy_a.call_mode.value,
                     "effective_put_mode": policy_a.put_mode.value,
@@ -4298,7 +4314,10 @@ class StrategyService:
                     details=policy.to_dict(),
                 )
                 return signal
-            # Preserve the existing validation-only legacy behavior for A/B.
+            # The legacy signal endpoint is intentionally non-routing for
+            # Strategies A/B. Strategy A LIVE execution is owned exclusively by
+            # the lifecycle-aware auto-trading path above; Strategy B remains
+            # validation-locked.
             if policy_strategy in {
                 StrategyName.TREND_PULLBACK,
                 StrategyName.VOLATILITY_BREAKOUT,
