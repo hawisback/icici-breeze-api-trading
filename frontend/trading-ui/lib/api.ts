@@ -312,7 +312,7 @@ export async function createOrder(order: {
   price: number;
   trading_mode: "PAPER" | "SHADOW" | "LIVE";
 }): Promise<OrderData> {
-  const res = await fetch(`${API_BASE}/orders`, {
+  const res = await authenticatedFetch(`${API_BASE}/orders`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(order),
@@ -343,7 +343,7 @@ export async function fetchAuditLogs(): Promise<AuditLogData[]> {
 }
 
 export async function triggerKillSwitch(action: string, reason: string): Promise<any> {
-  const res = await fetch(`${API_BASE}/risk/kill-switch`, {
+  const res = await authenticatedFetch(`${API_BASE}/risk/kill-switch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, reason }),
@@ -353,7 +353,7 @@ export async function triggerKillSwitch(action: string, reason: string): Promise
 }
 
 export async function setSystemMode(mode: string): Promise<any> {
-  const res = await fetch(`${API_BASE}/risk/system-mode`, {
+  const res = await authenticatedFetch(`${API_BASE}/risk/system-mode`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mode }),
@@ -802,7 +802,7 @@ export async function fetchStrategyConfig(): Promise<any> {
 }
 
 export async function updateStrategyConfig(config: any): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/config`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/config`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
@@ -818,7 +818,7 @@ export async function updateStrategyConfig(config: any): Promise<any> {
 }
 
 export async function armStrategySystem(armed: boolean): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/arm`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/arm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ armed }),
@@ -828,7 +828,7 @@ export async function armStrategySystem(armed: boolean): Promise<any> {
 }
 
 export async function setStrategyAutoTrade(enabled: boolean): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/auto-trade`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/auto-trade`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled }),
@@ -838,7 +838,7 @@ export async function setStrategyAutoTrade(enabled: boolean): Promise<any> {
 }
 
 export async function toggleStrategyKillSwitch(active: boolean): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/kill-switch`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/kill-switch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ active }),
@@ -848,7 +848,7 @@ export async function toggleStrategyKillSwitch(active: boolean): Promise<any> {
 }
 
 export async function evaluateStrategyNow(): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/evaluate-now`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/evaluate-now`, {
     method: "POST",
   });
   if (!res.ok) throw new Error("Failed to evaluate strategy");
@@ -868,7 +868,7 @@ export async function fetchStrategyTrades(limit: number = 50): Promise<AutoTrade
 }
 
 export async function exitStrategyTrade(tradeId: string, reason: string = "MANUAL_UI_EXIT"): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/trades/${tradeId}/exit`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/trades/${tradeId}/exit`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ reason }),
@@ -890,7 +890,7 @@ export async function fetchThresholdOverrides(): Promise<ThresholdOverridesData>
 }
 
 export async function updateThresholdOverrides(overrides: Partial<ThresholdOverridesData>): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/overrides`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/overrides`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(overrides),
@@ -900,7 +900,7 @@ export async function updateThresholdOverrides(overrides: Partial<ThresholdOverr
 }
 
 export async function resetThresholdOverrides(): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/overrides/reset`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/overrides/reset`, {
     method: "POST",
   });
   if (!res.ok) throw new Error("Failed to reset threshold overrides");
@@ -913,7 +913,7 @@ export async function forceStrategyEntry(payload: {
   option_type?: "CALL" | "PUT";
   override_premium_cap?: number;
 }): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/force-entry`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/force-entry`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
