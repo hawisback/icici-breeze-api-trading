@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import logging
+import re
 from typing import Any, Optional
 
 from libs.contracts.models import (
@@ -94,6 +95,58 @@ class RiskService:
     def set_portfolio_service(self, portfolio_service: Any) -> None:
         self.portfolio_service = portfolio_service
 
+    @staticmethod
+    def _canonical_option_identity(
+        instrument_id: str,
+    ) -> Optional[tuple[str, str, float, str]]:
+        match = re.fullmatch(
+            r"INST-(NIFTY|BANKNIFTY)-(\d{4}-\d{2}-\d{2})-"
+            r"(\d+(?:\.\d+)?)-(CE|PE)",
+            str(instrument_id).upper(),
+        )
+        if match is None:
+            return None
+        return (
+            match.group(1),
+            match.group(2),
+            float(match.group(3)),
+            match.group(4),
+        )
+
+    def _broker_held_quantity(
+        self,
+        intent: OrderIntent,
+        broker_positions: list[Any],
+    ) -> Optional[int]:
+        broker_name = str(
+            getattr(self.broker_gateway, "active_broker_name", "")
+        ).lower()
+        if broker_name == "breeze":
+            identity = self._canonical_option_identity(intent.instrument_id)
+            if identity is None:
+                return None
+            underlying, expiry, strike, right = identity
+            right_aliases = (
+                {"CE", "CALL"}
+                if right == "CE"
+                else {"PE", "PUT"}
+            )
+            return sum(
+                max(0, int(position.quantity))
+                for position in broker_positions
+                if str(position.stock_code).upper() == underlying
+                and position.strike_price is not None
+                and abs(float(position.strike_price) - strike) < 1e-9
+                and str(position.right or "").upper() in right_aliases
+                and str(position.expiry_date or "")[:10] == expiry
+            )
+
+        return sum(
+            max(0, int(position.quantity))
+            for position in broker_positions
+            if str(position.stock_code).upper() == str(intent.symbol).upper()
+        )
+
     async def _handle_order_intent_event(self, envelope: EventEnvelope[Any]) -> None:
         intent = OrderIntent.model_validate(envelope.payload)
         existing = await self.repo.get_decision_by_intent(intent.intent_id)
@@ -173,12 +226,22 @@ class RiskService:
                         ),
                         system_mode=system_mode,
                     )
-                held_quantity = sum(
-                    max(0, int(position.quantity))
-                    for position in broker_positions
-                    if str(position.stock_code).upper()
-                    == str(intent.symbol).upper()
+                broker_held_quantity = self._broker_held_quantity(
+                    intent,
+                    broker_positions,
                 )
+                if broker_held_quantity is None:
+                    return await self._record_and_publish(
+                        intent=intent,
+                        approved=False,
+                        rule="REDUCE_ONLY_POSITION_UNVERIFIED",
+                        reason=(
+                            "LIVE reduce-only exit rejected because exact "
+                            "broker contract identity could not be resolved"
+                        ),
+                        system_mode=system_mode,
+                    )
+                held_quantity = broker_held_quantity
             else:
                 if self.portfolio_service is None:
                     return await self._record_and_publish(
