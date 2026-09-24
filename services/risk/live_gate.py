@@ -47,7 +47,7 @@ class LiveTradingGate:
             "live_authorized": active,
             "system_setting_enabled": self._configured_enabled,
             "expires_at": self._expires_at.isoformat() if self._expires_at else None,
-            "allowed_accounts": list(self._allowed_accounts),
+            "allowed_account_count": len(self._allowed_accounts),
             "time_remaining_sec": max(
                 0, int((self._expires_at - utc_now()).total_seconds())
             )
