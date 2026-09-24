@@ -445,7 +445,7 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
         <div className="flex items-center justify-between gap-3 mb-4">
           <div>
             <h3 className="text-sm font-bold tracking-wider text-slate-200 uppercase">Strategy Fleet · Runtime & Stops</h3>
-            <p className="text-[11px] text-slate-500 mt-1">A/B use the production lifecycle. C/D are frozen paper candidates and cannot route live until explicitly promoted.</p>
+            <p className="text-[11px] text-slate-500 mt-1">Execution authority is server-controlled per strategy. Global LIVE mode cannot promote a locked strategy.</p>
           </div>
           <span className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 rounded px-2 py-1">AUTO REFRESH 1.5s</span>
         </div>
@@ -462,11 +462,33 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
                 </span>
               </div>
               <div className="grid grid-cols-2 gap-2 text-[10px]">
-                <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Mode</div><div className="font-bold text-blue-300">{item.execution_mode || "N/A"}</div></div>
-                <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Live routing</div><div className={`font-bold ${item.live_trading_allowed ? "text-emerald-300" : "text-amber-300"}`}>{item.live_trading_allowed ? "ELIGIBLE" : "LOCKED"}</div></div>
+                <div className="bg-slate-900 rounded p-2">
+                  <div className="text-slate-500">Effective mode</div>
+                  <div className="font-bold text-blue-300">
+                    {item.effective_call_mode && item.effective_put_mode
+                      ? item.effective_call_mode === item.effective_put_mode
+                        ? item.effective_call_mode
+                        : `CE ${item.effective_call_mode} · PE ${item.effective_put_mode}`
+                      : item.execution_mode || "N/A"}
+                  </div>
+                </div>
+                <div className="bg-slate-900 rounded p-2">
+                  <div className="text-slate-500">Promotion</div>
+                  <div className={`font-bold ${item.live_trading_allowed ? "text-emerald-300" : "text-amber-300"}`}>
+                    {item.live_trading_allowed ? "LIVE ELIGIBLE" : item.promotion_state || "LOCKED"}
+                  </div>
+                </div>
                 <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Current R</div><div className="font-mono font-bold text-slate-200">{item.current_r == null ? "--" : `${item.current_r.toFixed(2)}R`}</div></div>
                 <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Strategy trailing SL</div><div className="font-mono font-bold text-rose-300">{item.current_trailing_stop == null ? "--" : `₹${item.current_trailing_stop.toFixed(2)}`}</div></div>
               </div>
+              {!item.live_trading_allowed && item.live_block_reason && (
+                <div
+                  className="bg-amber-950/20 border border-amber-900/40 rounded p-2 text-[9px] text-amber-300 font-mono break-words"
+                  title={item.live_block_reason}
+                >
+                  LIVE LOCK · {item.live_block_reason}
+                </div>
+              )}
               {item.broker_protective_stop_status && (
                 <div className="bg-rose-950/20 border border-rose-900/40 rounded p-2 text-[10px]">
                   <div className="flex items-center justify-between gap-2">
