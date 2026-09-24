@@ -2232,7 +2232,7 @@ class StrategyService:
         trade: ActiveTrade,
         order: Any,
     ) -> tuple[int, float, int]:
-        """Apply cumulative broker fills for a Strategy A T1 order once."""
+        """Apply cumulative broker fills for a lifecycle T1 order once."""
         new_filled = max(
             0,
             min(int(order.filled_quantity or 0), int(order.quantity or 0)),
@@ -2459,7 +2459,7 @@ class StrategyService:
         quote: dict[str, Any],
         reason: str,
     ) -> None:
-        """Route a Strategy A final LIVE exit through one reduce-only OMS order."""
+        """Route a lifecycle final LIVE exit through one reduce-only OMS order."""
         if trade.exit_order_id:
             return
 
@@ -2515,6 +2515,265 @@ class StrategyService:
         trade.pending_exit_reason = reason
         trade.state = TradeLifecycleState.EXIT_PENDING
         trade.option_data_status = "LIVE_EXIT_SUBMITTED"
+        await self.repo.save_trade(trade)
+
+    def _candidate_runtime_for_trade(
+        self,
+        trade: ActiveTrade,
+    ) -> dict[str, Any] | None:
+        """Return the frozen C/D underlying lifecycle for an integrated trade."""
+        if trade.strategy == StrategyName.DI_CONTINUATION:
+            status = self._last_strategy_c_shadow_status
+        elif trade.strategy == StrategyName.SR_MOMENTUM_BREAKOUT:
+            status = self._last_strategy_d_paper_status
+        else:
+            return None
+
+        candidates: list[dict[str, Any]] = []
+        active_execution = status.get("active_execution_trade")
+        if isinstance(active_execution, dict):
+            candidates.append(active_execution)
+        active_paper = status.get("active_paper_trade")
+        if isinstance(active_paper, dict):
+            candidates.append(active_paper)
+        candidates.extend(
+            row
+            for row in (status.get("paper_trades") or [])
+            if isinstance(row, dict)
+        )
+        for row in candidates:
+            if str(row.get("signal_id") or "") == str(trade.signal_id or ""):
+                return row
+
+        # C's underlying lifecycle exists independently of its parallel paper
+        # option observer. Keep LIVE management tied to that frozen lifecycle.
+        if trade.strategy == StrategyName.DI_CONTINUATION:
+            row = status.get("active_candidate_trade") or {}
+            if str(row.get("candidate_signal_id") or "") == str(
+                trade.signal_id or ""
+            ):
+                lifecycle = row.get("lifecycle") or {}
+                return {
+                    "signal_id": trade.signal_id,
+                    "current_underlying_stop": lifecycle.get("current_stop"),
+                    "current_r": lifecycle.get("current_r"),
+                    "underlying_exit_reason": lifecycle.get("exit_reason"),
+                    "underlying_exit_time": lifecycle.get("exit_time"),
+                    "underlying_exit_price": lifecycle.get("exit_price"),
+                    "underlying_realized_r": lifecycle.get("realized_r"),
+                }
+        return None
+
+    async def _evaluate_candidate_active_trade(
+        self,
+        trade: ActiveTrade,
+        features: MarketFeatures,
+        quote: dict[str, Any],
+    ) -> None:
+        """Manage promoted C/D trades from their frozen underlying lifecycle."""
+        runtime = self._candidate_runtime_for_trade(trade)
+        if runtime is None:
+            trade.option_data_status = (
+                trade.option_data_status
+                if trade.option_data_status not in {"", "ENTRY_CAPTURED"}
+                else "AWAITING_STRATEGY_LIFECYCLE"
+            )
+            await self.repo.save_trade(trade)
+            return
+
+        try:
+            current_r = float(runtime.get("current_r"))
+        except (TypeError, ValueError):
+            current_r = trade.current_r
+        stop = runtime.get("current_underlying_stop")
+        if stop is not None:
+            trade.current_trailing_stop = float(stop)
+        trade.current_r = round(current_r, 6)
+        trade.peak_r = max(trade.peak_r, trade.current_r)
+
+        entry = float(
+            trade.underlying_entry_price or trade.entry_spot_price
+        )
+        risk = float(trade.underlying_r or trade.initial_r_points)
+        exit_reason = (
+            trade.pending_exit_reason
+            or runtime.get("underlying_exit_reason")
+        )
+        exit_price_raw = runtime.get("underlying_exit_price")
+        if exit_price_raw is not None:
+            current_underlying = float(exit_price_raw)
+        elif risk > 0:
+            current_underlying = (
+                entry + trade.current_r * risk
+                if trade.direction == TradeDirection.BULLISH
+                else entry - trade.current_r * risk
+            )
+        else:
+            current_underlying = (
+                features.futures_price
+                if trade.strategy == StrategyName.DI_CONTINUATION
+                else features.spot_price
+            )
+        trade.current_spot_price = float(current_underlying)
+        trade.underlying_current_price = float(current_underlying)
+
+        quote_valid = (
+            quote.get("status") == "VALID"
+            and float(quote.get("bid") or 0.0) > 0
+        )
+        current_option = float(
+            quote.get("ltp") or quote.get("bid") or 0.0
+        )
+        if quote_valid and current_option > 0:
+            trade.current_option_price = current_option
+            trade.unrealized_pnl = round(
+                (current_option - trade.entry_option_price)
+                * trade.quantity,
+                2,
+            )
+
+        # LIVE catastrophe protection is broker-held and reconciled before
+        # reaching this method. PAPER/SHADOW still need the equivalent local
+        # emergency option stop.
+        if (
+            trade.mode != AutoTradingMode.LIVE
+            and quote_valid
+            and current_option > 0
+            and current_option <= trade.option_hard_stop_price
+        ):
+            await self._close_trade(
+                trade,
+                features,
+                max(
+                    0.0,
+                    round(
+                        float(quote["bid"]) - self._paper_slippage(),
+                        2,
+                    ),
+                ),
+                OPTION_EMERGENCY_STOP,
+                quote=quote,
+            )
+            return
+
+        # D keeps its frozen 1.5R whole-lot scale-out. The underlying monitor
+        # decides when T1 occurred; OMS owns the real option fill.
+        if (
+            trade.strategy == StrategyName.SR_MOMENTUM_BREAKOUT
+            and runtime.get("scale_out_time")
+            and not trade.t1_reached
+            and not trade.pending_exit_reason
+        ):
+            trade.t1_reached = True
+            original_quantity = int(
+                trade.initial_quantity or trade.quantity
+            )
+            original_lots = (
+                original_quantity // trade.lot_size
+                if trade.lot_size > 0
+                else 0
+            )
+            partial_lots = self.strategy_d_paper.manager.scale_out_lots(
+                original_lots
+            )
+            if partial_lots > 0:
+                trade.t1_exit_quantity = partial_lots * trade.lot_size
+                scale_price = float(
+                    runtime.get("scale_out_price")
+                    or current_underlying
+                )
+                trade.t1_decision_underlying_price = scale_price
+                trade.t1_decision_r = underlying_r_for_price(
+                    trade.direction,
+                    entry,
+                    risk,
+                    scale_price,
+                )
+                trade.t1_exit_pending = True
+            else:
+                trade.t1_exit_quantity = 0
+                trade.t1_exit_pending = False
+
+        if (
+            trade.t1_exit_pending
+            and trade.partial_exit_filled_quantity
+            < trade.t1_exit_quantity
+        ):
+            if trade.mode == AutoTradingMode.LIVE:
+                if quote_valid:
+                    await self._submit_live_t1_partial_exit(
+                        trade,
+                        features,
+                        quote,
+                    )
+                else:
+                    await self.repo.save_trade(trade)
+                return
+            if not quote_valid:
+                await self.repo.save_trade(trade)
+                return
+            trade.state = TradeLifecycleState.RUNNER_MODE
+            await self._execute_strategy_a_partial_exit(
+                trade,
+                features,
+                quote,
+            )
+            return
+
+        if exit_reason:
+            trade.pending_exit_reason = str(exit_reason)
+            trade.underlying_exit_reason = str(exit_reason)
+            exit_time = runtime.get("underlying_exit_time")
+            trade.underlying_exit_time = (
+                datetime.fromisoformat(
+                    str(exit_time).replace("Z", "+00:00")
+                )
+                if exit_time
+                else features.timestamp
+            )
+            trade.pending_underlying_exit_time = (
+                trade.underlying_exit_time
+            )
+            trade.underlying_exit_price = float(
+                runtime.get("underlying_exit_price")
+                or current_underlying
+            )
+
+            if not quote_valid:
+                await self.repo.save_trade(trade)
+                return
+
+            if trade.mode == AutoTradingMode.LIVE:
+                if trade.partial_exit_order_id:
+                    await self.repo.save_trade(trade)
+                    return
+                await self._submit_live_final_exit(
+                    trade,
+                    features,
+                    quote,
+                    str(exit_reason),
+                )
+                return
+
+            sell_price = max(
+                0.0,
+                round(
+                    float(quote["bid"]) - self._paper_slippage(),
+                    2,
+                ),
+            )
+            if sell_price <= 0:
+                await self.repo.save_trade(trade)
+                return
+            await self._close_trade(
+                trade,
+                features,
+                sell_price,
+                str(exit_reason),
+                quote=quote,
+            )
+            return
+
         await self.repo.save_trade(trade)
 
     async def _evaluate_active_trade(self, trade: ActiveTrade, features: MarketFeatures) -> None:
@@ -2858,6 +3117,14 @@ class StrategyService:
                 await self._close_trade(updated_trade, features, sell_price, underlying_event, quote=quote)
                 return
             await self.repo.save_trade(updated_trade)
+            return
+
+        if self._is_candidate_execution_strategy(trade.strategy):
+            await self._evaluate_candidate_active_trade(
+                trade,
+                features,
+                quote,
+            )
             return
 
         # Strategy B preserves its established quote-gated management path.
