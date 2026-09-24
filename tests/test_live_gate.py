@@ -13,7 +13,7 @@ Verifies:
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -322,7 +322,7 @@ async def test_risk_service_enforces_live_gate(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_api_gateway_live_gate_endpoints(tmp_path):
+async def test_api_gateway_live_gate_endpoints(tmp_path, monkeypatch):
     """Test full HTTP API Gateway endpoints for Live Trading Gate."""
     test_settings = PlatformSettings(
         data_root=str(tmp_path),
@@ -330,6 +330,15 @@ async def test_api_gateway_live_gate_endpoints(tmp_path):
         live_allowed_accounts=["ICICI_PRIMARY"],
     )
     container = await initialize_services(settings=test_settings)
+    monkeypatch.setattr(
+        "services.api_gateway.main.get_live_preflight",
+        AsyncMock(
+            return_value={
+                "readiness": "READY_FOR_AUTHORIZATION",
+                "blockers": [],
+            }
+        ),
+    )
 
     import httpx
 
