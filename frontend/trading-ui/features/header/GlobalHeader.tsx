@@ -26,12 +26,14 @@ import {
   fetchLoginUrl,
   fetchPnLSummary,
   fetchQuotes,
+  fetchStrategyStatus,
   fetchSystemHealth,
   getStoredAuthSession,
   loginUser,
   logoutUser,
   requestLiveGateChallenge,
   revokeLiveGate,
+  setLocalStrategyMode,
 } from "@/lib/api";
 import { useTradingWebSocket } from "@/lib/useWebSocket";
 import { useTradingStore } from "@/stores/useTradingStore";
@@ -63,6 +65,18 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
     refetchIntervalInBackground: true,
   });
 
+  const { data: strategyStatus, refetch: refetchStrategyStatus } = useQuery({
+    queryKey: ["strategy_status_header"],
+    queryFn: fetchStrategyStatus,
+    refetchInterval: 2000,
+    refetchIntervalInBackground: true,
+  });
+
+  const localSingleUserMode = Boolean(
+    health?.config?.local_single_user_mode ||
+      liveGate?.local_single_user_mode,
+  );
+
   // Listen for OAuth completion message from popup window
   React.useEffect(() => {
     const handleMessage = (e: MessageEvent) => {
@@ -88,10 +102,58 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   const [liveConfirmInput, setLiveConfirmInput] = React.useState("");
   const [liveGateError, setLiveGateError] = React.useState("");
   const [liveGateSubmitting, setLiveGateSubmitting] = React.useState(false);
+  const [nonLiveMode, setNonLiveMode] = React.useState<"PAPER" | "SHADOW">("PAPER");
+  const [modeSwitching, setModeSwitching] = React.useState(false);
+  const [modeError, setModeError] = React.useState("");
 
   React.useEffect(() => {
     setOperatorSession(getStoredAuthSession());
   }, []);
+
+  React.useEffect(() => {
+    const backendMode = strategyStatus?.config?.mode;
+    if (!backendMode) return;
+    if (backendMode === "SHADOW_ONLY") {
+      setTradingMode("SHADOW");
+      setNonLiveMode("SHADOW");
+      return;
+    }
+    if (backendMode === "PAPER") {
+      setTradingMode("PAPER");
+      setNonLiveMode("PAPER");
+      return;
+    }
+    if (backendMode === "LIVE") {
+      setTradingMode("LIVE");
+    }
+  }, [strategyStatus?.config?.mode, setTradingMode]);
+
+  const switchLocalExecutionMode = async (
+    target: "PAPER" | "SHADOW" | "LIVE",
+  ) => {
+    setModeSwitching(true);
+    setModeError("");
+    try {
+      const backendMode =
+        target === "SHADOW" ? "SHADOW_ONLY" : target;
+      const result = await setLocalStrategyMode(backendMode);
+      const uiMode =
+        result.mode === "SHADOW_ONLY" ? "SHADOW" : result.mode;
+      setTradingMode(uiMode);
+      if (uiMode !== "LIVE") {
+        setNonLiveMode(uiMode);
+      }
+      await Promise.all([
+        refetchStrategyStatus(),
+        refetchLiveGate(),
+        refetchHealth(),
+      ]);
+    } catch (err: any) {
+      setModeError(err?.message || "Unable to switch trading mode.");
+    } finally {
+      setModeSwitching(false);
+    }
+  };
 
   const handleOperatorLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -124,6 +186,10 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   };
 
   const beginLiveAuthorization = async () => {
+    if (localSingleUserMode) {
+      await switchLocalExecutionMode("LIVE");
+      return;
+    }
     if (!operatorSession) {
       setOperatorAuthError("Operator authentication is required before LIVE authorization.");
       setShowOperatorLogin(true);
@@ -198,10 +264,15 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   };
 
   React.useEffect(() => {
-    if (tradingMode === "LIVE" && liveGate && !liveGate.live_authorized) {
+    if (
+      !localSingleUserMode &&
+      tradingMode === "LIVE" &&
+      liveGate &&
+      !liveGate.live_authorized
+    ) {
       setTradingMode("PAPER");
     }
-  }, [liveGate, tradingMode, setTradingMode]);
+  }, [liveGate, localSingleUserMode, tradingMode, setTradingMode]);
 
   const [showAuthModal, setShowAuthModal] = React.useState(false);
   const [tokenInput, setTokenInput] = React.useState("");
@@ -213,7 +284,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   const brokerLabel = brokerBackend === "kite" ? "Kite" : "ICICI Breeze";
 
   const handleConnectBroker = async () => {
-    if (!operatorSession) {
+    if (!localSingleUserMode && !operatorSession) {
       setOperatorAuthError("Operator authentication is required before broker login.");
       setShowOperatorLogin(true);
       return;
@@ -244,7 +315,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
       if (match) raw = match[1];
     }
 
-    if (!operatorSession) {
+    if (!localSingleUserMode && !operatorSession) {
       setOperatorAuthError("Operator authentication is required before broker activation.");
       setShowOperatorLogin(true);
       return;
@@ -380,7 +451,15 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
       {/* Global Status Badges & Controls */}
       <div className="flex items-center space-x-3">
         {/* Platform Operator Authentication */}
-        {operatorSession ? (
+        {localSingleUserMode ? (
+          <div
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono border bg-cyan-950/40 text-cyan-300 border-cyan-800/60"
+            title="Loopback-only single-user mode; local controls do not require operator login."
+          >
+            <UserRound className="w-3 h-3" />
+            <span>LOCAL USER</span>
+          </div>
+        ) : operatorSession ? (
           <div className="flex items-center gap-1.5">
             <div
               className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono border bg-indigo-950/40 text-indigo-300 border-indigo-800/60"
@@ -455,61 +534,142 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
         </div>
 
         {/* Trading Mode Switcher */}
-        <div className="flex items-center bg-slate-900 border border-slate-800 rounded p-0.5">
-          {(["PAPER", "SHADOW", "LIVE"] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => {
-                if (m === "LIVE") {
-                  if (liveGate?.live_authorized) {
-                    setTradingMode("LIVE");
-                  } else {
-                    void beginLiveAuthorization();
+        {localSingleUserMode ? (
+          <div
+            className="flex items-center gap-1 rounded border border-slate-800 bg-slate-900 p-0.5"
+            title={
+              modeError ||
+              "LIVE switch changes backend mode and always leaves the strategy system disarmed."
+            }
+          >
+            {(["PAPER", "SHADOW"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                disabled={modeSwitching}
+                onClick={() => {
+                  setNonLiveMode(mode);
+                  if (tradingMode !== "LIVE") {
+                    void switchLocalExecutionMode(mode);
                   }
-                  return;
-                }
-                setTradingMode(m);
-              }}
-              className={`px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wider transition ${
-                tradingMode === m
-                  ? m === "LIVE"
-                    ? "bg-rose-600 text-white shadow"
-                    : "bg-blue-600 text-white shadow"
-                  : "text-slate-400 hover:text-slate-200"
+                }}
+                className={`px-2 py-0.5 rounded text-[9px] font-bold tracking-wider transition disabled:opacity-50 ${
+                  nonLiveMode === mode
+                    ? "bg-blue-600 text-white"
+                    : "text-slate-500 hover:text-slate-200"
+                }`}
+              >
+                {mode}
+              </button>
+            ))}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={tradingMode === "LIVE"}
+              disabled={modeSwitching}
+              onClick={() =>
+                void switchLocalExecutionMode(
+                  tradingMode === "LIVE" ? nonLiveMode : "LIVE",
+                )
+              }
+              className={`ml-1 flex items-center gap-1.5 rounded px-2 py-0.5 text-[10px] font-bold tracking-wider transition disabled:opacity-50 ${
+                tradingMode === "LIVE"
+                  ? "bg-rose-600 text-white"
+                  : "bg-slate-800 text-slate-300"
               }`}
             >
-              {m}
+              <span
+                className={`relative inline-flex h-3.5 w-6 rounded-full transition ${
+                  tradingMode === "LIVE" ? "bg-rose-300" : "bg-slate-600"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-2.5 w-2.5 rounded-full bg-white transition-all ${
+                    tradingMode === "LIVE" ? "left-3" : "left-0.5"
+                  }`}
+                />
+              </span>
+              LIVE
             </button>
-          ))}
-        </div>
+            {modeError && (
+              <span className="px-1 text-[10px] font-bold text-rose-400">!</span>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center bg-slate-900 border border-slate-800 rounded p-0.5">
+            {(["PAPER", "SHADOW", "LIVE"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => {
+                  if (m === "LIVE") {
+                    if (liveGate?.live_authorized) {
+                      setTradingMode("LIVE");
+                    } else {
+                      void beginLiveAuthorization();
+                    }
+                    return;
+                  }
+                  setTradingMode(m);
+                }}
+                className={`px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wider transition ${
+                  tradingMode === m
+                    ? m === "LIVE"
+                      ? "bg-rose-600 text-white shadow"
+                      : "bg-blue-600 text-white shadow"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Server LIVE Authorization */}
-        <button
-          onClick={() => {
-            if (liveGate?.live_authorized) {
-              setShowLiveGateModal(true);
-            } else {
-              void beginLiveAuthorization();
-            }
-          }}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-mono border text-[10px] font-bold transition ${
-            liveGate?.live_authorized
-              ? "bg-rose-950/50 text-rose-300 border-rose-700/70"
-              : liveGate?.system_setting_enabled
-              ? "bg-amber-950/40 text-amber-300 border-amber-800/60"
-              : "bg-slate-900 text-slate-500 border-slate-800"
-          }`}
-          title="Server-side LIVE execution authorization"
-        >
-          <ShieldAlert className="w-3 h-3" />
-          <span>
-            {liveGate?.live_authorized
-              ? `LIVE AUTH · ${Math.ceil((liveGate.time_remaining_sec || 0) / 60)}m`
-              : liveGate?.system_setting_enabled
-              ? "LIVE LOCKED"
-              : "LIVE DISABLED"}
-          </span>
-        </button>
+        {localSingleUserMode ? (
+          <div
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-mono border text-[10px] font-bold ${
+              strategyStatus?.config?.system_armed
+                ? "bg-rose-950/60 text-rose-300 border-rose-700/70"
+                : "bg-emerald-950/40 text-emerald-300 border-emerald-800/60"
+            }`}
+            title="Local single-user mode: LIVE confirmation is bypassed; mode changes remain disarmed."
+          >
+            <ShieldAlert className="w-3 h-3" />
+            <span>
+              {strategyStatus?.config?.system_armed
+                ? "LOCAL · ARMED"
+                : "LOCAL · DISARMED"}
+            </span>
+          </div>
+        ) : (
+          <button
+            onClick={() => {
+              if (liveGate?.live_authorized) {
+                setShowLiveGateModal(true);
+              } else {
+                void beginLiveAuthorization();
+              }
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-mono border text-[10px] font-bold transition ${
+              liveGate?.live_authorized
+                ? "bg-rose-950/50 text-rose-300 border-rose-700/70"
+                : liveGate?.system_setting_enabled
+                ? "bg-amber-950/40 text-amber-300 border-amber-800/60"
+                : "bg-slate-900 text-slate-500 border-slate-800"
+            }`}
+            title="Server-side LIVE execution authorization"
+          >
+            <ShieldAlert className="w-3 h-3" />
+            <span>
+              {liveGate?.live_authorized
+                ? `LIVE AUTH · ${Math.ceil((liveGate.time_remaining_sec || 0) / 60)}m`
+                : liveGate?.system_setting_enabled
+                ? "LIVE LOCKED"
+                : "LIVE DISABLED"}
+            </span>
+          </button>
+        )}
 
         {/* Safety Mode Indicator */}
         <div
