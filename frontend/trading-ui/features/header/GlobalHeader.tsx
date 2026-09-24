@@ -385,9 +385,9 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   );
 
   const breezeSessionStatus =
-    health?.services?.broker_sessions?.breeze || "DISCONNECTED";
+    health?.broker_sessions?.breeze || "DISCONNECTED";
   const kiteSessionStatus =
-    health?.services?.broker_sessions?.kite || "DISCONNECTED";
+    health?.broker_sessions?.kite || "DISCONNECTED";
   const marketFeedStatus = health?.services?.market_feed || "LIVE";
 
   return (
