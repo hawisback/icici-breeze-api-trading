@@ -263,6 +263,7 @@ async def initialize_services(
             orders=startup_orders,
             broker_verified=startup_broker_verified,
             broker_error=startup_broker_error,
+            record_as_startup=True,
         )
     )
     if (
