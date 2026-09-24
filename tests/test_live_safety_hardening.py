@@ -1,6 +1,7 @@
 """Regression coverage for live-trading safety hardening."""
 
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -28,6 +29,7 @@ from services.oms.service import OMSService
 from services.risk.live_gate import LiveTradingGate
 from services.risk.repository import RiskRepository
 from services.risk.service import RiskService
+from services.strategy.contract_selector import ContractSelector
 from services.strategy.models import (
     ActiveTrade,
     AutoTradingMode,
@@ -413,6 +415,133 @@ async def test_live_entries_have_independent_notional_position_and_funds_caps(tm
     )
     assert funds.approved is False
     assert funds.rule_name == "LIVE_INSUFFICIENT_MARGIN"
+
+    await risk.stop()
+    await bus.stop()
+
+
+def test_contract_selector_preserves_exchange_valid_symbol():
+    selector = ContractSelector()
+    selected, _, reason = selector.select_contract(
+        direction=TradeDirection.BULLISH,
+        underlying_price=25000.0,
+        option_chain={
+            "expiry": "2026-09-29",
+            "strikes": [
+                {
+                    "strike": 25000,
+                    "call": {
+                        "instrument_id": "INST-NIFTY-2026-09-29-25000-CE",
+                        "symbol": "NIFTY26SEP25000CE",
+                        "expiry": "2026-09-29",
+                        "bid": 49.5,
+                        "ask": 50.0,
+                        "ltp": 49.8,
+                        "open_interest": 50000,
+                        "volume": 10000,
+                        "lot_size": 65,
+                    },
+                }
+            ],
+        },
+        as_of=datetime(2026, 9, 24, 4, 0, tzinfo=timezone.utc),
+        strategy_a=False,
+    )
+    assert reason is None
+    assert selected is not None
+    assert selected.symbol == "NIFTY26SEP25000CE"
+
+
+def test_execution_builds_exact_breeze_option_identity():
+    service = ExecutionService(
+        broker_gateway=SimpleNamespace(active_broker_name="breeze"),
+        oms_service=SimpleNamespace(),
+        live_gate=SimpleNamespace(),
+        event_bus=SimpleNamespace(),
+    )
+    order = SimpleNamespace(
+        trading_mode=TradingMode.LIVE,
+        instrument_id="INST-NIFTY-2026-09-29-25000-CE",
+        symbol="NIFTY26SEP25000CE",
+        client_order_id="CL-IDENTITY",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=65,
+        price=100.0,
+        trigger_price=None,
+    )
+
+    request = service._build_broker_request(order)
+    assert request is not None
+    assert request.stock_code == "NIFTY"
+    assert request.expiry_date == "2026-09-29"
+    assert request.strike_price == 25000.0
+    assert request.right == "call"
+
+
+@pytest.mark.asyncio
+async def test_breeze_reduce_only_requires_exact_expiry_strike_and_right(tmp_path):
+    bus = InMemoryEventBus()
+    await bus.start()
+    broker_gateway = SimpleNamespace(
+        active_broker_name="breeze",
+        get_positions=AsyncMock(
+            return_value=[
+                BrokerPositionResponse(
+                    stock_code="NIFTY",
+                    exchange_code="NFO",
+                    product_type="OPTIONS",
+                    quantity=65,
+                    average_price=100.0,
+                    ltp=95.0,
+                    pnl=-325.0,
+                    strike_price=25100.0,
+                    right="call",
+                    expiry_date="2026-09-29",
+                )
+            ]
+        ),
+    )
+    risk = RiskService(
+        repository=RiskRepository(tmp_path / "risk-breeze-identity.db"),
+        event_bus=bus,
+        broker_gateway=broker_gateway,
+    )
+    await risk.initialize()
+
+    base_intent = OrderIntent(
+        intent_id="BREEZE-REDUCE-MISMATCH",
+        instrument_id="INST-NIFTY-2026-09-29-25000-CE",
+        symbol="NIFTY25000CE",
+        side=OrderSide.SELL,
+        order_type=OrderType.LIMIT,
+        quantity=65,
+        price=90.0,
+        trading_mode=TradingMode.LIVE,
+        reduce_only=True,
+    )
+    mismatch = await risk.evaluate_intent(base_intent)
+    assert mismatch.approved is False
+    assert mismatch.rule_name == "REDUCE_ONLY_QUANTITY_EXCEEDED"
+
+    broker_gateway.get_positions.return_value = [
+        BrokerPositionResponse(
+            stock_code="NIFTY",
+            exchange_code="NFO",
+            product_type="OPTIONS",
+            quantity=65,
+            average_price=100.0,
+            ltp=95.0,
+            pnl=-325.0,
+            strike_price=25000.0,
+            right="call",
+            expiry_date="2026-09-29",
+        )
+    ]
+    exact = await risk.evaluate_intent(
+        base_intent.model_copy(update={"intent_id": "BREEZE-REDUCE-EXACT"})
+    )
+    assert exact.approved is True
 
     await risk.stop()
     await bus.stop()
