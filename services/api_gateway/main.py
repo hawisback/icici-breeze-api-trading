@@ -384,6 +384,7 @@ async def get_system_health():
     """Aggregated health check of all platform services."""
     services = get_services()
     session_status = await services.session_svc.get_session_status()
+    broker_sessions = await services.session_svc.get_all_session_statuses()
     feed_status = services.market_svc.get_feed_status()
     system_mode = await services.risk_svc.get_system_mode()
     strategy_status = await services.strategy_svc.get_status()
@@ -403,6 +404,10 @@ async def get_system_health():
         "services": {
             "api_gateway": "ONLINE",
             "broker_session": "CONNECTED" if broker_connected else "DISCONNECTED",
+            "broker_sessions": {
+                broker: status_payload.get("status", "DISCONNECTED")
+                for broker, status_payload in broker_sessions.items()
+            },
             "market_feed": feed_status["status"],
             "strategy_scheduler": "RUNNING" if strategy_scheduler.get("running") else "STOPPED",
             "strategy_market_data": "READY" if strategy_ready else "NOT_READY",
