@@ -8,14 +8,26 @@ import {
   CheckCircle2,
   ExternalLink,
   Lock,
+  LogIn,
+  LogOut,
   Power,
   RefreshCw,
+  UserRound,
   ShieldAlert,
   Wifi,
   WifiOff,
   X,
 } from "lucide-react";
-import { fetchLoginUrl, fetchPnLSummary, fetchQuotes, fetchSystemHealth } from "@/lib/api";
+import {
+  AuthSession,
+  fetchLoginUrl,
+  fetchPnLSummary,
+  fetchQuotes,
+  fetchSystemHealth,
+  getStoredAuthSession,
+  loginUser,
+  logoutUser,
+} from "@/lib/api";
 import { useTradingWebSocket } from "@/lib/useWebSocket";
 import { useTradingStore } from "@/stores/useTradingStore";
 
@@ -49,6 +61,47 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
   }, [refetchHealth]);
+
+  const [operatorSession, setOperatorSession] = React.useState<AuthSession | null>(null);
+  const [showOperatorLogin, setShowOperatorLogin] = React.useState(false);
+  const [operatorUsername, setOperatorUsername] = React.useState("");
+  const [operatorPassword, setOperatorPassword] = React.useState("");
+  const [operatorAuthError, setOperatorAuthError] = React.useState("");
+  const [operatorSubmitting, setOperatorSubmitting] = React.useState(false);
+
+  React.useEffect(() => {
+    setOperatorSession(getStoredAuthSession());
+  }, []);
+
+  const handleOperatorLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!operatorUsername.trim() || !operatorPassword) return;
+    setOperatorSubmitting(true);
+    setOperatorAuthError("");
+    try {
+      const session = await loginUser(
+        operatorUsername.trim(),
+        operatorPassword,
+      );
+      setOperatorSession(session);
+      setOperatorPassword("");
+      setShowOperatorLogin(false);
+    } catch (err: any) {
+      setOperatorAuthError(err?.message || "Authentication failed");
+    } finally {
+      setOperatorSubmitting(false);
+    }
+  };
+
+  const handleOperatorLogout = async () => {
+    try {
+      await logoutUser();
+    } finally {
+      setOperatorSession(null);
+      setOperatorUsername("");
+      setOperatorPassword("");
+    }
+  };
 
   const [showAuthModal, setShowAuthModal] = React.useState(false);
   const [tokenInput, setTokenInput] = React.useState("");
@@ -207,6 +260,40 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
 
       {/* Global Status Badges & Controls */}
       <div className="flex items-center space-x-3">
+        {/* Platform Operator Authentication */}
+        {operatorSession ? (
+          <div className="flex items-center gap-1.5">
+            <div
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono border bg-indigo-950/40 text-indigo-300 border-indigo-800/60"
+              title={`Authenticated as ${operatorSession.user.username}`}
+            >
+              <UserRound className="w-3 h-3" />
+              <span>
+                {operatorSession.user.username.toUpperCase()} · {operatorSession.user.role}
+              </span>
+            </div>
+            <button
+              onClick={handleOperatorLogout}
+              className="p-1.5 rounded border border-slate-700 text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition"
+              title="Sign out operator session"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => {
+              setOperatorAuthError("");
+              setShowOperatorLogin(true);
+            }}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono border bg-amber-950/40 text-amber-300 border-amber-800/60 hover:bg-amber-900/40 transition"
+            title="Authenticate before using trading or strategy controls"
+          >
+            <LogIn className="w-3 h-3" />
+            <span>OPERATOR LOGIN</span>
+          </button>
+        )}
+
         {/* Broker Session */}
         <button
           onClick={() => setShowAuthModal(true)}
@@ -288,6 +375,72 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
           <span>KILL SWITCH</span>
         </button>
       </div>
+
+      {/* Platform operator authentication modal */}
+      {showOperatorLogin && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleOperatorLogin}
+            className="bg-[#0f172a] border border-slate-800 rounded-xl max-w-sm w-full p-6 shadow-2xl space-y-4 text-slate-200"
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <UserRound className="w-4 h-4 text-indigo-400" />
+                <h3 className="text-sm font-bold uppercase tracking-wider">
+                  Platform Operator Login
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowOperatorLogin(false)}
+                className="text-slate-400 hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-[11px] leading-relaxed text-slate-500">
+              Required for trading, strategy controls, safety-mode changes,
+              and manual exits. Broker login remains a separate daily session.
+            </p>
+            <input
+              autoComplete="username"
+              value={operatorUsername}
+              onChange={(e) => setOperatorUsername(e.target.value)}
+              placeholder="Username"
+              className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-xs focus:outline-none focus:border-indigo-500"
+            />
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={operatorPassword}
+              onChange={(e) => setOperatorPassword(e.target.value)}
+              placeholder="Password"
+              className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-xs focus:outline-none focus:border-indigo-500"
+            />
+            {operatorAuthError && (
+              <div className="text-[11px] text-rose-400 bg-rose-950/40 border border-rose-800/60 p-2 rounded">
+                {operatorAuthError}
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={
+                !operatorUsername.trim() ||
+                !operatorPassword ||
+                operatorSubmitting
+              }
+              className="w-full py-2 px-3 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-2"
+            >
+              {operatorSubmitting ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <LogIn className="w-3.5 h-3.5" />
+              )}
+              <span>{operatorSubmitting ? "Signing in..." : "Sign In"}</span>
+            </button>
+          </form>
+        </div>
+      )}
 
       {/* Configured broker connection modal */}
       {showAuthModal && (
