@@ -3421,6 +3421,7 @@ class StrategyService:
             "strategy_c_shadow": self._last_strategy_c_shadow_status,
             "strategy_c_paper": self._last_strategy_c_shadow_status,
             "strategy_d_paper": self._last_strategy_d_paper_status,
+            "startup_reconciliation": self._startup_reconciliation,
             "features": features.model_dump(mode="json"),
             "active_trades": [t.model_dump(mode="json") for t in active_trades],
             "signals": latest_signals,
