@@ -329,6 +329,10 @@ class LogoutRequest(BaseModel):
     refresh_token: str
 
 
+class StrategyModeRequest(BaseModel):
+    mode: AutoTradingMode
+
+
 class StrategyArmRequest(BaseModel):
     armed: bool
 
@@ -1466,6 +1470,51 @@ async def get_strategy_config():
     services = get_services()
     cfg = await services.strategy_svc.get_config()
     return cfg.model_dump(mode="json")
+
+
+@app.post("/api/v1/strategies/mode")
+async def set_local_strategy_mode(
+    req: StrategyModeRequest,
+    request: Request,
+):
+    """Local workstation mode switch. It never arms the strategy system."""
+    services = get_services()
+    settings = services.settings
+    client_host = (
+        request.client.host.strip().lower()
+        if request.client and request.client.host
+        else ""
+    )
+    if not settings.local_single_user_mode:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Unauthenticated strategy mode switching is available only "
+                "when LOCAL_SINGLE_USER_MODE=true."
+            ),
+        )
+    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="LOCAL_SINGLE_USER_MODE accepts loopback requests only.",
+        )
+    if req.mode == AutoTradingMode.LIVE and not settings.live_trading_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Server LIVE capability is disabled by configuration.",
+        )
+
+    try:
+        updated = await services.strategy_svc.set_execution_mode(req.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {
+        "status": "SUCCESS",
+        "mode": updated.mode.value,
+        "system_armed": updated.system_armed,
+        "auto_trade_enabled": updated.auto_trade_enabled,
+        "config": updated.model_dump(mode="json"),
+    }
 
 
 @app.post("/api/v1/strategies/config")
