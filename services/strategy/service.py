@@ -1616,6 +1616,14 @@ class StrategyService:
                     trade.protective_stop_filled_quantity = new_filled
                     trade.protective_stop_filled_proceeds = new_proceeds
 
+            # Broker reconciliation above may have discovered a partial fill.
+            # Any replacement protection must cover only the still-open long
+            # quantity, never the pre-reconciliation quantity.
+            remaining_quantity = max(
+                0,
+                trade.quantity - trade.exit_filled_quantity,
+            )
+
             if (
                 status == "FILLED"
                 or trade.exit_filled_quantity >= trade.quantity
