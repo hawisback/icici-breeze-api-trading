@@ -111,27 +111,46 @@ class MarketDataService:
         )
 
     def _live_broker_active(self) -> bool:
-        """Return whether the configured market-data provider is active."""
+        """Return whether the frequent market-data provider is active."""
         if not self.broker_gateway:
             return False
-        provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
-        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
-        if provider == "kite":
-            return bool(active_adapter and getattr(active_adapter, "is_active", False))
-        breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
-        client_mgr = getattr(breeze_adapter, "client_manager", None)
+        provider = str(
+            getattr(
+                self.broker_gateway,
+                "frequent_data_broker_name",
+                getattr(self.broker_gateway, "active_broker_name", ""),
+            )
+            or ""
+        ).lower()
+        if hasattr(self.broker_gateway, "is_broker_active"):
+            return bool(self.broker_gateway.is_broker_active(provider))
+        adapter = getattr(
+            self.broker_gateway,
+            "frequent_data_adapter",
+            getattr(self.broker_gateway, "active_adapter", None),
+        )
         if provider == "breeze":
+            client_mgr = getattr(adapter, "client_manager", None)
             return bool(client_mgr and getattr(client_mgr, "is_active", False))
-        if active_adapter and getattr(active_adapter, "is_active", False):
-            return True
-        return bool(client_mgr and getattr(client_mgr, "is_active", False))
+        return bool(adapter and getattr(adapter, "is_active", False))
 
     async def sync_quotes_from_broker(self) -> bool:
-        """Fetch index quotes only from the configured provider."""
+        """Fetch high-frequency index quotes from the configured frequent provider."""
         if not self.broker_gateway:
             return False
-        provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
-        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
+        provider = str(
+            getattr(
+                self.broker_gateway,
+                "frequent_data_broker_name",
+                getattr(self.broker_gateway, "active_broker_name", ""),
+            )
+            or ""
+        ).lower()
+        active_adapter = getattr(
+            self.broker_gateway,
+            "frequent_data_adapter",
+            getattr(self.broker_gateway, "active_adapter", None),
+        )
         if provider == "kite":
             if not active_adapter or not getattr(active_adapter, "is_active", False):
                 return False
@@ -147,9 +166,9 @@ class MarketDataService:
                 logger.warning("Kite live quote sync deferred: %s", exc)
                 return False
 
-        breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
+        breeze_adapter = active_adapter
         client_mgr = getattr(breeze_adapter, "client_manager", None)
-        if provider not in {"", "breeze"} or not client_mgr or not client_mgr.is_active:
+        if provider != "breeze" or not client_mgr or not client_mgr.is_active:
             return False
         try:
             sdk = client_mgr.get_sdk_client()
