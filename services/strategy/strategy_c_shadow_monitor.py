@@ -1,6 +1,7 @@
-"""Passive live evidence capture for frozen Strategy C candidate V1.
+"""Passive evidence sidecar for frozen Strategy C V1.
 
-The monitor is intentionally isolated from OMS and auto-trade state. It:
+StrategyService may promote the frozen candidate into the common execution
+pipeline; this monitor itself remains isolated from OMS and auto-trade state. It:
 - fetches completed native 5m and 1m futures candles,
 - replays the frozen Strategy C observer through the current timestamp,
 - captures real option-chain selector inputs at new candidate entries,
