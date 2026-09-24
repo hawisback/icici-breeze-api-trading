@@ -20,6 +20,8 @@ import {
 } from "lucide-react";
 import {
   AuthSession,
+  confirmLiveGate,
+  fetchLiveGateStatus,
   fetchLoginUrl,
   fetchPnLSummary,
   fetchQuotes,
@@ -27,6 +29,8 @@ import {
   getStoredAuthSession,
   loginUser,
   logoutUser,
+  requestLiveGateChallenge,
+  revokeLiveGate,
 } from "@/lib/api";
 import { useTradingWebSocket } from "@/lib/useWebSocket";
 import { useTradingStore } from "@/stores/useTradingStore";
@@ -51,6 +55,13 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
     refetchInterval: 5000,
   });
 
+  const { data: liveGate, refetch: refetchLiveGate } = useQuery({
+    queryKey: ["live_gate_status"],
+    queryFn: fetchLiveGateStatus,
+    refetchInterval: 1500,
+    refetchIntervalInBackground: true,
+  });
+
   // Listen for OAuth completion message from popup window
   React.useEffect(() => {
     const handleMessage = (e: MessageEvent) => {
@@ -68,6 +79,14 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   const [operatorPassword, setOperatorPassword] = React.useState("");
   const [operatorAuthError, setOperatorAuthError] = React.useState("");
   const [operatorSubmitting, setOperatorSubmitting] = React.useState(false);
+  const [showLiveGateModal, setShowLiveGateModal] = React.useState(false);
+  const [liveChallenge, setLiveChallenge] = React.useState<{
+    challenge_id: string;
+    challenge_token: string;
+  } | null>(null);
+  const [liveConfirmInput, setLiveConfirmInput] = React.useState("");
+  const [liveGateError, setLiveGateError] = React.useState("");
+  const [liveGateSubmitting, setLiveGateSubmitting] = React.useState(false);
 
   React.useEffect(() => {
     setOperatorSession(getStoredAuthSession());
@@ -102,6 +121,87 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
       setOperatorPassword("");
     }
   };
+
+  const beginLiveAuthorization = async () => {
+    if (!operatorSession) {
+      setOperatorAuthError("Operator authentication is required before LIVE authorization.");
+      setShowOperatorLogin(true);
+      return;
+    }
+    if (!liveGate?.system_setting_enabled) {
+      setLiveGateError("Server LIVE capability is disabled by configuration.");
+      setShowLiveGateModal(true);
+      return;
+    }
+    const accountId = liveGate.allowed_accounts?.[0];
+    if (!accountId) {
+      setLiveGateError("No allowlisted LIVE account is configured.");
+      setShowLiveGateModal(true);
+      return;
+    }
+    setLiveGateSubmitting(true);
+    setLiveGateError("");
+    try {
+      const challenge = await requestLiveGateChallenge(accountId, 30);
+      setLiveChallenge({
+        challenge_id: challenge.challenge_id,
+        challenge_token: challenge.challenge_token,
+      });
+      setLiveConfirmInput("");
+      setShowLiveGateModal(true);
+    } catch (err: any) {
+      setLiveGateError(err?.message || "Unable to request LIVE authorization.");
+      setShowLiveGateModal(true);
+    } finally {
+      setLiveGateSubmitting(false);
+    }
+  };
+
+  const confirmLiveAuthorization = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!liveChallenge || !liveConfirmInput.trim()) return;
+    setLiveGateSubmitting(true);
+    setLiveGateError("");
+    try {
+      await confirmLiveGate(
+        liveChallenge.challenge_id,
+        liveConfirmInput.trim(),
+      );
+      await refetchLiveGate();
+      setTradingMode("LIVE");
+      setShowLiveGateModal(false);
+      setLiveChallenge(null);
+      setLiveConfirmInput("");
+    } catch (err: any) {
+      setLiveGateError(err?.message || "LIVE authorization failed.");
+    } finally {
+      setLiveGateSubmitting(false);
+    }
+  };
+
+  const handleLiveRevoke = async () => {
+    setLiveGateSubmitting(true);
+    setLiveGateError("");
+    try {
+      await revokeLiveGate("Operator UI revocation");
+      await refetchLiveGate();
+      setTradingMode("PAPER");
+      setShowLiveGateModal(false);
+      setLiveChallenge(null);
+      setLiveConfirmInput("");
+    } catch (err: any) {
+      setLiveGateError(err?.message || "Unable to revoke LIVE authorization.");
+      setShowLiveGateModal(true);
+    } finally {
+      setLiveGateSubmitting(false);
+    }
+  };
+
+  React.useEffect(() => {
+    if (tradingMode === "LIVE" && liveGate && !liveGate.live_authorized) {
+      setTradingMode("PAPER");
+    }
+  }, [liveGate, tradingMode, setTradingMode]);
 
   const [showAuthModal, setShowAuthModal] = React.useState(false);
   const [tokenInput, setTokenInput] = React.useState("");
@@ -340,7 +440,17 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
           {(["PAPER", "SHADOW", "LIVE"] as const).map((m) => (
             <button
               key={m}
-              onClick={() => setTradingMode(m)}
+              onClick={() => {
+                if (m === "LIVE") {
+                  if (liveGate?.live_authorized) {
+                    setTradingMode("LIVE");
+                  } else {
+                    void beginLiveAuthorization();
+                  }
+                  return;
+                }
+                setTradingMode(m);
+              }}
               className={`px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wider transition ${
                 tradingMode === m
                   ? m === "LIVE"
@@ -353,6 +463,34 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
             </button>
           ))}
         </div>
+
+        {/* Server LIVE Authorization */}
+        <button
+          onClick={() => {
+            if (liveGate?.live_authorized) {
+              setShowLiveGateModal(true);
+            } else {
+              void beginLiveAuthorization();
+            }
+          }}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-mono border text-[10px] font-bold transition ${
+            liveGate?.live_authorized
+              ? "bg-rose-950/50 text-rose-300 border-rose-700/70"
+              : liveGate?.system_setting_enabled
+              ? "bg-amber-950/40 text-amber-300 border-amber-800/60"
+              : "bg-slate-900 text-slate-500 border-slate-800"
+          }`}
+          title="Server-side LIVE execution authorization"
+        >
+          <ShieldAlert className="w-3 h-3" />
+          <span>
+            {liveGate?.live_authorized
+              ? `LIVE AUTH · ${Math.ceil((liveGate.time_remaining_sec || 0) / 60)}m`
+              : liveGate?.system_setting_enabled
+              ? "LIVE LOCKED"
+              : "LIVE DISABLED"}
+          </span>
+        </button>
 
         {/* Safety Mode Indicator */}
         <div
@@ -375,6 +513,89 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
           <span>KILL SWITCH</span>
         </button>
       </div>
+
+      {/* Server LIVE authorization modal */}
+      {showLiveGateModal && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+          <form
+            onSubmit={confirmLiveAuthorization}
+            className="bg-[#0f172a] border border-rose-900/60 rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4 text-slate-200"
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-rose-400" />
+                <h3 className="text-sm font-bold uppercase tracking-wider">
+                  Server LIVE Authorization
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowLiveGateModal(false)}
+                className="text-slate-400 hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {liveGate?.live_authorized ? (
+              <>
+                <div className="text-xs text-rose-200 bg-rose-950/30 border border-rose-900/50 rounded-lg p-3">
+                  LIVE execution is authorized for approximately{" "}
+                  <strong>{Math.ceil((liveGate.time_remaining_sec || 0) / 60)} minutes</strong>.
+                  Strategy-specific live locks remain independent.
+                </div>
+                <button
+                  type="button"
+                  onClick={handleLiveRevoke}
+                  disabled={liveGateSubmitting}
+                  className="w-full py-2 px-3 rounded bg-rose-700 hover:bg-rose-600 disabled:opacity-50 text-white text-xs font-bold"
+                >
+                  Revoke LIVE Authorization Now
+                </button>
+              </>
+            ) : liveChallenge ? (
+              <>
+                <div className="text-[11px] text-slate-400 leading-relaxed">
+                  Type the generated confirmation token exactly to open a 30-minute
+                  server authorization window. This does not remove per-strategy
+                  live locks.
+                </div>
+                <div className="bg-slate-950 border border-slate-800 rounded p-3 font-mono text-center text-amber-300 tracking-wider">
+                  {liveChallenge.challenge_token}
+                </div>
+                <input
+                  value={liveConfirmInput}
+                  onChange={(e) => setLiveConfirmInput(e.target.value)}
+                  placeholder="Type confirmation token"
+                  className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-xs font-mono focus:outline-none focus:border-rose-500"
+                />
+                <button
+                  type="submit"
+                  disabled={
+                    liveGateSubmitting ||
+                    liveConfirmInput.trim() !== liveChallenge.challenge_token
+                  }
+                  className="w-full py-2 px-3 rounded bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-white text-xs font-bold"
+                >
+                  {liveGateSubmitting ? "Confirming..." : "Confirm LIVE Authorization"}
+                </button>
+              </>
+            ) : (
+              <div className="text-xs text-slate-400">
+                {liveGate?.system_setting_enabled
+                  ? "Request a new LIVE challenge from the LIVE selector."
+                  : "LIVE_TRADING_ENABLED is false on the server. Browser controls cannot override it."}
+              </div>
+            )}
+
+            {liveGateError && (
+              <div className="text-[11px] text-rose-400 bg-rose-950/40 border border-rose-800/60 p-2 rounded">
+                {liveGateError}
+              </div>
+            )}
+          </form>
+        </div>
+      )}
 
       {/* Platform operator authentication modal */}
       {showOperatorLogin && (
