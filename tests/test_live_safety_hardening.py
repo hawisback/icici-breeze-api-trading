@@ -383,8 +383,16 @@ async def test_live_entries_have_independent_notional_position_and_funds_caps(tm
     assert naked_sell.approved is False
     assert naked_sell.rule_name == "LIVE_NAKED_SELL_DISABLED"
 
-    portfolio.get_positions.return_value = [
-        SimpleNamespace(quantity=65, trading_mode=TradingMode.LIVE)
+    gateway.get_positions.return_value = [
+        BrokerPositionResponse(
+            stock_code="NIFTYOTHERCE",
+            exchange_code="NFO",
+            product_type="OPTIONS",
+            quantity=65,
+            average_price=100.0,
+            ltp=100.0,
+            pnl=0.0,
+        )
     ]
     position_cap = await risk.evaluate_intent(
         OrderIntent(
@@ -400,7 +408,7 @@ async def test_live_entries_have_independent_notional_position_and_funds_caps(tm
     assert position_cap.approved is False
     assert position_cap.rule_name == "LIVE_OPEN_POSITION_LIMIT"
 
-    portfolio.get_positions.return_value = []
+    gateway.get_positions.return_value = []
     gateway.get_funds.return_value = SimpleNamespace(available_margin=1000.0)
     funds = await risk.evaluate_intent(
         OrderIntent(
