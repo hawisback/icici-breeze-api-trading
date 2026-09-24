@@ -61,7 +61,7 @@ class OptionChainService:
                 getattr(
                     self.broker_gateway,
                     "reference_data_broker_name",
-                    getattr(self.broker_gateway, "active_broker_name", ""),
+                    "",
                 )
                 or ""
             ).lower()
@@ -69,14 +69,20 @@ class OptionChainService:
             else ""
         )
         reference_adapter = (
-            getattr(
-                self.broker_gateway,
-                "reference_data_adapter",
-                getattr(self.broker_gateway, "active_adapter", None),
-            )
+            getattr(self.broker_gateway, "reference_data_adapter", None)
             if self.broker_gateway
             else None
         )
+        if self.broker_gateway and reference_provider not in {"breeze", "kite"}:
+            reference_provider = str(
+                getattr(self.broker_gateway, "active_broker_name", "")
+                or ""
+            ).lower()
+            reference_adapter = getattr(
+                self.broker_gateway,
+                "active_adapter",
+                reference_adapter,
+            )
         if (
             reference_provider == "kite"
             and reference_adapter
