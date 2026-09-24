@@ -1161,6 +1161,13 @@ async def get_live_preflight(
     if not scheduler.get("running"):
         blockers.append("STRATEGY_SCHEDULER_NOT_RUNNING")
 
+    strategy_config = strategy.get("config", {}) or {}
+    strategy_mode = str(strategy_config.get("mode") or "UNKNOWN")
+    if strategy_mode != AutoTradingMode.LIVE.value:
+        blockers.append(f"STRATEGY_MODE_NOT_LIVE:{strategy_mode}")
+    if strategy_config.get("kill_switch"):
+        blockers.append("STRATEGY_KILL_SWITCH_ACTIVE")
+
     execution_policy = strategy.get("execution_policy") or {}
     strategy_statuses = strategy.get("strategies") or {}
     enabled_live_strategies = [
@@ -1204,11 +1211,11 @@ async def get_live_preflight(
             "outboxes and broker reconciliation."
         )
 
-    if strategy.get("config", {}).get("system_armed"):
+    if strategy_config.get("system_armed"):
         blockers.append(
             "STRATEGY_MUST_BE_DISARMED_BEFORE_LIVE_AUTHORIZATION"
         )
-    if strategy.get("config", {}).get("auto_trade_enabled"):
+    if strategy_config.get("auto_trade_enabled"):
         warnings.append("AUTO_TRADE_ALREADY_ENABLED")
 
     if blockers:
