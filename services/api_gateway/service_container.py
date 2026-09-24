@@ -216,6 +216,7 @@ async def initialize_services(
         live_account_id=live_account_id,
         broker_session_service=session_svc,
         market_data_service=market_svc,
+        portfolio_service=portfolio_svc,
         live_market_data_max_age_seconds=(
             app_settings.live_market_data_max_age_seconds
         ),
