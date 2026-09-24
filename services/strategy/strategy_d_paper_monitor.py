@@ -1,11 +1,11 @@
-"""Isolated paper runtime for frozen Strategy D V2.
+"""Paper/evidence sidecar for frozen Strategy D V2.
 
-Strategy D remains outside the production OMS until it is explicitly promoted.
-This sidecar runs every strategy scheduler cycle, evaluates only completed real
-market candles, captures a real option contract/quote for paper execution, and
-tracks the frozen underlying stop / T1 / EMA9 / pivot lifecycle.
+StrategyService may promote its frozen signal and underlying lifecycle into the
+common execution pipeline. This sidecar still runs independently, evaluates
+only completed real market candles, captures a parallel paper option
+contract/quote, and tracks the frozen stop / T1 / EMA9 / pivot lifecycle.
 
-No broker order is ever created by this monitor.
+No broker order is ever created by this monitor itself.
 """
 
 from __future__ import annotations
