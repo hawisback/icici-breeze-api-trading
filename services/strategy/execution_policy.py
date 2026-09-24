@@ -14,7 +14,7 @@ from typing import Any
 from services.strategy.models import AutoTradingMode, OptionType, StrategyName
 
 
-POLICY_VERSION = "strategy_execution_policy_v3"
+POLICY_VERSION = "strategy_execution_policy_v4"
 
 
 @dataclass(frozen=True)
@@ -52,11 +52,9 @@ def resolve_strategy_execution_policy(
 ) -> StrategyExecutionPolicy:
     """Return the maximum currently-approved execution authority.
 
-    Strategies A and B are explicitly LIVE-promoted after their broker-entry,
-    protective-stop, partial-exit, final-exit, audit, and reconciliation paths
-    were hardened. Strategies C/D remain frozen paper candidates. Runtime
-    health, account allowlisting, arming, and market-data readiness remain
-    separate fail-closed gates.
+    Strategies A/B/C/D are LIVE-promoted through this single authority boundary.
+    Runtime health, account allowlisting, arming, market-data readiness, and each
+    strategy's frozen signal contract remain separate fail-closed gates.
     """
 
     if strategy == StrategyName.TREND_PULLBACK:
@@ -84,24 +82,26 @@ def resolve_strategy_execution_policy(
         )
 
     if strategy == StrategyName.DI_CONTINUATION:
+        effective = requested_mode
         return StrategyExecutionPolicy(
             strategy=strategy,
-            call_mode=AutoTradingMode.PAPER,
-            put_mode=AutoTradingMode.PAPER,
-            live_trading_allowed=False,
-            promotion_state="FROZEN_PAPER_CANDIDATE",
-            live_block_reason="STRATEGY_C_FROZEN_CANDIDATE_NOT_PROMOTED",
+            call_mode=effective,
+            put_mode=effective,
+            live_trading_allowed=True,
+            promotion_state="LIVE_PROMOTED",
+            live_block_reason="",
             force_entry_allowed=False,
         )
 
     if strategy == StrategyName.SR_MOMENTUM_BREAKOUT:
+        effective = requested_mode
         return StrategyExecutionPolicy(
             strategy=strategy,
-            call_mode=AutoTradingMode.PAPER,
-            put_mode=AutoTradingMode.PAPER,
-            live_trading_allowed=False,
-            promotion_state="FROZEN_PAPER_CANDIDATE",
-            live_block_reason="STRATEGY_D_FROZEN_CANDIDATE_NOT_PROMOTED",
+            call_mode=effective,
+            put_mode=effective,
+            live_trading_allowed=True,
+            promotion_state="LIVE_PROMOTED",
+            live_block_reason="",
             force_entry_allowed=False,
         )
 
