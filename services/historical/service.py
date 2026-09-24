@@ -43,16 +43,34 @@ class HistoricalService:
         adapter = getattr(
             self.broker_gateway,
             "frequent_data_adapter",
-            getattr(self.broker_gateway, "active_adapter", None),
+            None,
         )
         name = str(
             getattr(
                 self.broker_gateway,
                 "frequent_data_broker_name",
-                getattr(self.broker_gateway, "active_broker_name", ""),
+                "",
             )
             or ""
         ).lower()
+        if name not in {"breeze", "kite"}:
+            name = str(
+                getattr(self.broker_gateway, "active_broker_name", "")
+                or ""
+            ).lower()
+            adapter = getattr(
+                self.broker_gateway,
+                "active_adapter",
+                adapter,
+            )
+        if name not in {"breeze", "kite"}:
+            breeze = getattr(self.broker_gateway, "breeze_adapter", None)
+            client = getattr(breeze, "client_manager", None)
+            if client and getattr(client, "is_active", False):
+                return "breeze", breeze
+            kite = getattr(self.broker_gateway, "kite_adapter", None)
+            if kite and getattr(kite, "is_active", False):
+                return "kite", kite
         return name, adapter
 
     def _provider_is_active(self) -> bool:
