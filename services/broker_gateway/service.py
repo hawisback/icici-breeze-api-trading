@@ -1,4 +1,4 @@
-"""Broker Gateway Service routing orders to appropriate adapter (Paper vs Live Breeze).
+"""Broker Gateway Service separating LIVE execution ownership from data routing.
 """
 
 from __future__ import annotations
@@ -52,16 +52,87 @@ class BrokerGatewayService:
 
     @property
     def broker_backend(self) -> BrokerBackend:
+        """Compatibility alias for the configured LIVE execution broker."""
         return self.settings.broker_backend
+
+    def adapter_for_broker(self, broker: BrokerBackend | str) -> BrokerAdapter:
+        broker_value = (
+            broker
+            if isinstance(broker, BrokerBackend)
+            else BrokerBackend(str(broker).lower())
+        )
+        return (
+            self.kite_adapter
+            if broker_value == BrokerBackend.KITE
+            else self.breeze_adapter
+        )
+
+    @property
+    def execution_adapter(self) -> BrokerAdapter:
+        """Return the only adapter authorized to own LIVE order state."""
+        return self.adapter_for_broker(self.settings.broker_backend)
+
+    @property
+    def execution_broker_name(self) -> str:
+        return self.settings.broker_backend.value
 
     @property
     def active_adapter(self) -> BrokerAdapter:
-        """Return the configured live broker adapter."""
-        return self.kite_adapter if self.broker_backend == BrokerBackend.KITE else self.breeze_adapter
+        """Compatibility alias for the LIVE execution adapter."""
+        return self.execution_adapter
 
     @property
     def active_broker_name(self) -> str:
-        return self.broker_backend.value
+        """Compatibility alias for the LIVE execution broker name."""
+        return self.execution_broker_name
+
+    def _configured_data_broker(self, *, frequent: bool) -> BrokerBackend:
+        backend = self.settings.market_data_backend
+        backend_value = getattr(backend, "value", str(backend)).lower()
+        if backend_value == "kite":
+            return BrokerBackend.KITE
+        if backend_value == "breeze":
+            return BrokerBackend.BREEZE
+        if backend_value == "hybrid":
+            return (
+                self.settings.frequent_data_broker
+                if frequent
+                else self.settings.reference_data_broker
+            )
+        # Simulated mode has no external data owner; retain execution broker
+        # only as an adapter lookup fallback for explicit calls.
+        return self.settings.broker_backend
+
+    @property
+    def frequent_data_broker(self) -> BrokerBackend:
+        return self._configured_data_broker(frequent=True)
+
+    @property
+    def reference_data_broker(self) -> BrokerBackend:
+        return self._configured_data_broker(frequent=False)
+
+    @property
+    def frequent_data_adapter(self) -> BrokerAdapter:
+        return self.adapter_for_broker(self.frequent_data_broker)
+
+    @property
+    def reference_data_adapter(self) -> BrokerAdapter:
+        return self.adapter_for_broker(self.reference_data_broker)
+
+    @property
+    def frequent_data_broker_name(self) -> str:
+        return self.frequent_data_broker.value
+
+    @property
+    def reference_data_broker_name(self) -> str:
+        return self.reference_data_broker.value
+
+    def is_broker_active(self, broker: BrokerBackend | str) -> bool:
+        adapter = self.adapter_for_broker(broker)
+        active = bool(getattr(adapter, "is_active", False))
+        if not active and hasattr(adapter, "client_manager"):
+            active = bool(getattr(adapter.client_manager, "is_active", False))
+        return active
 
     @property
     def clean_breeze_service(self) -> BrokerApplicationService:
@@ -70,7 +141,7 @@ class BrokerGatewayService:
 
     def get_adapter(self, mode: TradingMode) -> BrokerAdapter:
         if mode == TradingMode.LIVE:
-            return self.active_adapter
+            return self.execution_adapter
         # Default and fallback is paper execution
         return self.paper_adapter
 
