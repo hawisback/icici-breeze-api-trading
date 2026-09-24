@@ -209,6 +209,14 @@ class StrategyTunablesConfig(BaseModel):
     evaluation_interval_sec: int = Field(default=2, ge=1, le=10, description="Scheduler loop interval in seconds")
     trend_pullback_enabled: bool = Field(default=True)
     volatility_breakout_enabled: bool = Field(default=True)
+    di_continuation_enabled: bool = Field(
+        default=True,
+        description="Enable Strategy C DI Continuation signal evaluation and execution",
+    )
+    sr_momentum_breakout_enabled: bool = Field(
+        default=True,
+        description="Enable Strategy D S&R Momentum signal evaluation and execution",
+    )
     # Strategy A authoritative defaults.
     ema_fast_period: int = Field(default=20, ge=1, description="Fast EMA period on completed 15m bars")
     ema_slow_period: int = Field(default=50, ge=2, description="Slow EMA period on completed 15m bars")
