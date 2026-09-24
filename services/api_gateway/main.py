@@ -1030,6 +1030,19 @@ async def get_live_preflight(
     open_broker_positions = [
         position for position in broker_positions if int(position.quantity) != 0
     ]
+    reconciliation = await services.strategy_svc.build_live_reconciliation_report(
+        broker_positions=broker_positions,
+        orders=orders,
+        broker_verified=bool(session.get("connected")) and broker_error is None,
+        broker_error=(
+            broker_error
+            or (
+                None
+                if session.get("connected")
+                else "BROKER_SESSION_NOT_CONNECTED"
+            )
+        ),
+    )
     market = strategy.get("market_data") or {}
     scheduler = strategy.get("scheduler") or {}
     configured_bus = settings.event_bus_backend.value
@@ -1100,8 +1113,8 @@ async def get_live_preflight(
         blockers.append(f"RISK_MODE_{system_mode.value}")
     if unresolved_live_orders:
         blockers.append("UNRESOLVED_LIVE_ORDERS")
-    if open_broker_positions:
-        blockers.append("OPEN_BROKER_POSITIONS")
+    for issue in reconciliation.get("issues", []):
+        blockers.append(f"RECONCILIATION:{issue}")
     if funds is not None and float(funds.available_margin) <= 0:
         blockers.append("NO_AVAILABLE_BROKER_MARGIN")
     if configured_bus != runtime_bus:
@@ -1115,7 +1128,9 @@ async def get_live_preflight(
         )
 
     if strategy.get("config", {}).get("system_armed"):
-        warnings.append("STRATEGY_SYSTEM_ALREADY_ARMED")
+        blockers.append(
+            "STRATEGY_MUST_BE_DISARMED_BEFORE_LIVE_AUTHORIZATION"
+        )
     if strategy.get("config", {}).get("auto_trade_enabled"):
         warnings.append("AUTO_TRADE_ALREADY_ENABLED")
 
@@ -1173,6 +1188,8 @@ async def get_live_preflight(
             ),
             "futures_candle_count": market.get("futures_candle_count", 0),
         },
+        "reconciliation": reconciliation,
+        "startup_reconciliation": strategy.get("startup_reconciliation"),
         "orders": {
             "unresolved_live_count": len(unresolved_live_orders),
             "unresolved_live": [
@@ -1234,6 +1251,16 @@ async def request_live_gate_challenge(
     current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     services = get_services()
+    preflight = await get_live_preflight(current_user)
+    if preflight.get("readiness") != "READY_FOR_AUTHORIZATION":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "LIVE activation challenge blocked by preflight",
+                "readiness": preflight.get("readiness"),
+                "blockers": preflight.get("blockers", []),
+            },
+        )
     account_id = (
         "ZERODHA_PRIMARY"
         if services.settings.broker_backend.value == "kite"
@@ -1262,6 +1289,19 @@ async def confirm_live_gate(
     services = get_services()
 
     async def _execute():
+        preflight = await get_live_preflight(current_user)
+        if preflight.get("readiness") != "READY_FOR_AUTHORIZATION":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        "LIVE activation confirmation blocked because "
+                        "preflight changed"
+                    ),
+                    "readiness": preflight.get("readiness"),
+                    "blockers": preflight.get("blockers", []),
+                },
+            )
         confirmed = await services.live_gate.confirm_activation(
             challenge_id=req.challenge_id,
             challenge_token=req.challenge_token,
