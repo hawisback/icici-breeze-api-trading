@@ -869,6 +869,56 @@ def test_live_capable_settings_require_strong_signing_key(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_is_authenticated_and_fail_closed(tmp_path):
+    settings = PlatformSettings(
+        data_root=str(tmp_path),
+        live_trading_enabled=False,
+    )
+    container = await initialize_services(
+        settings=settings,
+        force_reinit=True,
+    )
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        unauth = await client.get("/api/v1/live-preflight")
+        assert unauth.status_code == 401
+
+        login = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "username": "operator",
+                "password": "Operator@Trading123!",
+            },
+        )
+        assert login.status_code == 200
+        headers = {
+            "Authorization": f"Bearer {login.json()['access_token']}"
+        }
+
+        report = await client.get(
+            "/api/v1/live-preflight",
+            headers=headers,
+        )
+        assert report.status_code == 200
+        data = report.json()
+        assert data["readiness"] == "BLOCKED"
+        assert "LIVE_TRADING_ENABLED_FALSE" in data["blockers"]
+        assert data["event_bus"]["runtime"] == "memory"
+        assert data["protective_stop"]["order_type"] == "STOP_LIMIT"
+
+    await container.strategy_svc.stop()
+    await container.exec_svc.stop()
+    await container.risk_svc.stop()
+    await container.market_svc.stop_simulated_feed()
+    await container.oms_svc.stop_outbox_worker()
+    await container.event_bus.stop()
+
+
+@pytest.mark.asyncio
 async def test_production_auth_db_refuses_predictable_bootstrap_users(tmp_path):
     settings = PlatformSettings(
         app_env="production",
