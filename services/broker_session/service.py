@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import logging
+import secrets
 from typing import Any, Optional
 
 from libs.contracts.models import generate_id, utc_now
@@ -29,6 +30,56 @@ class BrokerSessionService:
         self._active_token: Optional[str] = None
         self._active_api_key: Optional[str] = None
         self._active_secret_key: Optional[str] = None
+        self._login_challenges: dict[str, dict[str, Any]] = {}
+
+    def issue_login_challenge(
+        self,
+        *,
+        initiated_by: str,
+        ttl_seconds: int = 600,
+    ) -> dict[str, Any]:
+        """Issue a short-lived, one-time correlation state for broker login."""
+        now = utc_now()
+        self._purge_login_challenges(now)
+        state = secrets.token_urlsafe(32)
+        expires_at = now + timedelta(seconds=max(60, int(ttl_seconds)))
+        self._login_challenges[state] = {
+            "initiated_by": initiated_by,
+            "expires_at": expires_at,
+        }
+        return {
+            "state": state,
+            "expires_at": expires_at.isoformat(),
+            "expires_in_seconds": int((expires_at - now).total_seconds()),
+        }
+
+    def validate_login_challenge(self, state: str) -> bool:
+        """Check whether a broker-login correlation state is still valid."""
+        now = utc_now()
+        self._purge_login_challenges(now)
+        challenge = self._login_challenges.get(str(state or ""))
+        return bool(challenge and challenge["expires_at"] > now)
+
+    def consume_login_challenge(self, state: str) -> Optional[dict[str, Any]]:
+        """Consume a valid broker-login correlation state exactly once."""
+        now = utc_now()
+        self._purge_login_challenges(now)
+        challenge = self._login_challenges.pop(str(state or ""), None)
+        if not challenge or challenge["expires_at"] <= now:
+            return None
+        return {
+            "initiated_by": challenge["initiated_by"],
+            "expires_at": challenge["expires_at"].isoformat(),
+        }
+
+    def _purge_login_challenges(self, now: datetime) -> None:
+        expired = [
+            state
+            for state, challenge in self._login_challenges.items()
+            if challenge["expires_at"] <= now
+        ]
+        for state in expired:
+            self._login_challenges.pop(state, None)
 
     def set_broker_gateway(self, broker_gateway: Any) -> None:
         """Inject broker gateway to wire live adapter session activation."""
