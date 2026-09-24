@@ -14,7 +14,7 @@ from typing import Any
 from services.strategy.models import AutoTradingMode, OptionType, StrategyName
 
 
-POLICY_VERSION = "strategy_execution_policy_v1"
+POLICY_VERSION = "strategy_execution_policy_v2"
 
 
 @dataclass(frozen=True)
@@ -52,26 +52,22 @@ def resolve_strategy_execution_policy(
 ) -> StrategyExecutionPolicy:
     """Return the maximum currently-approved execution authority.
 
-    All four strategies remain non-LIVE in policy v1. The requested platform
-    mode may lower authority (for example Strategy B PAPER), but selecting
-    global LIVE can never raise authority beyond the strategy's promotion
-    state.
+    Strategy A is explicitly LIVE-promoted in policy v2 after its broker-entry,
+    protective-stop, partial-exit, final-exit, audit, and reconciliation paths
+    were hardened. Strategies B/C/D remain validation-locked. Runtime health,
+    operator authorization, account allowlisting, arming, and market-data
+    readiness remain separate fail-closed gates.
     """
 
     if strategy == StrategyName.TREND_PULLBACK:
-        blockers = ["STRATEGY_A_LIVE_PROMOTION_NOT_APPROVED"]
-        if not strategy_a_option_execution_ready:
-            blockers.append(
-                strategy_a_option_execution_reason
-                or "VERIFIED_OPTION_DELTA_UNAVAILABLE"
-            )
+        effective = requested_mode
         return StrategyExecutionPolicy(
             strategy=strategy,
-            call_mode=AutoTradingMode.SHADOW_ONLY,
-            put_mode=AutoTradingMode.PAPER,
-            live_trading_allowed=False,
-            promotion_state="VALIDATION_LOCKED",
-            live_block_reason=";".join(blockers),
+            call_mode=effective,
+            put_mode=effective,
+            live_trading_allowed=True,
+            promotion_state="LIVE_PROMOTED",
+            live_block_reason="",
             force_entry_allowed=False,
         )
 
