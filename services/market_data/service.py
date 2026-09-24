@@ -137,6 +137,17 @@ class MarketDataService:
                 "active_adapter",
                 adapter,
             )
+        if provider not in {"breeze", "kite"}:
+            breeze = getattr(self.broker_gateway, "breeze_adapter", None)
+            breeze_client = getattr(breeze, "client_manager", None)
+            if breeze_client and getattr(breeze_client, "is_active", False):
+                provider = "breeze"
+                adapter = breeze
+            else:
+                kite = getattr(self.broker_gateway, "kite_adapter", None)
+                if kite and getattr(kite, "is_active", False):
+                    provider = "kite"
+                    adapter = kite
         if (
             provider in {"breeze", "kite"}
             and hasattr(self.broker_gateway, "is_broker_active")
