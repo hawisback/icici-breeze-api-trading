@@ -256,6 +256,20 @@ class PortfolioRepository:
             )
             await conn.commit()
 
+    async def get_executed_quantity_for_order(self, order_id: str) -> int:
+        async with self.engine.connect() as conn:
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT COALESCE(SUM(quantity), 0) AS executed_quantity
+                    FROM executions
+                    WHERE order_id = ?
+                    """,
+                    (order_id,),
+                )
+            ).fetchone()
+            return int(row["executed_quantity"] or 0)
+
     async def get_position(self, instrument_id: str) -> Optional[Position]:
         async with self.engine.connect() as conn:
             cursor = await conn.execute(
