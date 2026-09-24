@@ -274,6 +274,16 @@ async def test_risk_service_enforces_live_gate(tmp_path):
         live_gate=gate,
         portfolio_service=portfolio,
         broker_gateway=gateway,
+        broker_session_service=SimpleNamespace(
+            get_session_status=AsyncMock(
+                return_value={"connected": True, "status": "CONNECTED"}
+            )
+        ),
+        market_data_service=SimpleNamespace(
+            get_execution_feed_health=Mock(
+                return_value={"healthy": True, "reasons": []}
+            )
+        ),
     )
     await risk_svc.initialize()
 
