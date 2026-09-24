@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 import re
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from pydantic import SecretStr
 
@@ -346,7 +347,6 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         if not self.is_active:
             return []
         raw = await self._run(lambda: self._kite.quote(["NSE:NIFTY 50", "NSE:NIFTY BANK"]))
-        now = utc_now()
         result: list[Quote] = []
         for instrument_id, symbol in [
             ("INST-NIFTY-INDEX", "NIFTY 50"),
@@ -354,7 +354,15 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         ]:
             row = raw.get(f"NSE:{symbol}", {}) if isinstance(raw, dict) else {}
             last = float(row.get("last_price") or 0)
-            if last <= 0:
+            exchange_timestamp = _parse_exchange_quote_datetime(
+                row.get("timestamp") or row.get("last_trade_time")
+            )
+            if last <= 0 or exchange_timestamp is None:
+                if last > 0:
+                    logger.warning(
+                        "Kite quote for %s omitted: exchange timestamp missing/unparseable",
+                        instrument_id,
+                    )
                 continue
             ohlc = row.get("ohlc", {}) or {}
             previous_close = float(ohlc.get("close") or last)
@@ -372,7 +380,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
                     change_pct=round(((last - previous_close) / previous_close) * 100, 4)
                     if previous_close
                     else 0.0,
-                    timestamp=now,
+                    timestamp=exchange_timestamp,
                 )
             )
         return result
@@ -536,6 +544,29 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             asyncio.to_thread(callback),
             timeout=self.request_timeout_sec,
         )
+
+
+def _parse_exchange_quote_datetime(value: Any) -> Optional[datetime]:
+    """Parse Kite market timestamp without replacing missing data with now."""
+    ist = ZoneInfo("Asia/Kolkata")
+    if isinstance(value, datetime):
+        parsed = value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=ist)
+        return parsed.astimezone(timezone.utc)
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ist)
+    return parsed.astimezone(timezone.utc)
 
 
 def _secret_value(value: Any) -> str:
