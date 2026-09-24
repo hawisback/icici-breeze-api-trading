@@ -1,4 +1,4 @@
-"""Canonical Strategy A lifecycle reason codes."""
+"""Canonical option lifecycle reason codes shared by LIVE strategies."""
 
 from __future__ import annotations
 
