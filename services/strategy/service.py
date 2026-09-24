@@ -2626,7 +2626,43 @@ class StrategyService:
             }
 
         now = utc_now()
-        features = self._last_features or await self._gather_features()
+        # Manual force-entry must refresh the same runtime-health snapshot used
+        # by automatic entries; cached features cannot authorize new exposure.
+        features = await self._gather_features()
+        entry_feed_healthy = bool(
+            self._market_data_status.get("execution_feed_healthy")
+        )
+        signal_data_fresh = (
+            bool(
+                self._market_data_status.get(
+                    "strategy_a_signal_data_fresh"
+                )
+            )
+            if strategy == StrategyName.TREND_PULLBACK
+            else bool(
+                self._market_data_status.get(
+                    "strategy_b_signal_data_fresh"
+                )
+            )
+        )
+        if not entry_feed_healthy or not signal_data_fresh:
+            reasons = list(
+                self._market_data_status.get(
+                    "execution_feed_reasons",
+                    [],
+                )
+            )
+            if not signal_data_fresh:
+                reasons.append(
+                    "STALE_OR_MISSING_FUTURES_15M_CANDLE"
+                    if strategy == StrategyName.TREND_PULLBACK
+                    else "STALE_OR_MISSING_SPOT_5M_CANDLE"
+                )
+            return {
+                "status": "ENTRY_DATA_UNHEALTHY",
+                "reason": ";".join(dict.fromkeys(reasons)),
+                "execution_policy": policy.to_dict(),
+            }
 
         if strategy == StrategyName.TREND_PULLBACK:
             spot = features.futures_price if (features and features.futures_price > 0) else 0.0
