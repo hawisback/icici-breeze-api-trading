@@ -43,6 +43,7 @@ from libs.config import get_platform_settings, update_env_variable
 from libs.observability.logger import setup_logging
 from services.strategy.models import (
     AutoTradingConfig,
+    AutoTradingMode,
     HistoricalReplaySource,
     OptionType,
     SimulationRequest,
