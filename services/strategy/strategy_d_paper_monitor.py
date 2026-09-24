@@ -840,15 +840,24 @@ class StrategyDPaperMonitor:
                 if lifecycle.scale_out_time
                 else None
             )
+            tracked["scale_out_price"] = lifecycle.scale_out_price
             tracked["lifecycle_state"] = (
                 "PROTECTED_BREAKEVEN"
                 if lifecycle.scale_out_time is not None
                 else "OPEN_INITIAL_RISK"
             )
+            resolved = lifecycle.runner_exit_reason != "DATA_END"
             tracked["underlying_exit_reason"] = (
-                None
-                if lifecycle.runner_exit_reason == "DATA_END"
-                else lifecycle.runner_exit_reason
+                lifecycle.runner_exit_reason if resolved else None
+            )
+            tracked["underlying_exit_time"] = (
+                lifecycle.exit_time.isoformat() if resolved else None
+            )
+            tracked["underlying_exit_price"] = (
+                lifecycle.runner_exit_price if resolved else None
+            )
+            tracked["underlying_realized_r"] = (
+                lifecycle.realized_r if resolved else None
             )
         else:
             tracked["current_underlying_stop"] = signal.initial_stop
@@ -996,10 +1005,13 @@ class StrategyDPaperMonitor:
         tracked_map = self.runtime.setdefault("tracked", {})
         changed = False
         for tracked in tracked_map.values():
-            if tracked.get("paper_status") in {
-                "OPEN",
-                "EXIT_QUOTE_PENDING",
-            }:
+            # Underlying lifecycle is authoritative for Strategy D execution
+            # and must continue even when the parallel paper option capture
+            # was skipped or incomplete.
+            if (
+                tracked.get("signal")
+                and not tracked.get("underlying_exit_reason")
+            ):
                 before = dict(tracked)
                 await self._manage_open_trade(
                     tracked,
@@ -1129,6 +1141,13 @@ class StrategyDPaperMonitor:
             key=lambda row: str(row.get("entry_observed_at") or ""),
             reverse=True,
         )[:10]
+        active_execution_trade = next(
+            (
+                row for row in recent_paper_trades
+                if row.get("signal") and not row.get("underlying_exit_reason")
+            ),
+            None,
+        )
         return {
             "status": (
                 "PAPER_POSITION_OPEN"
@@ -1159,6 +1178,7 @@ class StrategyDPaperMonitor:
             "active_paper_trade": (
                 open_paper[0] if open_paper else None
             ),
+            "active_execution_trade": active_execution_trade,
             "paper_trades": recent_paper_trades,
             "latest_signal": latest_signal,
             "execution_signal": (
