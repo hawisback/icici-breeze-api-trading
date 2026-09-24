@@ -120,6 +120,21 @@ async function authenticatedFetch(
   return res;
 }
 
+export interface LiveGateStatus {
+  live_authorized: boolean;
+  system_setting_enabled: boolean;
+  expires_at: string | null;
+  allowed_accounts: string[];
+  time_remaining_sec: number;
+}
+
+export interface LiveGateChallenge {
+  challenge_id: string;
+  challenge_token: string;
+  expires_in_seconds: number;
+  message?: string;
+}
+
 export interface SystemHealth {
   status: string;
   timestamp: string;
@@ -349,6 +364,87 @@ export async function triggerKillSwitch(action: string, reason: string): Promise
     body: JSON.stringify({ action, reason }),
   });
   if (!res.ok) throw new Error("Failed to trigger kill switch");
+  return res.json();
+}
+
+export async function fetchLiveGateStatus(): Promise<LiveGateStatus> {
+  const res = await fetch(`${API_BASE}/live-gate/status`);
+  if (!res.ok) throw new Error("Failed to fetch LIVE authorization status");
+  return res.json();
+}
+
+export async function requestLiveGateChallenge(
+  accountId: string,
+  durationMinutes: number = 30,
+): Promise<LiveGateChallenge> {
+  const session = getStoredAuthSession();
+  const res = await authenticatedFetch(`${API_BASE}/live-gate/challenge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      operator_id: session?.user.user_id || "AUTHENTICATED_USER",
+      account_id: accountId,
+      duration_minutes: durationMinutes,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to request LIVE challenge");
+  }
+  return res.json();
+}
+
+export async function confirmLiveGate(
+  challengeId: string,
+  challengeToken: string,
+): Promise<any> {
+  const session = getStoredAuthSession();
+  const idempotencyKey =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `live-confirm-${Date.now()}`;
+  const res = await authenticatedFetch(`${API_BASE}/live-gate/confirm`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": idempotencyKey,
+    },
+    body: JSON.stringify({
+      challenge_id: challengeId,
+      challenge_token: challengeToken,
+      operator_id: session?.user.user_id || "AUTHENTICATED_USER",
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to confirm LIVE authorization");
+  }
+  return res.json();
+}
+
+export async function revokeLiveGate(
+  reason: string = "Operator manual revocation",
+): Promise<any> {
+  const session = getStoredAuthSession();
+  const idempotencyKey =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `live-revoke-${Date.now()}`;
+  const res = await authenticatedFetch(`${API_BASE}/live-gate/revoke`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": idempotencyKey,
+    },
+    body: JSON.stringify({
+      operator_id: session?.user.user_id || "AUTHENTICATED_USER",
+      reason,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to revoke LIVE authorization");
+  }
   return res.json();
 }
 
