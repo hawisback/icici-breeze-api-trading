@@ -1061,6 +1061,13 @@ async def get_live_preflight(
         blockers.append("SIMULATED_MARKET_DATA")
     if not market.get("provider_active"):
         blockers.append("STRATEGY_MARKET_DATA_NOT_ACTIVE")
+    if not market.get("execution_feed_healthy", False):
+        feed_reasons = market.get("execution_feed_reasons") or [
+            "UNKNOWN"
+        ]
+        blockers.append(
+            "EXECUTION_FEED_UNHEALTHY:" + ";".join(feed_reasons)
+        )
     if not scheduler.get("running"):
         blockers.append("STRATEGY_SCHEDULER_NOT_RUNNING")
 
@@ -1139,6 +1146,31 @@ async def get_live_preflight(
             "configured_backend": settings.market_data_backend.value,
             "strategy_provider": market.get("provider"),
             "provider_active": bool(market.get("provider_active")),
+            "execution_feed_healthy": bool(
+                market.get("execution_feed_healthy")
+            ),
+            "execution_feed_status": market.get(
+                "execution_feed_status"
+            ),
+            "execution_feed_reasons": market.get(
+                "execution_feed_reasons",
+                [],
+            ),
+            "execution_feed_max_age_seconds": market.get(
+                "execution_feed_max_age_seconds"
+            ),
+            "latest_spot_5m_candle_age_seconds": market.get(
+                "latest_spot_5m_candle_age_seconds"
+            ),
+            "latest_futures_15m_candle_age_seconds": market.get(
+                "latest_futures_15m_candle_age_seconds"
+            ),
+            "strategy_a_signal_data_fresh": bool(
+                market.get("strategy_a_signal_data_fresh")
+            ),
+            "strategy_b_signal_data_fresh": bool(
+                market.get("strategy_b_signal_data_fresh")
+            ),
             "futures_candle_count": market.get("futures_candle_count", 0),
         },
         "orders": {
