@@ -384,9 +384,6 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
     (q) => q.symbol === "NIFTY 50" || q.instrument_id === "INST-NIFTY-INDEX" || q.symbol === "NIFTY"
   );
 
-  const brokerSessionStatus = health?.services?.broker_session || "DISCONNECTED";
-  const isBrokerActive = brokerSessionStatus === "CONNECTED";
-  const isBrokerExpired = brokerSessionStatus === "EXPIRED";
   const breezeSessionStatus =
     health?.services?.broker_sessions?.breeze || "DISCONNECTED";
   const kiteSessionStatus =
