@@ -406,7 +406,9 @@ class BreezeTradingAdapter(BrokerTradingPort):
             instrument=inst,
             side=side,
             quantity=int(row.get("quantity", 0)),
-            filled_quantity=int(row.get("executed_quantity") or row.get("cancelled_quantity") or 0),
+            # cancelled_quantity is the unexecuted quantity cancelled by
+            # Breeze; it is not evidence of a broker fill.
+            filled_quantity=int(row.get("executed_quantity") or 0),
             price=Decimal(str(row.get("price", "0"))),
             average_price=Decimal(str(row.get("average_price") or row.get("price") or "0")),
             raw_status=raw_status,
