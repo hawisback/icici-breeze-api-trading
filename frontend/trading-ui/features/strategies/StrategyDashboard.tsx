@@ -48,12 +48,25 @@ export const StrategyDashboard: React.FC = () => {
     refetchOnWindowFocus: true,
   });
 
+  const liveEligibleStrategies = status
+    ? Object.entries(status.strategies)
+        .filter(([, item]) => item.enabled && item.live_trading_allowed)
+        .map(([name]) => name)
+    : [];
+  const hasLiveEligibleStrategy = liveEligibleStrategies.length > 0;
+
   const handleArmToggle = async () => {
     if (!status) return;
     const targetArmed = !status.config.system_armed;
     if (targetArmed && status.config.mode === "LIVE") {
+      if (!hasLiveEligibleStrategy) {
+        alert(
+          "No enabled strategy is promoted for LIVE execution. Platform LIVE mode does not override per-strategy execution policy.",
+        );
+        return;
+      }
       const broker = status.market_data?.provider === "kite" ? "Zerodha Kite" : status.market_data?.provider === "breeze" ? "ICICI Breeze" : "the configured live broker";
-      if (!confirm(`WARNING: Arming the system in LIVE mode allows real ${broker} order routing. Are you sure?`)) {
+      if (!confirm(`WARNING: Arming allows LIVE routing only for explicitly promoted strategies via ${broker}. Continue?`)) {
         return;
       }
     }
@@ -113,7 +126,9 @@ export const StrategyDashboard: React.FC = () => {
   const handleModeChange = async (newMode: "PAPER" | "LIVE") => {
     if (!status || status.config.mode === newMode) return;
     if (newMode === "LIVE") {
-      if (!confirm("Switching the production engine to LIVE mode. C and D remain paper-locked frozen candidates until explicit promotion. Ensure live broker credentials are valid.")) return;
+      if (!confirm(
+        "Request platform LIVE mode? This does NOT promote any strategy. Each strategy remains limited by its server execution policy, and arming stays unavailable until at least one enabled strategy is LIVE-promoted.",
+      )) return;
     }
     try {
       setActionLoading(true);
@@ -145,7 +160,7 @@ export const StrategyDashboard: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            A/B production engine + frozen C/D paper candidates. Status refreshes every 1.5s; charts refresh candles every 3s and live quotes every 1s.
+            Platform mode is separate from per-strategy execution authority. Status refreshes every 1.5s; charts refresh candles every 3s and live quotes every 1s.
           </p>
           <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] font-bold tracking-wider">
             <span className={`px-2 py-1 rounded border ${status?.scheduler?.running ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-rose-500/15 text-rose-300 border-rose-500/30"}`}>
@@ -160,8 +175,10 @@ export const StrategyDashboard: React.FC = () => {
 
         {/* Master Action Buttons */}
         <div className="flex flex-wrap items-center gap-2.5">
-          {/* Mode Selector */}
-          <div className="bg-slate-900 border border-slate-800 rounded-lg p-0.5 flex items-center">
+          {/* Platform mode request — never overrides per-strategy policy */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-[9px] uppercase tracking-wider text-slate-500">Platform</span>
+            <div className="bg-slate-900 border border-slate-800 rounded-lg p-0.5 flex items-center">
             <button
               onClick={() => handleModeChange("PAPER")}
               disabled={actionLoading}
@@ -184,12 +201,20 @@ export const StrategyDashboard: React.FC = () => {
             >
               LIVE
             </button>
+            </div>
           </div>
 
           {/* Arm System */}
           <button
             onClick={handleArmToggle}
-            disabled={actionLoading || status?.config.kill_switch || (status?.config.mode !== "LIVE" && !status?.config.system_armed)}
+            disabled={
+              actionLoading ||
+              status?.config.kill_switch ||
+              (status?.config.mode !== "LIVE" && !status?.config.system_armed) ||
+              (status?.config.mode === "LIVE" &&
+                !status?.config.system_armed &&
+                !hasLiveEligibleStrategy)
+            }
             className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
               status?.config.system_armed
                 ? "bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-900/30 animate-pulse"
@@ -204,7 +229,11 @@ export const StrategyDashboard: React.FC = () => {
             ) : (
               <>
                 <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                {status?.config.mode === "LIVE" ? "ARM SYSTEM" : "LIVE ARM N/A"}
+                {status?.config.mode === "LIVE"
+                  ? hasLiveEligibleStrategy
+                    ? "ARM PROMOTED STRATEGIES"
+                    : "NO STRATEGY PROMOTED"
+                  : "LIVE ARM N/A"}
               </>
             )}
           </button>
