@@ -459,10 +459,36 @@ export async function setSystemMode(mode: string): Promise<any> {
   return res.json();
 }
 
-export async function fetchLoginUrl(): Promise<{ login_url: string; api_key: string; broker?: "breeze" | "kite" }> {
-  const res = await fetch(`${API_BASE}/broker/session/login-url`);
+export async function fetchLoginUrl(): Promise<{
+  login_url: string;
+  api_key: string;
+  broker?: "breeze" | "kite";
+  callback_state: string;
+  state_expires_at?: string;
+}> {
+  const res = await authenticatedFetch(`${API_BASE}/broker/session/login-url`);
   if (!res.ok) throw new Error("Failed to fetch login URL");
   return res.json();
+}
+
+export async function activateBrokerSessionCallback(
+  tokenParam: "apisession" | "request_token",
+  token: string,
+  state: string,
+): Promise<any> {
+  const params = new URLSearchParams({
+    [tokenParam]: token,
+    state,
+  });
+  const res = await authenticatedFetch(
+    `${API_BASE}/broker/session/callback?${params.toString()}`,
+    { headers: { Accept: "application/json" } },
+  );
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.message || "Failed to authenticate broker session");
+  }
+  return data;
 }
 
 // ==============================================================================
