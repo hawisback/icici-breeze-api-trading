@@ -280,22 +280,36 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   const [authError, setAuthError] = React.useState("");
   const [authSuccess, setAuthSuccess] = React.useState("");
   const [brokerLoginState, setBrokerLoginState] = React.useState("");
-  const brokerBackend = health?.config?.broker_backend === "kite" ? "kite" : "breeze";
+  const executionBroker =
+    health?.config?.live_execution_broker === "kite" ||
+    health?.config?.broker_backend === "kite"
+      ? "kite"
+      : "breeze";
+  const [brokerAuthTarget, setBrokerAuthTarget] =
+    React.useState<"breeze" | "kite">("breeze");
+  const brokerBackend = brokerAuthTarget;
   const brokerLabel = brokerBackend === "kite" ? "Kite" : "ICICI Breeze";
 
-  const handleConnectBroker = async () => {
+  React.useEffect(() => {
+    setBrokerAuthTarget(executionBroker);
+  }, [executionBroker]);
+
+  const handleConnectBroker = async (
+    target: "breeze" | "kite" = brokerAuthTarget,
+  ) => {
     if (!localSingleUserMode && !operatorSession) {
       setOperatorAuthError("Operator authentication is required before broker login.");
       setShowOperatorLogin(true);
       return;
     }
     try {
-      const data = await fetchLoginUrl();
+      setBrokerAuthTarget(target);
+      const data = await fetchLoginUrl(target);
       setBrokerLoginState(data.callback_state || "");
       if (data.login_url) {
         window.open(
           data.login_url,
-          `${brokerLabel}Login`,
+          `${target === "kite" ? "Kite" : "Breeze"}Login`,
           "width=600,height=750,menubar=no,toolbar=no,status=no,scrollbars=yes"
         );
       }
@@ -373,6 +387,10 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
   const brokerSessionStatus = health?.services?.broker_session || "DISCONNECTED";
   const isBrokerActive = brokerSessionStatus === "CONNECTED";
   const isBrokerExpired = brokerSessionStatus === "EXPIRED";
+  const breezeSessionStatus =
+    health?.services?.broker_sessions?.breeze || "DISCONNECTED";
+  const kiteSessionStatus =
+    health?.services?.broker_sessions?.kite || "DISCONNECTED";
   const marketFeedStatus = health?.services?.market_feed || "LIVE";
 
   return (
@@ -492,33 +510,45 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
           </button>
         )}
 
-        {/* Broker Session */}
-        <button
-          onClick={() => setShowAuthModal(true)}
-          className={`flex items-center space-x-1.5 px-2.5 py-1 rounded font-mono border transition ${
-            isBrokerActive
-              ? "bg-emerald-950/40 text-emerald-400 border-emerald-800/60 hover:bg-emerald-900/30 cursor-pointer"
-              : isBrokerExpired
-              ? "bg-rose-950/40 text-rose-300 border-rose-800/60 hover:bg-rose-900/50 cursor-pointer animate-pulse"
-              : "bg-amber-950/40 text-amber-300 border-amber-800/60 hover:bg-amber-900/50 cursor-pointer"
-          }`}
-          title={
-            isBrokerActive
-              ? "Broker Connected (Click to view session)"
-              : isBrokerExpired
-              ? `Daily ${brokerLabel} session expired. Click to authenticate today's token.`
-              : `Click to Connect ${brokerLabel}`
-          }
-        >
-          <Lock className="w-3 h-3" />
-          <span>
-            {isBrokerActive
-              ? "BROKER CONNECTED"
-              : isBrokerExpired
-              ? "SESSION EXPIRED"
-              : "CONNECT BROKER"}
-          </span>
-        </button>
+        {/* Broker Sessions */}
+        <div className="flex items-center rounded border border-slate-800 bg-slate-900 p-0.5">
+          {([
+            ["kite", kiteSessionStatus],
+            ["breeze", breezeSessionStatus],
+          ] as const).map(([broker, sessionStatus]) => {
+            const connected = sessionStatus === "CONNECTED";
+            const expired = sessionStatus === "EXPIRED";
+            const isExecution = executionBroker === broker;
+            return (
+              <button
+                key={broker}
+                type="button"
+                onClick={() => {
+                  setBrokerAuthTarget(broker);
+                  setBrokerLoginState("");
+                  setTokenInput("");
+                  setAuthError("");
+                  setAuthSuccess("");
+                  setShowAuthModal(true);
+                }}
+                className={`flex items-center gap-1 rounded px-2 py-0.5 font-mono text-[9px] font-bold transition ${
+                  connected
+                    ? "bg-emerald-950/50 text-emerald-300"
+                    : expired
+                    ? "bg-rose-950/50 text-rose-300"
+                    : "text-amber-300 hover:bg-amber-950/40"
+                }`}
+                title={`${broker.toUpperCase()} session: ${sessionStatus}${
+                  isExecution ? " · LIVE execution broker" : ""
+                }`}
+              >
+                <Lock className="h-2.5 w-2.5" />
+                <span>{broker.toUpperCase()}</span>
+                {isExecution && <span className="text-rose-300">EXEC</span>}
+              </button>
+            );
+          })}
+        </div>
 
         {/* Market Feed Status */}
         <div
@@ -861,6 +891,40 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
               </button>
             </div>
 
+            <div className="grid grid-cols-2 gap-2">
+              {(["kite", "breeze"] as const).map((broker) => {
+                const sessionStatus =
+                  broker === "kite" ? kiteSessionStatus : breezeSessionStatus;
+                return (
+                  <button
+                    key={broker}
+                    type="button"
+                    onClick={() => {
+                      setBrokerAuthTarget(broker);
+                      setBrokerLoginState("");
+                      setTokenInput("");
+                      setAuthError("");
+                      setAuthSuccess("");
+                    }}
+                    className={`rounded border px-3 py-2 text-[10px] font-bold ${
+                      brokerAuthTarget === broker
+                        ? "border-blue-500 bg-blue-950/40 text-blue-200"
+                        : "border-slate-800 bg-slate-900 text-slate-400"
+                    }`}
+                  >
+                    {broker.toUpperCase()} · {sessionStatus}
+                    {executionBroker === broker ? " · EXEC" : ""}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="rounded border border-slate-800 bg-slate-950/60 p-2 text-[10px] text-slate-500">
+              LIVE orders: {executionBroker.toUpperCase()} · Frequent data:{" "}
+              {(health?.config?.frequent_data_broker || "kite").toUpperCase()} ·
+              Reference data:{" "}
+              {(health?.config?.reference_data_broker || "breeze").toUpperCase()}
+            </div>
+
             <div className="space-y-3 text-xs leading-relaxed text-slate-400">
               <p>
                 To authenticate your daily broker session, log in on the official {brokerLabel} portal.
@@ -874,7 +938,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
                 </div>
                 <button
                   type="button"
-                  onClick={handleConnectBroker}
+                  onClick={() => void handleConnectBroker(brokerAuthTarget)}
                   className="w-full flex items-center justify-center space-x-2 py-2 px-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded text-xs transition"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
