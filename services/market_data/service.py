@@ -118,17 +118,30 @@ class MarketDataService:
             getattr(
                 self.broker_gateway,
                 "frequent_data_broker_name",
-                getattr(self.broker_gateway, "active_broker_name", ""),
+                "",
             )
             or ""
         ).lower()
-        if hasattr(self.broker_gateway, "is_broker_active"):
-            return bool(self.broker_gateway.is_broker_active(provider))
         adapter = getattr(
             self.broker_gateway,
             "frequent_data_adapter",
-            getattr(self.broker_gateway, "active_adapter", None),
+            None,
         )
+        if provider not in {"breeze", "kite"}:
+            provider = str(
+                getattr(self.broker_gateway, "active_broker_name", "")
+                or ""
+            ).lower()
+            adapter = getattr(
+                self.broker_gateway,
+                "active_adapter",
+                adapter,
+            )
+        if (
+            provider in {"breeze", "kite"}
+            and hasattr(self.broker_gateway, "is_broker_active")
+        ):
+            return bool(self.broker_gateway.is_broker_active(provider))
         if provider == "breeze":
             client_mgr = getattr(adapter, "client_manager", None)
             return bool(client_mgr and getattr(client_mgr, "is_active", False))
@@ -142,15 +155,36 @@ class MarketDataService:
             getattr(
                 self.broker_gateway,
                 "frequent_data_broker_name",
-                getattr(self.broker_gateway, "active_broker_name", ""),
+                "",
             )
             or ""
         ).lower()
         active_adapter = getattr(
             self.broker_gateway,
             "frequent_data_adapter",
-            getattr(self.broker_gateway, "active_adapter", None),
+            None,
         )
+        if provider not in {"breeze", "kite"}:
+            provider = str(
+                getattr(self.broker_gateway, "active_broker_name", "")
+                or ""
+            ).lower()
+            active_adapter = getattr(
+                self.broker_gateway,
+                "active_adapter",
+                active_adapter,
+            )
+        if provider not in {"breeze", "kite"}:
+            breeze = getattr(self.broker_gateway, "breeze_adapter", None)
+            breeze_client = getattr(breeze, "client_manager", None)
+            if breeze_client and getattr(breeze_client, "is_active", False):
+                provider = "breeze"
+                active_adapter = breeze
+            else:
+                kite = getattr(self.broker_gateway, "kite_adapter", None)
+                if kite and getattr(kite, "is_active", False):
+                    provider = "kite"
+                    active_adapter = kite
         if provider == "kite":
             if not active_adapter or not getattr(active_adapter, "is_active", False):
                 return False
