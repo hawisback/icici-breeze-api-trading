@@ -189,6 +189,58 @@ class MarketDataService:
                 unique_quotes.append(q)
         return unique_quotes
 
+    def get_execution_feed_health(
+        self,
+        instrument_ids: tuple[str, ...] = ("INST-NIFTY-INDEX",),
+        max_age_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Fail-closed health used by LIVE entry boundaries.
+
+        General UI feed freshness may consider any recent tick. Execution
+        health is stricter: the configured live broker must still be active
+        and every required instrument must have a recent real-provider quote.
+        """
+        broker_active = self._live_broker_active()
+        reasons: list[str] = []
+        quotes: dict[str, dict[str, Any]] = {}
+        now = utc_now()
+
+        if not broker_active:
+            reasons.append("BROKER_SESSION_INACTIVE")
+
+        for instrument_id in instrument_ids:
+            quote = self.get_latest_quote(instrument_id)
+            if quote is None:
+                reasons.append(f"MISSING_QUOTE:{instrument_id}")
+                continue
+
+            source = str(getattr(quote, "source", "UNKNOWN") or "UNKNOWN").upper()
+            age_seconds = max(0.0, (now - quote.timestamp).total_seconds())
+            quotes[instrument_id] = {
+                "source": source,
+                "timestamp": quote.timestamp.isoformat(),
+                "age_seconds": round(age_seconds, 3),
+                "last_price": float(quote.last_price or 0.0),
+            }
+            if source not in {"BREEZE", "KITE", "LIVE"}:
+                reasons.append(f"NON_REAL_QUOTE:{instrument_id}:{source}")
+            if quote.last_price <= 0:
+                reasons.append(f"INVALID_QUOTE_PRICE:{instrument_id}")
+            if age_seconds > max_age_seconds:
+                reasons.append(
+                    f"STALE_QUOTE:{instrument_id}:{age_seconds:.3f}s"
+                )
+
+        return {
+            "healthy": not reasons,
+            "status": "LIVE" if not reasons else "BLOCKED",
+            "broker_active": broker_active,
+            "max_age_seconds": max_age_seconds,
+            "quotes": quotes,
+            "reasons": reasons,
+            "checked_at": now.isoformat(),
+        }
+
     def get_feed_status(self) -> dict[str, Any]:
         """Determine feed status: LIVE, STALE, or DOWN."""
         if not self._last_tick_time:
