@@ -54,6 +54,7 @@ from services.strategy.models import (
 )
 from services.strategy.position_manager import PositionManager, UnderlyingRiskSizer, calculate_realized_trade_r, underlying_r_for_price
 from services.strategy.reason_codes import (
+    BROKER_PROTECTIVE_STOP_UNAVAILABLE,
     OPTION_EMERGENCY_STOP,
     OPTION_EMERGENCY_STOP_OUTCOME_STATUS,
     OPTION_EMERGENCY_STOP_UNDERLYING_REASON,
@@ -1294,23 +1295,70 @@ class StrategyService:
             limit_price = self._option_tick_price(trigger - 0.05, down=True)
         return trigger, limit_price
 
+    async def _record_protective_stop_failure(
+        self,
+        trade: ActiveTrade,
+        reason: str,
+        *,
+        state_unknown: bool = False,
+    ) -> bool:
+        """Persist a protection failure and escalate when safe recovery ends."""
+        trade.protective_stop_failures += 1
+        trade.protective_stop_last_failure_reason = reason
+        trade.protective_stop_last_failure_at = utc_now()
+        trade.option_data_status = "PROTECTIVE_STOP_DEGRADED"
+
+        exhausted = (
+            state_unknown
+            or trade.protective_stop_failures
+            >= self.config.risk.broker_protective_stop_max_failures
+        )
+        if exhausted:
+            trade.protective_stop_status = (
+                "STATE_UNKNOWN_BLOCKED"
+                if state_unknown
+                else "UNAVAILABLE_EXIT_REQUIRED"
+            )
+            if not state_unknown:
+                trade.pending_exit_reason = (
+                    BROKER_PROTECTIVE_STOP_UNAVAILABLE
+                )
+                trade.option_exit_reason = (
+                    BROKER_PROTECTIVE_STOP_UNAVAILABLE
+                )
+            if self.config.system_armed:
+                self.config.system_armed = False
+                await self.repo.save_auto_config(self.config)
+            await self._log_decision(
+                "SECURITY",
+                trade.strategy.value,
+                "Broker protective stop safety escalation",
+                {
+                    "trade_id": trade.trade_id,
+                    "reason": reason,
+                    "state_unknown": state_unknown,
+                    "failure_count": trade.protective_stop_failures,
+                    "system_auto_disarmed": True,
+                },
+            )
+        await self.repo.save_trade(trade)
+        return exhausted
+
     async def _sync_live_protective_stop(
         self,
         trade: ActiveTrade,
         features: MarketFeatures,
     ) -> bool:
-        """Ensure a confirmed LIVE long option has broker-held catastrophe protection.
-
-        Returns True only when normal lifecycle management may continue. While
-        the protective order is still validating/submitting, management pauses
-        rather than racing a second SELL order against an unconfirmed stop.
-        """
+        """Keep the LIVE long option protected without racing duplicate SELLs."""
         if trade.mode != AutoTradingMode.LIVE or trade.filled_quantity <= 0:
             return True
         if trade.state == TradeLifecycleState.CLOSED:
             return False
 
-        remaining_quantity = max(0, trade.quantity - trade.exit_filled_quantity)
+        remaining_quantity = max(
+            0,
+            trade.quantity - trade.exit_filled_quantity,
+        )
         if remaining_quantity <= 0:
             if trade.exit_proceeds > 0 and trade.quantity > 0:
                 await self._close_trade(
@@ -1323,36 +1371,48 @@ class StrategyService:
             return False
 
         if trade.protective_stop_order_id:
-            protective = await self.oms.get_order(trade.protective_stop_order_id)
+            protective = await self.oms.get_order(
+                trade.protective_stop_order_id
+            )
             if protective is None:
-                trade.protective_stop_status = "OMS_ORDER_MISSING"
-                await self.repo.save_trade(trade)
+                await self._record_protective_stop_failure(
+                    trade,
+                    "OMS_PROTECTIVE_ORDER_MISSING",
+                    state_unknown=True,
+                )
                 return False
 
             status = protective.status.value
             trade.protective_stop_status = status
-            new_protective_filled = int(protective.filled_quantity or 0)
-            delta_fill = max(
-                0,
-                new_protective_filled - trade.protective_stop_filled_quantity,
+            new_filled = int(protective.filled_quantity or 0)
+            accounted = int(
+                trade.protective_stop_filled_quantity or 0
             )
-            if delta_fill:
+            if new_filled >= accounted:
                 cumulative_average = float(
                     protective.average_price
                     or trade.protective_stop_limit_price
                     or trade.option_hard_stop_price
                 )
-                new_order_proceeds = cumulative_average * new_protective_filled
-                delta_proceeds = max(
-                    0.0,
-                    new_order_proceeds - trade.protective_stop_filled_proceeds,
+                new_proceeds = cumulative_average * new_filled
+                delta_filled = new_filled - accounted
+                delta_proceeds = (
+                    new_proceeds
+                    - trade.protective_stop_filled_proceeds
                 )
-                trade.exit_proceeds += delta_proceeds
-                trade.exit_filled_quantity += delta_fill
-                trade.protective_stop_filled_quantity = new_protective_filled
-                trade.protective_stop_filled_proceeds = new_order_proceeds
+                if delta_filled or abs(delta_proceeds) > 1e-9:
+                    trade.exit_filled_quantity = min(
+                        trade.quantity,
+                        trade.exit_filled_quantity + delta_filled,
+                    )
+                    trade.exit_proceeds += delta_proceeds
+                    trade.protective_stop_filled_quantity = new_filled
+                    trade.protective_stop_filled_proceeds = new_proceeds
 
-            if status == "FILLED" or trade.exit_filled_quantity >= trade.quantity:
+            if (
+                status == "FILLED"
+                or trade.exit_filled_quantity >= trade.quantity
+            ):
                 trade.protective_stop_status = "FILLED"
                 average_exit = (
                     trade.exit_proceeds / trade.quantity
@@ -1365,34 +1425,65 @@ class StrategyService:
                     average_exit,
                     OPTION_EMERGENCY_STOP,
                     quote={
-                        "bid": float(protective.average_price or average_exit),
+                        "bid": float(
+                            protective.average_price or average_exit
+                        ),
                         "source": "BROKER_PROTECTIVE_STOP",
                     },
                 )
                 return False
 
-            if status in {
+            terminal_failure = status in {
                 "CANCELLED",
                 "REJECTED",
                 "RISK_REJECTED",
                 "EXPIRED",
                 "FAILED_SAFE",
-            }:
-                cancelled_for_exit = trade.protective_stop_cancel_for_exit
+            }
+            if terminal_failure:
+                cancelled_for_exit = (
+                    trade.protective_stop_cancel_for_exit
+                    and status == "CANCELLED"
+                )
                 trade.protective_stop_order_id = None
                 trade.protective_stop_filled_quantity = 0
                 trade.protective_stop_filled_proceeds = 0.0
                 trade.protective_stop_cancel_for_exit = False
+                trade.protective_stop_cancel_attempts = 0
+                trade.protective_stop_cancel_requested_at = None
+
+                if cancelled_for_exit:
+                    await self.repo.save_trade(trade)
+                    return True
+
+                exhausted = await self._record_protective_stop_failure(
+                    trade,
+                    f"PROTECTIVE_STOP_{status}",
+                )
+                if exhausted:
+                    # The old protective order is confirmed terminal, so it is
+                    # safe to proceed to a reduce-only flattening exit.
+                    return True
+                # Retry protection immediately below without waiting for a
+                # future scheduler cycle.
+            else:
+                if status in {
+                    "OPEN",
+                    "ACKNOWLEDGED",
+                    "PARTIALLY_FILLED",
+                }:
+                    trade.protective_stop_failures = 0
+                    trade.protective_stop_last_failure_reason = None
+                    trade.protective_stop_last_failure_at = None
                 await self.repo.save_trade(trade)
-                return cancelled_for_exit
+                if trade.protective_stop_cancel_for_exit:
+                    return False
+                return status in {
+                    "OPEN",
+                    "ACKNOWLEDGED",
+                    "PARTIALLY_FILLED",
+                }
 
-            await self.repo.save_trade(trade)
-            if trade.protective_stop_cancel_for_exit:
-                return False
-            return status in {"OPEN", "ACKNOWLEDGED", "PARTIALLY_FILLED"}
-
-        # An already-decided exit must not create a new protective order while
-        # it is trying to flatten the remaining position.
         if trade.pending_exit_reason or trade.exit_order_id:
             return True
 
@@ -1400,7 +1491,9 @@ class StrategyService:
         intent = OrderIntent(
             intent_id=generate_id(),
             correlation_id=trade.trade_id,
-            strategy_instance_id="INST-NIFTY-AUTO-ENGINE-PROTECTIVE",
+            strategy_instance_id=(
+                "INST-NIFTY-AUTO-ENGINE-PROTECTIVE"
+            ),
             source=SourceType.STRATEGY,
             instrument_id=trade.contract_instrument_id,
             symbol=trade.contract_symbol,
@@ -1421,6 +1514,8 @@ class StrategyService:
         trade.protective_stop_trigger_price = trigger_price
         trade.protective_stop_limit_price = limit_price
         trade.protective_stop_cancel_for_exit = False
+        trade.protective_stop_cancel_attempts = 0
+        trade.protective_stop_cancel_requested_at = None
         await self.repo.save_trade(trade)
         await self._log_decision(
             "RISK",
@@ -1432,6 +1527,7 @@ class StrategyService:
                 "quantity": remaining_quantity,
                 "trigger_price": trigger_price,
                 "limit_price": limit_price,
+                "prior_failures": trade.protective_stop_failures,
             },
         )
         return False
@@ -1441,36 +1537,61 @@ class StrategyService:
         trade: ActiveTrade,
         features: MarketFeatures,
     ) -> bool:
-        """Cancel/reconcile protection before submitting a discretionary SELL."""
-        if trade.mode != AutoTradingMode.LIVE or not trade.protective_stop_order_id:
+        """Cancel/reconcile protection before any competing reduce-only SELL."""
+        if (
+            trade.mode != AutoTradingMode.LIVE
+            or not trade.protective_stop_order_id
+        ):
             return True
 
-        may_continue = await self._sync_live_protective_stop(trade, features)
+        may_continue = await self._sync_live_protective_stop(
+            trade,
+            features,
+        )
         if trade.state == TradeLifecycleState.CLOSED:
             return False
         if not trade.protective_stop_order_id:
             return may_continue
-        if trade.protective_stop_cancel_for_exit:
-            return False
 
-        protective = await self.oms.get_order(trade.protective_stop_order_id)
-        if protective is None:
-            trade.protective_stop_status = "OMS_ORDER_MISSING"
-            await self.repo.save_trade(trade)
-            return False
-        if protective.status.value in {
-            "CANCELLED",
-            "REJECTED",
-            "RISK_REJECTED",
-            "EXPIRED",
-            "FAILED_SAFE",
-        }:
-            trade.protective_stop_order_id = None
-            trade.protective_stop_filled_quantity = 0
-            trade.protective_stop_filled_proceeds = 0.0
+        if trade.protective_stop_cancel_for_exit:
+            requested_at = trade.protective_stop_cancel_requested_at
+            age_seconds = (
+                max(
+                    0.0,
+                    (utc_now() - requested_at).total_seconds(),
+                )
+                if requested_at is not None
+                else float("inf")
+            )
+            if (
+                age_seconds
+                < self.config.risk
+                .broker_protective_stop_cancel_timeout_sec
+            ):
+                return False
+            if (
+                trade.protective_stop_cancel_attempts
+                >= self.config.risk
+                .broker_protective_stop_cancel_max_attempts
+            ):
+                await self._record_protective_stop_failure(
+                    trade,
+                    "PROTECTIVE_STOP_CANCEL_UNRESOLVED",
+                    state_unknown=True,
+                )
+                return False
             trade.protective_stop_cancel_for_exit = False
-            await self.repo.save_trade(trade)
-            return True
+
+        protective = await self.oms.get_order(
+            trade.protective_stop_order_id
+        )
+        if protective is None:
+            await self._record_protective_stop_failure(
+                trade,
+                "OMS_PROTECTIVE_ORDER_MISSING_DURING_CANCEL",
+                state_unknown=True,
+            )
+            return False
         if protective.status.value == "FILLED":
             return False
         if not protective.broker_order_id:
@@ -1482,20 +1603,53 @@ class StrategyService:
 
         gateway = getattr(self.hist_svc, "broker_gateway", None)
         if gateway is None:
-            trade.protective_stop_status = "CANCEL_BLOCKED_NO_GATEWAY"
-            await self.repo.save_trade(trade)
+            await self._record_protective_stop_failure(
+                trade,
+                "PROTECTIVE_STOP_CANCEL_NO_GATEWAY",
+                state_unknown=True,
+            )
             return False
 
-        response = await gateway.cancel_order(
-            protective.broker_order_id,
-            mode=protective.trading_mode,
-        )
+        trade.protective_stop_cancel_attempts += 1
+        trade.protective_stop_cancel_requested_at = utc_now()
         trade.protective_stop_cancel_for_exit = True
-        trade.protective_stop_status = (
-            "CANCEL_REQUESTED"
-            if response.success
-            else f"CANCEL_FAILED:{response.status}"
-        )
+        try:
+            response = await gateway.cancel_order(
+                protective.broker_order_id,
+                mode=protective.trading_mode,
+            )
+            if response.success:
+                trade.protective_stop_status = "CANCEL_REQUESTED"
+            else:
+                trade.protective_stop_status = (
+                    f"CANCEL_FAILED:{response.status}"
+                )
+                trade.protective_stop_last_failure_reason = (
+                    trade.protective_stop_status
+                )
+                trade.protective_stop_last_failure_at = utc_now()
+        except Exception as exc:
+            trade.protective_stop_status = (
+                f"CANCEL_ERROR:{type(exc).__name__}"
+            )
+            trade.protective_stop_last_failure_reason = (
+                trade.protective_stop_status
+            )
+            trade.protective_stop_last_failure_at = utc_now()
+
+        if (
+            trade.protective_stop_cancel_attempts
+            >= self.config.risk
+            .broker_protective_stop_cancel_max_attempts
+            and trade.protective_stop_status != "CANCEL_REQUESTED"
+        ):
+            await self._record_protective_stop_failure(
+                trade,
+                "PROTECTIVE_STOP_CANCEL_RETRIES_EXHAUSTED",
+                state_unknown=True,
+            )
+            return False
+
         await self.repo.save_trade(trade)
         return False
 
