@@ -741,6 +741,51 @@ class StrategyService:
 
         self._active_trades_cache = await self.repo.get_active_trades()
 
+        # Loss of execution-grade broker/feed health while armed is a
+        # fail-closed event. Existing positions were already managed above and
+        # broker-held catastrophe stops remain active; only new authority is
+        # revoked, requiring an explicit operator re-arm after recovery.
+        if (
+            self.config.mode == AutoTradingMode.LIVE
+            and self.config.system_armed
+            and not bool(
+                self._market_data_status.get(
+                    "execution_feed_healthy",
+                    False,
+                )
+            )
+        ):
+            self.config.system_armed = False
+            await self.repo.save_auto_config(self.config)
+            self._reset_setups(now)
+            await self._save_runtime()
+            reasons = list(
+                self._market_data_status.get(
+                    "execution_feed_reasons",
+                    [],
+                )
+            )
+            await self._log_decision(
+                category="SECURITY",
+                strategy="SYSTEM",
+                message=(
+                    "LIVE system auto-disarmed after broker/feed health loss"
+                ),
+                details={
+                    "reasons": reasons,
+                    "active_positions_managed": len(
+                        self._active_trades_cache
+                    ),
+                },
+            )
+            return {
+                "status": "LIVE_RUNTIME_HEALTH_AUTO_DISARMED",
+                "reasons": reasons,
+                "active_positions_managed": len(
+                    self._active_trades_cache
+                ),
+            }
+
         # The strategy kill switch is entry-blocking, not exit-blocking.
         # Existing positions have already had stops/session exits evaluated
         # above, so it is now safe to stop before any new entry logic.
