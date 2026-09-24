@@ -1941,14 +1941,70 @@ class StrategyService:
             try:
                 chain = await self.chain_svc.get_chain(underlying="NIFTY")
                 if chain.get("source") in ("BREEZE", "KITE", "LIVE"):
+                    capabilities = (
+                        chain.get("capabilities")
+                        if isinstance(chain.get("capabilities"), dict)
+                        else {}
+                    )
+                    strategy_a_ready = bool(
+                        capabilities.get(
+                            "strategy_a_contract_selection_ready",
+                            capabilities.get("verified_delta_available", False),
+                        )
+                    )
+                    self._market_data_status.update({
+                        "option_chain_source": chain.get("source"),
+                        "option_chain_captured_at": (
+                            chain.get("captured_at")
+                            or chain.get("timestamp")
+                        ),
+                        "strategy_a_option_execution_ready": (
+                            strategy_a_ready
+                        ),
+                        "strategy_a_option_execution_reason": (
+                            None
+                            if strategy_a_ready
+                            else capabilities.get(
+                                "strategy_a_rejection_reason",
+                                "VERIFIED_OPTION_DELTA_UNAVAILABLE",
+                            )
+                        ),
+                    })
                     return chain
                 # Offline/synthetic matrices remain usable by the UI, but may
                 # never create a forward option-validation trade.
                 if chain.get("strikes"):
-                    return {**chain, "source": "UNAVAILABLE", "validation_rejection": "synthetic option prices are not executable"}
+                    self._market_data_status.update({
+                        "option_chain_source": "UNAVAILABLE",
+                        "strategy_a_option_execution_ready": False,
+                        "strategy_a_option_execution_reason": (
+                            "SYNTHETIC_OPTION_CHAIN_NOT_EXECUTABLE"
+                        ),
+                    })
+                    return {
+                        **chain,
+                        "source": "UNAVAILABLE",
+                        "validation_rejection": (
+                            "synthetic option prices are not executable"
+                        ),
+                    }
             except Exception:
                 logger.exception("Option-chain retrieval failed")
-        return {"source": "UNAVAILABLE", "strikes": []}
+        self._market_data_status.update({
+            "option_chain_source": "UNAVAILABLE",
+            "strategy_a_option_execution_ready": False,
+            "strategy_a_option_execution_reason": "OPTION_CHAIN_UNAVAILABLE",
+        })
+        return {
+            "source": "UNAVAILABLE",
+            "strikes": [],
+            "capabilities": {
+                "verified_delta_available": False,
+                "verified_greeks_available": False,
+                "strategy_a_contract_selection_ready": False,
+                "strategy_a_rejection_reason": "OPTION_CHAIN_UNAVAILABLE",
+            },
+        }
 
     async def _capture_option_chain_snapshot(
         self,
