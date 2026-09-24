@@ -376,13 +376,13 @@ class RiskService:
             and intent.side == OrderSide.BUY
             and not is_reduce_only_exit
         ):
-            if self.portfolio_service is None or self.broker_gateway is None:
+            if self.broker_gateway is None:
                 return await self._record_and_publish(
                     intent=intent,
                     approved=False,
                     rule="LIVE_RISK_DEPENDENCY_UNAVAILABLE",
                     reason=(
-                        "LIVE entry rejected because portfolio or broker funds "
+                        "LIVE entry rejected because broker exposure/funds "
                         "verification is unavailable"
                     ),
                     system_mode=system_mode,
@@ -401,12 +401,27 @@ class RiskService:
                     system_mode=system_mode,
                 )
 
-            positions = await self.portfolio_service.get_positions()
+            try:
+                broker_positions = await self.broker_gateway.get_positions(
+                    mode=TradingMode.LIVE
+                )
+            except Exception as exc:
+                logger.exception("LIVE broker position verification failed")
+                return await self._record_and_publish(
+                    intent=intent,
+                    approved=False,
+                    rule="LIVE_POSITIONS_UNAVAILABLE",
+                    reason=(
+                        "LIVE entry rejected because broker positions could not "
+                        f"be verified: {type(exc).__name__}"
+                    ),
+                    system_mode=system_mode,
+                )
+
             open_live_positions = [
                 position
-                for position in positions
+                for position in broker_positions
                 if int(position.quantity) > 0
-                and position.trading_mode == TradingMode.LIVE
             ]
             if len(open_live_positions) >= self.live_max_open_positions:
                 return await self._record_and_publish(
@@ -414,8 +429,8 @@ class RiskService:
                     approved=False,
                     rule="LIVE_OPEN_POSITION_LIMIT",
                     reason=(
-                        f"Open LIVE positions {len(open_live_positions)} reached "
-                        f"limit {self.live_max_open_positions}"
+                        f"Open broker positions {len(open_live_positions)} "
+                        f"reached LIVE limit {self.live_max_open_positions}"
                     ),
                     system_mode=system_mode,
                 )
