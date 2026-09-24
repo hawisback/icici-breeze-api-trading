@@ -362,7 +362,12 @@ class IciciBreezeAdapter(BrokerAdapter):
             quantity=request.quantity,
             order_style=order_style,
             limit_price=Decimal(str(request.price)),
-            stop_price=Decimal(str(request.price)) if order_style == OrderStyle.STOP_LIMIT else None,
+            stop_price=(
+                Decimal(str(request.trigger_price))
+                if order_style == OrderStyle.STOP_LIMIT
+                and request.trigger_price is not None
+                else None
+            ),
             validity=OrderValidity.DAY if request.validity.lower() == "day" else OrderValidity.IOC,
             client_reference=request.client_order_id,
             user_remark=request.user_remark,
@@ -485,11 +490,38 @@ class IciciBreezeAdapter(BrokerAdapter):
             return None
 
         return BrokerOrderResponse(
-            success=True,
+            success=order.normalized_status not in {"REJECTED", "CANCELLED"},
             broker_order_id=order.broker_order_id,
             client_order_id=order.client_reference or "",
             status=order.normalized_status,
             message=order.raw_status,
+            filled_quantity=order.filled_quantity,
+            average_price=float(order.average_price),
+        )
+
+    async def find_order_by_client_id(self, client_order_id: str) -> Optional[BrokerOrderResponse]:
+        """Recover an order by the immutable client reference stored at Breeze."""
+        if not self.api_key or self.api_key.startswith("test_"):
+            return None
+        try:
+            orders = await self.clean_service.get_orders()
+        except Exception as exc:
+            logger.warning("Breeze client-id reconciliation failed: %s", exc)
+            return None
+        order = next(
+            (item for item in orders if item.client_reference == client_order_id),
+            None,
+        )
+        if order is None:
+            return None
+        return BrokerOrderResponse(
+            success=order.normalized_status not in {"REJECTED", "CANCELLED"},
+            broker_order_id=order.broker_order_id,
+            client_order_id=client_order_id,
+            status=order.normalized_status,
+            message=order.raw_status,
+            filled_quantity=order.filled_quantity,
+            average_price=float(order.average_price),
         )
 
     async def get_positions(self) -> list[BrokerPositionResponse]:
@@ -500,12 +532,28 @@ class IciciBreezeAdapter(BrokerAdapter):
         positions = await self.clean_service.get_positions()
         return [
             BrokerPositionResponse(
-                symbol=pos.instrument.stock_code,
-                exchange=pos.instrument.exchange.value,
+                stock_code=pos.instrument.stock_code,
+                exchange_code=pos.instrument.exchange.value,
+                product_type=pos.instrument.product_type.value,
                 quantity=pos.quantity,
                 average_price=float(pos.average_price),
                 ltp=float(pos.ltp),
                 pnl=float(pos.total_pnl),
+                strike_price=(
+                    float(pos.instrument.strike)
+                    if pos.instrument.strike is not None
+                    else None
+                ),
+                right=(
+                    pos.instrument.option_right.value.lower()
+                    if pos.instrument.option_right is not None
+                    else None
+                ),
+                expiry_date=(
+                    pos.instrument.expiry.isoformat()
+                    if pos.instrument.expiry is not None
+                    else None
+                ),
             )
             for pos in positions
         ]
@@ -520,12 +568,13 @@ class IciciBreezeAdapter(BrokerAdapter):
             BrokerTradeResponse(
                 trade_id=t.trade_id,
                 broker_order_id=t.broker_order_id,
-                symbol=t.instrument.stock_code,
-                exchange=t.instrument.exchange.value,
-                side=t.side.value,
+                client_order_id=None,
+                stock_code=t.instrument.stock_code,
+                exchange_code=t.instrument.exchange.value,
+                action=t.side.value,
                 quantity=t.quantity,
                 price=float(t.execution_price),
-                executed_at=t.trade_time,
+                trade_time=t.trade_time,
             )
             for t in trades
         ]

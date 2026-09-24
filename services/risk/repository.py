@@ -124,6 +124,18 @@ class RiskRepository:
                 )
             await conn.commit()
 
+    async def get_outbox_events_to_publish(
+        self,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        async with self.engine.connect() as conn:
+            return await get_pending_outbox_events(conn, limit)
+
+    async def mark_outbox_published(self, event_id: str) -> None:
+        async with self.engine.connect() as conn:
+            await mark_outbox_event_published(conn, event_id)
+            await conn.commit()
+
     async def get_decision_by_intent(self, intent_id: str) -> Optional[RiskDecision]:
         async with self.engine.connect() as conn:
             cursor = await conn.execute(

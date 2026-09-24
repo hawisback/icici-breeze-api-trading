@@ -210,6 +210,43 @@ export function BottomPanel() {
                   </div>
                 </div>
               ))}
+            {health?.broker_sessions &&
+              Object.entries(health.broker_sessions).map(([broker, status]) => (
+                <div key={`broker-${broker}`} className="bg-slate-900/80 p-2.5 rounded border border-slate-800">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">
+                    {broker} session
+                  </div>
+                  <div className={`mt-1 font-bold text-xs ${
+                    status === "CONNECTED" ? "text-emerald-400" : "text-amber-400"
+                  }`}>
+                    {status}
+                  </div>
+                </div>
+              ))}
+            {health?.config?.live_execution_broker && (
+              <div className="bg-slate-900/80 p-2.5 rounded border border-rose-900/50">
+                <div className="text-[10px] text-slate-400 uppercase tracking-wider">LIVE execution</div>
+                <div className="mt-1 font-bold text-xs text-rose-300">
+                  {String(health.config.live_execution_broker).toUpperCase()}
+                </div>
+              </div>
+            )}
+            {health?.config?.frequent_data_broker && (
+              <div className="bg-slate-900/80 p-2.5 rounded border border-sky-900/50">
+                <div className="text-[10px] text-slate-400 uppercase tracking-wider">Frequent data</div>
+                <div className="mt-1 font-bold text-xs text-sky-300">
+                  {String(health.config.frequent_data_broker).toUpperCase()}
+                </div>
+              </div>
+            )}
+            {health?.config?.reference_data_broker && (
+              <div className="bg-slate-900/80 p-2.5 rounded border border-violet-900/50">
+                <div className="text-[10px] text-slate-400 uppercase tracking-wider">Reference data</div>
+                <div className="mt-1 font-bold text-xs text-violet-300">
+                  {String(health.config.reference_data_broker).toUpperCase()}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

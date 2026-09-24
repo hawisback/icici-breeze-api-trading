@@ -174,13 +174,19 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         tier = self._determine_tier(path)
         client_id = self._get_client_id(request)
 
-        allowed, retry_after = await limiter.check_rate_limit(client_id=client_id, tier=tier)
+        scope = path if tier == "GENERAL" else ""
+        allowed, retry_after = await limiter.check_rate_limit(
+            client_id=client_id,
+            tier=tier,
+            scope=scope,
+        )
         if not allowed:
             request_id = getattr(request.state, "request_id", f"req_{generate_id()[:12]}")
             logger.warning(
-                "Rate limit exceeded for %s on tier %s (path %s). Retry-After: %d",
+                "Rate limit exceeded for %s on tier %s scope %s (path %s). Retry-After: %d",
                 client_id,
                 tier,
+                scope or "shared",
                 path,
                 retry_after,
             )
@@ -195,6 +201,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                             "event_type": "RATE_LIMIT_EXCEEDED",
                             "client_id": client_id,
                             "tier": tier,
+                            "scope": scope or "shared",
                             "path": path,
                             "retry_after": retry_after,
                             "timestamp": utc_now().isoformat(),

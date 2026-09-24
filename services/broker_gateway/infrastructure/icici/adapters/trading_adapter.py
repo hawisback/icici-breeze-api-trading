@@ -10,7 +10,7 @@ Enforces:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import logging
 from typing import Any, Optional
@@ -59,6 +59,22 @@ from services.broker_gateway.infrastructure.icici.status_mapper import normalize
 from services.broker_gateway.infrastructure.rate_limit.policies import BrokerRateLimiter
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_optional_expiry(value: Any) -> Optional[date]:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    for candidate in (text[:10], text[:11]):
+        for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y"):
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                continue
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
 
 
 class BreezeTradingAdapter(BrokerTradingPort):
@@ -270,14 +286,24 @@ class BreezeTradingAdapter(BrokerTradingPort):
             price = Decimal(str(row.get("execution_price") or row.get("price") or "0"))
             trade_time = parse_breeze_datetime(str(row.get("trade_date") or row.get("order_date") or ""))
 
+            right_raw = str(row.get("right", "")).lower()
+            option_right = (
+                OptionRight.CALL
+                if "call" in right_raw
+                else OptionRight.PUT
+                if "put" in right_raw
+                else None
+            )
             inst = BrokerInstrumentRef(
                 internal_instrument_id=uuid.uuid4(),
                 exchange=Exchange.NFO,
                 stock_code=str(row.get("stock_code", "")),
                 product_type=ProductType.OPTIONS,
-                expiry=None,
+                expiry=_parse_optional_expiry(
+                    row.get("expiry_date") or row.get("expiry")
+                ),
                 strike=Decimal(str(row.get("strike_price", 0))) if row.get("strike_price") else None,
-                option_right=OptionRight.CALL if "call" in str(row.get("right", "")).lower() else None,
+                option_right=option_right,
                 stock_token=None,
             )
             trades.append(
@@ -314,15 +340,25 @@ class BreezeTradingAdapter(BrokerTradingPort):
             ltp = Decimal(str(row.get("ltp") or row.get("current_price") or "0"))
             realized = Decimal(str(row.get("realized_profit") or "0"))
             unrealized = Decimal(str(row.get("unrealized_profit") or "0"))
+            right_raw = str(row.get("right", "")).lower()
+            option_right = (
+                OptionRight.CALL
+                if "call" in right_raw
+                else OptionRight.PUT
+                if "put" in right_raw
+                else None
+            )
 
             inst = BrokerInstrumentRef(
                 internal_instrument_id=uuid.uuid4(),
                 exchange=Exchange.NFO,
                 stock_code=str(row.get("stock_code", "")),
                 product_type=ProductType.OPTIONS,
-                expiry=None,
+                expiry=_parse_optional_expiry(
+                    row.get("expiry_date") or row.get("expiry")
+                ),
                 strike=Decimal(str(row.get("strike_price", 0))) if row.get("strike_price") else None,
-                option_right=OptionRight.CALL if "call" in str(row.get("right", "")).lower() else None,
+                option_right=option_right,
                 stock_token=None,
             )
             positions.append(
@@ -370,7 +406,9 @@ class BreezeTradingAdapter(BrokerTradingPort):
             instrument=inst,
             side=side,
             quantity=int(row.get("quantity", 0)),
-            filled_quantity=int(row.get("executed_quantity") or row.get("cancelled_quantity") or 0),
+            # cancelled_quantity is the unexecuted quantity cancelled by
+            # Breeze; it is not evidence of a broker fill.
+            filled_quantity=int(row.get("executed_quantity") or 0),
             price=Decimal(str(row.get("price", "0"))),
             average_price=Decimal(str(row.get("average_price") or row.get("price") or "0")),
             raw_status=raw_status,

@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 import re
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from pydantic import SecretStr
 
@@ -36,6 +37,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         api_secret: Optional[str] = None,
         product: str = "NRML",
         custom_client: Optional[Any] = None,
+        request_timeout_sec: float = 15.0,
     ) -> None:
         self.api_key = api_key or ""
         self.api_secret = api_secret or ""
@@ -45,6 +47,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         self._write_lock = asyncio.Lock()
         self._nse_instruments: Optional[list[dict[str, Any]]] = None
         self._nfo_instruments: Optional[list[dict[str, Any]]] = None
+        self.request_timeout_sec = request_timeout_sec
 
     @property
     def is_active(self) -> bool:
@@ -167,6 +170,8 @@ class ZerodhaKiteAdapter(BrokerAdapter):
     async def place_order(self, request: BrokerOrderRequest) -> BrokerOrderResponse:
         if not self.is_active:
             return _failure(request.client_order_id, "Kite session is not active")
+        normalized_order_type = request.order_type.upper().replace("_", "-")
+        kite_order_type = "SL" if normalized_order_type in {"STOP-LIMIT", "STOPLOSS"} else normalized_order_type
         params: dict[str, Any] = {
             "variety": "regular",
             "exchange": request.exchange_code.upper(),
@@ -174,11 +179,18 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             "transaction_type": "BUY" if request.action.lower() == "buy" else "SELL",
             "quantity": request.quantity,
             "product": self.product if request.product.lower() != "cash" else "CNC",
-            "order_type": request.order_type.upper(),
+            "order_type": kite_order_type,
             "validity": request.validity.upper(),
         }
-        if params["order_type"] == "LIMIT":
+        if params["order_type"] in {"LIMIT", "SL"}:
             params["price"] = request.price
+        if params["order_type"] == "SL":
+            if request.trigger_price is None:
+                return _failure(
+                    request.client_order_id,
+                    "STOP_LIMIT requires trigger_price",
+                )
+            params["trigger_price"] = request.trigger_price
         if request.user_remark:
             params["tag"] = request.user_remark[:20]
 
@@ -191,6 +203,14 @@ class ZerodhaKiteAdapter(BrokerAdapter):
                 client_order_id=request.client_order_id,
                 status="PLACED",
                 message="Order placed successfully with Kite",
+            )
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            logger.error("Kite submission outcome unknown for %s: %s", request.client_order_id, exc)
+            return BrokerOrderResponse(
+                success=False,
+                client_order_id=request.client_order_id,
+                status="UNKNOWN",
+                message="Kite submission timed out; reconciliation required and blind retry is prohibited.",
             )
         except Exception as exc:
             logger.warning("Kite order rejected for %s: %s", request.client_order_id, exc)
@@ -260,6 +280,31 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             logger.warning("Kite order status lookup failed: %s", exc)
             return None
 
+    async def find_order_by_client_id(self, client_order_id: str) -> Optional[BrokerOrderResponse]:
+        if not self.is_active:
+            return None
+        try:
+            rows = await self._run(self._kite.orders)
+            row = next(
+                (item for item in reversed(rows or []) if str(item.get("tag") or "") == client_order_id),
+                None,
+            )
+            if row is None:
+                return None
+            status = str(row.get("status", "UNKNOWN")).upper()
+            return BrokerOrderResponse(
+                success=status not in {"REJECTED", "CANCELLED"},
+                broker_order_id=str(row.get("order_id") or ""),
+                client_order_id=client_order_id,
+                status=status,
+                message=row.get("status_message"),
+                filled_quantity=int(row.get("filled_quantity") or 0),
+                average_price=float(row.get("average_price") or 0),
+            )
+        except Exception as exc:
+            logger.warning("Kite client-id reconciliation failed: %s", exc)
+            return None
+
     async def get_positions(self) -> list[BrokerPositionResponse]:
         if not self.is_active:
             return []
@@ -302,7 +347,6 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         if not self.is_active:
             return []
         raw = await self._run(lambda: self._kite.quote(["NSE:NIFTY 50", "NSE:NIFTY BANK"]))
-        now = utc_now()
         result: list[Quote] = []
         for instrument_id, symbol in [
             ("INST-NIFTY-INDEX", "NIFTY 50"),
@@ -310,7 +354,15 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         ]:
             row = raw.get(f"NSE:{symbol}", {}) if isinstance(raw, dict) else {}
             last = float(row.get("last_price") or 0)
-            if last <= 0:
+            exchange_timestamp = _parse_exchange_quote_datetime(
+                row.get("timestamp") or row.get("last_trade_time")
+            )
+            if last <= 0 or exchange_timestamp is None:
+                if last > 0:
+                    logger.warning(
+                        "Kite quote for %s omitted: exchange timestamp missing/unparseable",
+                        instrument_id,
+                    )
                 continue
             ohlc = row.get("ohlc", {}) or {}
             previous_close = float(ohlc.get("close") or last)
@@ -328,7 +380,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
                     change_pct=round(((last - previous_close) / previous_close) * 100, 4)
                     if previous_close
                     else 0.0,
-                    timestamp=now,
+                    timestamp=exchange_timestamp,
                 )
             )
         return result
@@ -488,7 +540,33 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         return int(futures[0]["instrument_token"]) if futures else None
 
     async def _run(self, callback):
-        return await asyncio.to_thread(callback)
+        return await asyncio.wait_for(
+            asyncio.to_thread(callback),
+            timeout=self.request_timeout_sec,
+        )
+
+
+def _parse_exchange_quote_datetime(value: Any) -> Optional[datetime]:
+    """Parse Kite market timestamp without replacing missing data with now."""
+    ist = ZoneInfo("Asia/Kolkata")
+    if isinstance(value, datetime):
+        parsed = value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=ist)
+        return parsed.astimezone(timezone.utc)
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ist)
+    return parsed.astimezone(timezone.utc)
 
 
 def _secret_value(value: Any) -> str:

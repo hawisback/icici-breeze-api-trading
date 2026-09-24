@@ -48,9 +48,13 @@ class PortfolioService:
         inst_id = payload["instrument_id"]
         symbol = payload["symbol"]
 
-        # Record execution
+        execution_id = str(
+            payload.get("execution_id")
+            or payload.get("broker_execution_id")
+            or generate_id()
+        )
         execution = Execution(
-            execution_id=generate_id(),
+            execution_id=execution_id,
             order_id=payload["order_id"],
             broker_execution_id=payload.get("broker_execution_id"),
             instrument_id=inst_id,
@@ -59,29 +63,6 @@ class PortfolioService:
             quantity=qty,
             price=price,
         )
-        await self.repo.save_execution(execution)
-
-        # Update position
-        pos = await self.repo.get_position(inst_id)
-        if not pos:
-            pos = Position(
-                position_id=generate_id(),
-                instrument_id=inst_id,
-                symbol=symbol,
-                trading_mode=TradingMode(payload.get("trading_mode", "PAPER")),
-            )
-
-        new_buy_qty = pos.buy_quantity + (qty if side == OrderSide.BUY else 0)
-        new_sell_qty = pos.sell_quantity + (qty if side == OrderSide.SELL else 0)
-        new_buy_val = pos.buy_value + (qty * price if side == OrderSide.BUY else 0.0)
-        new_sell_val = pos.sell_value + (qty * price if side == OrderSide.SELL else 0.0)
-        net_qty = new_buy_qty - new_sell_qty
-
-        # Average price & Realized PnL calculation
-        avg_price = (new_buy_val / new_buy_qty) if new_buy_qty > 0 else 0.0
-        # If closing partially or fully:
-        closed_qty = min(new_buy_qty, new_sell_qty)
-        realized_pnl = (new_sell_val / new_sell_qty * closed_qty - new_buy_val / new_buy_qty * closed_qty) if closed_qty > 0 else 0.0
 
         current_price = price
         if self.mkt_svc:
@@ -89,29 +70,27 @@ class PortfolioService:
             if q:
                 current_price = q.last_price
 
-        unrealized_pnl = (current_price - avg_price) * net_qty if net_qty != 0 else 0.0
-        total_pnl = round(realized_pnl + unrealized_pnl, 2)
-
-        updated_pos = pos.model_copy(
-            update={
-                "quantity": net_qty,
-                "buy_quantity": new_buy_qty,
-                "sell_quantity": new_sell_qty,
-                "buy_value": new_buy_val,
-                "sell_value": new_sell_val,
-                "average_price": round(avg_price, 2),
-                "current_price": round(current_price, 2),
-                "realized_pnl": round(realized_pnl, 2),
-                "unrealized_pnl": round(unrealized_pnl, 2),
-                "total_pnl": total_pnl,
-                "updated_at": utc_now(),
-            }
+        updated_pos, applied = await self.repo.apply_execution_atomic(
+            execution,
+            trading_mode=TradingMode(
+                payload.get("trading_mode", "PAPER")
+            ),
+            current_price=current_price,
         )
-        await self.repo.save_position(updated_pos)
+        if not applied:
+            logger.info(
+                "Duplicate execution %s ignored during portfolio replay",
+                execution_id,
+            )
+            return
 
-        # Publish position event
+        # Publish position event only after the execution and position were
+        # committed atomically.
         await self.bus.publish(
-            EventEnvelope(topic=Topics.PORTFOLIO_POSITION, payload=updated_pos.model_dump())
+            EventEnvelope(
+                topic=Topics.PORTFOLIO_POSITION,
+                payload=updated_pos.model_dump(),
+            )
         )
 
         # Recalculate portfolio PnL summary

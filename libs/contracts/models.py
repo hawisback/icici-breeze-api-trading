@@ -66,6 +66,7 @@ class OrderSide(str, Enum):
 class OrderType(str, Enum):
     MARKET = "MARKET"
     LIMIT = "LIMIT"
+    STOP_LIMIT = "STOP_LIMIT"
 
 
 class ProductType(str, Enum):
@@ -157,6 +158,7 @@ class OrderIntent(BaseDomainModel):
     product: ProductType = ProductType.OPTIONS
     time_in_force: TimeInForce = TimeInForce.DAY
     trading_mode: TradingMode = TradingMode.PAPER
+    reduce_only: bool = False
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -185,10 +187,12 @@ class BrokerOrder(BaseDomainModel):
     filled_quantity: int = 0
     remaining_quantity: int
     price: float
+    trigger_price: Optional[float] = None
     average_price: float = 0.0
     status: OrderState = OrderState.CREATED
     status_message: Optional[str] = None
     trading_mode: TradingMode = TradingMode.PAPER
+    reduce_only: bool = False
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

@@ -18,6 +18,7 @@ from libs.contracts.models import (
     ProductType,
     Signal,
     SourceType,
+    TimeInForce,
     TradingMode,
     generate_id,
     utc_now,
@@ -26,6 +27,9 @@ from libs.events.bus import EventBus, EventEnvelope, Topics, get_event_bus
 from libs.config.settings import get_platform_settings
 from services.oms.service import OMSService
 from services.strategy.contract_selector import ContractSelector
+from services.strategy.execution_policy import (
+    resolve_strategy_execution_policy,
+)
 from services.strategy.features import FeatureEngine
 from services.strategy.futures_signal import resolve_active_futures_instrument
 from services.strategy.models import (
@@ -51,6 +55,7 @@ from services.strategy.models import (
 )
 from services.strategy.position_manager import PositionManager, UnderlyingRiskSizer, calculate_realized_trade_r, underlying_r_for_price
 from services.strategy.reason_codes import (
+    BROKER_PROTECTIVE_STOP_UNAVAILABLE,
     OPTION_EMERGENCY_STOP,
     OPTION_EMERGENCY_STOP_OUTCOME_STATUS,
     OPTION_EMERGENCY_STOP_UNDERLYING_REASON,
@@ -150,8 +155,310 @@ class StrategyService:
             "futures_instrument": None, "futures_candle_count": 0,
             "latest_futures_candle": None, "last_error": "Awaiting first evaluation",
         }
+        self._startup_reconciliation: dict[str, Any] = {
+            "status": "NOT_CHECKED",
+            "issues": [],
+        }
+        self._last_live_reconciliation: dict[str, Any] = {
+            "status": "NOT_CHECKED",
+            "issues": [],
+        }
         self.strategy_a_telemetry = StrategyATelemetryStore()
 
+
+    @staticmethod
+    def _normalized_option_right(value: object) -> str:
+        text = str(value or "").upper()
+        if text in {"CALL", "CE"}:
+            return "CALL"
+        if text in {"PUT", "PE"}:
+            return "PUT"
+        return text
+
+    def _broker_position_matches_trade(
+        self,
+        position: Any,
+        trade: ActiveTrade,
+    ) -> bool:
+        broker_symbol = str(
+            getattr(position, "stock_code", "") or ""
+        ).upper()
+        if broker_symbol == trade.contract_symbol.upper():
+            return True
+
+        provider = self._active_broker_context()[0]
+        if provider != "breeze":
+            return False
+
+        expiry = str(getattr(position, "expiry_date", "") or "")[:10]
+        strike = getattr(position, "strike_price", None)
+        right = self._normalized_option_right(
+            getattr(position, "right", None)
+        )
+        underlying = (
+            "BANKNIFTY"
+            if trade.contract_symbol.upper().startswith("BANKNIFTY")
+            else "NIFTY"
+        )
+        return bool(
+            broker_symbol == underlying
+            and expiry == str(trade.expiry)[:10]
+            and strike is not None
+            and abs(float(strike) - float(trade.strike)) < 1e-6
+            and right == trade.option_type.value
+        )
+
+    @staticmethod
+    def _live_trade_contract_key(trade: ActiveTrade) -> str:
+        """Return the canonical local identity used for broker net-position reconciliation."""
+        instrument_id = str(trade.contract_instrument_id or "").strip().upper()
+        if instrument_id:
+            return f"INSTRUMENT:{instrument_id}"
+        return (
+            "CONTRACT:"
+            f"{trade.contract_symbol.upper()}|"
+            f"{str(trade.expiry)[:10]}|"
+            f"{float(trade.strike):.8f}|"
+            f"{trade.option_type.value}"
+        )
+
+    @staticmethod
+    def _local_live_remaining_quantity(trade: ActiveTrade) -> int:
+        """Return locally confirmed broker exposure, not merely requested entry size."""
+        base_quantity = (
+            int(trade.filled_quantity or 0)
+            if trade.state == TradeLifecycleState.ENTRY_PENDING
+            else int(trade.quantity or 0)
+        )
+        return max(
+            0,
+            base_quantity - int(trade.exit_filled_quantity or 0),
+        )
+
+    async def build_live_reconciliation_report(
+        self,
+        *,
+        broker_positions: list[Any],
+        orders: list[Any],
+        broker_verified: bool,
+        broker_error: str | None = None,
+        record_as_startup: bool = False,
+    ) -> dict[str, Any]:
+        """Compare durable local LIVE state with broker net positions by contract."""
+        active_trades = await self.repo.get_active_trades()
+        live_trades = [
+            trade
+            for trade in active_trades
+            if trade.mode == AutoTradingMode.LIVE
+            and trade.state != TradeLifecycleState.CLOSED
+        ]
+        unresolved_states = {
+            "CREATED",
+            "VALIDATING",
+            "APPROVED",
+            "SUBMITTING",
+            "SUBMISSION_UNKNOWN",
+            "ACKNOWLEDGED",
+            "OPEN",
+            "PARTIALLY_FILLED",
+        }
+        unresolved_orders = [
+            order
+            for order in orders
+            if order.trading_mode == TradingMode.LIVE
+            and order.status.value in unresolved_states
+        ]
+        issues: list[str] = []
+        matched_position_indexes: set[int] = set()
+        trade_rows: list[dict[str, Any]] = []
+        contract_rows: list[dict[str, Any]] = []
+
+        if not broker_verified:
+            issues.append(
+                "BROKER_STATE_UNVERIFIED"
+                + (f":{broker_error}" if broker_error else "")
+            )
+
+        # Broker APIs expose a net position per option contract. Multiple local
+        # strategy trades in that contract are fungible at the broker, so
+        # reconcile the aggregate local exposure against the aggregate broker
+        # exposure exactly once rather than comparing the same broker quantity
+        # independently with every local trade.
+        contract_groups: dict[str, list[ActiveTrade]] = {}
+        for trade in live_trades:
+            contract_groups.setdefault(
+                self._live_trade_contract_key(trade),
+                [],
+            ).append(trade)
+
+        positions_by_contract: dict[str, list[tuple[int, Any]]] = {
+            key: [] for key in contract_groups
+        }
+        for index, position in enumerate(broker_positions):
+            matching_keys = [
+                key
+                for key, grouped_trades in contract_groups.items()
+                if any(
+                    self._broker_position_matches_trade(position, trade)
+                    for trade in grouped_trades
+                )
+            ]
+            if len(matching_keys) == 1:
+                key = matching_keys[0]
+                positions_by_contract[key].append((index, position))
+                matched_position_indexes.add(index)
+            elif len(matching_keys) > 1:
+                # Do not allocate one broker net position across ambiguous local
+                # identities. Mark it seen to avoid a misleading orphan issue,
+                # then fail closed with the ambiguity itself.
+                matched_position_indexes.add(index)
+                issues.append(
+                    "AMBIGUOUS_BROKER_POSITION_MATCH:"
+                    f"{getattr(position, 'stock_code', 'UNKNOWN')}:"
+                    + ",".join(sorted(matching_keys))
+                )
+
+        for contract_key, grouped_trades in contract_groups.items():
+            local_contract_quantity = sum(
+                self._local_live_remaining_quantity(trade)
+                for trade in grouped_trades
+            )
+            matches = positions_by_contract.get(contract_key, [])
+            broker_contract_quantity = sum(
+                int(getattr(position, "quantity", 0) or 0)
+                for _, position in matches
+            )
+            trade_ids = [trade.trade_id for trade in grouped_trades]
+
+            if (
+                broker_verified
+                and broker_contract_quantity != local_contract_quantity
+            ):
+                issues.append(
+                    f"LIVE_POSITION_MISMATCH:{contract_key}:"
+                    f"local={local_contract_quantity}:"
+                    f"broker={broker_contract_quantity}:"
+                    f"trades={','.join(trade_ids)}"
+                )
+
+            contract_rows.append(
+                {
+                    "contract_key": contract_key,
+                    "symbol": grouped_trades[0].contract_symbol,
+                    "trade_ids": trade_ids,
+                    "local_remaining_quantity": local_contract_quantity,
+                    "broker_quantity": broker_contract_quantity,
+                    "broker_position_count": len(matches),
+                }
+            )
+
+            for trade in grouped_trades:
+                remaining = self._local_live_remaining_quantity(trade)
+                protection_status = "NOT_REQUIRED"
+                if (
+                    remaining > 0
+                    and not trade.exit_order_id
+                    and not trade.partial_exit_order_id
+                ):
+                    if not trade.protective_stop_order_id:
+                        protection_status = "MISSING"
+                        issues.append(
+                            f"LIVE_PROTECTIVE_STOP_MISSING:{trade.trade_id}"
+                        )
+                    else:
+                        protective = await self.oms.get_order(
+                            trade.protective_stop_order_id
+                        )
+                        if protective is None:
+                            protection_status = "OMS_ORDER_MISSING"
+                            issues.append(
+                                f"LIVE_PROTECTIVE_STOP_UNKNOWN:{trade.trade_id}"
+                            )
+                        else:
+                            protection_status = protective.status.value
+                            if protective.status.value not in {
+                                "OPEN",
+                                "ACKNOWLEDGED",
+                                "PARTIALLY_FILLED",
+                            }:
+                                issues.append(
+                                    "LIVE_PROTECTIVE_STOP_NOT_CONFIRMED:"
+                                    f"{trade.trade_id}:"
+                                    f"{protective.status.value}"
+                                )
+
+                if remaining > 0:
+                    issues.append(
+                        f"RECOVERED_LIVE_POSITION_ACTIVE:{trade.trade_id}"
+                    )
+
+                trade_rows.append(
+                    {
+                        "trade_id": trade.trade_id,
+                        "symbol": trade.contract_symbol,
+                        "contract_key": contract_key,
+                        "local_remaining_quantity": remaining,
+                        # Kept for response compatibility. This is deliberately
+                        # the broker's aggregate contract quantity, not a
+                        # fabricated per-trade allocation.
+                        "broker_quantity": broker_contract_quantity,
+                        "broker_contract_quantity": broker_contract_quantity,
+                        "local_contract_quantity": local_contract_quantity,
+                        "contract_trade_count": len(grouped_trades),
+                        "protective_stop_status": protection_status,
+                        "exit_order_id": trade.exit_order_id,
+                        "partial_exit_order_id": trade.partial_exit_order_id,
+                    }
+                )
+
+        for index, position in enumerate(broker_positions):
+            quantity = int(getattr(position, "quantity", 0) or 0)
+            if quantity == 0:
+                continue
+            if index not in matched_position_indexes:
+                issues.append(
+                    "ORPHAN_BROKER_POSITION:"
+                    f"{getattr(position, 'stock_code', 'UNKNOWN')}:"
+                    f"{quantity}"
+                )
+            if quantity < 0:
+                issues.append(
+                    "UNEXPECTED_SHORT_BROKER_POSITION:"
+                    f"{getattr(position, 'stock_code', 'UNKNOWN')}:"
+                    f"{quantity}"
+                )
+
+        if unresolved_orders:
+            issues.append("UNRESOLVED_LIVE_ORDERS")
+
+        report = {
+            "status": "BLOCKED" if issues else "CLEAN",
+            "checked_at": utc_now().isoformat(),
+            "broker_verified": broker_verified,
+            "broker_error": broker_error,
+            "issues": list(dict.fromkeys(issues)),
+            "active_live_trades": trade_rows,
+            "live_position_contracts": contract_rows,
+            "open_broker_positions": sum(
+                1
+                for position in broker_positions
+                if int(getattr(position, "quantity", 0) or 0) != 0
+            ),
+            "unresolved_live_orders": [
+                {
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "side": order.side.value,
+                    "status": order.status.value,
+                    "reduce_only": order.reduce_only,
+                }
+                for order in unresolved_orders
+            ],
+        }
+        self._last_live_reconciliation = report
+        if record_as_startup:
+            self._startup_reconciliation = report
+        return report
 
     def _reset_setups(self, at):
         self.strategy_a.reset(at)
@@ -249,6 +556,11 @@ class StrategyService:
     async def initialize(self) -> None:
         await self.repo.initialize()
         self.config = await self.repo.get_auto_config()
+        # Arming is deliberately process-local in effect. A restart must never
+        # silently restore authority to create new LIVE exposure.
+        if self.config.system_armed:
+            self.config.system_armed = False
+            await self.repo.save_auto_config(self.config)
         self._sync_subcomponents()
         try:
             await self.strategy_c_shadow.initialize()
@@ -344,32 +656,40 @@ class StrategyService:
     def _is_strategy_a(strategy: StrategyName) -> bool:
         return strategy == StrategyName.TREND_PULLBACK
 
+    def _execution_policy_for_strategy(self, strategy: StrategyName):
+        """Return the single authoritative A/B/C/D execution policy."""
+        return resolve_strategy_execution_policy(
+            strategy,
+            self.config.mode,
+            strategy_a_option_execution_ready=bool(
+                self._market_data_status.get(
+                    "strategy_a_option_execution_ready",
+                    False,
+                )
+            ),
+            strategy_a_option_execution_reason=(
+                self._market_data_status.get(
+                    "strategy_a_option_execution_reason"
+                )
+            ),
+        )
+
+    def _execution_policy_matrix(self) -> dict[str, dict[str, Any]]:
+        return {
+            strategy.value: self._execution_policy_for_strategy(strategy).to_dict()
+            for strategy in StrategyName
+        }
+
     def _execution_mode_for_strategy(
         self,
         strategy: StrategyName,
         option_type: OptionType,
     ) -> AutoTradingMode:
-        """Resolve execution mode while validation candidates remain non-live."""
-        if strategy in {
-            StrategyName.DI_CONTINUATION,
-            StrategyName.SR_MOMENTUM_BREAKOUT,
-        }:
-            return AutoTradingMode.PAPER
-        if self._is_strategy_a(strategy):
-            return (
-                AutoTradingMode.SHADOW_ONLY
-                if option_type == OptionType.CALL
-                else AutoTradingMode.PAPER
-            )
-        if (
-            strategy == StrategyName.VOLATILITY_BREAKOUT
-            and self.config.mode == AutoTradingMode.LIVE
-        ):
-            return AutoTradingMode.SHADOW_ONLY
-        return self.config.mode
+        """Resolve execution mode from the authoritative permission policy."""
+        return self._execution_policy_for_strategy(strategy).mode_for(option_type)
 
     def _execution_mode_for_signal(self, signal: StrategySignal) -> AutoTradingMode:
-        """Resolve signal execution while keeping Strategy B non-live during validation."""
+        """Resolve signal execution under the authoritative per-strategy policy."""
         return self._execution_mode_for_strategy(signal.strategy, signal.option_type)
 
     def _paper_slippage(self) -> float:
@@ -562,7 +882,11 @@ class StrategyService:
             instance_id="INST-NIFTY-AUTO-ENGINE",
             definition_id=def_id,
             name="NIFTY Intraday Options Orchestrator",
-            mode=TradingMode.PAPER if self.config.mode == AutoTradingMode.PAPER else TradingMode.LIVE,
+            mode=(
+                TradingMode.LIVE
+                if self.config.mode == AutoTradingMode.LIVE
+                else TradingMode.PAPER
+            ),
             symbol="NIFTY",
             parameters=self.config.model_dump(),
             status="RUNNING",
@@ -572,10 +896,44 @@ class StrategyService:
     async def get_config(self) -> AutoTradingConfig:
         return self.config
 
+    async def set_execution_mode(
+        self,
+        mode: AutoTradingMode,
+    ) -> AutoTradingConfig:
+        """Switch PAPER/SHADOW/LIVE authority while forcing the system disarmed."""
+        if mode == AutoTradingMode.DISABLED:
+            raise ValueError("DISABLED is not available from the trading-mode switch.")
+
+        active_trades = await self.repo.get_active_trades()
+        if active_trades and mode != self.config.mode:
+            raise ValueError(
+                "Cannot switch trading mode while positions are active."
+            )
+
+        if self.config.system_armed:
+            await self.arm_system(False)
+
+        updated = self.config.model_copy(
+            update={
+                "mode": mode,
+                "system_armed": False,
+            }
+        )
+        return await self.update_config(updated)
+
     async def update_config(self, new_config: AutoTradingConfig) -> AutoTradingConfig:
-        # If active positions exist, do not allow mode change between PAPER and LIVE
+        # Mode transitions with active positions are never safe because the
+        # lifecycle authority must remain stable until those positions close.
         if self._active_trades_cache and new_config.mode != self.config.mode:
             raise ValueError("Cannot switch trading mode while positions are active.")
+        if (
+            new_config.mode == AutoTradingMode.LIVE
+            and self.config.mode != AutoTradingMode.LIVE
+            and (self.config.system_armed or new_config.system_armed)
+        ):
+            raise ValueError(
+                "System must be DISARMED before switching strategy mode to LIVE."
+            )
 
         runtime = self.strategy_a.export_state()
         self.config = new_config
@@ -689,13 +1047,8 @@ class StrategyService:
         now = utc_now()
         self._last_eval_time = now  # track for get_status() freshness check
 
-        # 1. Check Kill Switch
-        if self.config.kill_switch:
-            self._reset_setups(now)
-            await self._save_runtime()
-            return {"status": "HALTED_KILL_SWITCH"}
-
-        # 2. Gather market features
+        # 1. Gather market features. Existing positions must continue to be
+        # managed even when the entry kill switch is active.
         features = await self._gather_features()
         self._last_features = features
 
@@ -729,6 +1082,63 @@ class StrategyService:
             await self._evaluate_active_trade(trade, features)
 
         self._active_trades_cache = await self.repo.get_active_trades()
+
+        # Loss of execution-grade broker/feed health while armed is a
+        # fail-closed event. Existing positions were already managed above and
+        # broker-held catastrophe stops remain active; only new authority is
+        # revoked, requiring an explicit operator re-arm after recovery.
+        if (
+            self.config.mode == AutoTradingMode.LIVE
+            and self.config.system_armed
+            and not bool(
+                self._market_data_status.get(
+                    "execution_feed_healthy",
+                    False,
+                )
+            )
+        ):
+            self.config.system_armed = False
+            await self.repo.save_auto_config(self.config)
+            self._reset_setups(now)
+            await self._save_runtime()
+            reasons = list(
+                self._market_data_status.get(
+                    "execution_feed_reasons",
+                    [],
+                )
+            )
+            await self._log_decision(
+                category="SECURITY",
+                strategy="SYSTEM",
+                message=(
+                    "LIVE system auto-disarmed after broker/feed health loss"
+                ),
+                details={
+                    "reasons": reasons,
+                    "active_positions_managed": len(
+                        self._active_trades_cache
+                    ),
+                },
+            )
+            return {
+                "status": "LIVE_RUNTIME_HEALTH_AUTO_DISARMED",
+                "reasons": reasons,
+                "active_positions_managed": len(
+                    self._active_trades_cache
+                ),
+            }
+
+        # The strategy kill switch is entry-blocking, not exit-blocking.
+        # Existing positions have already had stops/session exits evaluated
+        # above, so it is now safe to stop before any new entry logic.
+        if self.config.kill_switch:
+            self._reset_setups(now)
+            await self._save_runtime()
+            return {
+                "status": "HALTED_KILL_SWITCH",
+                "active_positions_managed": len(self._active_trades_cache),
+            }
+
         bypass = getattr(self._active_overrides, "bypass_entry_window", False)
         _, _, futures_candles = self._market_snapshot
         strategy_a_data_ready = self.config.tunables.trend_pullback_enabled and bool(futures_candles)
@@ -803,25 +1213,111 @@ class StrategyService:
             await self._save_runtime()
             return {"status": "LIVE_SYSTEM_NOT_ARMED"}
 
-        # 9. Evaluate Strategy Entry Signals
+        # 9. Evaluate Strategy Entry Signals only on fresh real-time input.
+        # Existing positions were managed above; these gates affect new
+        # exposure only.
         candles_5m, candles_15m, futures_candles = self._market_snapshot
 
+        execution_feed_healthy = bool(
+            self._market_data_status.get("execution_feed_healthy")
+        )
+        strategy_a_entry_data_ready = bool(
+            execution_feed_healthy
+            and self._market_data_status.get(
+                "strategy_a_signal_data_fresh",
+                False,
+            )
+        )
+        strategy_b_entry_data_ready = bool(
+            execution_feed_healthy
+            and self._market_data_status.get(
+                "strategy_b_signal_data_fresh",
+                False,
+            )
+        )
+
         signal: Optional[StrategySignal] = None
+        entry_data_blockers: dict[str, list[str]] = {}
 
         if self.config.tunables.trend_pullback_enabled:
-            signal = self.strategy_a.evaluate(features, candles_5m, candles_15m, futures_candles=futures_candles, overrides=self._active_overrides)
-            await self._record_strategy_a_evaluation(features, signal)
-            await self._save_runtime()
+            if strategy_a_entry_data_ready:
+                signal = self.strategy_a.evaluate(
+                    features,
+                    candles_5m,
+                    candles_15m,
+                    futures_candles=futures_candles,
+                    overrides=self._active_overrides,
+                )
+                await self._record_strategy_a_evaluation(features, signal)
+                await self._save_runtime()
+            else:
+                self.strategy_a.reset(now)
+                reasons = list(
+                    self._market_data_status.get(
+                        "execution_feed_reasons",
+                        [],
+                    )
+                )
+                if not self._market_data_status.get(
+                    "strategy_a_signal_data_fresh",
+                    False,
+                ):
+                    reasons.append("STALE_OR_MISSING_FUTURES_15M_CANDLE")
+                entry_data_blockers["TREND_PULLBACK"] = list(
+                    dict.fromkeys(reasons)
+                )
+                await self._save_runtime()
 
         if not signal and self.config.tunables.volatility_breakout_enabled:
-            signal = self.strategy_b.evaluate(features, candles_5m, candles_15m, overrides=self._active_overrides)
-            await self._save_runtime()
+            if strategy_b_entry_data_ready:
+                signal = self.strategy_b.evaluate(
+                    features,
+                    candles_5m,
+                    candles_15m,
+                    overrides=self._active_overrides,
+                )
+                await self._save_runtime()
+            else:
+                self.strategy_b.reset(now)
+                reasons = list(
+                    self._market_data_status.get(
+                        "execution_feed_reasons",
+                        [],
+                    )
+                )
+                if not self._market_data_status.get(
+                    "strategy_b_signal_data_fresh",
+                    False,
+                ):
+                    reasons.append("STALE_OR_MISSING_SPOT_5M_CANDLE")
+                entry_data_blockers["VOLATILITY_BREAKOUT"] = list(
+                    dict.fromkeys(reasons)
+                )
+                await self._save_runtime()
         elif not self.config.tunables.volatility_breakout_enabled:
             self.strategy_b.reset(now)
             await self._save_runtime()
 
         if not signal:
-            return {"status": "NO_SIGNAL", "features": features.model_dump(mode="json")}
+            enabled_blocked = (
+                (
+                    self.config.tunables.trend_pullback_enabled
+                    and not strategy_a_entry_data_ready
+                )
+                or (
+                    self.config.tunables.volatility_breakout_enabled
+                    and not strategy_b_entry_data_ready
+                )
+            )
+            return {
+                "status": (
+                    "ENTRY_DATA_UNHEALTHY"
+                    if enabled_blocked
+                    else "NO_SIGNAL"
+                ),
+                "entry_data_blockers": entry_data_blockers,
+                "features": features.model_dump(mode="json"),
+            }
 
         if sum(t.strategy == signal.strategy for t in today_trades) >= self.config.risk.max_trades_per_strategy_per_day:
             return {"status":"STRATEGY_DAILY_TRADE_LIMIT_REACHED"}
@@ -848,6 +1344,36 @@ class StrategyService:
         execution_mode = self._execution_mode_for_signal(signal)
         chain = await self._get_option_chain()
         is_strategy_a = self._is_strategy_a(signal.strategy)
+        if (
+            is_strategy_a
+            and execution_mode == AutoTradingMode.LIVE
+            and not bool(
+                self._market_data_status.get(
+                    "strategy_a_option_execution_ready",
+                    False,
+                )
+            )
+        ):
+            reason = str(
+                self._market_data_status.get(
+                    "strategy_a_option_execution_reason"
+                )
+                or "VERIFIED_OPTION_DELTA_UNAVAILABLE"
+            )
+            await self._log_decision(
+                "RISK",
+                signal.strategy.value,
+                "Strategy A LIVE entry blocked: option execution readiness degraded",
+                {"reason": reason, "signal_id": signal.signal_id},
+            )
+            await self._reject_strategy_a_execution(
+                signal,
+                f"EXECUTION_REJECTED_OPTION_READINESS:{reason}",
+            )
+            return {
+                "status": "STRATEGY_A_OPTION_EXECUTION_BLOCKED",
+                "reason": reason,
+            }
         if is_strategy_a and signal.underlying_entry_price is None:
             await self._log_decision("RISK", signal.strategy.value, "Strategy A signal missing authoritative futures entry", signal.model_dump(mode="json"))
             await self._reject_strategy_a_execution(signal, "EXECUTION_REJECTED_INVALID_ENTRY_REFERENCE")
@@ -1060,27 +1586,34 @@ class StrategyService:
 
         await self.repo.save_trade(new_trade)
         if is_strategy_a:
-            # ENTERED is confirmed only after a real Strategy A trade record
-            # exists, eliminating the trigger->selector crash window.
-            self.strategy_a.confirm_entry(signal.timestamp)
-            await self._save_runtime()
-            await self._record_strategy_a_lifecycle_event(new_trade, features, "POSITION_SIZED")
-        await self._record_execution({
-            "trade_id": new_trade.trade_id,
-            "side": "BUY",
-            "timestamp": now.isoformat(),
-            "raw_bid": selected_contract.bid_price,
-            "raw_ask": selected_contract.ask_price,
-            "raw_ltp": selected_contract.ltp,
-            "executable_price": entry_price,
-            "slippage_points": entry_slippage,
-            "quantity": quantity,
-            "source": chain.get("source", "UNKNOWN"),
-            "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
-            "reason": "PAPER_OR_SHADOW_ENTRY",
-        })
-        if is_strategy_a:
-            await self._record_strategy_a_lifecycle_event(new_trade, features, "ENTRY_OPENED")
+            await self._record_strategy_a_lifecycle_event(
+                new_trade, features, "POSITION_SIZED"
+            )
+            # PAPER/SHADOW entries are immediate simulations.  A LIVE Strategy A
+            # trade is not ENTERED until the broker fill is confirmed below.
+            if execution_mode != AutoTradingMode.LIVE:
+                self.strategy_a.confirm_entry(signal.timestamp)
+                await self._save_runtime()
+
+        if not (is_strategy_a and execution_mode == AutoTradingMode.LIVE):
+            await self._record_execution({
+                "trade_id": new_trade.trade_id,
+                "side": "BUY",
+                "timestamp": now.isoformat(),
+                "raw_bid": selected_contract.bid_price,
+                "raw_ask": selected_contract.ask_price,
+                "raw_ltp": selected_contract.ltp,
+                "executable_price": entry_price,
+                "slippage_points": entry_slippage,
+                "quantity": quantity,
+                "source": chain.get("source", "UNKNOWN"),
+                "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                "reason": "PAPER_OR_SHADOW_ENTRY",
+            })
+        if is_strategy_a and execution_mode != AutoTradingMode.LIVE:
+            await self._record_strategy_a_lifecycle_event(
+                new_trade, features, "ENTRY_OPENED"
+            )
         self._active_trades_cache.append(new_trade)
 
         await self._log_decision(
@@ -1091,7 +1624,7 @@ class StrategyService:
         )
 
         # In LIVE mode, dispatch OrderIntent to OMS
-        if execution_mode == AutoTradingMode.LIVE and not self._is_strategy_a(signal.strategy):
+        if execution_mode == AutoTradingMode.LIVE:
             intent = OrderIntent(
                 intent_id=generate_id(),
                 correlation_id=trade_id,
@@ -1121,6 +1654,758 @@ class StrategyService:
 
         return {"status": "TRADE_OPENED", "trade": new_trade.model_dump(mode="json")}
 
+    @staticmethod
+    def _option_tick_price(value: float, *, down: bool = False) -> float:
+        """Normalize an option price to the platform's NFO tick."""
+        tick = 0.05
+        if value <= 0:
+            return tick
+        steps = int(value / tick) if down else round(value / tick)
+        return round(max(tick, steps * tick), 2)
+
+    def _protective_stop_prices(self, trade: ActiveTrade) -> tuple[float, float]:
+        trigger = self._option_tick_price(float(trade.option_hard_stop_price))
+        raw_limit = trigger * (
+            1.0 - self.config.risk.broker_protective_stop_limit_buffer_pct / 100.0
+        )
+        limit_price = self._option_tick_price(raw_limit, down=True)
+        if limit_price >= trigger:
+            limit_price = self._option_tick_price(trigger - 0.05, down=True)
+        return trigger, limit_price
+
+    async def _record_protective_stop_failure(
+        self,
+        trade: ActiveTrade,
+        reason: str,
+        *,
+        state_unknown: bool = False,
+    ) -> bool:
+        """Persist a protection failure and escalate when safe recovery ends."""
+        trade.protective_stop_failures += 1
+        trade.protective_stop_last_failure_reason = reason
+        trade.protective_stop_last_failure_at = utc_now()
+        trade.option_data_status = "PROTECTIVE_STOP_DEGRADED"
+
+        exhausted = (
+            state_unknown
+            or trade.protective_stop_failures
+            >= self.config.risk.broker_protective_stop_max_failures
+        )
+        if exhausted:
+            trade.protective_stop_status = (
+                "STATE_UNKNOWN_BLOCKED"
+                if state_unknown
+                else "UNAVAILABLE_EXIT_REQUIRED"
+            )
+            if not state_unknown:
+                trade.pending_exit_reason = (
+                    BROKER_PROTECTIVE_STOP_UNAVAILABLE
+                )
+                trade.option_exit_reason = (
+                    BROKER_PROTECTIVE_STOP_UNAVAILABLE
+                )
+            if self.config.system_armed:
+                self.config.system_armed = False
+                await self.repo.save_auto_config(self.config)
+            await self._log_decision(
+                "SECURITY",
+                trade.strategy.value,
+                "Broker protective stop safety escalation",
+                {
+                    "trade_id": trade.trade_id,
+                    "reason": reason,
+                    "state_unknown": state_unknown,
+                    "failure_count": trade.protective_stop_failures,
+                    "system_auto_disarmed": True,
+                },
+            )
+        await self.repo.save_trade(trade)
+        return exhausted
+
+    async def _sync_live_protective_stop(
+        self,
+        trade: ActiveTrade,
+        features: MarketFeatures,
+    ) -> bool:
+        """Keep the LIVE long option protected without racing duplicate SELLs."""
+        if trade.mode != AutoTradingMode.LIVE or trade.filled_quantity <= 0:
+            return True
+        if trade.state == TradeLifecycleState.CLOSED:
+            return False
+
+        remaining_quantity = max(
+            0,
+            trade.quantity - trade.exit_filled_quantity,
+        )
+        if remaining_quantity <= 0:
+            if trade.exit_proceeds > 0 and trade.quantity > 0:
+                await self._close_trade(
+                    trade,
+                    features,
+                    trade.exit_proceeds / trade.quantity,
+                    OPTION_EMERGENCY_STOP,
+                    quote={"source": "BROKER_PROTECTIVE_STOP"},
+                )
+            return False
+
+        if trade.protective_stop_order_id:
+            protective = await self.oms.get_order(
+                trade.protective_stop_order_id
+            )
+            if protective is None:
+                await self._record_protective_stop_failure(
+                    trade,
+                    "OMS_PROTECTIVE_ORDER_MISSING",
+                    state_unknown=True,
+                )
+                return False
+
+            status = protective.status.value
+            trade.protective_stop_status = status
+            new_filled = int(protective.filled_quantity or 0)
+            accounted = int(
+                trade.protective_stop_filled_quantity or 0
+            )
+            if new_filled >= accounted:
+                cumulative_average = float(
+                    protective.average_price
+                    or trade.protective_stop_limit_price
+                    or trade.option_hard_stop_price
+                )
+                new_proceeds = cumulative_average * new_filled
+                delta_filled = new_filled - accounted
+                delta_proceeds = (
+                    new_proceeds
+                    - trade.protective_stop_filled_proceeds
+                )
+                if delta_filled or abs(delta_proceeds) > 1e-9:
+                    trade.exit_filled_quantity = min(
+                        trade.quantity,
+                        trade.exit_filled_quantity + delta_filled,
+                    )
+                    trade.exit_proceeds += delta_proceeds
+                    trade.protective_stop_filled_quantity = new_filled
+                    trade.protective_stop_filled_proceeds = new_proceeds
+                    if delta_filled > 0:
+                        incremental_price = (
+                            delta_proceeds / delta_filled
+                            if delta_proceeds > 0
+                            else cumulative_average
+                        )
+                        await self._record_execution({
+                            "ledger_id": (
+                                f"LIVE-PROTECTIVE-"
+                                f"{getattr(protective, 'order_id', None) or trade.protective_stop_order_id or protective.broker_order_id}-"
+                                f"{new_filled}"
+                            ),
+                            "trade_id": trade.trade_id,
+                            "side": "SELL",
+                            "timestamp": (
+                                getattr(protective, "updated_at", None)
+                                or utc_now()
+                            ).isoformat(),
+                            "raw_bid": None,
+                            "raw_ask": None,
+                            "raw_ltp": None,
+                            "executable_price": incremental_price,
+                            "slippage_points": 0.0,
+                            "quantity": delta_filled,
+                            "source": "BROKER_PROTECTIVE_STOP",
+                            "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                            "reason": OPTION_EMERGENCY_STOP,
+                        })
+
+            # Broker reconciliation above may have discovered a partial fill.
+            # Any replacement protection must cover only the still-open long
+            # quantity, never the pre-reconciliation quantity.
+            remaining_quantity = max(
+                0,
+                trade.quantity - trade.exit_filled_quantity,
+            )
+
+            if (
+                status == "FILLED"
+                or trade.exit_filled_quantity >= trade.quantity
+            ):
+                trade.protective_stop_status = "FILLED"
+                average_exit = (
+                    trade.exit_proceeds / trade.quantity
+                    if trade.quantity > 0
+                    else float(protective.average_price or 0.0)
+                )
+                await self._close_trade(
+                    trade,
+                    features,
+                    average_exit,
+                    OPTION_EMERGENCY_STOP,
+                    quote={
+                        "bid": float(
+                            protective.average_price or average_exit
+                        ),
+                        "source": "BROKER_PROTECTIVE_STOP",
+                    },
+                )
+                return False
+
+            terminal_failure = status in {
+                "CANCELLED",
+                "REJECTED",
+                "RISK_REJECTED",
+                "EXPIRED",
+                "FAILED_SAFE",
+            }
+            if terminal_failure:
+                cancelled_for_exit = (
+                    trade.protective_stop_cancel_for_exit
+                    and status == "CANCELLED"
+                )
+                trade.protective_stop_order_id = None
+                trade.protective_stop_filled_quantity = 0
+                trade.protective_stop_filled_proceeds = 0.0
+                trade.protective_stop_cancel_for_exit = False
+                trade.protective_stop_cancel_attempts = 0
+                trade.protective_stop_cancel_requested_at = None
+
+                if cancelled_for_exit:
+                    await self.repo.save_trade(trade)
+                    return True
+
+                exhausted = await self._record_protective_stop_failure(
+                    trade,
+                    f"PROTECTIVE_STOP_{status}",
+                )
+                if exhausted:
+                    # The old protective order is confirmed terminal, so it is
+                    # safe to proceed to a reduce-only flattening exit.
+                    return True
+                # Retry protection immediately below without waiting for a
+                # future scheduler cycle.
+            else:
+                if status in {
+                    "OPEN",
+                    "ACKNOWLEDGED",
+                    "PARTIALLY_FILLED",
+                }:
+                    trade.protective_stop_failures = 0
+                    trade.protective_stop_last_failure_reason = None
+                    trade.protective_stop_last_failure_at = None
+                await self.repo.save_trade(trade)
+                if trade.protective_stop_cancel_for_exit:
+                    return False
+                return status in {
+                    "OPEN",
+                    "ACKNOWLEDGED",
+                    "PARTIALLY_FILLED",
+                }
+
+        if (
+            trade.pending_exit_reason
+            or trade.exit_order_id
+            or trade.partial_exit_order_id
+        ):
+            return True
+
+        trigger_price, limit_price = self._protective_stop_prices(trade)
+        intent = OrderIntent(
+            intent_id=generate_id(),
+            correlation_id=trade.trade_id,
+            strategy_instance_id=(
+                "INST-NIFTY-AUTO-ENGINE-PROTECTIVE"
+            ),
+            source=SourceType.STRATEGY,
+            instrument_id=trade.contract_instrument_id,
+            symbol=trade.contract_symbol,
+            side=OrderSide.SELL,
+            order_type=OrderType.STOP_LIMIT,
+            quantity=remaining_quantity,
+            price=limit_price,
+            trigger_price=trigger_price,
+            product=ProductType.OPTIONS,
+            trading_mode=TradingMode.LIVE,
+            reduce_only=True,
+        )
+        order = await self.oms.create_order_intent(intent)
+        trade.protective_stop_order_id = order.order_id
+        trade.protective_stop_filled_quantity = 0
+        trade.protective_stop_filled_proceeds = 0.0
+        trade.protective_stop_status = order.status.value
+        trade.protective_stop_trigger_price = trigger_price
+        trade.protective_stop_limit_price = limit_price
+        trade.protective_stop_cancel_for_exit = False
+        trade.protective_stop_cancel_attempts = 0
+        trade.protective_stop_cancel_requested_at = None
+        await self.repo.save_trade(trade)
+        await self._log_decision(
+            "RISK",
+            trade.strategy.value,
+            "Broker-held option catastrophe stop submitted",
+            {
+                "trade_id": trade.trade_id,
+                "protective_order_id": order.order_id,
+                "quantity": remaining_quantity,
+                "trigger_price": trigger_price,
+                "limit_price": limit_price,
+                "prior_failures": trade.protective_stop_failures,
+            },
+        )
+        return False
+
+    async def _cancel_live_protective_stop_for_exit(
+        self,
+        trade: ActiveTrade,
+        features: MarketFeatures,
+    ) -> bool:
+        """Cancel/reconcile protection before any competing reduce-only SELL."""
+        if (
+            trade.mode != AutoTradingMode.LIVE
+            or not trade.protective_stop_order_id
+        ):
+            return True
+
+        may_continue = await self._sync_live_protective_stop(
+            trade,
+            features,
+        )
+        if trade.state == TradeLifecycleState.CLOSED:
+            return False
+        if not trade.protective_stop_order_id:
+            return may_continue
+
+        if trade.protective_stop_cancel_for_exit:
+            requested_at = trade.protective_stop_cancel_requested_at
+            age_seconds = (
+                max(
+                    0.0,
+                    (utc_now() - requested_at).total_seconds(),
+                )
+                if requested_at is not None
+                else float("inf")
+            )
+            if (
+                age_seconds
+                < self.config.risk
+                .broker_protective_stop_cancel_timeout_sec
+            ):
+                return False
+            if (
+                trade.protective_stop_cancel_attempts
+                >= self.config.risk
+                .broker_protective_stop_cancel_max_attempts
+            ):
+                await self._record_protective_stop_failure(
+                    trade,
+                    "PROTECTIVE_STOP_CANCEL_UNRESOLVED",
+                    state_unknown=True,
+                )
+                return False
+            trade.protective_stop_cancel_for_exit = False
+
+        protective = await self.oms.get_order(
+            trade.protective_stop_order_id
+        )
+        if protective is None:
+            await self._record_protective_stop_failure(
+                trade,
+                "OMS_PROTECTIVE_ORDER_MISSING_DURING_CANCEL",
+                state_unknown=True,
+            )
+            return False
+        if protective.status.value == "FILLED":
+            return False
+        if not protective.broker_order_id:
+            trade.protective_stop_status = (
+                "CANCEL_WAITING_FOR_BROKER_REFERENCE"
+            )
+            await self.repo.save_trade(trade)
+            return False
+
+        gateway = getattr(self.hist_svc, "broker_gateway", None)
+        if gateway is None:
+            await self._record_protective_stop_failure(
+                trade,
+                "PROTECTIVE_STOP_CANCEL_NO_GATEWAY",
+                state_unknown=True,
+            )
+            return False
+
+        trade.protective_stop_cancel_attempts += 1
+        trade.protective_stop_cancel_requested_at = utc_now()
+        trade.protective_stop_cancel_for_exit = True
+        try:
+            response = await gateway.cancel_order(
+                protective.broker_order_id,
+                mode=protective.trading_mode,
+            )
+            if response.success:
+                trade.protective_stop_status = "CANCEL_REQUESTED"
+            else:
+                trade.protective_stop_status = (
+                    f"CANCEL_FAILED:{response.status}"
+                )
+                trade.protective_stop_last_failure_reason = (
+                    trade.protective_stop_status
+                )
+                trade.protective_stop_last_failure_at = utc_now()
+        except Exception as exc:
+            trade.protective_stop_status = (
+                f"CANCEL_ERROR:{type(exc).__name__}"
+            )
+            trade.protective_stop_last_failure_reason = (
+                trade.protective_stop_status
+            )
+            trade.protective_stop_last_failure_at = utc_now()
+
+        if (
+            trade.protective_stop_cancel_attempts
+            >= self.config.risk
+            .broker_protective_stop_cancel_max_attempts
+            and trade.protective_stop_status != "CANCEL_REQUESTED"
+        ):
+            await self._record_protective_stop_failure(
+                trade,
+                "PROTECTIVE_STOP_CANCEL_RETRIES_EXHAUSTED",
+                state_unknown=True,
+            )
+            return False
+
+        await self.repo.save_trade(trade)
+        return False
+
+    @staticmethod
+    def _apply_exit_order_progress(
+        trade: ActiveTrade,
+        order: Any,
+    ) -> tuple[int, float, int]:
+        """Apply cumulative broker fill progress exactly once per exit order."""
+        new_filled = max(
+            0,
+            min(int(order.filled_quantity or 0), int(order.quantity or 0)),
+        )
+        accounted_filled = int(
+            trade.exit_order_accounted_filled_quantity or 0
+        )
+        if new_filled < accounted_filled:
+            return 0, 0.0, new_filled
+
+        cumulative_average = float(order.average_price or 0.0)
+        new_order_proceeds = cumulative_average * new_filled
+        accounted_proceeds = float(
+            trade.exit_order_accounted_proceeds or 0.0
+        )
+        delta_filled = new_filled - accounted_filled
+        delta_proceeds = new_order_proceeds - accounted_proceeds
+        incremental_price = 0.0
+        if delta_filled or abs(delta_proceeds) > 1e-9:
+            trade.exit_filled_quantity = min(
+                trade.quantity,
+                trade.exit_filled_quantity + delta_filled,
+            )
+            trade.exit_proceeds += delta_proceeds
+            trade.exit_order_accounted_filled_quantity = new_filled
+            trade.exit_order_accounted_proceeds = new_order_proceeds
+            if delta_filled > 0:
+                incremental_price = (
+                    delta_proceeds / delta_filled
+                    if delta_proceeds > 0
+                    else cumulative_average
+                )
+        return delta_filled, incremental_price, new_filled
+
+    @staticmethod
+    def _reset_exit_order_progress(trade: ActiveTrade) -> None:
+        trade.exit_order_accounted_filled_quantity = 0
+        trade.exit_order_accounted_proceeds = 0.0
+
+    @staticmethod
+    def _apply_live_t1_order_progress(
+        trade: ActiveTrade,
+        order: Any,
+    ) -> tuple[int, float, int]:
+        """Apply cumulative broker fills for a Strategy A T1 order once."""
+        new_filled = max(
+            0,
+            min(int(order.filled_quantity or 0), int(order.quantity or 0)),
+        )
+        accounted = int(
+            trade.partial_exit_order_accounted_filled_quantity or 0
+        )
+        if new_filled < accounted:
+            return 0, 0.0, new_filled
+
+        cumulative_average = float(order.average_price or 0.0)
+        new_order_proceeds = cumulative_average * new_filled
+        accounted_proceeds = float(
+            trade.partial_exit_order_accounted_proceeds or 0.0
+        )
+        delta_filled = new_filled - accounted
+        delta_proceeds = new_order_proceeds - accounted_proceeds
+
+        if delta_filled or abs(delta_proceeds) > 1e-9:
+            original_quantity = int(
+                trade.initial_quantity
+                or (trade.quantity + trade.partial_exit_filled_quantity)
+            )
+            trade.partial_exit_filled_quantity = min(
+                int(trade.t1_exit_quantity),
+                int(trade.partial_exit_filled_quantity) + delta_filled,
+            )
+            trade.partial_exit_proceeds += delta_proceeds
+            if (
+                trade.partial_exit_filled_quantity > 0
+                and trade.partial_exit_proceeds > 0
+            ):
+                trade.partial_exit_price = (
+                    trade.partial_exit_proceeds
+                    / trade.partial_exit_filled_quantity
+                )
+            trade.partial_exit_order_accounted_filled_quantity = new_filled
+            trade.partial_exit_order_accounted_proceeds = new_order_proceeds
+            trade.partial_exit_time = (
+                getattr(order, "updated_at", None) or utc_now()
+            )
+            trade.partial_exit_reason = "T1_REACHED_PARTIAL_EXIT"
+            trade.remaining_quantity = max(
+                0,
+                original_quantity - trade.partial_exit_filled_quantity,
+            )
+            trade.quantity = trade.remaining_quantity
+            trade.lots = (
+                trade.remaining_quantity // trade.lot_size
+                if trade.lot_size > 0
+                else 0
+            )
+            trade.t1_exit_pending = (
+                trade.partial_exit_filled_quantity
+                < trade.t1_exit_quantity
+            )
+            if trade.partial_exit_filled_quantity > 0:
+                trade.t1_realized_r = trade.t1_decision_r
+        incremental_price = (
+            delta_proceeds / delta_filled
+            if delta_filled > 0 and delta_proceeds > 0
+            else cumulative_average if delta_filled > 0 else 0.0
+        )
+        return delta_filled, incremental_price, new_filled
+
+    @staticmethod
+    def _reset_live_t1_order_progress(trade: ActiveTrade) -> None:
+        trade.partial_exit_order_accounted_filled_quantity = 0
+        trade.partial_exit_order_accounted_proceeds = 0.0
+
+    async def _sync_strategy_a_live_partial_exit(
+        self,
+        trade: ActiveTrade,
+        features: MarketFeatures,
+    ) -> bool:
+        """Reconcile a LIVE T1 reduce-only order before further management."""
+        if not trade.partial_exit_order_id:
+            return True
+
+        order = await self.oms.get_order(trade.partial_exit_order_id)
+        if order is None:
+            trade.option_data_status = "LIVE_T1_ORDER_STATE_UNKNOWN"
+            await self.repo.save_trade(trade)
+            return False
+
+        was_complete = (
+            trade.partial_exit_filled_quantity >= trade.t1_exit_quantity
+        )
+        (
+            delta_filled,
+            incremental_price,
+            cumulative_filled,
+        ) = self._apply_live_t1_order_progress(trade, order)
+        if delta_filled > 0:
+            await self._record_execution({
+                "ledger_id": (
+                    f"LIVE-T1-{order.order_id}-{cumulative_filled}"
+                ),
+                "trade_id": trade.trade_id,
+                "side": "SELL",
+                "timestamp": (
+                    getattr(order, "updated_at", None) or utc_now()
+                ).isoformat(),
+                "raw_bid": trade.partial_exit_raw_bid,
+                "raw_ask": None,
+                "raw_ltp": None,
+                "executable_price": (
+                    incremental_price
+                    or float(order.average_price or order.price or 0.0)
+                ),
+                "slippage_points": 0.0,
+                "quantity": delta_filled,
+                "source": "BROKER_FILL",
+                "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                "reason": "T1_REACHED_PARTIAL_EXIT",
+            })
+        terminal = order.status.value in {
+            "FILLED",
+            "CANCELLED",
+            "REJECTED",
+            "RISK_REJECTED",
+            "EXPIRED",
+            "FAILED_SAFE",
+        }
+
+        if not terminal:
+            await self.repo.save_trade(trade)
+            return False
+
+        trade.partial_exit_order_id = None
+        self._reset_live_t1_order_progress(trade)
+        target_complete = (
+            trade.partial_exit_filled_quantity >= trade.t1_exit_quantity
+        )
+        trade.t1_exit_pending = not target_complete
+        if target_complete:
+            trade.option_data_status = "LIVE_T1_EXIT_FILLED"
+            if not was_complete:
+                await self._record_strategy_a_lifecycle_event(
+                    trade,
+                    features,
+                    "PARTIAL_EXIT",
+                    "T1_REACHED_PARTIAL_EXIT",
+                )
+        elif delta_filled > 0:
+            trade.option_data_status = "LIVE_T1_EXIT_PARTIAL"
+        else:
+            trade.option_data_status = (
+                f"LIVE_T1_EXIT_{order.status.value}"
+            )
+        await self.repo.save_trade(trade)
+
+        # The T1 order no longer competes with the catastrophe stop. Restore
+        # protection for the actual remaining long quantity before proceeding.
+        if trade.quantity > 0:
+            return await self._sync_live_protective_stop(trade, features)
+        return True
+
+    async def _submit_strategy_a_live_partial_exit(
+        self,
+        trade: ActiveTrade,
+        features: MarketFeatures,
+        quote: dict[str, Any],
+    ) -> None:
+        """Submit the outstanding Strategy A T1 quantity through OMS."""
+        if trade.partial_exit_order_id:
+            return
+
+        outstanding = max(
+            0,
+            int(trade.t1_exit_quantity)
+            - int(trade.partial_exit_filled_quantity),
+        )
+        quantity = min(outstanding, max(0, int(trade.quantity)))
+        if quantity <= 0:
+            trade.t1_exit_pending = False
+            await self.repo.save_trade(trade)
+            return
+
+        if not await self._cancel_live_protective_stop_for_exit(
+            trade,
+            features,
+        ):
+            trade.t1_exit_pending = True
+            await self.repo.save_trade(trade)
+            return
+
+        raw_bid = float(quote.get("bid") or 0.0)
+        if raw_bid <= 0:
+            trade.t1_exit_pending = True
+            trade.option_data_status = "LIVE_T1_EXIT_WAITING_FOR_BID"
+            await self.repo.save_trade(trade)
+            return
+
+        order_price = self._option_tick_price(raw_bid, down=True)
+        intent = OrderIntent(
+            intent_id=generate_id(),
+            correlation_id=trade.trade_id,
+            strategy_instance_id="INST-NIFTY-AUTO-ENGINE-T1",
+            source=SourceType.STRATEGY,
+            instrument_id=trade.contract_instrument_id,
+            symbol=trade.contract_symbol,
+            side=OrderSide.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=quantity,
+            price=order_price,
+            product=ProductType.OPTIONS,
+            time_in_force=TimeInForce.IOC,
+            trading_mode=TradingMode.LIVE,
+            reduce_only=True,
+        )
+        order = await self.oms.create_order_intent(intent)
+        trade.partial_exit_order_id = order.order_id
+        self._reset_live_t1_order_progress(trade)
+        trade.partial_exit_raw_bid = raw_bid
+        trade.t1_exit_pending = True
+        trade.option_data_status = "LIVE_T1_EXIT_SUBMITTED"
+        await self.repo.save_trade(trade)
+
+    async def _submit_live_final_exit(
+        self,
+        trade: ActiveTrade,
+        features: MarketFeatures,
+        quote: dict[str, Any],
+        reason: str,
+    ) -> None:
+        """Route a Strategy A final LIVE exit through one reduce-only OMS order."""
+        if trade.exit_order_id:
+            return
+
+        if is_option_emergency_stop(reason):
+            # Catastrophe protection already owns this exit. Never race a
+            # second SELL against the broker-held stop.
+            trade.pending_exit_reason = OPTION_EMERGENCY_STOP
+            trade.option_exit_reason = OPTION_EMERGENCY_STOP
+            await self.repo.save_trade(trade)
+            return
+
+        if not await self._cancel_live_protective_stop_for_exit(
+            trade,
+            features,
+        ):
+            trade.pending_exit_reason = reason
+            await self.repo.save_trade(trade)
+            return
+
+        bid = float(quote.get("bid") or 0.0)
+        if bid <= 0:
+            trade.pending_exit_reason = reason
+            trade.option_data_status = "LIVE_EXIT_WAITING_FOR_BID"
+            await self.repo.save_trade(trade)
+            return
+
+        quantity = max(
+            0,
+            int(trade.quantity) - int(trade.exit_filled_quantity),
+        )
+        if quantity <= 0:
+            await self.repo.save_trade(trade)
+            return
+
+        intent = OrderIntent(
+            intent_id=generate_id(),
+            correlation_id=trade.trade_id,
+            strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
+            source=SourceType.STRATEGY,
+            instrument_id=trade.contract_instrument_id,
+            symbol=trade.contract_symbol,
+            side=OrderSide.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=quantity,
+            price=self._option_tick_price(bid, down=True),
+            product=ProductType.OPTIONS,
+            trading_mode=TradingMode.LIVE,
+            reduce_only=True,
+        )
+        order = await self.oms.create_order_intent(intent)
+        trade.exit_order_id = order.order_id
+        self._reset_exit_order_progress(trade)
+        trade.pending_exit_reason = reason
+        trade.state = TradeLifecycleState.EXIT_PENDING
+        trade.option_data_status = "LIVE_EXIT_SUBMITTED"
+        await self.repo.save_trade(trade)
+
     async def _evaluate_active_trade(self, trade: ActiveTrade, features: MarketFeatures) -> None:
         """Evaluates active position stops, trailing updates, and thesis reversal score."""
         if trade.state == TradeLifecycleState.ENTRY_PENDING and not trade.entry_order_id:
@@ -1128,55 +2413,220 @@ class StrategyService:
             return
         if features.spot_price <= 0:
             features = features.model_copy(update={"spot_price": trade.current_spot_price, "closed_5m_time": None, "closed_5m_price": None})
-        if trade.entry_order_id:
+        if (
+            trade.entry_order_id
+            and trade.state == TradeLifecycleState.ENTRY_PENDING
+        ):
             order = await self.oms.get_order(trade.entry_order_id)
             if not order:
                 return
-            terminal = order.status.value in ("FILLED", "CANCELLED", "REJECTED", "RISK_REJECTED", "EXPIRED", "FAILED_SAFE")
+            terminal = order.status.value in (
+                "FILLED",
+                "CANCELLED",
+                "REJECTED",
+                "RISK_REJECTED",
+                "EXPIRED",
+                "FAILED_SAFE",
+            )
             gateway = getattr(self.hist_svc, "broker_gateway", None)
+
+            # Persist cumulative partial-entry progress immediately. Assignment,
+            # rather than addition, makes restart/replay idempotent.
+            if order.filled_quantity > 0:
+                filled_quantity = int(order.filled_quantity)
+                if (
+                    trade.filled_quantity != filled_quantity
+                    or (
+                        order.average_price > 0
+                        and trade.entry_option_price != order.average_price
+                    )
+                ):
+                    trade.filled_quantity = filled_quantity
+                    if order.average_price > 0:
+                        trade.entry_option_price = float(order.average_price)
+                        trade.option_hard_stop_price = round(
+                            float(order.average_price)
+                            * (
+                                1
+                                - self.config.risk.option_hard_stop_pct
+                                / 100
+                            ),
+                            2,
+                        )
+                    await self.repo.save_trade(trade)
+
             if not terminal:
-                # Cancel the remainder of partial fills before managing a fixed quantity.
-                timed_out = (utc_now()-trade.entry_time).total_seconds() >= self.config.risk.entry_order_timeout_sec
-                if (order.filled_quantity > 0 or timed_out) and order.broker_order_id and gateway:
-                    await gateway.cancel_order(order.broker_order_id, mode=order.trading_mode)
+                timed_out = (
+                    utc_now() - trade.entry_time
+                ).total_seconds() >= self.config.risk.entry_order_timeout_sec
+                if (
+                    (order.filled_quantity > 0 or timed_out)
+                    and order.broker_order_id
+                    and gateway
+                ):
+                    await gateway.cancel_order(
+                        order.broker_order_id,
+                        mode=order.trading_mode,
+                    )
                 return
+
             if order.filled_quantity <= 0:
                 trade.state = TradeLifecycleState.CLOSED
                 trade.exit_time = utc_now()
                 trade.exit_reason = "ENTRY_UNFILLED_" + order.status.value
-                self.strategy_a.on_exit(trade.direction, trade.exit_time)
+                if self._is_strategy_a(trade.strategy):
+                    self.strategy_a.on_execution_rejected(
+                        trade.exit_time,
+                        trade.exit_reason,
+                    )
+                else:
+                    self.strategy_a.on_exit(trade.direction, trade.exit_time)
                 self.strategy_b.reset(trade.exit_time)
+                self._active_trades_cache = [
+                    item
+                    for item in self._active_trades_cache
+                    if item.trade_id != trade.trade_id
+                ]
                 await self._save_runtime()
                 await self.repo.save_trade(trade)
                 return
-            if trade.filled_quantity != order.filled_quantity:
-                trade.filled_quantity = order.filled_quantity
-                trade.quantity = order.filled_quantity
-                trade.entry_option_price = order.average_price
-                trade.option_hard_stop_price = round(order.average_price * (1-self.config.risk.option_hard_stop_pct/100), 2)
-                trade.state = TradeLifecycleState.OPEN_INITIAL_RISK
-                await self.repo.save_trade(trade)
+
+            trade.filled_quantity = int(order.filled_quantity)
+            trade.quantity = int(order.filled_quantity)
+            trade.initial_quantity = int(order.filled_quantity)
+            trade.remaining_quantity = int(order.filled_quantity)
+            if order.average_price > 0:
+                trade.entry_option_price = float(order.average_price)
+                trade.option_hard_stop_price = round(
+                    float(order.average_price)
+                    * (
+                        1
+                        - self.config.risk.option_hard_stop_pct / 100
+                    ),
+                    2,
+                )
+            trade.state = TradeLifecycleState.OPEN_INITIAL_RISK
+            await self.repo.save_trade(trade)
+            if self._is_strategy_a(trade.strategy):
+                self.strategy_a.confirm_entry(
+                    getattr(order, "updated_at", None) or features.timestamp
+                )
+                await self._save_runtime()
+                await self._record_execution({
+                    "trade_id": trade.trade_id,
+                    "side": "BUY",
+                    "timestamp": (
+                        getattr(order, "updated_at", None) or utc_now()
+                    ).isoformat(),
+                    "raw_bid": trade.entry_bid,
+                    "raw_ask": trade.entry_ask,
+                    "raw_ltp": trade.entry_ltp,
+                    "executable_price": trade.entry_option_price,
+                    "slippage_points": 0.0,
+                    "quantity": trade.filled_quantity,
+                    "source": "BROKER_FILL",
+                    "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                    "reason": "LIVE_ENTRY_FILLED",
+                })
+                await self._record_strategy_a_lifecycle_event(
+                    trade,
+                    features,
+                    "ENTRY_OPENED",
+                )
+
+        if trade.mode == AutoTradingMode.LIVE and trade.filled_quantity > 0:
+            protection_ready = await self._sync_live_protective_stop(
+                trade,
+                features,
+            )
+            if trade.state == TradeLifecycleState.CLOSED or not protection_ready:
+                return
+
+        if (
+            self._is_strategy_a(trade.strategy)
+            and trade.mode == AutoTradingMode.LIVE
+            and trade.partial_exit_order_id
+        ):
+            partial_exit_ready = (
+                await self._sync_strategy_a_live_partial_exit(
+                    trade,
+                    features,
+                )
+            )
+            if (
+                trade.state == TradeLifecycleState.CLOSED
+                or not partial_exit_ready
+            ):
+                return
 
         if trade.exit_order_id:
             order = await self.oms.get_order(trade.exit_order_id)
             if not order:
                 return
-            if order.status.value == "FILLED":
-                trade.exit_proceeds += order.average_price * order.filled_quantity
-                trade.exit_filled_quantity += order.filled_quantity
-                await self._close_trade(trade, features, trade.exit_proceeds/trade.quantity, trade.pending_exit_reason)
+
+            (
+                delta_filled,
+                incremental_price,
+                cumulative_filled,
+            ) = self._apply_exit_order_progress(trade, order)
+            if delta_filled > 0:
+                await self._record_execution({
+                    "ledger_id": (
+                        f"LIVE-EXIT-{order.order_id}-{cumulative_filled}"
+                    ),
+                    "trade_id": trade.trade_id,
+                    "side": "SELL",
+                    "timestamp": (
+                        getattr(order, "updated_at", None) or utc_now()
+                    ).isoformat(),
+                    "raw_bid": None,
+                    "raw_ask": None,
+                    "raw_ltp": None,
+                    "executable_price": (
+                        incremental_price
+                        or float(order.average_price or order.price or 0.0)
+                    ),
+                    "slippage_points": 0.0,
+                    "quantity": delta_filled,
+                    "source": "BROKER_FILL",
+                    "cost_assumption_version": self.config.risk.paper_cost_assumption_version,
+                    "reason": trade.pending_exit_reason or "LIVE_EXIT",
+                })
+
+            if (
+                order.status.value == "FILLED"
+                or trade.exit_filled_quantity >= trade.quantity
+            ):
+                await self.repo.save_trade(trade)
+                await self._close_trade(
+                    trade,
+                    features,
+                    trade.exit_proceeds / trade.quantity,
+                    trade.pending_exit_reason,
+                )
                 return
-            if order.status.value in ("CANCELLED", "REJECTED", "RISK_REJECTED", "EXPIRED", "FAILED_SAFE"):
-                trade.exit_proceeds += order.average_price * order.filled_quantity
-                trade.exit_filled_quantity += order.filled_quantity
+
+            if order.status.value in (
+                "CANCELLED",
+                "REJECTED",
+                "RISK_REJECTED",
+                "EXPIRED",
+                "FAILED_SAFE",
+            ):
                 trade.exit_order_id = None
+                self._reset_exit_order_progress(trade)
                 await self.repo.save_trade(trade)
             else:
+                await self.repo.save_trade(trade)
                 bid = await self._executable_bid(trade)
                 gateway = getattr(self.hist_svc, "broker_gateway", None)
                 if gateway and bid and order.broker_order_id:
                     if bid != order.price:
-                        await gateway.modify_order(order.broker_order_id, price=bid, mode=order.trading_mode)
+                        await gateway.modify_order(
+                            order.broker_order_id,
+                            price=bid,
+                            mode=order.trading_mode,
+                        )
                 return
 
         quote = await self._resolve_option_quote(trade)
@@ -1199,8 +2649,12 @@ class StrategyService:
                     await self.repo.save_trade(trade)
                     return
                 if trade.mode == AutoTradingMode.LIVE:
-                    trade.option_data_status = "LIVE_TRADING_DISABLED"
-                    await self.repo.save_trade(trade)
+                    await self._submit_live_final_exit(
+                        trade,
+                        features,
+                        quote,
+                        trade.pending_exit_reason,
+                    )
                     return
                 await self._close_trade(trade, features, sell_price, trade.pending_exit_reason, quote=quote)
                 return
@@ -1227,8 +2681,12 @@ class StrategyService:
                     await self.repo.save_trade(trade)
                     return
                 if trade.mode == AutoTradingMode.LIVE:
-                    trade.option_data_status = "LIVE_TRADING_DISABLED"
-                    await self.repo.save_trade(trade)
+                    await self._submit_live_final_exit(
+                        trade,
+                        features,
+                        quote,
+                        OPTION_EMERGENCY_STOP,
+                    )
                     return
                 sell_price = max(0.0, round(float(quote["bid"]) - self._paper_slippage(), 2))
                 if sell_price <= 0:
@@ -1240,8 +2698,19 @@ class StrategyService:
             if underlying_event == "T1_PARTIAL_EXIT":
                 if trade.partial_exit_reason != "T1_REACHED_PARTIAL_EXIT":
                     await self._record_strategy_a_lifecycle_event(trade, features, "T1_REACHED", "T1_PARTIAL_EXIT")
-                if quote_valid and trade.mode != AutoTradingMode.LIVE:
-                    await self._execute_strategy_a_partial_exit(trade, features, quote)
+                if quote_valid:
+                    if trade.mode == AutoTradingMode.LIVE:
+                        await self._submit_strategy_a_live_partial_exit(
+                            trade,
+                            features,
+                            quote,
+                        )
+                    else:
+                        await self._execute_strategy_a_partial_exit(
+                            trade,
+                            features,
+                            quote,
+                        )
                 else:
                     trade.t1_exit_pending = True
                     await self.repo.save_trade(trade)
@@ -1262,8 +2731,12 @@ class StrategyService:
                     await self.repo.save_trade(updated_trade)
                     return
                 if trade.mode == AutoTradingMode.LIVE:
-                    trade.option_data_status = "LIVE_TRADING_DISABLED"
-                    await self.repo.save_trade(trade)
+                    await self._submit_live_final_exit(
+                        trade,
+                        features,
+                        quote,
+                        underlying_event,
+                    )
                     return
                 sell_price = max(0.0, round(float(quote["bid"]) - self._paper_slippage(), 2))
                 if sell_price <= 0:
@@ -1305,6 +2778,21 @@ class StrategyService:
                     trade.option_data_status = "LIVE_TRADING_DISABLED"
                     await self.repo.save_trade(trade)
                     return
+                if is_option_emergency_stop(exit_reason):
+                    # The broker-held SL-limit is already the emergency exit.
+                    # Do not cancel it and race a second SELL against the same
+                    # position.
+                    trade.pending_exit_reason = OPTION_EMERGENCY_STOP
+                    trade.option_exit_reason = OPTION_EMERGENCY_STOP
+                    await self.repo.save_trade(trade)
+                    return
+                if not await self._cancel_live_protective_stop_for_exit(
+                    trade,
+                    features,
+                ):
+                    trade.pending_exit_reason = exit_reason
+                    await self.repo.save_trade(trade)
+                    return
                 bid = quote.get("bid")
                 if not bid or float(bid) <= 0:
                     trade.option_data_status = "INVALID"
@@ -1317,9 +2805,11 @@ class StrategyService:
                     source=SourceType.STRATEGY, instrument_id=trade.contract_instrument_id,
                     symbol=trade.contract_symbol, side=OrderSide.SELL, order_type=OrderType.LIMIT,
                     quantity=trade.quantity-trade.exit_filled_quantity, price=order_price,
-                    product=ProductType.OPTIONS, trading_mode=TradingMode.LIVE)
+                    product=ProductType.OPTIONS, trading_mode=TradingMode.LIVE,
+                    reduce_only=True)
                 order = await self.oms.create_order_intent(intent)
                 trade.exit_order_id = order.order_id
+                self._reset_exit_order_progress(trade)
                 trade.pending_exit_reason = exit_reason
                 trade.state = TradeLifecycleState.EXIT_PENDING
                 await self.repo.save_trade(trade)
@@ -1464,20 +2954,21 @@ class StrategyService:
         await self.repo.save_trade(trade)
         if self._is_strategy_a(trade.strategy):
             await self._record_strategy_a_lifecycle_event(trade, features, "CLOSED", reason)
-        await self._record_execution({
-            "trade_id": trade.trade_id,
-            "side": "SELL",
-            "timestamp": trade.exit_time.isoformat(),
-            "raw_bid": (quote or {}).get("bid"),
-            "raw_ask": (quote or {}).get("ask"),
-            "raw_ltp": (quote or {}).get("ltp"),
-            "executable_price": price,
-            "slippage_points": self._paper_slippage(),
-            "quantity": final_quantity,
-            "source": (quote or {}).get("source", "UNKNOWN"),
-            "cost_assumption_version": r.paper_cost_assumption_version,
-            "reason": reason,
-        })
+        if trade.mode != AutoTradingMode.LIVE:
+            await self._record_execution({
+                "trade_id": trade.trade_id,
+                "side": "SELL",
+                "timestamp": trade.exit_time.isoformat(),
+                "raw_bid": (quote or {}).get("bid"),
+                "raw_ask": (quote or {}).get("ask"),
+                "raw_ltp": (quote or {}).get("ltp"),
+                "executable_price": price,
+                "slippage_points": self._paper_slippage(),
+                "quantity": final_quantity,
+                "source": (quote or {}).get("source", "UNKNOWN"),
+                "cost_assumption_version": r.paper_cost_assumption_version,
+                "reason": reason,
+            })
         await self._log_decision("EXIT", trade.strategy.value, "Position closed: " + str(reason), trade.model_dump(mode="json"))
         await self.bus.publish(EventEnvelope(topic=Topics.STRATEGY_SIGNAL, payload={"event": "TRADE_CLOSED", "trade": trade.model_dump(mode="json")}))
 
@@ -1514,6 +3005,13 @@ class StrategyService:
             await self._close_trade(target, features, exit_price, reason, quote=quote)
             return target
         else:
+            if not await self._cancel_live_protective_stop_for_exit(
+                target,
+                features,
+            ):
+                target.pending_exit_reason = reason
+                await self.repo.save_trade(target)
+                return target
             intent = OrderIntent(
                 correlation_id=target.trade_id,
                 strategy_instance_id="INST-NIFTY-AUTO-ENGINE",
@@ -1526,9 +3024,11 @@ class StrategyService:
                 price=exit_price,
                 product=ProductType.OPTIONS,
                 trading_mode=TradingMode.LIVE,
+                reduce_only=True,
             )
             order = await self.oms.create_order_intent(intent)
             target.exit_order_id = order.order_id
+            self._reset_exit_order_progress(target)
             target.pending_exit_reason = reason
             target.state = TradeLifecycleState.EXIT_PENDING
             await self.repo.save_trade(target)
@@ -1536,13 +3036,31 @@ class StrategyService:
 
     # --- Market Data & Chain Fetching ---
     def _active_broker_context(self) -> tuple[str, Any | None, bool]:
-        gateway = getattr(self.chain_svc, "broker_gateway", None) or getattr(self.hist_svc, "broker_gateway", None)
+        """Return the configured frequent market-data provider context."""
+        gateway = (
+            getattr(self.chain_svc, "broker_gateway", None)
+            or getattr(self.hist_svc, "broker_gateway", None)
+        )
         if not gateway:
             return "unknown", None, False
-        provider = str(getattr(gateway, "active_broker_name", "unknown") or "unknown").lower()
-        adapter = getattr(gateway, "active_adapter", None)
-        if provider == "breeze":
-            client = getattr(getattr(gateway, "breeze_adapter", None), "client_manager", None)
+
+        provider = str(
+            getattr(
+                gateway,
+                "frequent_data_broker_name",
+                getattr(gateway, "active_broker_name", "unknown"),
+            )
+            or "unknown"
+        ).lower()
+        adapter = getattr(
+            gateway,
+            "frequent_data_adapter",
+            getattr(gateway, "active_adapter", None),
+        )
+        if hasattr(gateway, "is_broker_active") and provider in {"breeze", "kite"}:
+            active = bool(gateway.is_broker_active(provider))
+        elif provider == "breeze":
+            client = getattr(adapter, "client_manager", None)
             active = bool(client and getattr(client, "is_active", False))
         else:
             active = bool(adapter and getattr(adapter, "is_active", False))
@@ -1610,6 +3128,68 @@ class StrategyService:
         elif futures:
             self._market_data_status["last_error"] = None
         self._market_snapshot = (candles_5m, candles_15m, futures)
+
+        now = utc_now()
+        spot_5m_age = (
+            max(0.0, (now - candles_5m[-1].end_time).total_seconds())
+            if candles_5m
+            else None
+        )
+        futures_15m_age = (
+            max(0.0, (now - futures[-1].end_time).total_seconds())
+            if futures
+            else None
+        )
+        try:
+            max_quote_age = float(
+                get_platform_settings().live_market_data_max_age_seconds
+            )
+        except Exception:
+            max_quote_age = 5.0
+        execution_feed_health = (
+            self.mkt_svc.get_execution_feed_health(
+                max_age_seconds=max_quote_age,
+            )
+            if self.mkt_svc is not None
+            else {
+                "healthy": False,
+                "status": "BLOCKED",
+                "reasons": ["MARKET_DATA_SERVICE_UNAVAILABLE"],
+            }
+        )
+        self._market_data_status.update({
+            "execution_feed_healthy": bool(
+                execution_feed_health.get("healthy")
+            ),
+            "execution_feed_status": execution_feed_health.get("status"),
+            "execution_feed_reasons": execution_feed_health.get(
+                "reasons",
+                [],
+            ),
+            "execution_feed_checked_at": execution_feed_health.get(
+                "checked_at"
+            ),
+            "execution_feed_max_age_seconds": max_quote_age,
+            "latest_spot_5m_candle_age_seconds": (
+                round(spot_5m_age, 3)
+                if spot_5m_age is not None
+                else None
+            ),
+            "latest_futures_15m_candle_age_seconds": (
+                round(futures_15m_age, 3)
+                if futures_15m_age is not None
+                else None
+            ),
+            "strategy_a_signal_data_fresh": bool(
+                futures_15m_age is not None
+                and futures_15m_age <= 1200.0
+            ),
+            "strategy_b_signal_data_fresh": bool(
+                spot_5m_age is not None
+                and spot_5m_age <= 600.0
+            ),
+        })
+
         chain = await self._get_option_chain()
         spot = candles_5m[-1].close if candles_5m else 0.0
         if self.mkt_svc:
@@ -1673,14 +3253,70 @@ class StrategyService:
             try:
                 chain = await self.chain_svc.get_chain(underlying="NIFTY")
                 if chain.get("source") in ("BREEZE", "KITE", "LIVE"):
+                    capabilities = (
+                        chain.get("capabilities")
+                        if isinstance(chain.get("capabilities"), dict)
+                        else {}
+                    )
+                    strategy_a_ready = bool(
+                        capabilities.get(
+                            "strategy_a_contract_selection_ready",
+                            capabilities.get("verified_delta_available", False),
+                        )
+                    )
+                    self._market_data_status.update({
+                        "option_chain_source": chain.get("source"),
+                        "option_chain_captured_at": (
+                            chain.get("captured_at")
+                            or chain.get("timestamp")
+                        ),
+                        "strategy_a_option_execution_ready": (
+                            strategy_a_ready
+                        ),
+                        "strategy_a_option_execution_reason": (
+                            None
+                            if strategy_a_ready
+                            else capabilities.get(
+                                "strategy_a_rejection_reason",
+                                "VERIFIED_OPTION_DELTA_UNAVAILABLE",
+                            )
+                        ),
+                    })
                     return chain
                 # Offline/synthetic matrices remain usable by the UI, but may
                 # never create a forward option-validation trade.
                 if chain.get("strikes"):
-                    return {**chain, "source": "UNAVAILABLE", "validation_rejection": "synthetic option prices are not executable"}
+                    self._market_data_status.update({
+                        "option_chain_source": "UNAVAILABLE",
+                        "strategy_a_option_execution_ready": False,
+                        "strategy_a_option_execution_reason": (
+                            "SYNTHETIC_OPTION_CHAIN_NOT_EXECUTABLE"
+                        ),
+                    })
+                    return {
+                        **chain,
+                        "source": "UNAVAILABLE",
+                        "validation_rejection": (
+                            "synthetic option prices are not executable"
+                        ),
+                    }
             except Exception:
                 logger.exception("Option-chain retrieval failed")
-        return {"source": "UNAVAILABLE", "strikes": []}
+        self._market_data_status.update({
+            "option_chain_source": "UNAVAILABLE",
+            "strategy_a_option_execution_ready": False,
+            "strategy_a_option_execution_reason": "OPTION_CHAIN_UNAVAILABLE",
+        })
+        return {
+            "source": "UNAVAILABLE",
+            "strikes": [],
+            "capabilities": {
+                "verified_delta_available": False,
+                "verified_greeks_available": False,
+                "strategy_a_contract_selection_ready": False,
+                "strategy_a_rejection_reason": "OPTION_CHAIN_UNAVAILABLE",
+            },
+        }
 
     async def _capture_option_chain_snapshot(
         self,
@@ -2089,25 +3725,64 @@ class StrategyService:
         Strategy A cannot be synthesized here because that would bypass its
         futures-only TrendPullback state machine and contaminate validation.
         """
-        if strategy == StrategyName.TREND_PULLBACK:
+        policy = self._execution_policy_for_strategy(strategy)
+        if not policy.force_entry_allowed:
             return {
-                "status": "STRATEGY_A_FORCE_ENTRY_DISABLED",
-                "reason": "Strategy A entries must originate from the validated futures TrendPullback state machine",
-            }
-        if strategy in {
-            StrategyName.DI_CONTINUATION,
-            StrategyName.SR_MOMENTUM_BREAKOUT,
-        }:
-            return {
-                "status": "FROZEN_CANDIDATE_FORCE_ENTRY_DISABLED",
-                "reason": (
-                    "Strategies C and D must originate from their frozen "
-                    "paper candidate monitors and cannot be force-entered."
+                "status": (
+                    "STRATEGY_A_FORCE_ENTRY_DISABLED"
+                    if strategy == StrategyName.TREND_PULLBACK
+                    else "FROZEN_CANDIDATE_FORCE_ENTRY_DISABLED"
+                    if strategy in {
+                        StrategyName.DI_CONTINUATION,
+                        StrategyName.SR_MOMENTUM_BREAKOUT,
+                    }
+                    else "EXECUTION_POLICY_FORCE_ENTRY_DISABLED"
                 ),
+                "reason": (
+                    policy.live_block_reason
+                    or "FORCE_ENTRY_DISABLED_BY_POLICY"
+                ),
+                "execution_policy": policy.to_dict(),
             }
 
         now = utc_now()
-        features = self._last_features or await self._gather_features()
+        # Manual force-entry must refresh the same runtime-health snapshot used
+        # by automatic entries; cached features cannot authorize new exposure.
+        features = await self._gather_features()
+        entry_feed_healthy = bool(
+            self._market_data_status.get("execution_feed_healthy")
+        )
+        signal_data_fresh = (
+            bool(
+                self._market_data_status.get(
+                    "strategy_a_signal_data_fresh"
+                )
+            )
+            if strategy == StrategyName.TREND_PULLBACK
+            else bool(
+                self._market_data_status.get(
+                    "strategy_b_signal_data_fresh"
+                )
+            )
+        )
+        if not entry_feed_healthy or not signal_data_fresh:
+            reasons = list(
+                self._market_data_status.get(
+                    "execution_feed_reasons",
+                    [],
+                )
+            )
+            if not signal_data_fresh:
+                reasons.append(
+                    "STALE_OR_MISSING_FUTURES_15M_CANDLE"
+                    if strategy == StrategyName.TREND_PULLBACK
+                    else "STALE_OR_MISSING_SPOT_5M_CANDLE"
+                )
+            return {
+                "status": "ENTRY_DATA_UNHEALTHY",
+                "reason": ";".join(dict.fromkeys(reasons)),
+                "execution_policy": policy.to_dict(),
+            }
 
         if strategy == StrategyName.TREND_PULLBACK:
             spot = features.futures_price if (features and features.futures_price > 0) else 0.0
@@ -2363,9 +4038,42 @@ class StrategyService:
             self._last_strategy_d_paper_status.get("active_paper_trade")
             or {}
         )
+        policy_a = self._execution_policy_for_strategy(
+            StrategyName.TREND_PULLBACK
+        )
+        policy_b = self._execution_policy_for_strategy(
+            StrategyName.VOLATILITY_BREAKOUT
+        )
+        policy_c = self._execution_policy_for_strategy(
+            StrategyName.DI_CONTINUATION
+        )
+        policy_d = self._execution_policy_for_strategy(
+            StrategyName.SR_MOMENTUM_BREAKOUT
+        )
+
+        gateway = (
+            getattr(self.chain_svc, "broker_gateway", None)
+            or getattr(self.hist_svc, "broker_gateway", None)
+        )
+        broker_routing = {
+            "execution_broker": str(
+                getattr(gateway, "execution_broker_name", "unknown")
+                or "unknown"
+            ).lower(),
+            "frequent_data_broker": str(
+                getattr(gateway, "frequent_data_broker_name", "unknown")
+                or "unknown"
+            ).lower(),
+            "reference_data_broker": str(
+                getattr(gateway, "reference_data_broker_name", "unknown")
+                or "unknown"
+            ).lower(),
+        }
 
         return {
             "config": self.config.model_dump(mode="json"),
+            "broker_routing": broker_routing,
+            "execution_policy": self._execution_policy_matrix(),
             "scheduler": {
                 "running": bool(self._is_running and self._loop_task and not self._loop_task.done()),
                 "task_done": bool(self._loop_task.done()) if self._loop_task else None,
@@ -2387,6 +4095,8 @@ class StrategyService:
             "strategy_c_shadow": self._last_strategy_c_shadow_status,
             "strategy_c_paper": self._last_strategy_c_shadow_status,
             "strategy_d_paper": self._last_strategy_d_paper_status,
+            "startup_reconciliation": self._startup_reconciliation,
+            "live_reconciliation": self._last_live_reconciliation,
             "features": features.model_dump(mode="json"),
             "active_trades": [t.model_dump(mode="json") for t in active_trades],
             "signals": latest_signals,
@@ -2402,9 +4112,14 @@ class StrategyService:
                     "execution_mode": (
                         strategy_a_trade.mode.value
                         if strategy_a_trade is not None
-                        else "PAPER/SHADOW_VALIDATION"
+                        else policy_a.call_mode.value
                     ),
-                    "live_trading_allowed": False,
+                    "effective_call_mode": policy_a.call_mode.value,
+                    "effective_put_mode": policy_a.put_mode.value,
+                    "promotion_state": policy_a.promotion_state,
+                    "live_block_reason": policy_a.live_block_reason,
+                    "force_entry_allowed": policy_a.force_entry_allowed,
+                    "live_trading_allowed": policy_a.live_trading_allowed,
                     "current_r": (
                         strategy_a_trade.current_r
                         if strategy_a_trade is not None
@@ -2412,6 +4127,21 @@ class StrategyService:
                     ),
                     "current_trailing_stop": (
                         strategy_a_trade.current_trailing_stop
+                        if strategy_a_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_status": (
+                        strategy_a_trade.protective_stop_status
+                        if strategy_a_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_trigger": (
+                        strategy_a_trade.protective_stop_trigger_price
+                        if strategy_a_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_limit": (
+                        strategy_a_trade.protective_stop_limit_price
                         if strategy_a_trade is not None
                         else None
                     ),
@@ -2432,13 +4162,14 @@ class StrategyService:
                     "execution_mode": (
                         strategy_b_trade.mode.value
                         if strategy_b_trade is not None
-                        else (
-                            "SHADOW_ONLY"
-                            if self.config.mode == AutoTradingMode.LIVE
-                            else self.config.mode.value
-                        )
+                        else policy_b.call_mode.value
                     ),
-                    "live_trading_allowed": False,
+                    "effective_call_mode": policy_b.call_mode.value,
+                    "effective_put_mode": policy_b.put_mode.value,
+                    "promotion_state": policy_b.promotion_state,
+                    "live_block_reason": policy_b.live_block_reason,
+                    "force_entry_allowed": policy_b.force_entry_allowed,
+                    "live_trading_allowed": policy_b.live_trading_allowed,
                     "current_r": (
                         strategy_b_trade.current_r
                         if strategy_b_trade is not None
@@ -2446,6 +4177,21 @@ class StrategyService:
                     ),
                     "current_trailing_stop": (
                         strategy_b_trade.current_trailing_stop
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_status": (
+                        strategy_b_trade.protective_stop_status
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_trigger": (
+                        strategy_b_trade.protective_stop_trigger_price
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_limit": (
+                        strategy_b_trade.protective_stop_limit_price
                         if strategy_b_trade is not None
                         else None
                     ),
@@ -2462,8 +4208,13 @@ class StrategyService:
                         self._last_strategy_c_shadow_status.get("status")
                         or "NOT_INITIALIZED"
                     ),
-                    "execution_mode": AutoTradingMode.PAPER.value,
-                    "live_trading_allowed": False,
+                    "execution_mode": policy_c.call_mode.value,
+                    "effective_call_mode": policy_c.call_mode.value,
+                    "effective_put_mode": policy_c.put_mode.value,
+                    "promotion_state": policy_c.promotion_state,
+                    "live_block_reason": policy_c.live_block_reason,
+                    "force_entry_allowed": policy_c.force_entry_allowed,
+                    "live_trading_allowed": policy_c.live_trading_allowed,
                     "candidate_id": self._last_strategy_c_shadow_status.get(
                         "candidate_id"
                     ),
@@ -2495,8 +4246,13 @@ class StrategyService:
                         self._last_strategy_d_paper_status.get("status")
                         or "NOT_INITIALIZED"
                     ),
-                    "execution_mode": AutoTradingMode.PAPER.value,
-                    "live_trading_allowed": False,
+                    "execution_mode": policy_d.call_mode.value,
+                    "effective_call_mode": policy_d.call_mode.value,
+                    "effective_put_mode": policy_d.put_mode.value,
+                    "promotion_state": policy_d.promotion_state,
+                    "live_block_reason": policy_d.live_block_reason,
+                    "force_entry_allowed": policy_d.force_entry_allowed,
+                    "live_trading_allowed": policy_d.live_trading_allowed,
                     "candidate_id": self._last_strategy_d_paper_status.get(
                         "candidate_id"
                     ),
@@ -2635,13 +4391,41 @@ class StrategyService:
             EventEnvelope(topic=Topics.STRATEGY_SIGNAL, payload=signal.model_dump())
         )
 
-        # Strategy A forward-validation signals are audit/simulation only.
-        # This guard is intentionally before construction of any OMS intent.
+        # Backwards-compatible signal emission may never bypass the
+        # authoritative per-strategy execution policy.
         strategy_tag = str((metadata or {}).get("strategy", "")).upper()
-        is_strategy_a_validation = strategy_tag in {StrategyName.TREND_PULLBACK.value, "STRATEGY_A", "CALL", "PUT"}
-        is_strategy_b_validation = strategy_tag == StrategyName.VOLATILITY_BREAKOUT.value
-        if trading_mode == TradingMode.SHADOW or is_strategy_a_validation or is_strategy_b_validation:
+        strategy_aliases = {
+            StrategyName.TREND_PULLBACK.value: StrategyName.TREND_PULLBACK,
+            "STRATEGY_A": StrategyName.TREND_PULLBACK,
+            StrategyName.VOLATILITY_BREAKOUT.value: StrategyName.VOLATILITY_BREAKOUT,
+            "STRATEGY_B": StrategyName.VOLATILITY_BREAKOUT,
+            StrategyName.DI_CONTINUATION.value: StrategyName.DI_CONTINUATION,
+            "STRATEGY_C": StrategyName.DI_CONTINUATION,
+            StrategyName.SR_MOMENTUM_BREAKOUT.value: StrategyName.SR_MOMENTUM_BREAKOUT,
+            "STRATEGY_D": StrategyName.SR_MOMENTUM_BREAKOUT,
+        }
+        policy_strategy = strategy_aliases.get(strategy_tag)
+        if trading_mode == TradingMode.SHADOW:
             return signal
+        if policy_strategy is not None:
+            policy = self._execution_policy_for_strategy(policy_strategy)
+            if trading_mode == TradingMode.LIVE and not policy.live_trading_allowed:
+                await self._log_decision(
+                    category="SECURITY",
+                    strategy=policy_strategy.value,
+                    message="Legacy signal LIVE routing blocked by execution policy",
+                    details=policy.to_dict(),
+                )
+                return signal
+            # The legacy signal endpoint is intentionally non-routing for
+            # Strategies A/B. Strategy A LIVE execution is owned exclusively by
+            # the lifecycle-aware auto-trading path above; Strategy B remains
+            # validation-locked.
+            if policy_strategy in {
+                StrategyName.TREND_PULLBACK,
+                StrategyName.VOLATILITY_BREAKOUT,
+            }:
+                return signal
         if trading_mode == TradingMode.LIVE and not self._live_orders_enabled():
             return signal
 

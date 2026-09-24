@@ -22,7 +22,7 @@ class RateLimiter:
 
     def __init__(self, settings: Optional[PlatformSettings] = None) -> None:
         self.settings = settings or get_platform_settings()
-        self._history: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+        self._history: dict[tuple[str, str, str], deque[float]] = defaultdict(deque)
         self._lock = asyncio.Lock()
 
     def _get_limit_for_tier(self, tier: str) -> int:
@@ -34,8 +34,16 @@ class RateLimiter:
         else:
             return self.settings.rate_limit_general_per_minute
 
-    async def check_rate_limit(self, client_id: str, tier: str = "GENERAL") -> tuple[bool, int]:
-        """Check if request is permitted under sliding window.
+    async def check_rate_limit(
+        self,
+        client_id: str,
+        tier: str = "GENERAL",
+        scope: str = "",
+    ) -> tuple[bool, int]:
+        """Check if a request is permitted under a scoped sliding window.
+
+        The optional scope allows read-heavy GENERAL endpoints to use
+        independent buckets while AUTH and COMMANDS remain aggregated.
 
         Returns:
             (allowed: bool, retry_after_seconds: int)
@@ -46,7 +54,7 @@ class RateLimiter:
         limit = self._get_limit_for_tier(tier)
         window = 60.0  # 1 minute sliding window
         now = time.monotonic()
-        key = (client_id, tier.upper())
+        key = (client_id, tier.upper(), str(scope or "").strip())
 
         async with self._lock:
             queue = self._history[key]

@@ -62,15 +62,16 @@ class BrokerSessionRepository:
         login_time: datetime,
         expires_at: datetime,
         metadata: Optional[dict[str, Any]] = None,
+        broker_name: str = "ICICI_DIRECT",
     ) -> None:
         async with self.engine.connect() as conn:
             await conn.execute(
                 """
                 INSERT OR IGNORE INTO broker_accounts (
                     account_id, broker_name, account_name, api_key, created_at
-                ) VALUES (?, 'ICICI_DIRECT', 'Primary Account', '', ?)
+                ) VALUES (?, ?, 'Primary Account', '', ?)
                 """,
-                (account_id, login_time.isoformat()),
+                (account_id, broker_name, login_time.isoformat()),
             )
             await conn.execute(
                 """
@@ -90,18 +91,34 @@ class BrokerSessionRepository:
             )
             await conn.commit()
 
-    async def get_active_session(self) -> Optional[dict[str, Any]]:
+    async def get_active_session(
+        self,
+        account_id: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
         async with self.engine.connect() as conn:
-            cursor = await conn.execute(
-                """
-                SELECT session_id, account_id, session_token_masked, status,
-                       login_time, expires_at, metadata
-                FROM session_history
-                WHERE status = 'ACTIVE'
-                ORDER BY login_time DESC
-                LIMIT 1
-                """
-            )
+            if account_id:
+                cursor = await conn.execute(
+                    """
+                    SELECT session_id, account_id, session_token_masked, status,
+                           login_time, expires_at, metadata
+                    FROM session_history
+                    WHERE status = 'ACTIVE' AND account_id = ?
+                    ORDER BY login_time DESC
+                    LIMIT 1
+                    """,
+                    (account_id,),
+                )
+            else:
+                cursor = await conn.execute(
+                    """
+                    SELECT session_id, account_id, session_token_masked, status,
+                           login_time, expires_at, metadata
+                    FROM session_history
+                    WHERE status = 'ACTIVE'
+                    ORDER BY login_time DESC
+                    LIMIT 1
+                    """
+                )
             row = await cursor.fetchone()
             if not row:
                 return None
@@ -114,6 +131,31 @@ class BrokerSessionRepository:
                 "expires_at": row["expires_at"],
                 "metadata": json.loads(row["metadata"] or "{}"),
             }
+
+    async def get_active_sessions(self) -> list[dict[str, Any]]:
+        async with self.engine.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT session_id, account_id, session_token_masked, status,
+                       login_time, expires_at, metadata
+                FROM session_history
+                WHERE status = 'ACTIVE'
+                ORDER BY login_time DESC
+                """
+            )
+            rows = await cursor.fetchall()
+        return [
+            {
+                "session_id": row["session_id"],
+                "account_id": row["account_id"],
+                "session_token_masked": row["session_token_masked"],
+                "status": row["status"],
+                "login_time": row["login_time"],
+                "expires_at": row["expires_at"],
+                "metadata": json.loads(row["metadata"] or "{}"),
+            }
+            for row in rows
+        ]
 
     async def expire_session(self, session_id: str) -> None:
         async with self.engine.connect() as conn:

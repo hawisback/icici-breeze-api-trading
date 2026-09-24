@@ -12,6 +12,9 @@ Verifies:
 """
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 
 from libs.config.settings import PlatformSettings
@@ -32,13 +35,23 @@ from services.risk.repository import RiskRepository
 from services.risk.service import RiskService
 
 
+def _live_capable_settings(**overrides):
+    values = {
+        "live_trading_enabled": True,
+        "live_allowed_accounts": ["ICICI_PRIMARY", "ICICI_SECONDARY"],
+        "auth_signing_key": "live-gate-test-signing-key-32-bytes-minimum",
+        "market_data_backend": "breeze",
+        "breeze_api_key": "test-live-key",
+        "breeze_secret_key": "test-live-secret",
+    }
+    values.update(overrides)
+    return PlatformSettings(**values)
+
+
 @pytest.fixture
 def clean_gate():
     bus = InMemoryEventBus()
-    settings = PlatformSettings(
-        live_trading_enabled=False,
-        live_allowed_accounts=["ICICI_PRIMARY", "ICICI_SECONDARY"],
-    )
+    settings = _live_capable_settings()
     return LiveTradingGate(settings=settings, event_bus=bus)
 
 
@@ -48,12 +61,60 @@ async def test_live_gate_default_disabled(clean_gate):
     gate = clean_gate
     status = gate.get_status()
     assert status["live_authorized"] is False
-    assert status["system_setting_enabled"] is False
+    assert status["system_setting_enabled"] is True
     assert gate.is_live_active() is False
 
     allowed, reason = gate.validate_live_order("ICICI_PRIMARY")
     assert allowed is False
     assert "not authorized" in reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_local_single_user_live_gate_needs_no_confirmation():
+    settings = _live_capable_settings(
+        local_single_user_mode=True,
+        api_host="127.0.0.1",
+    )
+    gate = LiveTradingGate(
+        settings=settings,
+        event_bus=InMemoryEventBus(),
+    )
+
+    status = gate.get_status()
+    assert status["live_authorized"] is True
+    assert status["authorization_required"] is False
+    assert status["local_single_user_mode"] is True
+
+    allowed, reason = gate.validate_live_order("ICICI_PRIMARY")
+    assert allowed is True
+    assert "single-user" in reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_server_capability_disabled_rejects_activation_challenge():
+    gate = LiveTradingGate(
+        settings=PlatformSettings(
+            live_trading_enabled=False,
+            live_allowed_accounts=["ICICI_PRIMARY"],
+        ),
+        event_bus=InMemoryEventBus(),
+    )
+    with pytest.raises(PermissionError, match="LIVE_TRADING_ENABLED is false"):
+        await gate.request_activation_challenge(
+            operator_id="ADMIN_ALICE",
+            account_id="ICICI_PRIMARY",
+            duration_minutes=30,
+        )
+
+
+@pytest.mark.asyncio
+async def test_challenge_cannot_expand_account_allowlist(clean_gate):
+    with pytest.raises(PermissionError, match="not in LIVE_ALLOWED_ACCOUNTS"):
+        await clean_gate.request_activation_challenge(
+            operator_id="ADMIN_ALICE",
+            account_id="UNAUTHORIZED_ACCOUNT_99",
+            duration_minutes=30,
+        )
 
 
 @pytest.mark.asyncio
@@ -86,7 +147,8 @@ async def test_challenge_and_successful_confirmation(clean_gate):
     status = gate.get_status()
     assert status["live_authorized"] is True
     assert status["time_remaining_sec"] > 3500  # ~3600 sec for 60 min
-    assert "ICICI_PRIMARY" in status["allowed_accounts"]
+    assert status["allowed_account_count"] == 2
+    assert "allowed_accounts" not in status
 
     # Order validation now passes for allowed account
     allowed, msg = gate.validate_live_order("ICICI_PRIMARY")
@@ -214,14 +276,36 @@ async def test_risk_service_enforces_live_gate(tmp_path):
     """Verify RiskService rejects LIVE orders when gate is closed and approves when open."""
     bus = InMemoryEventBus()
     await bus.start()
-    settings = PlatformSettings(
+    settings = _live_capable_settings(
         data_root=str(tmp_path),
-        live_trading_enabled=False,
         live_allowed_accounts=["ICICI_PRIMARY"],
     )
     gate = LiveTradingGate(settings=settings, event_bus=bus)
     repo = RiskRepository(db_path=tmp_path / "risk.db")
-    risk_svc = RiskService(repository=repo, event_bus=bus, live_gate=gate)
+    portfolio = SimpleNamespace(get_positions=AsyncMock(return_value=[]))
+    gateway = SimpleNamespace(
+        get_funds=AsyncMock(
+            return_value=SimpleNamespace(available_margin=500000.0)
+        ),
+        get_positions=AsyncMock(return_value=[]),
+    )
+    risk_svc = RiskService(
+        repository=repo,
+        event_bus=bus,
+        live_gate=gate,
+        portfolio_service=portfolio,
+        broker_gateway=gateway,
+        broker_session_service=SimpleNamespace(
+            get_session_status=AsyncMock(
+                return_value={"connected": True, "status": "CONNECTED"}
+            )
+        ),
+        market_data_service=SimpleNamespace(
+            get_execution_feed_health=Mock(
+                return_value={"healthy": True, "reasons": []}
+            )
+        ),
+    )
     await risk_svc.initialize()
 
     live_intent = OrderIntent(
@@ -254,18 +338,28 @@ async def test_risk_service_enforces_live_gate(tmp_path):
     assert decision3.approved is False
     assert decision3.rule_name == "LIVE_TRADING_NOT_AUTHORIZED"
 
+    await risk_svc.stop()
     await bus.stop()
 
 
 @pytest.mark.asyncio
-async def test_api_gateway_live_gate_endpoints(tmp_path):
+async def test_api_gateway_live_gate_endpoints(tmp_path, monkeypatch):
     """Test full HTTP API Gateway endpoints for Live Trading Gate."""
     test_settings = PlatformSettings(
         data_root=str(tmp_path),
         live_trading_enabled=False,
         live_allowed_accounts=["ICICI_PRIMARY"],
     )
-    await initialize_services(settings=test_settings)
+    container = await initialize_services(settings=test_settings)
+    monkeypatch.setattr(
+        "services.api_gateway.main.get_live_preflight",
+        AsyncMock(
+            return_value={
+                "readiness": "READY_FOR_AUTHORIZATION",
+                "blockers": [],
+            }
+        ),
+    )
 
     import httpx
 
@@ -284,59 +378,62 @@ async def test_api_gateway_live_gate_endpoints(tmp_path):
         assert login_resp.status_code == 200
         headers = {"Authorization": f"Bearer {login_resp.json()['access_token']}"}
 
-        # 2. POST challenge
+        operator_user_id = login_resp.json()["user"]["user_id"]
+        container.live_gate.request_activation_challenge = AsyncMock(
+            return_value={
+                "challenge_id": "CHAL-BOUND",
+                "challenge_token": "CONFIRM-BOUND",
+                "expires_in_seconds": 300,
+            }
+        )
+        container.live_gate.confirm_activation = AsyncMock(return_value=True)
+        container.live_gate.revoke_live_mode = AsyncMock()
+
+        # 2. Body operator_id is ignored; authenticated identity is authoritative.
         resp = await client.post(
             "/api/v1/live-gate/challenge",
-            json={"operator_id": "OPERATOR_TEST", "account_id": "ICICI_PRIMARY", "duration_minutes": 45},
-            headers=headers,
-        )
-        assert resp.status_code == 200
-        chal = resp.json()
-        assert "challenge_id" in chal
-        assert "challenge_token" in chal
-
-        # 3. POST confirm with wrong token -> 400
-        resp = await client.post(
-            "/api/v1/live-gate/confirm",
             json={
-                "challenge_id": chal["challenge_id"],
-                "challenge_token": "BAD_TOKEN",
-                "operator_id": "OPERATOR_TEST",
-            },
-            headers=headers,
-        )
-        assert resp.status_code == 400
-
-        # 4. POST confirm with valid token -> 200
-        resp = await client.post(
-            "/api/v1/live-gate/confirm",
-            json={
-                "challenge_id": chal["challenge_id"],
-                "challenge_token": chal["challenge_token"],
-                "operator_id": "OPERATOR_TEST",
+                "operator_id": "IMPERSONATED-OPERATOR",
+                "account_id": "ICICI_PRIMARY",
+                "duration_minutes": 45,
             },
             headers=headers,
         )
         assert resp.status_code == 200
-        assert resp.json()["status"] == "CONFIRMED"
-        assert resp.json()["gate_status"]["live_authorized"] is True
+        container.live_gate.request_activation_challenge.assert_awaited_once_with(
+            operator_id=operator_user_id,
+            account_id="ICICI_PRIMARY",
+            duration_minutes=45,
+        )
 
-        # 5. GET status reflects active LIVE mode
-        resp = await client.get("/api/v1/live-gate/status")
+        # 3. Confirm is bound to the same authenticated user.
+        resp = await client.post(
+            "/api/v1/live-gate/confirm",
+            json={
+                "challenge_id": "CHAL-BOUND",
+                "challenge_token": "CONFIRM-BOUND",
+                "operator_id": "IMPERSONATED-OPERATOR",
+            },
+            headers={**headers, "Idempotency-Key": "live-confirm-bound"},
+        )
         assert resp.status_code == 200
-        assert resp.json()["live_authorized"] is True
+        container.live_gate.confirm_activation.assert_awaited_once_with(
+            challenge_id="CHAL-BOUND",
+            challenge_token="CONFIRM-BOUND",
+            operator_id=operator_user_id,
+        )
 
-        # 6. POST revoke -> 200
+        # 4. Revoke also uses authenticated identity, not the request body.
         resp = await client.post(
             "/api/v1/live-gate/revoke",
-            json={"operator_id": "OPERATOR_TEST", "reason": "End of trading day"},
-            headers=headers,
+            json={
+                "operator_id": "IMPERSONATED-OPERATOR",
+                "reason": "End of trading day",
+            },
+            headers={**headers, "Idempotency-Key": "live-revoke-bound"},
         )
         assert resp.status_code == 200
-        assert resp.json()["status"] == "REVOKED"
-        assert resp.json()["gate_status"]["live_authorized"] is False
-
-        # 7. GET status is now False
-        resp = await client.get("/api/v1/live-gate/status")
-        assert resp.status_code == 200
-        assert resp.json()["live_authorized"] is False
+        container.live_gate.revoke_live_mode.assert_awaited_once_with(
+            operator_id=operator_user_id,
+            reason="End of trading day",
+        )

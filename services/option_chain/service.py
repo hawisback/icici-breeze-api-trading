@@ -56,10 +56,39 @@ class OptionChainService:
 
         expiries = await self.inst_svc.get_expiries(clean_underlying)
         all_expiries = sorted(e for e in (expiries or []) if e >= date.today().isoformat())
-        active_provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower() if self.broker_gateway else ""
-        active_adapter = getattr(self.broker_gateway, "active_adapter", None) if self.broker_gateway else None
-        if active_provider == "kite" and active_adapter and getattr(active_adapter, "is_active", False):
-            get_expiries = getattr(active_adapter, "get_option_expiries", None)
+        reference_provider = (
+            str(
+                getattr(
+                    self.broker_gateway,
+                    "reference_data_broker_name",
+                    "",
+                )
+                or ""
+            ).lower()
+            if self.broker_gateway
+            else ""
+        )
+        reference_adapter = (
+            getattr(self.broker_gateway, "reference_data_adapter", None)
+            if self.broker_gateway
+            else None
+        )
+        if self.broker_gateway and reference_provider not in {"breeze", "kite"}:
+            reference_provider = str(
+                getattr(self.broker_gateway, "active_broker_name", "")
+                or ""
+            ).lower()
+            reference_adapter = getattr(
+                self.broker_gateway,
+                "active_adapter",
+                reference_adapter,
+            )
+        if (
+            reference_provider == "kite"
+            and reference_adapter
+            and getattr(reference_adapter, "is_active", False)
+        ):
+            get_expiries = getattr(reference_adapter, "get_option_expiries", None)
             if callable(get_expiries):
                 try:
                     live_expiries = await get_expiries(clean_underlying)
@@ -68,7 +97,17 @@ class OptionChainService:
                 except Exception as exc:
                     logger.warning("Unable to refresh Kite option expiries: %s", exc)
         if not all_expiries:
-            return {"underlying": clean_underlying, "source": "UNAVAILABLE", "strikes": []}
+            return {
+                "underlying": clean_underlying,
+                "source": "UNAVAILABLE",
+                "strikes": [],
+                "capabilities": {
+                    "verified_delta_available": False,
+                    "verified_greeks_available": False,
+                    "strategy_a_contract_selection_ready": False,
+                    "strategy_a_rejection_reason": "OPTION_CHAIN_UNAVAILABLE",
+                },
+            }
         selected_expiry = expiry if (expiry and expiry in all_expiries) else all_expiries[0]
 
         # 1. Resolve realistic spot price
@@ -82,12 +121,18 @@ class OptionChainService:
         step = 100 if clean_underlying == "BANKNIFTY" else 50
         atm_strike = round(spot_price / step) * step
 
-        # 2. Attempt to fetch live option chain directly from ICICI Breeze SDK
+        # 2. Option-chain/reference traffic is independent of LIVE execution
+        # ownership. In hybrid mode this defaults to Breeze while frequent
+        # quote/candle traffic uses Kite.
         breeze_active = False
-        if self.broker_gateway and active_provider == "breeze":
-            breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
+        if self.broker_gateway and reference_provider == "breeze":
+            breeze_adapter = reference_adapter
             if breeze_adapter and hasattr(breeze_adapter, "client_manager"):
-                breeze_active = getattr(breeze_adapter.client_manager, "is_active", False)
+                breeze_active = getattr(
+                    breeze_adapter.client_manager,
+                    "is_active",
+                    False,
+                )
 
         if breeze_active:
             try:
@@ -137,6 +182,7 @@ class OptionChainService:
                     sorted_strikes = [strikes_map[k] for k in sorted(strikes_map.keys())]
                     live_spot = float(breeze_chain.spot_price) if breeze_chain.spot_price else spot_price
 
+                    captured_at = datetime.now(timezone.utc).isoformat()
                     return {
                         "underlying": clean_underlying,
                         "spot_price": live_spot,
@@ -144,7 +190,16 @@ class OptionChainService:
                         "available_expiries": all_expiries,
                         "atm_strike": round(live_spot / step) * step,
                         "source": "BREEZE",
-                        "captured_at": datetime.now(timezone.utc).isoformat(),
+                        "captured_at": captured_at,
+                        "timestamp": captured_at,
+                        "capabilities": {
+                            "verified_delta_available": False,
+                            "verified_greeks_available": False,
+                            "strategy_a_contract_selection_ready": False,
+                            "strategy_a_rejection_reason": (
+                                "BREEZE_VERIFIED_OPTION_GREEKS_UNAVAILABLE"
+                            ),
+                        },
                         "strikes": sorted_strikes,
                     }
             except Exception as exc:
@@ -153,11 +208,12 @@ class OptionChainService:
         # Kite returns exchange-valid tradingsymbols, so route its live chain directly
         # to the UI shape and avoid rebuilding contracts from synthetic local symbols.
         if self.broker_gateway:
-            active_adapter = getattr(self.broker_gateway, "active_adapter", None)
             if (
-                getattr(self.broker_gateway, "active_broker_name", None) == "kite"
-                and active_adapter
-                and callable(getattr(active_adapter, "get_option_chain_view", None))
+                reference_provider == "kite"
+                and reference_adapter
+                and callable(
+                    getattr(reference_adapter, "get_option_chain_view", None)
+                )
             ):
                 cache_key = (clean_underlying, selected_expiry)
                 cached = self._kite_chain_cache.get(cache_key)
@@ -171,12 +227,23 @@ class OptionChainService:
 
                     if monotonic() >= self._kite_chain_retry_after:
                         try:
-                            kite_chain = await active_adapter.get_option_chain_view(
+                            kite_chain = await reference_adapter.get_option_chain_view(
                                 underlying=clean_underlying,
                                 expiry=selected_expiry,
                             )
                             if kite_chain.get("strikes"):
                                 kite_chain["available_expiries"] = all_expiries or kite_chain.get("available_expiries", [])
+                                captured_at = datetime.now(timezone.utc).isoformat()
+                                kite_chain["captured_at"] = captured_at
+                                kite_chain["timestamp"] = captured_at
+                                kite_chain["capabilities"] = {
+                                    "verified_delta_available": False,
+                                    "verified_greeks_available": False,
+                                    "strategy_a_contract_selection_ready": False,
+                                    "strategy_a_rejection_reason": (
+                                        "KITE_VERIFIED_OPTION_GREEKS_UNAVAILABLE"
+                                    ),
+                                }
                                 self._kite_chain_cache[cache_key] = (monotonic(), kite_chain)
                                 self._kite_chain_retry_after = 0.0
                                 return deepcopy(kite_chain)
@@ -256,5 +323,13 @@ class OptionChainService:
             "available_expiries": expiries,
             "atm_strike": atm_strike,
             "source": "SIMULATED",
+            "capabilities": {
+                "verified_delta_available": False,
+                "verified_greeks_available": False,
+                "strategy_a_contract_selection_ready": False,
+                "strategy_a_rejection_reason": (
+                    "SIMULATED_OPTION_CHAIN_NOT_EXECUTABLE"
+                ),
+            },
             "strikes": sorted_strikes,
         }

@@ -77,8 +77,10 @@ class OMSService:
             quantity=intent.quantity,
             remaining_quantity=intent.quantity,
             price=intent.price,
+            trigger_price=intent.trigger_price,
             status=OrderState.CREATED,
             trading_mode=intent.trading_mode,
+            reduce_only=intent.reduce_only,
             created_at=now,
             updated_at=now,
         )
@@ -137,6 +139,11 @@ class OMSService:
             return
         order = matching[0]
 
+        # Risk decisions may be replayed by the durable outbox. Once the order
+        # has advanced beyond VALIDATING, the persisted decision is idempotent.
+        if order.status != OrderState.VALIDATING:
+            return
+
         from_state = order.status
         to_state = OrderState.APPROVED if approved else OrderState.RISK_REJECTED
         OrderStateMachine.validate_transition(from_state, to_state, reason)
@@ -178,25 +185,38 @@ class OMSService:
         to_state = order.status
         if broker_status == "FILLED":
             to_state = OrderState.FILLED
-        elif broker_status == "OPEN" or broker_status == "PLACED":
-            to_state = OrderState.OPEN
+        elif broker_status in {"PARTIAL", "PARTIALLY_FILLED", "PARTIALLY FILLED"}:
+            to_state = OrderState.PARTIALLY_FILLED
+        elif broker_status in {"OPEN", "PLACED"}:
+            to_state = OrderState.PARTIALLY_FILLED if filled_qty > 0 else OrderState.OPEN
         elif broker_status == "CANCELLED":
             to_state = OrderState.CANCELLED
         elif broker_status == "REJECTED":
             to_state = OrderState.REJECTED
+        elif broker_status == "EXPIRED":
+            to_state = OrderState.EXPIRED
+        elif broker_status == "FAILED_SAFE":
+            to_state = OrderState.FAILED_SAFE
         elif broker_status == "UNKNOWN":
             to_state = OrderState.SUBMISSION_UNKNOWN
 
-        if to_state != order.status:
-            OrderStateMachine.validate_transition(order.status, to_state, broker_status)
-            rem_qty = max(0, order.quantity - filled_qty)
+        state_changed = to_state != order.status
+        fill_changed = (
+            int(filled_qty or 0) != order.filled_quantity
+            or float(avg_price or 0.0) != float(order.average_price or 0.0)
+            or (broker_order_id and broker_order_id != order.broker_order_id)
+        )
+        if state_changed or fill_changed:
+            if state_changed:
+                OrderStateMachine.validate_transition(order.status, to_state, broker_status)
+            rem_qty = max(0, order.quantity - int(filled_qty or 0))
             updated = order.model_copy(
                 update={
                     "broker_order_id": broker_order_id or order.broker_order_id,
                     "status": to_state,
-                    "filled_quantity": filled_qty,
+                    "filled_quantity": int(filled_qty or 0),
                     "remaining_quantity": rem_qty,
-                    "average_price": avg_price or order.average_price,
+                    "average_price": float(avg_price or order.average_price),
                     "status_message": payload.get("message"),
                 }
             )
@@ -204,7 +224,7 @@ class OMSService:
                 order=updated,
                 from_state=order.status,
                 to_state=to_state,
-                reason=f"Broker status: {broker_status}",
+                reason=f"Broker reconciliation: {broker_status}",
                 outbox_topic=Topics.ORDER_STATE,
             )
 
@@ -227,6 +247,28 @@ class OMSService:
             except Exception as e:
                 logger.error("Error in OMS outbox dispatcher: %s", e)
                 await asyncio.sleep(poll_interval_sec)
+
+    async def mark_order_submitting(self, order_id: str) -> Optional[BrokerOrder]:
+        """Durably reserve an approved order for one broker submission."""
+        order = await self.repo.get_order_by_id(order_id)
+        if order is None:
+            return None
+        if order.status == OrderState.SUBMITTING:
+            return order
+        if order.status != OrderState.APPROVED:
+            return order
+        OrderStateMachine.validate_transition(order.status, OrderState.SUBMITTING, "Execution reserved")
+        updated = order.model_copy(
+            update={"status": OrderState.SUBMITTING, "updated_at": utc_now()}
+        )
+        await self.repo.save_broker_order_with_transition(
+            order=updated,
+            from_state=order.status,
+            to_state=OrderState.SUBMITTING,
+            reason="Execution service reserved broker submission",
+            outbox_topic=Topics.ORDER_STATE,
+        )
+        return updated
 
     async def get_order(self, order_id: str) -> Optional[BrokerOrder]:
         return await self.repo.get_order_by_id(order_id)

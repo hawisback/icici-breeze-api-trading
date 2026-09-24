@@ -57,6 +57,38 @@ async def test_kite_adapter_authenticates_and_places_normalized_order():
     assert client.placed["order_type"] == "LIMIT"
 
 
+@pytest.mark.asyncio
+async def test_kite_maps_protective_stop_limit_to_sl_with_trigger():
+    client = FakeKite()
+    adapter = ZerodhaKiteAdapter(custom_client=client)
+    assert await adapter.authenticate(
+        "api-key",
+        SecretStr("api-secret"),
+        "request-token",
+    ) is True
+
+    response = await adapter.place_order(
+        BrokerOrderRequest(
+            client_order_id="protective-1",
+            stock_code="NIFTY26SEP25000CE",
+            exchange_code="NFO",
+            product="options",
+            action="sell",
+            order_type="stop_limit",
+            quantity=65,
+            price=67.5,
+            trigger_price=75.0,
+            user_remark="protective-1",
+        )
+    )
+
+    assert response.success is True
+    assert client.placed["transaction_type"] == "SELL"
+    assert client.placed["order_type"] == "SL"
+    assert client.placed["price"] == 67.5
+    assert client.placed["trigger_price"] == 75.0
+
+
 def test_gateway_selects_kite_for_live_mode(tmp_path):
     settings = PlatformSettings(
         _env_file=None,

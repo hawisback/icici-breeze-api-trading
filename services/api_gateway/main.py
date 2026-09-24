@@ -9,10 +9,11 @@ from datetime import datetime, timezone
 import json
 import logging
 from typing import Any, Optional
+from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from services.api_gateway.error_handlers import register_error_handlers
@@ -42,6 +43,7 @@ from libs.config import get_platform_settings, update_env_variable
 from libs.observability.logger import setup_logging
 from services.strategy.models import (
     AutoTradingConfig,
+    AutoTradingMode,
     HistoricalReplaySource,
     OptionType,
     SimulationRequest,
@@ -167,40 +169,29 @@ async def lifespan(app: FastAPI):
                 match = re.search(r"apisession=([a-zA-Z0-9_-]+)", req_line)
                 token = match.group(1) if match else None
 
-                body_msg = ""
                 if token:
-                    from libs.config.env_manager import update_env_variable
-                    update_env_variable("BREEZE_SESSION_TOKEN", token)
-                    settings = get_platform_settings()
-                    api_k = settings.breeze_api_key.get_secret_value() if settings.breeze_api_key else ""
-                    sec_k = settings.breeze_secret_key.get_secret_value() if settings.breeze_secret_key else ""
-                    if api_k and sec_k:
-                        await container.session_svc.activate_session(
-                            api_key=api_k,
-                            secret_key=sec_k,
-                            session_token=token,
-                            account_id="ICICI_PRIMARY",
-                        )
-                    body_msg = f"Session token ({token[:4]}...{token[-4:]}) captured, saved to .env, and activated!"
+                    # Never activate or persist broker credentials on the raw
+                    # port-80 listener. Forward the browser into the hardened
+                    # callback, where the one-time login state is verified.
+                    location = (
+                        "http://127.0.0.1:8000/api/v1/broker/session/callback?"
+                        + urlencode({"apisession": token})
+                    )
+                    raw_resp = (
+                        "HTTP/1.1 302 Found\r\n"
+                        f"Location: {location}\r\n"
+                        "Cache-Control: no-store\r\n"
+                        "Connection: close\r\n\r\n"
+                    )
                 else:
-                    body_msg = "Redirect received, but no apisession token found in URL."
-
-                html_resp = f"""HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!DOCTYPE html>
-<html>
-<head><title>Breeze Authentication</title>
-<style>body {{ background: #020617; color: #f8fafc; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
-.card {{ background: #0f172a; border: 1px solid #10b981; border-radius: 12px; padding: 32px; max-width: 480px; text-align: center; }}
-h1 {{ color: #34d399; margin-top: 0; }} p {{ color: #94a3b8; font-size: 14px; }}
-</style></head>
-<body>
-<div class="card">
-  <h1>Authentication Successful</h1>
-  <p>{body_msg}</p>
-  <p>You can close this tab and return to the Trading Terminal.</p>
-</div>
-<script>setTimeout(() => window.close(), 3000);</script>
-</body></html>"""
-                writer.write(html_resp.encode("utf-8"))
+                    raw_resp = (
+                        "HTTP/1.1 400 Bad Request\r\n"
+                        "Content-Type: text/plain; charset=utf-8\r\n"
+                        "Cache-Control: no-store\r\n"
+                        "Connection: close\r\n\r\n"
+                        "Missing apisession token."
+                    )
+                writer.write(raw_resp.encode("utf-8"))
                 await writer.drain()
             except Exception as e:
                 logger.warning("Error handling port 80 redirect: %s", e)
@@ -227,6 +218,8 @@ h1 {{ color: #34d399; margin-top: 0; }} p {{ color: #94a3b8; font-size: 14px; }}
         except Exception:
             pass
     await container.market_svc.stop_simulated_feed()
+    await container.exec_svc.stop()
+    await container.risk_svc.stop()
     await container.oms_svc.stop_outbox_worker()
     await container.event_bus.stop()
 
@@ -282,6 +275,7 @@ class LoginRequest(BaseModel):
     session_token: str = ""
     access_token: Optional[str] = None
     account_id: str = "ICICI_PRIMARY"
+    broker: Optional[str] = Field(default=None, pattern=r"^(breeze|kite)$")
 
 
 class OrderRequest(BaseModel):
@@ -336,6 +330,10 @@ class LogoutRequest(BaseModel):
     refresh_token: str
 
 
+class StrategyModeRequest(BaseModel):
+    mode: AutoTradingMode
+
+
 class StrategyArmRequest(BaseModel):
     armed: bool
 
@@ -386,6 +384,7 @@ async def get_system_health():
     """Aggregated health check of all platform services."""
     services = get_services()
     session_status = await services.session_svc.get_session_status()
+    broker_sessions = await services.session_svc.get_all_session_statuses()
     feed_status = services.market_svc.get_feed_status()
     system_mode = await services.risk_svc.get_system_mode()
     strategy_status = await services.strategy_svc.get_status()
@@ -414,6 +413,10 @@ async def get_system_health():
             "oms": "ACTIVE",
             "portfolio": "ACTIVE",
             "system_mode": system_mode.value,
+        },
+        "broker_sessions": {
+            broker: status_payload.get("status", "DISCONNECTED")
+            for broker, status_payload in broker_sessions.items()
         },
         "config": services.settings.get_redacted_summary(),
     }
@@ -493,31 +496,119 @@ async def create_ws_ticket(current_user: UserPrincipal = Depends(get_current_use
 
 @app.get("/api/v1/broker/session/login-url")
 @app.get("/api/v1/session/login-url")
-async def get_session_login_url():
-    """Return the selected broker's official daily login URL."""
+async def get_session_login_url(
+    broker: Optional[str] = Query(default=None, pattern=r"^(breeze|kite)$"),
+    current_user: UserPrincipal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR)
+    ),
+):
+    """Issue a one-time login flow for either configured broker."""
     settings = get_platform_settings()
-    login_url = get_services().session_svc.get_login_url()
-    api_key_secret = settings.kite_api_key if settings.broker_backend.value == "kite" else settings.breeze_api_key
+    services = get_services()
+    selected_broker = (
+        broker
+        or getattr(
+            services.gateway_svc,
+            "execution_broker_name",
+            settings.broker_backend.value,
+        )
+    )
+    challenge = services.session_svc.issue_login_challenge(
+        initiated_by=current_user.user_id,
+        broker_backend=selected_broker,
+    )
+    api_key_secret = (
+        settings.kite_api_key
+        if selected_broker == "kite"
+        else settings.breeze_api_key
+    )
     api_key = api_key_secret.get_secret_value() if api_key_secret else ""
+    start_url = (
+        "http://127.0.0.1:8000/api/v1/broker/session/start?"
+        + urlencode(
+            {
+                "state": challenge["state"],
+                "broker": selected_broker,
+            }
+        )
+    )
     return {
-        "login_url": login_url,
+        "login_url": start_url,
         "api_key": api_key,
+        "callback_state": challenge["state"],
+        "state_expires_at": challenge["expires_at"],
         "redirect_url_hint": "http://127.0.0.1:8000/api/v1/broker/session/callback",
-        "broker": settings.broker_backend.value,
-        "instructions": "Open this URL in your broker's browser login flow. The callback will persist the daily token and activate the selected live adapter.",
+        "broker": selected_broker,
+        "instructions": (
+            "Open this URL in the broker login flow. The callback is accepted "
+            "only for this short-lived, one-time authenticated login state."
+        ),
     }
+
+
+@app.get("/api/v1/broker/session/start")
+@app.get("/api/v1/session/start")
+async def start_broker_session_login(
+    state: str = Query(..., min_length=20),
+    broker: Optional[str] = Query(default=None, pattern=r"^(breeze|kite)$"),
+):
+    """Bootstrap broker-specific correlation, then redirect to the official broker."""
+    services = get_services()
+    selected_broker = services.session_svc._normalize_broker(broker)
+    if not services.session_svc.validate_login_challenge(
+        state,
+        broker_backend=selected_broker,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Broker login state is invalid, expired, or broker-mismatched.",
+        )
+
+    login_url = services.session_svc.get_login_url(
+        broker_backend=selected_broker,
+    )
+    if selected_broker == "kite":
+        redirect_params = urlencode({"state": state})
+        login_url += "&" + urlencode({"redirect_params": redirect_params})
+
+    response = RedirectResponse(url=login_url, status_code=302)
+    response.set_cookie(
+        key="broker_login_state",
+        value=state,
+        max_age=600,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/api/v1/broker/session/status")
 @app.get("/api/v1/session/status")
-async def get_session_status():
+async def get_session_status(
+    broker: Optional[str] = Query(default=None, pattern=r"^(breeze|kite)$"),
+):
     services = get_services()
-    return await services.session_svc.get_session_status()
+    if broker:
+        return await services.session_svc.get_session_status(broker)
+    execution = await services.session_svc.get_session_status()
+    execution["sessions"] = await services.session_svc.get_all_session_statuses()
+    execution["execution_broker"] = services.gateway_svc.execution_broker_name
+    execution["frequent_data_broker"] = services.gateway_svc.frequent_data_broker_name
+    execution["reference_data_broker"] = services.gateway_svc.reference_data_broker_name
+    return execution
 
 
 @app.post("/api/v1/broker/session/login")
 @app.post("/api/v1/session/login")
-async def session_login(req: LoginRequest):
+async def session_login(
+    req: LoginRequest,
+    current_user: UserPrincipal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR)
+    ),
+):
     services = get_services()
     result = await services.session_svc.activate_session(
         api_key=req.api_key,
@@ -525,6 +616,7 @@ async def session_login(req: LoginRequest):
         session_token=req.session_token,
         access_token=req.access_token,
         account_id=req.account_id,
+        broker_backend=req.broker,
     )
     return result
 
@@ -538,6 +630,7 @@ async def broker_session_callback(
     session_token: Optional[str] = None,
     token: Optional[str] = None,
     request_token: Optional[str] = None,
+    state: Optional[str] = None,
 ):
     """OAuth callback endpoint handling ICICI Direct 2FA redirect.
 
@@ -545,7 +638,19 @@ async def broker_session_callback(
     and activates running broker sessions across all services.
     """
     settings = get_platform_settings()
-    is_kite = settings.broker_backend.value == "kite"
+    # The one-time challenge, not execution ownership, determines which broker
+    # this callback is authenticating.
+    raw_hint = (
+        request.query_params.get("broker")
+        or (
+            "kite"
+            if request_token
+            else "breeze"
+            if (apisession or session_token or token)
+            else None
+        )
+    )
+    is_kite = raw_hint == "kite"
     broker_display_name = "Kite" if is_kite else "ICICI Breeze"
     success_event_type = "KITE_SESSION_SUCCESS" if is_kite else "BREEZE_SESSION_SUCCESS"
     raw_token = request_token if is_kite else (apisession or session_token or token)
@@ -593,6 +698,45 @@ a {{ color: #38bdf8; text-decoration: none; }}
     token_clean = raw_token.strip()
     masked = token_clean[:4] + "..." + token_clean[-4:] if len(token_clean) > 8 else "***"
 
+    # Callback requests cannot carry the operator bearer token, so require a
+    # short-lived state that was issued only after RBAC-authenticated login
+    # initiation. Browser redirects may supply it via query (Kite) or the
+    # HttpOnly bootstrap cookie (Breeze/local redirect).
+    cookie_state = request.cookies.get("broker_login_state")
+    query_state = state or request.query_params.get("state")
+    if query_state and cookie_state and query_state != cookie_state:
+        correlation_state = None
+    else:
+        correlation_state = query_state or cookie_state
+
+    challenge = (
+        get_services().session_svc.consume_login_challenge(correlation_state)
+        if correlation_state
+        else None
+    )
+    if challenge is None:
+        msg = "Broker callback rejected: login state is missing, expired, or already used."
+        if wants_json:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "ERROR", "message": msg},
+            )
+        return HTMLResponse(
+            status_code=403,
+            content=f"""<!DOCTYPE html>
+<html><head><title>Authentication Rejected</title></head>
+<body><h1>Authentication Rejected</h1><p>{msg}</p></body></html>""",
+        )
+
+    challenge_broker = str(
+        challenge.get("broker_backend")
+        or raw_hint
+        or settings.broker_backend.value
+    ).lower()
+    is_kite = challenge_broker == "kite"
+    broker_display_name = "Kite" if is_kite else "ICICI Breeze"
+    success_event_type = "KITE_SESSION_SUCCESS" if is_kite else "BREEZE_SESSION_SUCCESS"
+
     # 1. Update .env file directly and sync runtime PlatformSettings
     # Breeze can persist its callback token. Kite request tokens are one-time and
     # short-lived, so the exchanged access token is persisted after activation.
@@ -616,6 +760,7 @@ a {{ color: #38bdf8; text-decoration: none; }}
                 secret_key=secret_key,
                 session_token=token_clean,
                 account_id="ZERODHA_PRIMARY" if is_kite else "ICICI_PRIMARY",
+                broker_backend=challenge_broker,
             )
         except Exception as exc:
             logger.warning("Session service activation produced warning: %s", exc)
@@ -646,7 +791,7 @@ a {{ color: #38bdf8; text-decoration: none; }}
         return JSONResponse(
             content={
                 "status": "SUCCESS",
-                "message": f"{settings.broker_backend.value.title()} session token captured, persisted to .env, and activated.",
+                "message": f"{broker_display_name} session token captured, persisted to .env, and activated.",
                 "token_masked": masked,
                 "env_updated": env_updated,
                 "session": session_result,
@@ -978,17 +1123,310 @@ async def get_live_gate_status():
     return services.live_gate.get_status()
 
 
+@app.get("/api/v1/live-preflight")
+async def get_live_preflight(
+    current_user: UserPrincipal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR)
+    ),
+):
+    """Fail-closed readiness report for opening a server LIVE window."""
+    services = get_services()
+    settings = services.settings
+    session = await services.session_svc.get_session_status()
+    strategy = await services.strategy_svc.get_status()
+    system_mode = await services.risk_svc.get_system_mode()
+    live_gate = services.live_gate.get_status()
+    orders = await services.oms_svc.list_orders(limit=500)
+
+    nonterminal = {
+        "CREATED",
+        "VALIDATING",
+        "APPROVED",
+        "SUBMITTING",
+        "SUBMISSION_UNKNOWN",
+        "ACKNOWLEDGED",
+        "OPEN",
+        "PARTIALLY_FILLED",
+    }
+    unresolved_live_orders = [
+        order
+        for order in orders
+        if order.trading_mode == TradingMode.LIVE
+        and order.status.value in nonterminal
+    ]
+
+    broker_positions = []
+    funds = None
+    broker_error = None
+    if session.get("connected"):
+        try:
+            broker_positions = await services.gateway_svc.get_positions(
+                mode=TradingMode.LIVE
+            )
+            funds = await services.gateway_svc.get_funds(
+                mode=TradingMode.LIVE
+            )
+        except Exception as exc:
+            logger.exception("LIVE preflight broker verification failed")
+            broker_error = type(exc).__name__
+
+    open_broker_positions = [
+        position for position in broker_positions if int(position.quantity) != 0
+    ]
+    reconciliation = await services.strategy_svc.build_live_reconciliation_report(
+        broker_positions=broker_positions,
+        orders=orders,
+        broker_verified=bool(session.get("connected")) and broker_error is None,
+        broker_error=(
+            broker_error
+            or (
+                None
+                if session.get("connected")
+                else "BROKER_SESSION_NOT_CONNECTED"
+            )
+        ),
+    )
+    market = strategy.get("market_data") or {}
+    scheduler = strategy.get("scheduler") or {}
+    configured_bus = settings.event_bus_backend.value
+    runtime_bus = (
+        "memory"
+        if type(services.event_bus).__name__ == "InMemoryEventBus"
+        else type(services.event_bus).__name__
+    )
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+
+    if not settings.live_trading_enabled:
+        blockers.append("LIVE_TRADING_ENABLED_FALSE")
+    expected_account_id = (
+        "ZERODHA_PRIMARY"
+        if settings.broker_backend.value == "kite"
+        else "ICICI_PRIMARY"
+    )
+    if not settings.live_allowed_accounts:
+        blockers.append("NO_LIVE_ALLOWED_ACCOUNT")
+    elif expected_account_id not in settings.live_allowed_accounts:
+        blockers.append("ACTIVE_BROKER_ACCOUNT_NOT_ALLOWLISTED")
+    if not session.get("connected"):
+        blockers.append("BROKER_SESSION_NOT_CONNECTED")
+    if broker_error:
+        blockers.append(f"BROKER_VERIFICATION_FAILED:{broker_error}")
+    if settings.market_data_backend.value == "simulated":
+        blockers.append("SIMULATED_MARKET_DATA")
+    if not market.get("provider_active"):
+        blockers.append("STRATEGY_MARKET_DATA_NOT_ACTIVE")
+    if not market.get("execution_feed_healthy", False):
+        feed_reasons = market.get("execution_feed_reasons") or [
+            "UNKNOWN"
+        ]
+        blockers.append(
+            "EXECUTION_FEED_UNHEALTHY:" + ";".join(feed_reasons)
+        )
+    if not scheduler.get("running"):
+        blockers.append("STRATEGY_SCHEDULER_NOT_RUNNING")
+
+    strategy_config = strategy.get("config", {}) or {}
+    strategy_mode = str(strategy_config.get("mode") or "UNKNOWN")
+    if strategy_mode != AutoTradingMode.LIVE.value:
+        blockers.append(f"STRATEGY_MODE_NOT_LIVE:{strategy_mode}")
+    if strategy_config.get("kill_switch"):
+        blockers.append("STRATEGY_KILL_SWITCH_ACTIVE")
+
+    execution_policy = strategy.get("execution_policy") or {}
+    strategy_statuses = strategy.get("strategies") or {}
+    enabled_live_strategies = [
+        key
+        for key, value in strategy_statuses.items()
+        if bool(value.get("enabled"))
+        and bool(value.get("live_trading_allowed"))
+    ]
+    if not enabled_live_strategies:
+        blockers.append("NO_ENABLED_STRATEGY_LIVE_PROMOTED")
+
+    strategy_a_enabled = bool(
+        strategy.get("config", {})
+        .get("tunables", {})
+        .get("trend_pullback_enabled", False)
+    )
+    if (
+        strategy_a_enabled
+        and not market.get("strategy_a_option_execution_ready", False)
+    ):
+        reason = str(
+            market.get("strategy_a_option_execution_reason")
+            or "VERIFIED_OPTION_DELTA_UNAVAILABLE"
+        )
+        blockers.append(f"STRATEGY_A_OPTION_EXECUTION_BLOCKED:{reason}")
+    if system_mode != SystemMode.NORMAL:
+        blockers.append(f"RISK_MODE_{system_mode.value}")
+    if unresolved_live_orders:
+        blockers.append("UNRESOLVED_LIVE_ORDERS")
+    for issue in reconciliation.get("issues", []):
+        blockers.append(f"RECONCILIATION:{issue}")
+    if funds is not None and float(funds.available_margin) <= 0:
+        blockers.append("NO_AVAILABLE_BROKER_MARGIN")
+    if configured_bus != runtime_bus:
+        blockers.append(
+            f"EVENT_BUS_RUNTIME_MISMATCH:{configured_bus}->{runtime_bus}"
+        )
+    elif runtime_bus == "memory":
+        warnings.append(
+            "EVENT_BUS_MEMORY_SINGLE_PROCESS; order path uses durable SQLite "
+            "outboxes and broker reconciliation."
+        )
+
+    if strategy_config.get("system_armed"):
+        blockers.append(
+            "STRATEGY_MUST_BE_DISARMED_BEFORE_LIVE_AUTHORIZATION"
+        )
+    if strategy_config.get("auto_trade_enabled"):
+        warnings.append("AUTO_TRADE_ALREADY_ENABLED")
+
+    if blockers:
+        readiness = "BLOCKED"
+    elif live_gate.get("live_authorized"):
+        readiness = "READY_FOR_LIVE"
+    else:
+        readiness = "READY_FOR_AUTHORIZATION"
+
+    return {
+        "readiness": readiness,
+        "checked_at": utc_now().isoformat(),
+        "checked_by": current_user.user_id,
+        "blockers": blockers,
+        "warnings": warnings,
+        "broker": {
+            "backend": settings.broker_backend.value,
+            "connected": bool(session.get("connected")),
+            "account_id": session.get("account_id"),
+            "expires_at": session.get("expires_at"),
+            "available_margin": (
+                float(funds.available_margin) if funds is not None else None
+            ),
+            "open_positions": len(open_broker_positions),
+        },
+        "market_data": {
+            "configured_backend": settings.market_data_backend.value,
+            "strategy_provider": market.get("provider"),
+            "provider_active": bool(market.get("provider_active")),
+            "execution_feed_healthy": bool(
+                market.get("execution_feed_healthy")
+            ),
+            "execution_feed_status": market.get(
+                "execution_feed_status"
+            ),
+            "execution_feed_reasons": market.get(
+                "execution_feed_reasons",
+                [],
+            ),
+            "execution_feed_max_age_seconds": market.get(
+                "execution_feed_max_age_seconds"
+            ),
+            "latest_spot_5m_candle_age_seconds": market.get(
+                "latest_spot_5m_candle_age_seconds"
+            ),
+            "latest_futures_15m_candle_age_seconds": market.get(
+                "latest_futures_15m_candle_age_seconds"
+            ),
+            "strategy_a_signal_data_fresh": bool(
+                market.get("strategy_a_signal_data_fresh")
+            ),
+            "strategy_b_signal_data_fresh": bool(
+                market.get("strategy_b_signal_data_fresh")
+            ),
+            "futures_candle_count": market.get("futures_candle_count", 0),
+        },
+        "reconciliation": reconciliation,
+        "startup_reconciliation": strategy.get("startup_reconciliation"),
+        "orders": {
+            "unresolved_live_count": len(unresolved_live_orders),
+            "unresolved_live": [
+                {
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "side": order.side.value,
+                    "status": order.status.value,
+                    "reduce_only": order.reduce_only,
+                }
+                for order in unresolved_live_orders
+            ],
+        },
+        "risk": {
+            "system_mode": system_mode.value,
+            "max_order_notional": settings.live_max_order_notional,
+            "max_open_positions": settings.live_max_open_positions,
+        },
+        "live_gate": live_gate,
+        "strategy": {
+            "scheduler_running": bool(scheduler.get("running")),
+            "system_armed": bool(
+                strategy.get("config", {}).get("system_armed")
+            ),
+            "auto_trade_enabled": bool(
+                strategy.get("config", {}).get("auto_trade_enabled")
+            ),
+            "enabled_live_strategies": enabled_live_strategies,
+            "execution_policy": execution_policy,
+            "routing": {
+                key: {
+                    "execution_mode": value.get("execution_mode"),
+                    "effective_call_mode": value.get("effective_call_mode"),
+                    "effective_put_mode": value.get("effective_put_mode"),
+                    "promotion_state": value.get("promotion_state"),
+                    "live_block_reason": value.get("live_block_reason"),
+                    "live_trading_allowed": value.get(
+                        "live_trading_allowed",
+                        False,
+                    ),
+                }
+                for key, value in strategy_statuses.items()
+            },
+        },
+        "event_bus": {
+            "configured": configured_bus,
+            "runtime": runtime_bus,
+        },
+        "protective_stop": {
+            "supported": settings.broker_backend.value in {"breeze", "kite"},
+            "order_type": "STOP_LIMIT",
+        },
+    }
+
+
 @app.post("/api/v1/live-gate/challenge")
 async def request_live_gate_challenge(
     req: LiveGateChallengeRequest,
     current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     services = get_services()
-    return await services.live_gate.request_activation_challenge(
-        operator_id=req.operator_id,
-        account_id=req.account_id,
-        duration_minutes=req.duration_minutes,
+    preflight = await get_live_preflight(current_user)
+    if preflight.get("readiness") != "READY_FOR_AUTHORIZATION":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "LIVE activation challenge blocked by preflight",
+                "readiness": preflight.get("readiness"),
+                "blockers": preflight.get("blockers", []),
+            },
+        )
+    account_id = (
+        "ZERODHA_PRIMARY"
+        if services.settings.broker_backend.value == "kite"
+        else "ICICI_PRIMARY"
     )
+    try:
+        return await services.live_gate.request_activation_challenge(
+            operator_id=current_user.user_id,
+            account_id=account_id,
+            duration_minutes=req.duration_minutes,
+        )
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
 
 
 @app.post("/api/v1/live-gate/confirm")
@@ -1001,10 +1439,23 @@ async def confirm_live_gate(
     services = get_services()
 
     async def _execute():
+        preflight = await get_live_preflight(current_user)
+        if preflight.get("readiness") != "READY_FOR_AUTHORIZATION":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        "LIVE activation confirmation blocked because "
+                        "preflight changed"
+                    ),
+                    "readiness": preflight.get("readiness"),
+                    "blockers": preflight.get("blockers", []),
+                },
+            )
         confirmed = await services.live_gate.confirm_activation(
             challenge_id=req.challenge_id,
             challenge_token=req.challenge_token,
-            operator_id=req.operator_id,
+            operator_id=current_user.user_id,
         )
         if not confirmed:
             raise HTTPException(
@@ -1041,7 +1492,7 @@ async def revoke_live_gate(
 
     async def _execute():
         await services.live_gate.revoke_live_mode(
-            operator_id=req.operator_id,
+            operator_id=current_user.user_id,
             reason=req.reason,
         )
         return {
@@ -1082,8 +1533,56 @@ async def get_strategy_config():
     return cfg.model_dump(mode="json")
 
 
+@app.post("/api/v1/strategies/mode")
+async def set_local_strategy_mode(
+    req: StrategyModeRequest,
+    request: Request,
+):
+    """Local workstation mode switch. It never arms the strategy system."""
+    services = get_services()
+    settings = services.settings
+    client_host = (
+        request.client.host.strip().lower()
+        if request.client and request.client.host
+        else ""
+    )
+    if not settings.local_single_user_mode:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Unauthenticated strategy mode switching is available only "
+                "when LOCAL_SINGLE_USER_MODE=true."
+            ),
+        )
+    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="LOCAL_SINGLE_USER_MODE accepts loopback requests only.",
+        )
+    if req.mode == AutoTradingMode.LIVE and not settings.live_trading_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Server LIVE capability is disabled by configuration.",
+        )
+
+    try:
+        updated = await services.strategy_svc.set_execution_mode(req.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {
+        "status": "SUCCESS",
+        "mode": updated.mode.value,
+        "system_armed": updated.system_armed,
+        "auto_trade_enabled": updated.auto_trade_enabled,
+        "config": updated.model_dump(mode="json"),
+    }
+
+
 @app.post("/api/v1/strategies/config")
-async def update_strategy_config(config_data: dict[str, Any]):
+async def update_strategy_config(
+    config_data: dict[str, Any],
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     try:
         cfg = AutoTradingConfig.model_validate(config_data)
@@ -1094,28 +1593,58 @@ async def update_strategy_config(config_data: dict[str, Any]):
 
 
 @app.post("/api/v1/strategies/arm")
-async def arm_strategy_system(req: StrategyArmRequest):
+async def arm_strategy_system(
+    req: StrategyArmRequest,
+    current_user: UserPrincipal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR)
+    ),
+):
     services = get_services()
+    current_config = await services.strategy_svc.get_config()
+    if req.armed and current_config.mode == AutoTradingMode.LIVE:
+        preflight = await get_live_preflight(current_user)
+        if preflight.get("readiness") != "READY_FOR_LIVE":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        "LIVE strategy arming blocked by current preflight"
+                    ),
+                    "readiness": preflight.get("readiness"),
+                    "blockers": preflight.get("blockers", []),
+                },
+            )
     updated = await services.strategy_svc.arm_system(req.armed)
-    return {"status": "SUCCESS", "config": updated.model_dump(mode="json")}
+    return {
+        "status": "SUCCESS",
+        "config": updated.model_dump(mode="json"),
+    }
 
 
 @app.post("/api/v1/strategies/auto-trade")
-async def set_strategy_auto_trade(req: StrategyAutoTradeRequest):
+async def set_strategy_auto_trade(
+    req: StrategyAutoTradeRequest,
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     updated = await services.strategy_svc.set_auto_trade(req.enabled)
     return {"status": "SUCCESS", "config": updated.model_dump(mode="json")}
 
 
 @app.post("/api/v1/strategies/kill-switch")
-async def toggle_strategy_kill_switch(req: StrategyKillSwitchRequest):
+async def toggle_strategy_kill_switch(
+    req: StrategyKillSwitchRequest,
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     updated = await services.strategy_svc.toggle_kill_switch(req.active)
     return {"status": "SUCCESS", "config": updated.model_dump(mode="json")}
 
 
 @app.post("/api/v1/strategies/evaluate-now")
-async def evaluate_strategy_now():
+async def evaluate_strategy_now(
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     result = await services.strategy_svc.evaluate_cycle()
     return {"status": "SUCCESS", "result": result}
@@ -1140,7 +1669,11 @@ async def get_strategy_eod_report(session_date: Optional[str] = Query(default=No
 
 
 @app.post("/api/v1/strategies/trades/{trade_id}/exit")
-async def exit_strategy_trade(trade_id: str, req: StrategyExitRequest = StrategyExitRequest()):
+async def exit_strategy_trade(
+    trade_id: str,
+    req: StrategyExitRequest = StrategyExitRequest(),
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     exited = await services.strategy_svc.manual_exit_trade(trade_id, reason=req.reason or "MANUAL_UI_EXIT")
     if not exited:
@@ -1163,7 +1696,10 @@ async def get_strategy_overrides():
 
 
 @app.post("/api/v1/strategies/overrides")
-async def update_strategy_overrides(req: StrategyOverridesRequest):
+async def update_strategy_overrides(
+    req: StrategyOverridesRequest,
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     overrides = ThresholdOverrides(**req.model_dump())
     updated = await services.strategy_svc.update_overrides(overrides)
@@ -1171,14 +1707,19 @@ async def update_strategy_overrides(req: StrategyOverridesRequest):
 
 
 @app.post("/api/v1/strategies/overrides/reset")
-async def reset_strategy_overrides():
+async def reset_strategy_overrides(
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     reset = await services.strategy_svc.reset_overrides()
     return {"status": "SUCCESS", "overrides": reset.model_dump(mode="json")}
 
 
 @app.post("/api/v1/strategies/force-entry")
-async def force_strategy_entry(req: StrategyForceEntryRequest):
+async def force_strategy_entry(
+    req: StrategyForceEntryRequest,
+    current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
     services = get_services()
     res = await services.strategy_svc.force_entry(
         strategy=req.strategy,

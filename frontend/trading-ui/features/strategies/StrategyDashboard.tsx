@@ -48,12 +48,38 @@ export const StrategyDashboard: React.FC = () => {
     refetchOnWindowFocus: true,
   });
 
+  const liveEligibleStrategies = status
+    ? Object.entries(status.strategies)
+        .filter(([, item]) => item.enabled && item.live_trading_allowed)
+        .map(([name]) => name)
+    : [];
+  const hasLiveEligibleStrategy = liveEligibleStrategies.length > 0;
+  const executionBroker =
+    status?.broker_routing?.execution_broker || "unknown";
+  const frequentDataBroker =
+    status?.broker_routing?.frequent_data_broker ||
+    status?.market_data?.provider ||
+    "unknown";
+  const referenceDataBroker =
+    status?.broker_routing?.reference_data_broker || "unknown";
+  const executionBrokerLabel =
+    executionBroker === "kite"
+      ? "Zerodha Kite"
+      : executionBroker === "breeze"
+        ? "ICICI Breeze"
+        : "the configured execution broker";
+
   const handleArmToggle = async () => {
     if (!status) return;
     const targetArmed = !status.config.system_armed;
     if (targetArmed && status.config.mode === "LIVE") {
-      const broker = status.market_data?.provider === "kite" ? "Zerodha Kite" : status.market_data?.provider === "breeze" ? "ICICI Breeze" : "the configured live broker";
-      if (!confirm(`WARNING: Arming the system in LIVE mode allows real ${broker} order routing. Are you sure?`)) {
+      if (!hasLiveEligibleStrategy) {
+        alert(
+          "No enabled strategy is promoted for LIVE execution. Platform LIVE mode does not override per-strategy execution policy.",
+        );
+        return;
+      }
+      if (!confirm(`WARNING: Arming allows LIVE routing only for explicitly promoted strategies via ${executionBrokerLabel}. Continue?`)) {
         return;
       }
     }
@@ -110,10 +136,12 @@ export const StrategyDashboard: React.FC = () => {
     }
   };
 
-  const handleModeChange = async (newMode: "PAPER" | "LIVE") => {
+  const handleModeChange = async (newMode: "PAPER" | "SHADOW_ONLY" | "LIVE") => {
     if (!status || status.config.mode === newMode) return;
     if (newMode === "LIVE") {
-      if (!confirm("Switching the production engine to LIVE mode. C and D remain paper-locked frozen candidates until explicit promotion. Ensure live broker credentials are valid.")) return;
+      if (!confirm(
+        "Request platform LIVE mode? This does NOT promote any strategy. Each strategy remains limited by its server execution policy, and arming stays unavailable until at least one enabled strategy is LIVE-promoted.",
+      )) return;
     }
     try {
       setActionLoading(true);
@@ -141,27 +169,83 @@ export const StrategyDashboard: React.FC = () => {
               NIFTY INTRADAY AUTO-TRADING STRATEGIES
             </h2>
             <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-              v1.0 • {(status?.market_data?.provider || "BROKER").toUpperCase()} {status?.market_data?.provider_active ? "CONNECTED" : "INACTIVE"}
+              v1.0 • DATA {frequentDataBroker.toUpperCase()} {status?.market_data?.provider_active ? "CONNECTED" : "INACTIVE"}
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            A/B production engine + frozen C/D paper candidates. Status refreshes every 1.5s; charts refresh candles every 3s and live quotes every 1s.
+            LIVE execution: {executionBrokerLabel}. Frequent data: {frequentDataBroker.toUpperCase()}. Reference data: {referenceDataBroker.toUpperCase()}. Platform mode remains separate from per-strategy execution authority.
           </p>
           <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] font-bold tracking-wider">
             <span className={`px-2 py-1 rounded border ${status?.scheduler?.running ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-rose-500/15 text-rose-300 border-rose-500/30"}`}>
               SCHEDULER {status?.scheduler?.running ? "RUNNING" : "STOPPED"} · {status?.scheduler?.evaluation_interval_seconds ?? "--"}s
             </span>
-            <span className="px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">A V3 · REV {status?.config.strategy_a_revision ?? 5}</span>
-            <span className="px-2 py-1 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">B · {status?.strategies?.volatility_breakout?.execution_mode ?? "PAPER"}</span>
-            <span className="px-2 py-1 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">C · PAPER LOCKED</span>
-            <span className="px-2 py-1 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">D · PAPER LOCKED</span>
+            <span
+              className={`px-2 py-1 rounded border ${
+                status?.market_data?.execution_feed_healthy
+                  ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                  : "bg-rose-500/15 text-rose-300 border-rose-500/30"
+              }`}
+              title={
+                status?.market_data?.execution_feed_reasons?.join("; ") ||
+                "Execution feed healthy"
+              }
+            >
+              ENTRY FEED {status?.market_data?.execution_feed_healthy ? "LIVE" : "BLOCKED"}
+            </span>
+            <span
+              className={`px-2 py-1 rounded border ${
+                status?.market_data?.strategy_a_signal_data_fresh
+                  ? "bg-cyan-500/15 text-cyan-300 border-cyan-500/30"
+                  : "bg-amber-500/15 text-amber-300 border-amber-500/30"
+              }`}
+              title={`Latest futures 15m age: ${
+                status?.market_data?.latest_futures_15m_candle_age_seconds ?? "--"
+              }s`}
+            >
+              A DATA {status?.market_data?.strategy_a_signal_data_fresh ? "FRESH" : "STALE"}
+            </span>
+            <span
+              className={`px-2 py-1 rounded border ${
+                status?.market_data?.strategy_b_signal_data_fresh
+                  ? "bg-cyan-500/15 text-cyan-300 border-cyan-500/30"
+                  : "bg-amber-500/15 text-amber-300 border-amber-500/30"
+              }`}
+              title={`Latest spot 5m age: ${
+                status?.market_data?.latest_spot_5m_candle_age_seconds ?? "--"
+              }s`}
+            >
+              B DATA {status?.market_data?.strategy_b_signal_data_fresh ? "FRESH" : "STALE"}
+            </span>
+            <span className="px-2 py-1 rounded bg-rose-500/10 text-rose-300 border border-rose-500/30">
+              EXEC · {executionBroker.toUpperCase()}
+            </span>
+            <span className="px-2 py-1 rounded bg-sky-500/10 text-sky-300 border border-sky-500/30">
+              FAST · {frequentDataBroker.toUpperCase()}
+            </span>
+            <span className="px-2 py-1 rounded bg-violet-500/10 text-violet-300 border border-violet-500/30">
+              REF · {referenceDataBroker.toUpperCase()}
+            </span>
+            <span className="px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+              A · {status?.strategies?.trend_pullback?.effective_call_mode ?? "--"}/{status?.strategies?.trend_pullback?.effective_put_mode ?? "--"}
+            </span>
+            <span className="px-2 py-1 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+              B · {status?.strategies?.volatility_breakout?.effective_call_mode ?? "--"}
+            </span>
+            <span className="px-2 py-1 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">
+              C · {status?.strategies?.di_continuation?.promotion_state ?? "LOCKED"}
+            </span>
+            <span className="px-2 py-1 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">
+              D · {status?.strategies?.sr_momentum_breakout?.promotion_state ?? "LOCKED"}
+            </span>
           </div>
         </div>
 
         {/* Master Action Buttons */}
         <div className="flex flex-wrap items-center gap-2.5">
-          {/* Mode Selector */}
-          <div className="bg-slate-900 border border-slate-800 rounded-lg p-0.5 flex items-center">
+          {/* Platform mode request — never overrides per-strategy policy */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-[9px] uppercase tracking-wider text-slate-500">Platform</span>
+            <div className="bg-slate-900 border border-slate-800 rounded-lg p-0.5 flex items-center">
             <button
               onClick={() => handleModeChange("PAPER")}
               disabled={actionLoading}
@@ -174,6 +258,17 @@ export const StrategyDashboard: React.FC = () => {
               PAPER
             </button>
             <button
+              onClick={() => handleModeChange("SHADOW_ONLY")}
+              disabled={actionLoading}
+              className={`px-3 py-1 rounded text-xs font-semibold transition-all ${
+                status?.config.mode === "SHADOW_ONLY"
+                  ? "bg-violet-600 text-white shadow"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              SHADOW
+            </button>
+            <button
               onClick={() => handleModeChange("LIVE")}
               disabled={actionLoading}
               className={`px-3 py-1 rounded text-xs font-semibold transition-all ${
@@ -184,12 +279,20 @@ export const StrategyDashboard: React.FC = () => {
             >
               LIVE
             </button>
+            </div>
           </div>
 
           {/* Arm System */}
           <button
             onClick={handleArmToggle}
-            disabled={actionLoading || status?.config.kill_switch || (status?.config.mode !== "LIVE" && !status?.config.system_armed)}
+            disabled={
+              actionLoading ||
+              status?.config.kill_switch ||
+              (status?.config.mode !== "LIVE" && !status?.config.system_armed) ||
+              (status?.config.mode === "LIVE" &&
+                !status?.config.system_armed &&
+                !hasLiveEligibleStrategy)
+            }
             className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
               status?.config.system_armed
                 ? "bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-900/30 animate-pulse"
@@ -204,7 +307,11 @@ export const StrategyDashboard: React.FC = () => {
             ) : (
               <>
                 <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                {status?.config.mode === "LIVE" ? "ARM SYSTEM" : "LIVE ARM N/A"}
+                {status?.config.mode === "LIVE"
+                  ? hasLiveEligibleStrategy
+                    ? "ARM PROMOTED STRATEGIES"
+                    : "NO STRATEGY PROMOTED"
+                  : "LIVE ARM N/A"}
               </>
             )}
           </button>

@@ -9,12 +9,47 @@ import logging
 import math
 import random
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from libs.contracts.models import Candle, Quote, utc_now
 from libs.events.bus import EventBus, EventEnvelope, Topics, get_event_bus
 from services.market_data.candle_builder import CandleBuilder
 
 logger = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _parse_exchange_quote_timestamp(value: Any) -> Optional[datetime]:
+    """Parse broker/exchange tick time without ever substituting local now."""
+    if isinstance(value, datetime):
+        parsed = value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=IST)
+        return parsed.astimezone(timezone.utc)
+    if value in (None, ""):
+        return None
+
+    text = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=IST)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        pass
+
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%d-%b-%Y %H:%M:%S",
+        "%d-%b-%Y %H:%M:%S.%f",
+    ):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=IST).astimezone(
+                timezone.utc
+            )
+        except ValueError:
+            continue
+    return None
 
 
 class MarketDataService:
@@ -76,27 +111,91 @@ class MarketDataService:
         )
 
     def _live_broker_active(self) -> bool:
-        """Return whether the configured market-data provider is active."""
+        """Return whether the frequent market-data provider is active."""
         if not self.broker_gateway:
             return False
-        provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
-        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
-        if provider == "kite":
-            return bool(active_adapter and getattr(active_adapter, "is_active", False))
-        breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
-        client_mgr = getattr(breeze_adapter, "client_manager", None)
+        provider = str(
+            getattr(
+                self.broker_gateway,
+                "frequent_data_broker_name",
+                "",
+            )
+            or ""
+        ).lower()
+        adapter = getattr(
+            self.broker_gateway,
+            "frequent_data_adapter",
+            None,
+        )
+        if provider not in {"breeze", "kite"}:
+            provider = str(
+                getattr(self.broker_gateway, "active_broker_name", "")
+                or ""
+            ).lower()
+            adapter = getattr(
+                self.broker_gateway,
+                "active_adapter",
+                adapter,
+            )
+        if provider not in {"breeze", "kite"}:
+            breeze = getattr(self.broker_gateway, "breeze_adapter", None)
+            breeze_client = getattr(breeze, "client_manager", None)
+            if breeze_client and getattr(breeze_client, "is_active", False):
+                provider = "breeze"
+                adapter = breeze
+            else:
+                kite = getattr(self.broker_gateway, "kite_adapter", None)
+                if kite and getattr(kite, "is_active", False):
+                    provider = "kite"
+                    adapter = kite
+        if (
+            provider in {"breeze", "kite"}
+            and hasattr(self.broker_gateway, "is_broker_active")
+        ):
+            return bool(self.broker_gateway.is_broker_active(provider))
         if provider == "breeze":
+            client_mgr = getattr(adapter, "client_manager", None)
             return bool(client_mgr and getattr(client_mgr, "is_active", False))
-        if active_adapter and getattr(active_adapter, "is_active", False):
-            return True
-        return bool(client_mgr and getattr(client_mgr, "is_active", False))
+        return bool(adapter and getattr(adapter, "is_active", False))
 
     async def sync_quotes_from_broker(self) -> bool:
-        """Fetch index quotes only from the configured provider."""
+        """Fetch high-frequency index quotes from the configured frequent provider."""
         if not self.broker_gateway:
             return False
-        provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower()
-        active_adapter = getattr(self.broker_gateway, "active_adapter", None)
+        provider = str(
+            getattr(
+                self.broker_gateway,
+                "frequent_data_broker_name",
+                "",
+            )
+            or ""
+        ).lower()
+        active_adapter = getattr(
+            self.broker_gateway,
+            "frequent_data_adapter",
+            None,
+        )
+        if provider not in {"breeze", "kite"}:
+            provider = str(
+                getattr(self.broker_gateway, "active_broker_name", "")
+                or ""
+            ).lower()
+            active_adapter = getattr(
+                self.broker_gateway,
+                "active_adapter",
+                active_adapter,
+            )
+        if provider not in {"breeze", "kite"}:
+            breeze = getattr(self.broker_gateway, "breeze_adapter", None)
+            breeze_client = getattr(breeze, "client_manager", None)
+            if breeze_client and getattr(breeze_client, "is_active", False):
+                provider = "breeze"
+                active_adapter = breeze
+            else:
+                kite = getattr(self.broker_gateway, "kite_adapter", None)
+                if kite and getattr(kite, "is_active", False):
+                    provider = "kite"
+                    active_adapter = kite
         if provider == "kite":
             if not active_adapter or not getattr(active_adapter, "is_active", False):
                 return False
@@ -112,13 +211,12 @@ class MarketDataService:
                 logger.warning("Kite live quote sync deferred: %s", exc)
                 return False
 
-        breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
+        breeze_adapter = active_adapter
         client_mgr = getattr(breeze_adapter, "client_manager", None)
-        if provider not in {"", "breeze"} or not client_mgr or not client_mgr.is_active:
+        if provider != "breeze" or not client_mgr or not client_mgr.is_active:
             return False
         try:
             sdk = client_mgr.get_sdk_client()
-            now = utc_now()
             synced_any = False
             for inst_id, symbol, code in [
                 ("INST-NIFTY-INDEX", "NIFTY 50", "NIFTY"),
@@ -132,15 +230,26 @@ class MarketDataService:
                 if rows and isinstance(rows, list):
                     row = rows[0]
                     lp = float(row.get("ltp") or 0.0)
-                    if lp > 0:
+                    exchange_timestamp = _parse_exchange_quote_timestamp(
+                        row.get("datetime")
+                        or row.get("quote_time")
+                        or row.get("ltt")
+                    )
+                    if lp > 0 and exchange_timestamp is not None:
                         await self.ingest_quote(Quote(
                             source="BREEZE", instrument_id=inst_id, symbol=symbol,
                             last_price=lp, open=float(row.get("open") or lp),
                             high=float(row.get("high") or lp), low=float(row.get("low") or lp),
                             close=lp, volume=int(row.get("total_quantity_traded") or 0),
-                            change_pct=float(row.get("ltp_percent_change") or 0.0), timestamp=now,
+                            change_pct=float(row.get("ltp_percent_change") or 0.0),
+                            timestamp=exchange_timestamp,
                         ))
                         synced_any = True
+                    elif lp > 0:
+                        logger.warning(
+                            "Breeze quote for %s omitted: broker timestamp missing/unparseable",
+                            inst_id,
+                        )
                 await asyncio.sleep(0.3)
             return synced_any
         except Exception as exc:
@@ -188,6 +297,63 @@ class MarketDataService:
                 seen.add(q.instrument_id)
                 unique_quotes.append(q)
         return unique_quotes
+
+    def get_execution_feed_health(
+        self,
+        instrument_ids: tuple[str, ...] = ("INST-NIFTY-INDEX",),
+        max_age_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Fail-closed health used by LIVE entry boundaries.
+
+        General UI feed freshness may consider any recent tick. Execution
+        health is stricter: the configured live broker must still be active
+        and every required instrument must have a recent real-provider quote.
+        """
+        broker_active = self._live_broker_active()
+        reasons: list[str] = []
+        quotes: dict[str, dict[str, Any]] = {}
+        now = utc_now()
+
+        if not broker_active:
+            reasons.append("BROKER_SESSION_INACTIVE")
+
+        for instrument_id in instrument_ids:
+            quote = self.get_latest_quote(instrument_id)
+            if quote is None:
+                reasons.append(f"MISSING_QUOTE:{instrument_id}")
+                continue
+
+            source = str(getattr(quote, "source", "UNKNOWN") or "UNKNOWN").upper()
+            raw_age_seconds = (now - quote.timestamp).total_seconds()
+            age_seconds = max(0.0, raw_age_seconds)
+            quotes[instrument_id] = {
+                "source": source,
+                "exchange_timestamp": quote.timestamp.isoformat(),
+                "age_seconds": round(age_seconds, 3),
+                "last_price": float(quote.last_price or 0.0),
+            }
+            if source not in {"BREEZE", "KITE", "LIVE"}:
+                reasons.append(f"NON_REAL_QUOTE:{instrument_id}:{source}")
+            if quote.last_price <= 0:
+                reasons.append(f"INVALID_QUOTE_PRICE:{instrument_id}")
+            if raw_age_seconds < -1.0:
+                reasons.append(
+                    f"FUTURE_EXCHANGE_TIMESTAMP:{instrument_id}:{raw_age_seconds:.3f}s"
+                )
+            if age_seconds > max_age_seconds:
+                reasons.append(
+                    f"STALE_EXCHANGE_QUOTE:{instrument_id}:{age_seconds:.3f}s"
+                )
+
+        return {
+            "healthy": not reasons,
+            "status": "LIVE" if not reasons else "BLOCKED",
+            "broker_active": broker_active,
+            "max_age_seconds": max_age_seconds,
+            "quotes": quotes,
+            "reasons": reasons,
+            "checked_at": now.isoformat(),
+        }
 
     def get_feed_status(self) -> dict[str, Any]:
         """Determine feed status: LIVE, STALE, or DOWN."""

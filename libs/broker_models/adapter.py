@@ -32,6 +32,7 @@ class BrokerOrderRequest(BaseModel):
     order_type: str  # limit, market
     quantity: int
     price: float
+    trigger_price: Optional[float] = None
     validity: str = "day"
     strike_price: Optional[float] = None
     right: Optional[str] = None  # call, put
@@ -117,6 +118,10 @@ class BrokerAdapter(Protocol):
 
     async def get_order_status(self, broker_order_id: str) -> Optional[BrokerOrderResponse]:
         """Query current status of an order."""
+        ...
+
+    async def find_order_by_client_id(self, client_order_id: str) -> Optional[BrokerOrderResponse]:
+        """Recover a broker order from the persisted client id/tag after an ambiguous submit."""
         ...
 
     async def get_positions(self) -> list[BrokerPositionResponse]:

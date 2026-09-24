@@ -1,9 +1,9 @@
 "use client";
 
 import React, { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDownRight, ArrowUpRight, Check, Send } from "lucide-react";
-import { createOrder } from "@/lib/api";
+import { createOrder, fetchSystemHealth } from "@/lib/api";
 import { useTradingStore } from "@/stores/useTradingStore";
 
 export function OrderTicket() {
@@ -11,6 +11,24 @@ export function OrderTicket() {
   const { orderDraft, setOrderDraft, tradingMode } = useTradingStore();
   const [lots, setLots] = useState(1);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const { data: health } = useQuery({
+    queryKey: ["system_health"],
+    queryFn: fetchSystemHealth,
+    refetchInterval: 5000,
+  });
+  const executionBroker =
+    health?.config?.live_execution_broker === "kite" ||
+    health?.config?.broker_backend === "kite"
+      ? "kite"
+      : "breeze";
+  const liveViaBreeze =
+    tradingMode === "LIVE" && executionBroker === "breeze";
+
+  React.useEffect(() => {
+    if (liveViaBreeze && orderDraft.order_type === "MARKET") {
+      setOrderDraft({ order_type: "LIMIT" });
+    }
+  }, [liveViaBreeze, orderDraft.order_type, setOrderDraft]);
 
   const mutation = useMutation({
     mutationFn: createOrder,
@@ -52,6 +70,9 @@ export function OrderTicket() {
         </span>
         <span className="font-mono text-slate-400 text-[10px]">
           Mode: <strong className="text-blue-400">{tradingMode}</strong>
+          {tradingMode === "LIVE" && (
+            <> · EXEC: <strong className="text-rose-400">{executionBroker.toUpperCase()}</strong></>
+          )}
         </span>
       </div>
 
@@ -107,7 +128,9 @@ export function OrderTicket() {
               className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 focus:outline-none"
             >
               <option value="LIMIT">LIMIT</option>
-              <option value="MARKET">MARKET</option>
+              <option value="MARKET" disabled={liveViaBreeze}>
+                MARKET{liveViaBreeze ? " (KITE ONLY IN LIVE)" : ""}
+              </option>
             </select>
           </div>
 
@@ -137,6 +160,13 @@ export function OrderTicket() {
             />
           </div>
         </div>
+
+        {tradingMode === "LIVE" && (
+          <div className="rounded border border-rose-900/50 bg-rose-950/20 p-2 text-[10px] text-rose-200">
+            LIVE orders are owned by {executionBroker === "kite" ? "Zerodha Kite" : "ICICI Breeze"}.
+            {liveViaBreeze ? " Breeze LIVE orders use LIMIT/SL-limit only." : ""}
+          </div>
+        )}
 
         {/* Feedback Alert */}
         {feedback && (

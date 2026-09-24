@@ -191,6 +191,37 @@ def test_request_mapper_conversion() -> None:
     assert params["strike_price"] == "52000"
 
 
+def test_request_mapper_stop_limit_uses_distinct_trigger_and_limit() -> None:
+    inst = BrokerInstrumentRef(
+        internal_instrument_id=uuid.uuid4(),
+        exchange=Exchange.NFO,
+        stock_code="NIFTY",
+        product_type=ProductType.OPTIONS,
+        expiry=date(2026, 9, 29),
+        strike=Decimal("25000"),
+        option_right=OptionRight.CALL,
+        stock_token=None,
+    )
+    req = BrokerOrderRequest(
+        request_id="REQ-PROTECT-1",
+        account_id="ACC-001",
+        instrument=inst,
+        side=OrderSide.SELL,
+        quantity=65,
+        order_style=OrderStyle.STOP_LIMIT,
+        limit_price=Decimal("67.50"),
+        stop_price=Decimal("75.00"),
+        validity=OrderValidity.DAY,
+        client_reference="PROTECT-1",
+    )
+
+    params = map_place_order_request(req)
+    assert params["order_type"] == "stoploss"
+    assert params["price"] == "67.50"
+    assert params["stoploss"] == "75.00"
+    assert params["action"] == "sell"
+
+
 def test_status_mapper() -> None:
     """Verify raw Breeze strings normalize to canonical platform OrderState."""
     assert normalize_breeze_order_status("Executed").value == "FILLED"

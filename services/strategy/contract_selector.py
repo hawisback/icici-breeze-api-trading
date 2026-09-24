@@ -77,6 +77,18 @@ class ContractSelector:
             return None, [], "NAIVE_SELECTION_TIMESTAMP"
         option_type = OptionType.CALL if direction is TradeDirection.BULLISH else OptionType.PUT
         leg_key = "call" if option_type is OptionType.CALL else "put"
+        capabilities = chain.get("capabilities")
+        if strategy_a and isinstance(capabilities, dict):
+            if capabilities.get("verified_delta_available") is False:
+                return (
+                    None,
+                    [],
+                    str(
+                        capabilities.get("strategy_a_rejection_reason")
+                        or "VERIFIED_OPTION_DELTA_UNAVAILABLE"
+                    ),
+                )
+
         strikes_data = chain.get("strikes", [])
         if not strikes_data:
             return None, [], "NO_STRIKES_IN_OPTION_CHAIN"
@@ -121,7 +133,9 @@ class ContractSelector:
                 "quote_timestamp": quote_timestamp.isoformat() if quote_timestamp else None,
                 "quote_freshness_seconds": freshness, "open_interest": int(leg.get("open_interest", 0) or 0),
                 "volume": int(leg.get("volume", 0) or 0), "lot_size": int(leg.get("lot_size", 0) or 0),
-                "instrument_id": leg.get("instrument_id"), "instrument_token": leg.get("instrument_token") or leg.get("token"),
+                "instrument_id": leg.get("instrument_id"),
+                "symbol": leg.get("symbol"),
+                "instrument_token": leg.get("instrument_token") or leg.get("token"),
                 "ltp": float(leg.get("ltp", 0) or 0),
             }
             info["status"] = "INSPECTED"
@@ -166,7 +180,8 @@ class ContractSelector:
             candidates.sort(key=lambda x: (-x["ask"], x["spread_pct"], -x["open_interest"], x["strike"], x["instrument_id"] or ""))
         best = candidates[0]
         selected = SelectedContract(
-            instrument_id=best["instrument_id"], symbol=f"NIFTY {best['strike']} {best['option_type']}",
+            instrument_id=best["instrument_id"],
+            symbol=str(best.get("symbol") or f"NIFTY{int(best['strike'])}{'CE' if best['option_type'] == 'CALL' else 'PE'}"),
             expiry=best["expiry"], strike=best["strike"], option_type=option_type,
             ask_price=best["ask"], bid_price=best["bid"], open_interest=best["open_interest"], volume=best["volume"],
             spread_pct=float(best["spread_pct"] or 0), lot_size=best["lot_size"], ltp=best["ltp"],

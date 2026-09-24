@@ -34,7 +34,11 @@ class LiveTradingGate:
         self.settings = settings or get_platform_settings()
         self.bus = event_bus or get_event_bus()
 
-        self._enabled: bool = self.settings.live_trading_enabled
+        self._configured_enabled: bool = self.settings.live_trading_enabled
+        self._local_single_user_mode: bool = bool(
+            self.settings.local_single_user_mode
+        )
+        self._authorized: bool = False
         self._expires_at: Optional[datetime] = None
         self._allowed_accounts: set[str] = set(self.settings.live_allowed_accounts)
         self._pending_challenges: dict[str, dict[str, Any]] = {}
@@ -44,9 +48,11 @@ class LiveTradingGate:
         active = self.is_live_active()
         return {
             "live_authorized": active,
-            "system_setting_enabled": self._enabled,
+            "system_setting_enabled": self._configured_enabled,
+            "local_single_user_mode": self._local_single_user_mode,
+            "authorization_required": not self._local_single_user_mode,
             "expires_at": self._expires_at.isoformat() if self._expires_at else None,
-            "allowed_accounts": list(self._allowed_accounts),
+            "allowed_account_count": len(self._allowed_accounts),
             "time_remaining_sec": max(
                 0, int((self._expires_at - utc_now()).total_seconds())
             )
@@ -55,8 +61,10 @@ class LiveTradingGate:
         }
 
     def is_live_active(self) -> bool:
-        """Check if LIVE mode is currently authorized and active window has not expired."""
-        if not self._enabled:
+        """Check whether the server currently permits LIVE broker execution."""
+        if self._local_single_user_mode:
+            return self._configured_enabled
+        if not self._configured_enabled or not self._authorized:
             return False
         if self._expires_at is None or utc_now() >= self._expires_at:
             if self._expires_at and utc_now() >= self._expires_at:
@@ -72,7 +80,12 @@ class LiveTradingGate:
         if self._allowed_accounts and account_id not in self._allowed_accounts:
             return False, f"Account '{account_id}' is not in the approved LIVE allowlist."
 
-        return True, "Authorized"
+        return (
+            True,
+            "Local single-user LIVE capability enabled"
+            if self._local_single_user_mode
+            else "Authorized",
+        )
 
     async def request_activation_challenge(
         self,
@@ -81,6 +94,14 @@ class LiveTradingGate:
         duration_minutes: int = 30,
     ) -> dict[str, Any]:
         """Step 1 of Two-Step Confirmation: Request an activation challenge code."""
+        if not self._configured_enabled:
+            raise PermissionError(
+                "LIVE_TRADING_ENABLED is false; server LIVE capability is disabled."
+            )
+        if account_id not in self._allowed_accounts:
+            raise PermissionError(
+                f"Account '{account_id}' is not in LIVE_ALLOWED_ACCOUNTS."
+            )
         challenge_id = f"CHAL-{uuid.uuid4().hex[:8].upper()}"
         challenge_token = f"CONFIRM-{uuid.uuid4().hex[:6].upper()}"
         expires_at = utc_now() + timedelta(minutes=5)  # Challenge valid for 5 mins
@@ -146,11 +167,17 @@ class LiveTradingGate:
             logger.warning("Operator mismatch for challenge %s", challenge_id)
             return False
 
-        # Activation confirmed!
+        if not self._configured_enabled:
+            logger.warning("LIVE activation rejected because server capability is disabled")
+            return False
+        if challenge["account_id"] not in self._allowed_accounts:
+            logger.warning("LIVE activation rejected because account is no longer allowlisted")
+            return False
+
+        # Activation confirmed within the immutable configured capability.
         duration = timedelta(minutes=challenge["duration_minutes"])
-        self._enabled = True
+        self._authorized = True
         self._expires_at = utc_now() + duration
-        self._allowed_accounts.add(challenge["account_id"])
         del self._pending_challenges[challenge_id]
 
         # Audit event
@@ -181,7 +208,7 @@ class LiveTradingGate:
         reason: str = "Operator manual revocation",
     ) -> None:
         """Emergency immediate revocation of LIVE authority."""
-        self._enabled = False
+        self._authorized = False
         self._expires_at = None
         self._pending_challenges.clear()
 

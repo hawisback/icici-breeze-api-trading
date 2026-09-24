@@ -59,6 +59,7 @@ class OMSRepository:
                     product TEXT NOT NULL,
                     time_in_force TEXT NOT NULL,
                     trading_mode TEXT NOT NULL,
+                    reduce_only INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 );
             """)
@@ -76,10 +77,12 @@ class OMSRepository:
                     filled_quantity INTEGER NOT NULL DEFAULT 0,
                     remaining_quantity INTEGER NOT NULL,
                     price REAL NOT NULL,
+                    trigger_price REAL,
                     average_price REAL NOT NULL DEFAULT 0.0,
                     status TEXT NOT NULL,
                     status_message TEXT,
                     trading_mode TEXT NOT NULL,
+                    reduce_only INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (intent_id) REFERENCES order_intents(intent_id)
@@ -97,6 +100,17 @@ class OMSRepository:
                     FOREIGN KEY (order_id) REFERENCES broker_orders(order_id)
                 );
             """)
+            intent_columns = {row["name"] for row in await (await conn.execute("PRAGMA table_info(order_intents)")).fetchall()}
+            if "reduce_only" not in intent_columns:
+                await conn.execute("ALTER TABLE order_intents ADD COLUMN reduce_only INTEGER NOT NULL DEFAULT 0")
+            if "trigger_price" not in intent_columns:
+                await conn.execute("ALTER TABLE order_intents ADD COLUMN trigger_price REAL")
+            order_columns = {row["name"] for row in await (await conn.execute("PRAGMA table_info(broker_orders)")).fetchall()}
+            if "reduce_only" not in order_columns:
+                await conn.execute("ALTER TABLE broker_orders ADD COLUMN reduce_only INTEGER NOT NULL DEFAULT 0")
+            if "trigger_price" not in order_columns:
+                await conn.execute("ALTER TABLE broker_orders ADD COLUMN trigger_price REAL")
+
             # Indexes
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_order_intents_time ON order_intents(created_at);")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON broker_orders(status);")
@@ -113,8 +127,8 @@ class OMSRepository:
                 INSERT INTO order_intents (
                     intent_id, correlation_id, strategy_instance_id, source,
                     instrument_id, symbol, side, order_type, quantity, price,
-                    trigger_price, product, time_in_force, trading_mode, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    trigger_price, product, time_in_force, trading_mode, reduce_only, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     intent.intent_id,
@@ -131,6 +145,7 @@ class OMSRepository:
                     intent.product.value,
                     intent.time_in_force.value,
                     intent.trading_mode.value,
+                    1 if intent.reduce_only else 0,
                     intent.created_at.isoformat(),
                 ),
             )
@@ -160,16 +175,18 @@ class OMSRepository:
                 INSERT INTO broker_orders (
                     order_id, intent_id, client_order_id, broker_order_id,
                     instrument_id, symbol, side, order_type, quantity,
-                    filled_quantity, remaining_quantity, price, average_price,
-                    status, status_message, trading_mode, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    filled_quantity, remaining_quantity, price, trigger_price, average_price,
+                    status, status_message, trading_mode, reduce_only, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(order_id) DO UPDATE SET
                     broker_order_id = excluded.broker_order_id,
                     filled_quantity = excluded.filled_quantity,
                     remaining_quantity = excluded.remaining_quantity,
+                    trigger_price = excluded.trigger_price,
                     average_price = excluded.average_price,
                     status = excluded.status,
                     status_message = excluded.status_message,
+                    reduce_only = excluded.reduce_only,
                     updated_at = excluded.updated_at;
                 """,
                 (
@@ -185,10 +202,12 @@ class OMSRepository:
                     order.filled_quantity,
                     order.remaining_quantity,
                     order.price,
+                    order.trigger_price,
                     order.average_price,
                     to_state.value,
                     order.status_message,
                     order.trading_mode.value,
+                    1 if order.reduce_only else 0,
                     order.created_at.isoformat(),
                     now.isoformat(),
                 ),
@@ -274,10 +293,12 @@ class OMSRepository:
             filled_quantity=row["filled_quantity"],
             remaining_quantity=row["remaining_quantity"],
             price=row["price"],
+            trigger_price=row["trigger_price"],
             average_price=row["average_price"],
             status=OrderState(row["status"]),
             status_message=row["status_message"],
             trading_mode=TradingMode(row["trading_mode"]),
+            reduce_only=bool(row["reduce_only"]),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )

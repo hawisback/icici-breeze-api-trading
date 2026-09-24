@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import jwt
 
@@ -20,9 +20,29 @@ security_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Security(security_scheme),
 ) -> UserPrincipal:
-    """Extract and validate JWT Bearer access token."""
+    """Resolve local single-user identity or validate a JWT Bearer token."""
+    services = get_services()
+    if services.settings.local_single_user_mode:
+        client_host = (
+            request.client.host.strip().lower()
+            if request.client and request.client.host
+            else ""
+        )
+        if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="LOCAL_SINGLE_USER_MODE accepts loopback requests only.",
+            )
+        return UserPrincipal(
+            user_id="LOCAL-SINGLE-USER",
+            username="local",
+            role=UserRole.ADMIN,
+            is_active=True,
+        )
+
     if not credentials or not credentials.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -30,7 +50,6 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    services = get_services()
     token = credentials.credentials
 
     try:

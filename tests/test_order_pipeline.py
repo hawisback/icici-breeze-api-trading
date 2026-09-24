@@ -76,6 +76,7 @@ async def platform(tmp_path):
         "oms_repo": oms_repo,
     }
 
+    await exec_svc.stop()
     await event_bus.stop()
 
 

@@ -4,6 +4,143 @@
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
+export interface AuthUser {
+  user_id: string;
+  username: string;
+  role: "ADMIN" | "OPERATOR" | "TRADER" | "READ_ONLY";
+  is_active: boolean;
+}
+
+export interface AuthSession {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+  user: AuthUser;
+}
+
+const AUTH_SESSION_KEY = "trading_operator_session";
+
+export function getStoredAuthSession(): AuthSession | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.sessionStorage.getItem(AUTH_SESSION_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as AuthSession;
+  } catch {
+    window.sessionStorage.removeItem(AUTH_SESSION_KEY);
+    return null;
+  }
+}
+
+export function clearStoredAuthSession(): void {
+  if (typeof window !== "undefined") {
+    window.sessionStorage.removeItem(AUTH_SESSION_KEY);
+  }
+}
+
+function storeAuthSession(session: AuthSession): void {
+  if (typeof window !== "undefined") {
+    window.sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(session));
+  }
+}
+
+export async function loginUser(
+  username: string,
+  password: string,
+): Promise<AuthSession> {
+  const res = await fetch(`${API_BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) {
+    throw new Error("Invalid username or password");
+  }
+  const session = (await res.json()) as AuthSession;
+  storeAuthSession(session);
+  return session;
+}
+
+export async function logoutUser(): Promise<void> {
+  const session = getStoredAuthSession();
+  try {
+    if (session?.refresh_token) {
+      await fetch(`${API_BASE}/auth/logout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: session.refresh_token }),
+      });
+    }
+  } finally {
+    clearStoredAuthSession();
+  }
+}
+
+async function refreshAuthSession(session: AuthSession): Promise<AuthSession | null> {
+  const res = await fetch(`${API_BASE}/auth/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: session.refresh_token }),
+  });
+  if (!res.ok) {
+    clearStoredAuthSession();
+    return null;
+  }
+  const refreshed = (await res.json()) as AuthSession;
+  storeAuthSession(refreshed);
+  return refreshed;
+}
+
+async function authenticatedFetch(
+  input: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  let session = getStoredAuthSession();
+  if (!session?.access_token) {
+    const res = await fetch(input, init);
+    if (res.status === 401) {
+      throw new Error("Operator authentication required");
+    }
+    return res;
+  }
+
+  const execute = (accessToken: string) =>
+    fetch(input, {
+      ...init,
+      headers: {
+        ...(init.headers || {}),
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+  let res = await execute(session.access_token);
+  if (res.status !== 401) return res;
+
+  session = await refreshAuthSession(session);
+  if (!session) {
+    throw new Error("Operator session expired; sign in again");
+  }
+  res = await execute(session.access_token);
+  return res;
+}
+
+export interface LiveGateStatus {
+  live_authorized: boolean;
+  system_setting_enabled: boolean;
+  local_single_user_mode?: boolean;
+  authorization_required?: boolean;
+  expires_at: string | null;
+  allowed_account_count: number;
+  time_remaining_sec: number;
+}
+
+export interface LiveGateChallenge {
+  challenge_id: string;
+  challenge_token: string;
+  expires_in_seconds: number;
+  message?: string;
+}
+
 export interface SystemHealth {
   status: string;
   timestamp: string;
@@ -17,8 +154,17 @@ export interface SystemHealth {
     portfolio: string;
     system_mode: string;
   };
+  broker_sessions?: {
+    breeze?: string;
+    kite?: string;
+  };
   config?: {
     broker_backend?: "breeze" | "kite";
+    live_execution_broker?: "breeze" | "kite";
+    frequent_data_broker?: "breeze" | "kite";
+    reference_data_broker?: "breeze" | "kite";
+    local_single_user_mode?: boolean;
+    live_trading_enabled?: boolean;
     [key: string]: unknown;
   };
 }
@@ -91,7 +237,9 @@ export interface OrderData {
   instrument_id: string;
   symbol: string;
   side: "BUY" | "SELL";
-  order_type: "LIMIT" | "MARKET";
+  order_type: "LIMIT" | "MARKET" | "STOP_LIMIT";
+  trigger_price?: number | null;
+  reduce_only?: boolean;
   quantity: number;
   filled_quantity: number;
   remaining_quantity: number;
@@ -196,7 +344,7 @@ export async function createOrder(order: {
   price: number;
   trading_mode: "PAPER" | "SHADOW" | "LIVE";
 }): Promise<OrderData> {
-  const res = await fetch(`${API_BASE}/orders`, {
+  const res = await authenticatedFetch(`${API_BASE}/orders`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(order),
@@ -227,7 +375,7 @@ export async function fetchAuditLogs(): Promise<AuditLogData[]> {
 }
 
 export async function triggerKillSwitch(action: string, reason: string): Promise<any> {
-  const res = await fetch(`${API_BASE}/risk/kill-switch`, {
+  const res = await authenticatedFetch(`${API_BASE}/risk/kill-switch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, reason }),
@@ -236,8 +384,88 @@ export async function triggerKillSwitch(action: string, reason: string): Promise
   return res.json();
 }
 
+export async function fetchLiveGateStatus(): Promise<LiveGateStatus> {
+  const res = await fetch(`${API_BASE}/live-gate/status`);
+  if (!res.ok) throw new Error("Failed to fetch LIVE authorization status");
+  return res.json();
+}
+
+export async function requestLiveGateChallenge(
+  durationMinutes: number = 30,
+): Promise<LiveGateChallenge> {
+  const session = getStoredAuthSession();
+  const res = await authenticatedFetch(`${API_BASE}/live-gate/challenge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      operator_id: session?.user.user_id || "AUTHENTICATED_USER",
+      account_id: "SERVER_SELECTED",
+      duration_minutes: durationMinutes,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to request LIVE challenge");
+  }
+  return res.json();
+}
+
+export async function confirmLiveGate(
+  challengeId: string,
+  challengeToken: string,
+): Promise<any> {
+  const session = getStoredAuthSession();
+  const idempotencyKey =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `live-confirm-${Date.now()}`;
+  const res = await authenticatedFetch(`${API_BASE}/live-gate/confirm`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": idempotencyKey,
+    },
+    body: JSON.stringify({
+      challenge_id: challengeId,
+      challenge_token: challengeToken,
+      operator_id: session?.user.user_id || "AUTHENTICATED_USER",
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to confirm LIVE authorization");
+  }
+  return res.json();
+}
+
+export async function revokeLiveGate(
+  reason: string = "Operator manual revocation",
+): Promise<any> {
+  const session = getStoredAuthSession();
+  const idempotencyKey =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `live-revoke-${Date.now()}`;
+  const res = await authenticatedFetch(`${API_BASE}/live-gate/revoke`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": idempotencyKey,
+    },
+    body: JSON.stringify({
+      operator_id: session?.user.user_id || "AUTHENTICATED_USER",
+      reason,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to revoke LIVE authorization");
+  }
+  return res.json();
+}
+
 export async function setSystemMode(mode: string): Promise<any> {
-  const res = await fetch(`${API_BASE}/risk/system-mode`, {
+  const res = await authenticatedFetch(`${API_BASE}/risk/system-mode`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mode }),
@@ -246,21 +474,68 @@ export async function setSystemMode(mode: string): Promise<any> {
   return res.json();
 }
 
-export async function fetchLoginUrl(): Promise<{ login_url: string; api_key: string; broker?: "breeze" | "kite" }> {
-  const res = await fetch(`${API_BASE}/broker/session/login-url`);
+export async function fetchLoginUrl(
+  broker?: "breeze" | "kite",
+): Promise<{
+  login_url: string;
+  api_key: string;
+  broker?: "breeze" | "kite";
+  callback_state: string;
+  state_expires_at?: string;
+}> {
+  const suffix = broker ? `?broker=${broker}` : "";
+  const res = await authenticatedFetch(
+    `${API_BASE}/broker/session/login-url${suffix}`,
+  );
   if (!res.ok) throw new Error("Failed to fetch login URL");
   return res.json();
+}
+
+export async function activateBrokerSessionCallback(
+  tokenParam: "apisession" | "request_token",
+  token: string,
+  state: string,
+): Promise<any> {
+  const params = new URLSearchParams({
+    [tokenParam]: token,
+    state,
+  });
+  const res = await authenticatedFetch(
+    `${API_BASE}/broker/session/callback?${params.toString()}`,
+    { headers: { Accept: "application/json" } },
+  );
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.message || "Failed to authenticate broker session");
+  }
+  return data;
 }
 
 // ==============================================================================
 // Auto-Trading Strategy API
 // ==============================================================================
 
+export interface StrategyExecutionPolicyData {
+  policy_version: string;
+  strategy: string;
+  call_mode: "PAPER" | "SHADOW_ONLY" | "LIVE" | "DISABLED";
+  put_mode: "PAPER" | "SHADOW_ONLY" | "LIVE" | "DISABLED";
+  live_trading_allowed: boolean;
+  promotion_state: string;
+  live_block_reason: string;
+  force_entry_allowed: boolean;
+}
+
 export interface StrategyFleetStatusData {
   enabled: boolean;
   label?: string;
   state: string;
   execution_mode?: string;
+  effective_call_mode?: string;
+  effective_put_mode?: string;
+  promotion_state?: string;
+  live_block_reason?: string;
+  force_entry_allowed?: boolean;
   live_trading_allowed?: boolean;
   candidate_id?: string | null;
   candidate_spec_fingerprint?: string | null;
@@ -269,6 +544,9 @@ export interface StrategyFleetStatusData {
   paper_net_pnl?: number;
   current_r?: number | null;
   current_trailing_stop?: number | null;
+  broker_protective_stop_status?: string | null;
+  broker_protective_stop_trigger?: number | null;
+  broker_protective_stop_limit?: number | null;
   active_trade_id?: string | null;
 }
 
@@ -293,6 +571,12 @@ export interface CandidatePaperStatusData {
 }
 
 export interface StrategyStatusData {
+  broker_routing?: {
+    execution_broker: "breeze" | "kite" | "unknown";
+    frequent_data_broker: "breeze" | "kite" | "unknown";
+    reference_data_broker: "breeze" | "kite" | "unknown";
+  };
+  execution_policy?: Record<string, StrategyExecutionPolicyData>;
   scheduler?: {
     running: boolean;
     task_done?: boolean | null;
@@ -308,6 +592,19 @@ export interface StrategyStatusData {
     futures_instrument?: string | null;
     futures_candle_count: number;
     latest_futures_candle?: string | null;
+    option_chain_source?: string | null;
+    option_chain_captured_at?: string | null;
+    strategy_a_option_execution_ready?: boolean;
+    strategy_a_option_execution_reason?: string | null;
+    execution_feed_healthy?: boolean;
+    execution_feed_status?: string | null;
+    execution_feed_reasons?: string[];
+    execution_feed_checked_at?: string | null;
+    execution_feed_max_age_seconds?: number | null;
+    latest_spot_5m_candle_age_seconds?: number | null;
+    latest_futures_15m_candle_age_seconds?: number | null;
+    strategy_a_signal_data_fresh?: boolean;
+    strategy_b_signal_data_fresh?: boolean;
     last_error?: string | null;
     last_evaluation_time?: string | null;
   };
@@ -685,8 +982,33 @@ export async function fetchStrategyConfig(): Promise<any> {
   return res.json();
 }
 
+export async function setLocalStrategyMode(
+  mode: "PAPER" | "SHADOW_ONLY" | "LIVE",
+): Promise<{
+  status: string;
+  mode: "PAPER" | "SHADOW_ONLY" | "LIVE";
+  system_armed: boolean;
+  auto_trade_enabled: boolean;
+  config: StrategyStatusData["config"];
+}> {
+  const res = await fetch(`${API_BASE}/strategies/mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof data.detail === "string"
+        ? data.detail
+        : "Failed to switch trading mode",
+    );
+  }
+  return data;
+}
+
 export async function updateStrategyConfig(config: any): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/config`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/config`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
@@ -702,7 +1024,7 @@ export async function updateStrategyConfig(config: any): Promise<any> {
 }
 
 export async function armStrategySystem(armed: boolean): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/arm`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/arm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ armed }),
@@ -712,7 +1034,7 @@ export async function armStrategySystem(armed: boolean): Promise<any> {
 }
 
 export async function setStrategyAutoTrade(enabled: boolean): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/auto-trade`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/auto-trade`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled }),
@@ -722,7 +1044,7 @@ export async function setStrategyAutoTrade(enabled: boolean): Promise<any> {
 }
 
 export async function toggleStrategyKillSwitch(active: boolean): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/kill-switch`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/kill-switch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ active }),
@@ -732,7 +1054,7 @@ export async function toggleStrategyKillSwitch(active: boolean): Promise<any> {
 }
 
 export async function evaluateStrategyNow(): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/evaluate-now`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/evaluate-now`, {
     method: "POST",
   });
   if (!res.ok) throw new Error("Failed to evaluate strategy");
@@ -752,7 +1074,7 @@ export async function fetchStrategyTrades(limit: number = 50): Promise<AutoTrade
 }
 
 export async function exitStrategyTrade(tradeId: string, reason: string = "MANUAL_UI_EXIT"): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/trades/${tradeId}/exit`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/trades/${tradeId}/exit`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ reason }),
@@ -774,7 +1096,7 @@ export async function fetchThresholdOverrides(): Promise<ThresholdOverridesData>
 }
 
 export async function updateThresholdOverrides(overrides: Partial<ThresholdOverridesData>): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/overrides`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/overrides`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(overrides),
@@ -784,7 +1106,7 @@ export async function updateThresholdOverrides(overrides: Partial<ThresholdOverr
 }
 
 export async function resetThresholdOverrides(): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/overrides/reset`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/overrides/reset`, {
     method: "POST",
   });
   if (!res.ok) throw new Error("Failed to reset threshold overrides");
@@ -797,7 +1119,7 @@ export async function forceStrategyEntry(payload: {
   option_type?: "CALL" | "PUT";
   override_premium_cap?: number;
 }): Promise<any> {
-  const res = await fetch(`${API_BASE}/strategies/force-entry`, {
+  const res = await authenticatedFetch(`${API_BASE}/strategies/force-entry`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -907,18 +1229,58 @@ export async function runStrategySimulation(req: SimulationRequestData = {}): Pr
   return res.json();
 }
 
+const simulationDatesCache = new Map<
+  "BREEZE" | "KITE",
+  { expiresAt: number; dates: string[] }
+>();
+const simulationDatesInFlight = new Map<
+  "BREEZE" | "KITE",
+  Promise<string[]>
+>();
+const SIMULATION_DATES_CACHE_MS = 60_000;
+
 export async function fetchSimulationAvailableDates(
   historicalSource: "BREEZE" | "KITE" = "BREEZE",
 ): Promise<string[]> {
-  const res = await fetch(
-    `${API_BASE}/strategies/simulate/available-dates?historical_source=${historicalSource}`,
-  );
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const detail = typeof err?.detail === "string" ? err.detail : "";
-    const developmentDetail = process.env.NODE_ENV === "development" && detail ? `: ${detail}` : "";
-    throw new Error(`Failed to fetch available simulation dates (${res.status})${developmentDetail}`);
+  const now = Date.now();
+  const cached = simulationDatesCache.get(historicalSource);
+  if (cached && cached.expiresAt > now) {
+    return cached.dates;
   }
-  const data = await res.json();
-  return data.dates || [];
+
+  const inFlight = simulationDatesInFlight.get(historicalSource);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const request = (async () => {
+    const res = await fetch(
+      `${API_BASE}/strategies/simulate/available-dates?historical_source=${historicalSource}`,
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const detail = typeof err?.detail === "string" ? err.detail : "";
+      const developmentDetail =
+        process.env.NODE_ENV === "development" && detail
+          ? `: ${detail}`
+          : "";
+      throw new Error(
+        `Failed to fetch available simulation dates (${res.status})${developmentDetail}`,
+      );
+    }
+    const data = await res.json();
+    const dates = Array.isArray(data.dates) ? data.dates : [];
+    simulationDatesCache.set(historicalSource, {
+      expiresAt: Date.now() + SIMULATION_DATES_CACHE_MS,
+      dates,
+    });
+    return dates;
+  })();
+
+  simulationDatesInFlight.set(historicalSource, request);
+  try {
+    return await request;
+  } finally {
+    simulationDatesInFlight.delete(historicalSource);
+  }
 }

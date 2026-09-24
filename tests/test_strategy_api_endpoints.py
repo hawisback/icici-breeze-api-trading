@@ -31,6 +31,18 @@ async def test_strategy_api_endpoints():
         cfg = res.json()
         assert "option_selection" in cfg and "max_option_premium" in cfg["option_selection"]
 
+        # Mutating strategy controls are operator-only.
+        unauth = await client.post("/api/v1/strategies/arm", json={"armed": True})
+        assert unauth.status_code == 401
+        login = await client.post(
+            "/api/v1/auth/login",
+            json={"username": "operator", "password": "Operator@Trading123!"},
+        )
+        assert login.status_code == 200
+        client.headers.update(
+            {"Authorization": f"Bearer {login.json()['access_token']}"}
+        )
+
         # 3. POST /api/v1/strategies/config
         cfg["option_selection"]["max_option_premium"] = 65.0
         res = await client.post("/api/v1/strategies/config", json=cfg)
@@ -230,4 +242,59 @@ async def test_strategy_api_endpoints():
     # Teardown
     await container.strategy_svc.stop()
 
+
+@pytest.mark.asyncio
+async def test_local_mode_switch_is_no_login_and_stays_disarmed(tmp_path):
+    from libs.config.settings import PlatformSettings
+
+    settings = PlatformSettings(
+        data_root=str(tmp_path),
+        api_host="127.0.0.1",
+        local_single_user_mode=True,
+        live_trading_enabled=True,
+        live_allowed_accounts=["ICICI_PRIMARY"],
+        auth_signing_key="local-mode-test-signing-key-32-bytes-minimum",
+        market_data_backend="breeze",
+        breeze_api_key="test-live-key",
+        breeze_secret_key="test-live-secret",
+    )
+    container = await initialize_services(
+        settings=settings,
+        force_reinit=True,
+    )
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://127.0.0.1",
+    ) as client:
+        live = await client.post(
+            "/api/v1/strategies/mode",
+            json={"mode": "LIVE"},
+        )
+        assert live.status_code == 200
+        assert live.json()["mode"] == "LIVE"
+        assert live.json()["system_armed"] is False
+
+        shadow = await client.post(
+            "/api/v1/strategies/mode",
+            json={"mode": "SHADOW_ONLY"},
+        )
+        assert shadow.status_code == 200
+        assert shadow.json()["mode"] == "SHADOW_ONLY"
+        assert shadow.json()["system_armed"] is False
+
+        # Other operator controls also resolve the synthetic local principal.
+        auto = await client.post(
+            "/api/v1/strategies/auto-trade",
+            json={"enabled": False},
+        )
+        assert auto.status_code == 200
+
+    await container.strategy_svc.stop()
+    await container.exec_svc.stop()
+    await container.risk_svc.stop()
+    await container.market_svc.stop_simulated_feed()
+    await container.oms_svc.stop_outbox_worker()
+    await container.event_bus.stop()
 
