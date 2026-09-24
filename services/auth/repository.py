@@ -100,7 +100,10 @@ class AuthRepository:
         if count > 0:
             if (
                 self.settings.app_env == AppEnv.PRODUCTION
-                or self.settings.live_trading_enabled
+                or (
+                    self.settings.live_trading_enabled
+                    and not self.settings.local_single_user_mode
+                )
             ):
                 known_defaults = {
                     "admin": "Admin@Trading123!",
@@ -129,6 +132,13 @@ class AuthRepository:
                         "bootstrap passwords are still active for: "
                         + ", ".join(sorted(compromised))
                     )
+            return
+
+        if self.settings.local_single_user_mode:
+            logger.info(
+                "LOCAL_SINGLE_USER_MODE enabled; auth.db may remain empty "
+                "because loopback requests use the synthetic local principal."
+            )
             return
 
         if (
