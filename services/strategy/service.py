@@ -1195,14 +1195,20 @@ class StrategyService:
                 new_protective_filled - trade.protective_stop_filled_quantity,
             )
             if delta_fill:
-                fill_price = float(
+                cumulative_average = float(
                     protective.average_price
                     or trade.protective_stop_limit_price
                     or trade.option_hard_stop_price
                 )
-                trade.exit_proceeds += fill_price * delta_fill
+                new_order_proceeds = cumulative_average * new_protective_filled
+                delta_proceeds = max(
+                    0.0,
+                    new_order_proceeds - trade.protective_stop_filled_proceeds,
+                )
+                trade.exit_proceeds += delta_proceeds
                 trade.exit_filled_quantity += delta_fill
                 trade.protective_stop_filled_quantity = new_protective_filled
+                trade.protective_stop_filled_proceeds = new_order_proceeds
 
             if status == "FILLED" or trade.exit_filled_quantity >= trade.quantity:
                 trade.protective_stop_status = "FILLED"
@@ -1233,6 +1239,7 @@ class StrategyService:
                 cancelled_for_exit = trade.protective_stop_cancel_for_exit
                 trade.protective_stop_order_id = None
                 trade.protective_stop_filled_quantity = 0
+                trade.protective_stop_filled_proceeds = 0.0
                 trade.protective_stop_cancel_for_exit = False
                 await self.repo.save_trade(trade)
                 return cancelled_for_exit
@@ -1267,6 +1274,7 @@ class StrategyService:
         order = await self.oms.create_order_intent(intent)
         trade.protective_stop_order_id = order.order_id
         trade.protective_stop_filled_quantity = 0
+        trade.protective_stop_filled_proceeds = 0.0
         trade.protective_stop_status = order.status.value
         trade.protective_stop_trigger_price = trigger_price
         trade.protective_stop_limit_price = limit_price
