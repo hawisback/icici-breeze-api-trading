@@ -2689,9 +2689,22 @@ class StrategyService:
             self._last_strategy_d_paper_status.get("active_paper_trade")
             or {}
         )
+        policy_a = self._execution_policy_for_strategy(
+            StrategyName.TREND_PULLBACK
+        )
+        policy_b = self._execution_policy_for_strategy(
+            StrategyName.VOLATILITY_BREAKOUT
+        )
+        policy_c = self._execution_policy_for_strategy(
+            StrategyName.DI_CONTINUATION
+        )
+        policy_d = self._execution_policy_for_strategy(
+            StrategyName.SR_MOMENTUM_BREAKOUT
+        )
 
         return {
             "config": self.config.model_dump(mode="json"),
+            "execution_policy": self._execution_policy_matrix(),
             "scheduler": {
                 "running": bool(self._is_running and self._loop_task and not self._loop_task.done()),
                 "task_done": bool(self._loop_task.done()) if self._loop_task else None,
@@ -2730,7 +2743,12 @@ class StrategyService:
                         if strategy_a_trade is not None
                         else "PAPER/SHADOW_VALIDATION"
                     ),
-                    "live_trading_allowed": False,
+                    "effective_call_mode": policy_a.call_mode.value,
+                    "effective_put_mode": policy_a.put_mode.value,
+                    "promotion_state": policy_a.promotion_state,
+                    "live_block_reason": policy_a.live_block_reason,
+                    "force_entry_allowed": policy_a.force_entry_allowed,
+                    "live_trading_allowed": policy_a.live_trading_allowed,
                     "current_r": (
                         strategy_a_trade.current_r
                         if strategy_a_trade is not None
@@ -2773,13 +2791,14 @@ class StrategyService:
                     "execution_mode": (
                         strategy_b_trade.mode.value
                         if strategy_b_trade is not None
-                        else (
-                            "SHADOW_ONLY"
-                            if self.config.mode == AutoTradingMode.LIVE
-                            else self.config.mode.value
-                        )
+                        else policy_b.call_mode.value
                     ),
-                    "live_trading_allowed": False,
+                    "effective_call_mode": policy_b.call_mode.value,
+                    "effective_put_mode": policy_b.put_mode.value,
+                    "promotion_state": policy_b.promotion_state,
+                    "live_block_reason": policy_b.live_block_reason,
+                    "force_entry_allowed": policy_b.force_entry_allowed,
+                    "live_trading_allowed": policy_b.live_trading_allowed,
                     "current_r": (
                         strategy_b_trade.current_r
                         if strategy_b_trade is not None
@@ -2818,8 +2837,13 @@ class StrategyService:
                         self._last_strategy_c_shadow_status.get("status")
                         or "NOT_INITIALIZED"
                     ),
-                    "execution_mode": AutoTradingMode.PAPER.value,
-                    "live_trading_allowed": False,
+                    "execution_mode": policy_c.call_mode.value,
+                    "effective_call_mode": policy_c.call_mode.value,
+                    "effective_put_mode": policy_c.put_mode.value,
+                    "promotion_state": policy_c.promotion_state,
+                    "live_block_reason": policy_c.live_block_reason,
+                    "force_entry_allowed": policy_c.force_entry_allowed,
+                    "live_trading_allowed": policy_c.live_trading_allowed,
                     "candidate_id": self._last_strategy_c_shadow_status.get(
                         "candidate_id"
                     ),
@@ -2851,8 +2875,13 @@ class StrategyService:
                         self._last_strategy_d_paper_status.get("status")
                         or "NOT_INITIALIZED"
                     ),
-                    "execution_mode": AutoTradingMode.PAPER.value,
-                    "live_trading_allowed": False,
+                    "execution_mode": policy_d.call_mode.value,
+                    "effective_call_mode": policy_d.call_mode.value,
+                    "effective_put_mode": policy_d.put_mode.value,
+                    "promotion_state": policy_d.promotion_state,
+                    "live_block_reason": policy_d.live_block_reason,
+                    "force_entry_allowed": policy_d.force_entry_allowed,
+                    "live_trading_allowed": policy_d.live_trading_allowed,
                     "candidate_id": self._last_strategy_d_paper_status.get(
                         "candidate_id"
                     ),
