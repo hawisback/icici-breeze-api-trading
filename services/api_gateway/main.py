@@ -986,11 +986,17 @@ async def request_live_gate_challenge(
     current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     services = get_services()
-    return await services.live_gate.request_activation_challenge(
-        operator_id=req.operator_id,
-        account_id=req.account_id,
-        duration_minutes=req.duration_minutes,
-    )
+    try:
+        return await services.live_gate.request_activation_challenge(
+            operator_id=current_user.user_id,
+            account_id=req.account_id,
+            duration_minutes=req.duration_minutes,
+        )
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
 
 
 @app.post("/api/v1/live-gate/confirm")
@@ -1006,7 +1012,7 @@ async def confirm_live_gate(
         confirmed = await services.live_gate.confirm_activation(
             challenge_id=req.challenge_id,
             challenge_token=req.challenge_token,
-            operator_id=req.operator_id,
+            operator_id=current_user.user_id,
         )
         if not confirmed:
             raise HTTPException(
@@ -1043,7 +1049,7 @@ async def revoke_live_gate(
 
     async def _execute():
         await services.live_gate.revoke_live_mode(
-            operator_id=req.operator_id,
+            operator_id=current_user.user_id,
             reason=req.reason,
         )
         return {
