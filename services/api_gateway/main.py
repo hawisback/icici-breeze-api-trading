@@ -1064,6 +1064,17 @@ async def get_live_preflight(
     if not scheduler.get("running"):
         blockers.append("STRATEGY_SCHEDULER_NOT_RUNNING")
 
+    execution_policy = strategy.get("execution_policy") or {}
+    strategy_statuses = strategy.get("strategies") or {}
+    enabled_live_strategies = [
+        key
+        for key, value in strategy_statuses.items()
+        if bool(value.get("enabled"))
+        and bool(value.get("live_trading_allowed"))
+    ]
+    if not enabled_live_strategies:
+        blockers.append("NO_ENABLED_STRATEGY_LIVE_PROMOTED")
+
     strategy_a_enabled = bool(
         strategy.get("config", {})
         .get("tunables", {})
@@ -1157,15 +1168,21 @@ async def get_live_preflight(
             "auto_trade_enabled": bool(
                 strategy.get("config", {}).get("auto_trade_enabled")
             ),
+            "enabled_live_strategies": enabled_live_strategies,
+            "execution_policy": execution_policy,
             "routing": {
                 key: {
                     "execution_mode": value.get("execution_mode"),
+                    "effective_call_mode": value.get("effective_call_mode"),
+                    "effective_put_mode": value.get("effective_put_mode"),
+                    "promotion_state": value.get("promotion_state"),
+                    "live_block_reason": value.get("live_block_reason"),
                     "live_trading_allowed": value.get(
                         "live_trading_allowed",
                         False,
                     ),
                 }
-                for key, value in (strategy.get("strategies") or {}).items()
+                for key, value in strategy_statuses.items()
             },
         },
         "event_bus": {
