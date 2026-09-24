@@ -1044,8 +1044,15 @@ async def get_live_preflight(
 
     if not settings.live_trading_enabled:
         blockers.append("LIVE_TRADING_ENABLED_FALSE")
+    expected_account_id = (
+        "ZERODHA_PRIMARY"
+        if settings.broker_backend.value == "kite"
+        else "ICICI_PRIMARY"
+    )
     if not settings.live_allowed_accounts:
         blockers.append("NO_LIVE_ALLOWED_ACCOUNT")
+    elif expected_account_id not in settings.live_allowed_accounts:
+        blockers.append("ACTIVE_BROKER_ACCOUNT_NOT_ALLOWLISTED")
     if not session.get("connected"):
         blockers.append("BROKER_SESSION_NOT_CONNECTED")
     if broker_error:
@@ -1163,10 +1170,15 @@ async def request_live_gate_challenge(
     current_user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
 ):
     services = get_services()
+    account_id = (
+        "ZERODHA_PRIMARY"
+        if services.settings.broker_backend.value == "kite"
+        else "ICICI_PRIMARY"
+    )
     try:
         return await services.live_gate.request_activation_challenge(
             operator_id=current_user.user_id,
-            account_id=req.account_id,
+            account_id=account_id,
             duration_minutes=req.duration_minutes,
         )
     except PermissionError as exc:
