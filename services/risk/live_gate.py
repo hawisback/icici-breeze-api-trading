@@ -35,6 +35,9 @@ class LiveTradingGate:
         self.bus = event_bus or get_event_bus()
 
         self._configured_enabled: bool = self.settings.live_trading_enabled
+        self._local_single_user_mode: bool = bool(
+            self.settings.local_single_user_mode
+        )
         self._authorized: bool = False
         self._expires_at: Optional[datetime] = None
         self._allowed_accounts: set[str] = set(self.settings.live_allowed_accounts)
@@ -46,6 +49,8 @@ class LiveTradingGate:
         return {
             "live_authorized": active,
             "system_setting_enabled": self._configured_enabled,
+            "local_single_user_mode": self._local_single_user_mode,
+            "authorization_required": not self._local_single_user_mode,
             "expires_at": self._expires_at.isoformat() if self._expires_at else None,
             "allowed_account_count": len(self._allowed_accounts),
             "time_remaining_sec": max(
@@ -56,7 +61,9 @@ class LiveTradingGate:
         }
 
     def is_live_active(self) -> bool:
-        """Check if LIVE mode is currently authorized and active window has not expired."""
+        """Check whether the server currently permits LIVE broker execution."""
+        if self._local_single_user_mode:
+            return self._configured_enabled
         if not self._configured_enabled or not self._authorized:
             return False
         if self._expires_at is None or utc_now() >= self._expires_at:
@@ -73,7 +80,12 @@ class LiveTradingGate:
         if self._allowed_accounts and account_id not in self._allowed_accounts:
             return False, f"Account '{account_id}' is not in the approved LIVE allowlist."
 
-        return True, "Authorized"
+        return (
+            True,
+            "Local single-user LIVE capability enabled"
+            if self._local_single_user_mode
+            else "Authorized",
+        )
 
     async def request_activation_challenge(
         self,
