@@ -126,7 +126,8 @@ async def test_challenge_and_successful_confirmation(clean_gate):
     status = gate.get_status()
     assert status["live_authorized"] is True
     assert status["time_remaining_sec"] > 3500  # ~3600 sec for 60 min
-    assert "ICICI_PRIMARY" in status["allowed_accounts"]
+    assert status["allowed_account_count"] == 2
+    assert "allowed_accounts" not in status
 
     # Order validation now passes for allowed account
     allowed, msg = gate.validate_live_order("ICICI_PRIMARY")
