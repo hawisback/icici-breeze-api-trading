@@ -32,9 +32,22 @@ def _signal() -> StrategySignal:
 
 
 def _service():
-    repo = Mock(save_signal=AsyncMock(), save_option_chain_snapshot=AsyncMock())
+    repo = Mock(
+        save_signal=AsyncMock(),
+        save_option_chain_snapshot=AsyncMock(),
+        save_decision_log=AsyncMock(),
+        save_auto_config=AsyncMock(),
+        get_runtime=AsyncMock(return_value=None),
+        save_runtime=AsyncMock(),
+    )
     oms = Mock(create_order_intent=AsyncMock())
     service = StrategyService(oms, repository=repo, event_bus=Mock(publish=AsyncMock()))
+    service._market_data_status.update({
+        "execution_feed_healthy": True,
+        "execution_feed_reasons": [],
+        "strategy_a_signal_data_fresh": True,
+        "strategy_b_signal_data_fresh": True,
+    })
     return service, repo, oms
 
 
