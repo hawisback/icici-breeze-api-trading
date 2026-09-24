@@ -56,10 +56,33 @@ class OptionChainService:
 
         expiries = await self.inst_svc.get_expiries(clean_underlying)
         all_expiries = sorted(e for e in (expiries or []) if e >= date.today().isoformat())
-        active_provider = str(getattr(self.broker_gateway, "active_broker_name", "") or "").lower() if self.broker_gateway else ""
-        active_adapter = getattr(self.broker_gateway, "active_adapter", None) if self.broker_gateway else None
-        if active_provider == "kite" and active_adapter and getattr(active_adapter, "is_active", False):
-            get_expiries = getattr(active_adapter, "get_option_expiries", None)
+        reference_provider = (
+            str(
+                getattr(
+                    self.broker_gateway,
+                    "reference_data_broker_name",
+                    getattr(self.broker_gateway, "active_broker_name", ""),
+                )
+                or ""
+            ).lower()
+            if self.broker_gateway
+            else ""
+        )
+        reference_adapter = (
+            getattr(
+                self.broker_gateway,
+                "reference_data_adapter",
+                getattr(self.broker_gateway, "active_adapter", None),
+            )
+            if self.broker_gateway
+            else None
+        )
+        if (
+            reference_provider == "kite"
+            and reference_adapter
+            and getattr(reference_adapter, "is_active", False)
+        ):
+            get_expiries = getattr(reference_adapter, "get_option_expiries", None)
             if callable(get_expiries):
                 try:
                     live_expiries = await get_expiries(clean_underlying)
@@ -92,12 +115,18 @@ class OptionChainService:
         step = 100 if clean_underlying == "BANKNIFTY" else 50
         atm_strike = round(spot_price / step) * step
 
-        # 2. Attempt to fetch live option chain directly from ICICI Breeze SDK
+        # 2. Option-chain/reference traffic is independent of LIVE execution
+        # ownership. In hybrid mode this defaults to Breeze while frequent
+        # quote/candle traffic uses Kite.
         breeze_active = False
-        if self.broker_gateway and active_provider == "breeze":
-            breeze_adapter = getattr(self.broker_gateway, "breeze_adapter", None)
+        if self.broker_gateway and reference_provider == "breeze":
+            breeze_adapter = reference_adapter
             if breeze_adapter and hasattr(breeze_adapter, "client_manager"):
-                breeze_active = getattr(breeze_adapter.client_manager, "is_active", False)
+                breeze_active = getattr(
+                    breeze_adapter.client_manager,
+                    "is_active",
+                    False,
+                )
 
         if breeze_active:
             try:
@@ -173,11 +202,12 @@ class OptionChainService:
         # Kite returns exchange-valid tradingsymbols, so route its live chain directly
         # to the UI shape and avoid rebuilding contracts from synthetic local symbols.
         if self.broker_gateway:
-            active_adapter = getattr(self.broker_gateway, "active_adapter", None)
             if (
-                getattr(self.broker_gateway, "active_broker_name", None) == "kite"
-                and active_adapter
-                and callable(getattr(active_adapter, "get_option_chain_view", None))
+                reference_provider == "kite"
+                and reference_adapter
+                and callable(
+                    getattr(reference_adapter, "get_option_chain_view", None)
+                )
             ):
                 cache_key = (clean_underlying, selected_expiry)
                 cached = self._kite_chain_cache.get(cache_key)
@@ -191,7 +221,7 @@ class OptionChainService:
 
                     if monotonic() >= self._kite_chain_retry_after:
                         try:
-                            kite_chain = await active_adapter.get_option_chain_view(
+                            kite_chain = await reference_adapter.get_option_chain_view(
                                 underlying=clean_underlying,
                                 expiry=selected_expiry,
                             )
