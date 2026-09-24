@@ -340,15 +340,25 @@ class BreezeTradingAdapter(BrokerTradingPort):
             ltp = Decimal(str(row.get("ltp") or row.get("current_price") or "0"))
             realized = Decimal(str(row.get("realized_profit") or "0"))
             unrealized = Decimal(str(row.get("unrealized_profit") or "0"))
+            right_raw = str(row.get("right", "")).lower()
+            option_right = (
+                OptionRight.CALL
+                if "call" in right_raw
+                else OptionRight.PUT
+                if "put" in right_raw
+                else None
+            )
 
             inst = BrokerInstrumentRef(
                 internal_instrument_id=uuid.uuid4(),
                 exchange=Exchange.NFO,
                 stock_code=str(row.get("stock_code", "")),
                 product_type=ProductType.OPTIONS,
-                expiry=None,
+                expiry=_parse_optional_expiry(
+                    row.get("expiry_date") or row.get("expiry")
+                ),
                 strike=Decimal(str(row.get("strike_price", 0))) if row.get("strike_price") else None,
-                option_right=OptionRight.CALL if "call" in str(row.get("right", "")).lower() else None,
+                option_right=option_right,
                 stock_token=None,
             )
             positions.append(
