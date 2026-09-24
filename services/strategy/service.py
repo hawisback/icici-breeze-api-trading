@@ -208,6 +208,33 @@ class StrategyService:
             and right == trade.option_type.value
         )
 
+    @staticmethod
+    def _live_trade_contract_key(trade: ActiveTrade) -> str:
+        """Return the canonical local identity used for broker net-position reconciliation."""
+        instrument_id = str(trade.contract_instrument_id or "").strip().upper()
+        if instrument_id:
+            return f"INSTRUMENT:{instrument_id}"
+        return (
+            "CONTRACT:"
+            f"{trade.contract_symbol.upper()}|"
+            f"{str(trade.expiry)[:10]}|"
+            f"{float(trade.strike):.8f}|"
+            f"{trade.option_type.value}"
+        )
+
+    @staticmethod
+    def _local_live_remaining_quantity(trade: ActiveTrade) -> int:
+        """Return locally confirmed broker exposure, not merely requested entry size."""
+        base_quantity = (
+            int(trade.filled_quantity or 0)
+            if trade.state == TradeLifecycleState.ENTRY_PENDING
+            else int(trade.quantity or 0)
+        )
+        return max(
+            0,
+            base_quantity - int(trade.exit_filled_quantity or 0),
+        )
+
     async def build_live_reconciliation_report(
         self,
         *,
@@ -217,7 +244,7 @@ class StrategyService:
         broker_error: str | None = None,
         record_as_startup: bool = False,
     ) -> dict[str, Any]:
-        """Compare durable local LIVE state with the broker before re-arming."""
+        """Compare durable local LIVE state with broker net positions by contract."""
         active_trades = await self.repo.get_active_trades()
         live_trades = [
             trade
@@ -244,6 +271,7 @@ class StrategyService:
         issues: list[str] = []
         matched_position_indexes: set[int] = set()
         trade_rows: list[dict[str, Any]] = []
+        contract_rows: list[dict[str, Any]] = []
 
         if not broker_verified:
             issues.append(
@@ -251,71 +279,137 @@ class StrategyService:
                 + (f":{broker_error}" if broker_error else "")
             )
 
+        # Broker APIs expose a net position per option contract. Multiple local
+        # strategy trades in that contract are fungible at the broker, so
+        # reconcile the aggregate local exposure against the aggregate broker
+        # exposure exactly once rather than comparing the same broker quantity
+        # independently with every local trade.
+        contract_groups: dict[str, list[ActiveTrade]] = {}
         for trade in live_trades:
-            remaining = max(
-                0,
-                int(trade.quantity) - int(trade.exit_filled_quantity),
+            contract_groups.setdefault(
+                self._live_trade_contract_key(trade),
+                [],
+            ).append(trade)
+
+        positions_by_contract: dict[str, list[tuple[int, Any]]] = {
+            key: [] for key in contract_groups
+        }
+        for index, position in enumerate(broker_positions):
+            matching_keys = [
+                key
+                for key, grouped_trades in contract_groups.items()
+                if any(
+                    self._broker_position_matches_trade(position, trade)
+                    for trade in grouped_trades
+                )
+            ]
+            if len(matching_keys) == 1:
+                key = matching_keys[0]
+                positions_by_contract[key].append((index, position))
+                matched_position_indexes.add(index)
+            elif len(matching_keys) > 1:
+                # Do not allocate one broker net position across ambiguous local
+                # identities. Mark it seen to avoid a misleading orphan issue,
+                # then fail closed with the ambiguity itself.
+                matched_position_indexes.add(index)
+                issues.append(
+                    "AMBIGUOUS_BROKER_POSITION_MATCH:"
+                    f"{getattr(position, 'stock_code', 'UNKNOWN')}:"
+                    + ",".join(sorted(matching_keys))
+                )
+
+        for contract_key, grouped_trades in contract_groups.items():
+            local_contract_quantity = sum(
+                self._local_live_remaining_quantity(trade)
+                for trade in grouped_trades
             )
-            matches: list[tuple[int, Any]] = []
-            for index, position in enumerate(broker_positions):
-                if self._broker_position_matches_trade(position, trade):
-                    matches.append((index, position))
-                    matched_position_indexes.add(index)
-            broker_quantity = sum(
+            matches = positions_by_contract.get(contract_key, [])
+            broker_contract_quantity = sum(
                 int(getattr(position, "quantity", 0) or 0)
                 for _, position in matches
             )
+            trade_ids = [trade.trade_id for trade in grouped_trades]
 
-            if broker_verified and broker_quantity != remaining:
+            if (
+                broker_verified
+                and broker_contract_quantity != local_contract_quantity
+            ):
                 issues.append(
-                    f"LIVE_POSITION_MISMATCH:{trade.trade_id}:"
-                    f"local={remaining}:broker={broker_quantity}"
+                    f"LIVE_POSITION_MISMATCH:{contract_key}:"
+                    f"local={local_contract_quantity}:"
+                    f"broker={broker_contract_quantity}:"
+                    f"trades={','.join(trade_ids)}"
                 )
 
-            protection_status = "NOT_REQUIRED"
-            if remaining > 0 and not trade.exit_order_id:
-                if not trade.protective_stop_order_id:
-                    protection_status = "MISSING"
-                    issues.append(
-                        f"LIVE_PROTECTIVE_STOP_MISSING:{trade.trade_id}"
-                    )
-                else:
-                    protective = await self.oms.get_order(
-                        trade.protective_stop_order_id
-                    )
-                    if protective is None:
-                        protection_status = "OMS_ORDER_MISSING"
-                        issues.append(
-                            f"LIVE_PROTECTIVE_STOP_UNKNOWN:{trade.trade_id}"
-                        )
-                    else:
-                        protection_status = protective.status.value
-                        if protective.status.value not in {
-                            "OPEN",
-                            "ACKNOWLEDGED",
-                            "PARTIALLY_FILLED",
-                        }:
-                            issues.append(
-                                "LIVE_PROTECTIVE_STOP_NOT_CONFIRMED:"
-                                f"{trade.trade_id}:"
-                                f"{protective.status.value}"
-                            )
-
-            if remaining > 0:
-                issues.append(
-                    f"RECOVERED_LIVE_POSITION_ACTIVE:{trade.trade_id}"
-                )
-
-            trade_rows.append(
+            contract_rows.append(
                 {
-                    "trade_id": trade.trade_id,
-                    "symbol": trade.contract_symbol,
-                    "local_remaining_quantity": remaining,
-                    "broker_quantity": broker_quantity,
-                    "protective_stop_status": protection_status,
-                    "exit_order_id": trade.exit_order_id,
+                    "contract_key": contract_key,
+                    "symbol": grouped_trades[0].contract_symbol,
+                    "trade_ids": trade_ids,
+                    "local_remaining_quantity": local_contract_quantity,
+                    "broker_quantity": broker_contract_quantity,
+                    "broker_position_count": len(matches),
                 }
             )
+
+            for trade in grouped_trades:
+                remaining = self._local_live_remaining_quantity(trade)
+                protection_status = "NOT_REQUIRED"
+                if (
+                    remaining > 0
+                    and not trade.exit_order_id
+                    and not trade.partial_exit_order_id
+                ):
+                    if not trade.protective_stop_order_id:
+                        protection_status = "MISSING"
+                        issues.append(
+                            f"LIVE_PROTECTIVE_STOP_MISSING:{trade.trade_id}"
+                        )
+                    else:
+                        protective = await self.oms.get_order(
+                            trade.protective_stop_order_id
+                        )
+                        if protective is None:
+                            protection_status = "OMS_ORDER_MISSING"
+                            issues.append(
+                                f"LIVE_PROTECTIVE_STOP_UNKNOWN:{trade.trade_id}"
+                            )
+                        else:
+                            protection_status = protective.status.value
+                            if protective.status.value not in {
+                                "OPEN",
+                                "ACKNOWLEDGED",
+                                "PARTIALLY_FILLED",
+                            }:
+                                issues.append(
+                                    "LIVE_PROTECTIVE_STOP_NOT_CONFIRMED:"
+                                    f"{trade.trade_id}:"
+                                    f"{protective.status.value}"
+                                )
+
+                if remaining > 0:
+                    issues.append(
+                        f"RECOVERED_LIVE_POSITION_ACTIVE:{trade.trade_id}"
+                    )
+
+                trade_rows.append(
+                    {
+                        "trade_id": trade.trade_id,
+                        "symbol": trade.contract_symbol,
+                        "contract_key": contract_key,
+                        "local_remaining_quantity": remaining,
+                        # Kept for response compatibility. This is deliberately
+                        # the broker's aggregate contract quantity, not a
+                        # fabricated per-trade allocation.
+                        "broker_quantity": broker_contract_quantity,
+                        "broker_contract_quantity": broker_contract_quantity,
+                        "local_contract_quantity": local_contract_quantity,
+                        "contract_trade_count": len(grouped_trades),
+                        "protective_stop_status": protection_status,
+                        "exit_order_id": trade.exit_order_id,
+                        "partial_exit_order_id": trade.partial_exit_order_id,
+                    }
+                )
 
         for index, position in enumerate(broker_positions):
             quantity = int(getattr(position, "quantity", 0) or 0)
@@ -344,6 +438,7 @@ class StrategyService:
             "broker_error": broker_error,
             "issues": list(dict.fromkeys(issues)),
             "active_live_trades": trade_rows,
+            "live_position_contracts": contract_rows,
             "open_broker_positions": sum(
                 1
                 for position in broker_positions
