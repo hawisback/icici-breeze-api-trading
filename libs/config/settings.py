@@ -63,6 +63,14 @@ class PlatformSettings(BaseSettings):
 
     # Trading Authority & Safety
     default_trading_mode: TradingMode = Field(default=TradingMode.PAPER, alias="DEFAULT_TRADING_MODE")
+    local_single_user_mode: bool = Field(
+        default=False,
+        alias="LOCAL_SINGLE_USER_MODE",
+        description=(
+            "Local workstation mode: operator/LIVE confirmation UX may be "
+            "bypassed only when the API is bound to loopback."
+        ),
+    )
     live_trading_enabled: bool = Field(default=False, alias="LIVE_TRADING_ENABLED")
     live_allowed_accounts: list[str] = Field(default_factory=list, alias="LIVE_ALLOWED_ACCOUNTS")
     live_max_order_notional: float = Field(
@@ -142,6 +150,16 @@ class PlatformSettings(BaseSettings):
     def validate_safety_invariants(self) -> PlatformSettings:
         # Resolve data_root
         self.data_root = self.data_root.resolve()
+
+        if (
+            self.local_single_user_mode
+            and self.api_host.strip().lower()
+            not in {"127.0.0.1", "localhost", "::1"}
+        ):
+            raise ValueError(
+                "LOCAL_SINGLE_USER_MODE=true requires API_HOST to be loopback "
+                "(127.0.0.1, localhost, or ::1)."
+            )
 
         # Reject wildcard CORS if credentials or production
         if any(origin.strip() == "*" for origin in self.cors_allowed_origins):
@@ -290,6 +308,7 @@ class PlatformSettings(BaseSettings):
             "redpanda_brokers": self.redpanda_brokers or "[NONE]",
             "redis_url": self.redis_url or "[NONE]",
             "default_trading_mode": self.default_trading_mode.value,
+            "local_single_user_mode": self.local_single_user_mode,
             "live_trading_enabled": self.live_trading_enabled,
             "live_allowed_accounts": (
                 f"[CONFIGURED:{len(self.live_allowed_accounts)}]"
