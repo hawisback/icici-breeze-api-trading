@@ -54,6 +54,20 @@ export const StrategyDashboard: React.FC = () => {
         .map(([name]) => name)
     : [];
   const hasLiveEligibleStrategy = liveEligibleStrategies.length > 0;
+  const executionBroker =
+    status?.broker_routing?.execution_broker || "unknown";
+  const frequentDataBroker =
+    status?.broker_routing?.frequent_data_broker ||
+    status?.market_data?.provider ||
+    "unknown";
+  const referenceDataBroker =
+    status?.broker_routing?.reference_data_broker || "unknown";
+  const executionBrokerLabel =
+    executionBroker === "kite"
+      ? "Zerodha Kite"
+      : executionBroker === "breeze"
+        ? "ICICI Breeze"
+        : "the configured execution broker";
 
   const handleArmToggle = async () => {
     if (!status) return;
@@ -65,8 +79,7 @@ export const StrategyDashboard: React.FC = () => {
         );
         return;
       }
-      const broker = status.market_data?.provider === "kite" ? "Zerodha Kite" : status.market_data?.provider === "breeze" ? "ICICI Breeze" : "the configured live broker";
-      if (!confirm(`WARNING: Arming allows LIVE routing only for explicitly promoted strategies via ${broker}. Continue?`)) {
+      if (!confirm(`WARNING: Arming allows LIVE routing only for explicitly promoted strategies via ${executionBrokerLabel}. Continue?`)) {
         return;
       }
     }
@@ -123,7 +136,7 @@ export const StrategyDashboard: React.FC = () => {
     }
   };
 
-  const handleModeChange = async (newMode: "PAPER" | "LIVE") => {
+  const handleModeChange = async (newMode: "PAPER" | "SHADOW_ONLY" | "LIVE") => {
     if (!status || status.config.mode === newMode) return;
     if (newMode === "LIVE") {
       if (!confirm(
@@ -156,11 +169,11 @@ export const StrategyDashboard: React.FC = () => {
               NIFTY INTRADAY AUTO-TRADING STRATEGIES
             </h2>
             <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-              v1.0 • {(status?.market_data?.provider || "BROKER").toUpperCase()} {status?.market_data?.provider_active ? "CONNECTED" : "INACTIVE"}
+              v1.0 • DATA {frequentDataBroker.toUpperCase()} {status?.market_data?.provider_active ? "CONNECTED" : "INACTIVE"}
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Platform mode is separate from per-strategy execution authority. Status refreshes every 1.5s; charts refresh candles every 3s and live quotes every 1s.
+            LIVE execution: {executionBrokerLabel}. Frequent data: {frequentDataBroker.toUpperCase()}. Reference data: {referenceDataBroker.toUpperCase()}. Platform mode remains separate from per-strategy execution authority.
           </p>
           <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] font-bold tracking-wider">
             <span className={`px-2 py-1 rounded border ${status?.scheduler?.running ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-rose-500/15 text-rose-300 border-rose-500/30"}`}>
@@ -203,6 +216,15 @@ export const StrategyDashboard: React.FC = () => {
             >
               B DATA {status?.market_data?.strategy_b_signal_data_fresh ? "FRESH" : "STALE"}
             </span>
+            <span className="px-2 py-1 rounded bg-rose-500/10 text-rose-300 border border-rose-500/30">
+              EXEC · {executionBroker.toUpperCase()}
+            </span>
+            <span className="px-2 py-1 rounded bg-sky-500/10 text-sky-300 border border-sky-500/30">
+              FAST · {frequentDataBroker.toUpperCase()}
+            </span>
+            <span className="px-2 py-1 rounded bg-violet-500/10 text-violet-300 border border-violet-500/30">
+              REF · {referenceDataBroker.toUpperCase()}
+            </span>
             <span className="px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
               A · {status?.strategies?.trend_pullback?.effective_call_mode ?? "--"}/{status?.strategies?.trend_pullback?.effective_put_mode ?? "--"}
             </span>
@@ -234,6 +256,17 @@ export const StrategyDashboard: React.FC = () => {
               }`}
             >
               PAPER
+            </button>
+            <button
+              onClick={() => handleModeChange("SHADOW_ONLY")}
+              disabled={actionLoading}
+              className={`px-3 py-1 rounded text-xs font-semibold transition-all ${
+                status?.config.mode === "SHADOW_ONLY"
+                  ? "bg-violet-600 text-white shadow"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              SHADOW
             </button>
             <button
               onClick={() => handleModeChange("LIVE")}
