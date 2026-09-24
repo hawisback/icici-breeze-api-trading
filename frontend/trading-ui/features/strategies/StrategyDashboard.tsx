@@ -166,6 +166,43 @@ export const StrategyDashboard: React.FC = () => {
             <span className={`px-2 py-1 rounded border ${status?.scheduler?.running ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-rose-500/15 text-rose-300 border-rose-500/30"}`}>
               SCHEDULER {status?.scheduler?.running ? "RUNNING" : "STOPPED"} · {status?.scheduler?.evaluation_interval_seconds ?? "--"}s
             </span>
+            <span
+              className={`px-2 py-1 rounded border ${
+                status?.market_data?.execution_feed_healthy
+                  ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                  : "bg-rose-500/15 text-rose-300 border-rose-500/30"
+              }`}
+              title={
+                status?.market_data?.execution_feed_reasons?.join("; ") ||
+                "Execution feed healthy"
+              }
+            >
+              ENTRY FEED {status?.market_data?.execution_feed_healthy ? "LIVE" : "BLOCKED"}
+            </span>
+            <span
+              className={`px-2 py-1 rounded border ${
+                status?.market_data?.strategy_a_signal_data_fresh
+                  ? "bg-cyan-500/15 text-cyan-300 border-cyan-500/30"
+                  : "bg-amber-500/15 text-amber-300 border-amber-500/30"
+              }`}
+              title={`Latest futures 15m age: ${
+                status?.market_data?.latest_futures_15m_candle_age_seconds ?? "--"
+              }s`}
+            >
+              A DATA {status?.market_data?.strategy_a_signal_data_fresh ? "FRESH" : "STALE"}
+            </span>
+            <span
+              className={`px-2 py-1 rounded border ${
+                status?.market_data?.strategy_b_signal_data_fresh
+                  ? "bg-cyan-500/15 text-cyan-300 border-cyan-500/30"
+                  : "bg-amber-500/15 text-amber-300 border-amber-500/30"
+              }`}
+              title={`Latest spot 5m age: ${
+                status?.market_data?.latest_spot_5m_candle_age_seconds ?? "--"
+              }s`}
+            >
+              B DATA {status?.market_data?.strategy_b_signal_data_fresh ? "FRESH" : "STALE"}
+            </span>
             <span className="px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
               A · {status?.strategies?.trend_pullback?.effective_call_mode ?? "--"}/{status?.strategies?.trend_pullback?.effective_put_mode ?? "--"}
             </span>
