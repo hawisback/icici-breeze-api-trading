@@ -96,6 +96,7 @@ async def test_reduce_only_exit_survives_closed_live_gate_and_reconciles(tmp_pat
         data_root=str(tmp_path),
         live_trading_enabled=False,
         live_allowed_accounts=["ICICI_PRIMARY"],
+        broker_backend="breeze",
     )
     gate = LiveTradingGate(settings=settings, event_bus=bus)
 
@@ -161,6 +162,7 @@ async def test_reduce_only_exit_survives_closed_live_gate_and_reconciles(tmp_pat
     opened = await _wait_for_order_state(oms, created.order_id, OrderState.OPEN)
 
     assert opened is not None
+    assert opened.status == OrderState.OPEN
     assert opened.reduce_only is True
     assert adapter.place_calls == 1
     assert gate.is_live_active() is False
