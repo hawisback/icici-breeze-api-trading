@@ -482,6 +482,9 @@ export interface StrategyFleetStatusData {
   paper_net_pnl?: number;
   current_r?: number | null;
   current_trailing_stop?: number | null;
+  broker_protective_stop_status?: string | null;
+  broker_protective_stop_trigger?: number | null;
+  broker_protective_stop_limit?: number | null;
   active_trade_id?: string | null;
 }
 
