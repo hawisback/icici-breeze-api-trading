@@ -465,8 +465,33 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
                 <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Mode</div><div className="font-bold text-blue-300">{item.execution_mode || "N/A"}</div></div>
                 <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Live routing</div><div className={`font-bold ${item.live_trading_allowed ? "text-emerald-300" : "text-amber-300"}`}>{item.live_trading_allowed ? "ELIGIBLE" : "LOCKED"}</div></div>
                 <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Current R</div><div className="font-mono font-bold text-slate-200">{item.current_r == null ? "--" : `${item.current_r.toFixed(2)}R`}</div></div>
-                <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Trailing / protective SL</div><div className="font-mono font-bold text-rose-300">{item.current_trailing_stop == null ? "--" : `₹${item.current_trailing_stop.toFixed(2)}`}</div></div>
+                <div className="bg-slate-900 rounded p-2"><div className="text-slate-500">Strategy trailing SL</div><div className="font-mono font-bold text-rose-300">{item.current_trailing_stop == null ? "--" : `₹${item.current_trailing_stop.toFixed(2)}`}</div></div>
               </div>
+              {item.broker_protective_stop_status && (
+                <div className="bg-rose-950/20 border border-rose-900/40 rounded p-2 text-[10px]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500">Broker catastrophe SL-limit</span>
+                    <span className={`font-bold ${
+                      ["OPEN", "ACKNOWLEDGED", "PARTIALLY_FILLED"].includes(
+                        item.broker_protective_stop_status,
+                      )
+                        ? "text-emerald-300"
+                        : ["VALIDATING", "APPROVED", "SUBMITTING", "CANCEL_REQUESTED"].includes(
+                            item.broker_protective_stop_status,
+                          )
+                        ? "text-amber-300"
+                        : "text-rose-300"
+                    }`}>
+                      {item.broker_protective_stop_status}
+                    </span>
+                  </div>
+                  <div className="mt-1 font-mono text-slate-300">
+                    trigger {item.broker_protective_stop_trigger == null ? "--" : `₹${item.broker_protective_stop_trigger.toFixed(2)}`}
+                    {" · "}
+                    limit {item.broker_protective_stop_limit == null ? "--" : `₹${item.broker_protective_stop_limit.toFixed(2)}`}
+                  </div>
+                </div>
+              )}
               {item.paper_closed_trades != null && (
                 <div className="flex justify-between text-[10px] text-slate-400 border-t border-slate-800 pt-2">
                   <span>Paper {item.paper_open_trades || 0} open / {item.paper_closed_trades || 0} closed</span>
