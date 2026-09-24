@@ -166,10 +166,18 @@ export const StrategyDashboard: React.FC = () => {
             <span className={`px-2 py-1 rounded border ${status?.scheduler?.running ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-rose-500/15 text-rose-300 border-rose-500/30"}`}>
               SCHEDULER {status?.scheduler?.running ? "RUNNING" : "STOPPED"} · {status?.scheduler?.evaluation_interval_seconds ?? "--"}s
             </span>
-            <span className="px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">A V3 · REV {status?.config.strategy_a_revision ?? 5}</span>
-            <span className="px-2 py-1 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">B · {status?.strategies?.volatility_breakout?.execution_mode ?? "PAPER"}</span>
-            <span className="px-2 py-1 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">C · PAPER LOCKED</span>
-            <span className="px-2 py-1 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">D · PAPER LOCKED</span>
+            <span className="px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+              A · {status?.strategies?.trend_pullback?.effective_call_mode ?? "--"}/{status?.strategies?.trend_pullback?.effective_put_mode ?? "--"}
+            </span>
+            <span className="px-2 py-1 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+              B · {status?.strategies?.volatility_breakout?.effective_call_mode ?? "--"}
+            </span>
+            <span className="px-2 py-1 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">
+              C · {status?.strategies?.di_continuation?.promotion_state ?? "LOCKED"}
+            </span>
+            <span className="px-2 py-1 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">
+              D · {status?.strategies?.sr_momentum_breakout?.promotion_state ?? "LOCKED"}
+            </span>
           </div>
         </div>
 
