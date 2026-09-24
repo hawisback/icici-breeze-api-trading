@@ -1063,6 +1063,21 @@ async def get_live_preflight(
         blockers.append("STRATEGY_MARKET_DATA_NOT_ACTIVE")
     if not scheduler.get("running"):
         blockers.append("STRATEGY_SCHEDULER_NOT_RUNNING")
+
+    strategy_a_enabled = bool(
+        strategy.get("config", {})
+        .get("tunables", {})
+        .get("trend_pullback_enabled", False)
+    )
+    if (
+        strategy_a_enabled
+        and not market.get("strategy_a_option_execution_ready", False)
+    ):
+        reason = str(
+            market.get("strategy_a_option_execution_reason")
+            or "VERIFIED_OPTION_DELTA_UNAVAILABLE"
+        )
+        blockers.append(f"STRATEGY_A_OPTION_EXECUTION_BLOCKED:{reason}")
     if system_mode != SystemMode.NORMAL:
         blockers.append(f"RISK_MODE_{system_mode.value}")
     if unresolved_live_orders:
