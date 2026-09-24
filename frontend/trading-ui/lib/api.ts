@@ -571,6 +571,11 @@ export interface CandidatePaperStatusData {
 }
 
 export interface StrategyStatusData {
+  broker_routing?: {
+    execution_broker: "breeze" | "kite" | "unknown";
+    frequent_data_broker: "breeze" | "kite" | "unknown";
+    reference_data_broker: "breeze" | "kite" | "unknown";
+  };
   execution_policy?: Record<string, StrategyExecutionPolicyData>;
   scheduler?: {
     running: boolean;
