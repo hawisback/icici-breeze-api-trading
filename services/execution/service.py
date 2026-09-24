@@ -28,12 +28,20 @@ class ExecutionService:
         live_gate: Optional[LiveTradingGate] = None,
         event_bus: Optional[EventBus] = None,
         live_account_id: str = "ICICI_PRIMARY",
+        broker_session_service: Any = None,
+        market_data_service: Any = None,
+        live_market_data_max_age_seconds: float = 5.0,
     ) -> None:
         self.gateway = broker_gateway
         self.oms = oms_service
         self.bus = event_bus or get_event_bus()
         self.live_gate = live_gate or LiveTradingGate(event_bus=self.bus)
         self.live_account_id = live_account_id
+        self.broker_session_service = broker_session_service
+        self.market_data_service = market_data_service
+        self.live_market_data_max_age_seconds = float(
+            live_market_data_max_age_seconds
+        )
         self._processed_executions: set[str] = set()
         self._reconciliation_task: Optional[asyncio.Task[None]] = None
         self._reconciliation_running = False
@@ -137,6 +145,66 @@ class ExecutionService:
                 order.status.value,
             )
             return
+
+        # Re-check runtime health immediately before the broker write. Risk
+        # approval can precede a disconnect/stale tick by milliseconds, so
+        # the final boundary must independently fail closed. Reduce-only exits
+        # remain exempt and may still be sent to reduce existing exposure.
+        if order.trading_mode == TradingMode.LIVE and not order.reduce_only:
+            health_reason: Optional[str] = None
+            if self.broker_session_service is None:
+                health_reason = "BROKER_SESSION_HEALTH_UNAVAILABLE"
+            else:
+                session_status = (
+                    await self.broker_session_service.get_session_status()
+                )
+                if not bool(session_status.get("connected")):
+                    health_reason = (
+                        "BROKER_SESSION_DISCONNECTED:"
+                        + str(session_status.get("status") or "UNKNOWN")
+                    )
+
+            if health_reason is None:
+                if self.market_data_service is None:
+                    health_reason = "MARKET_DATA_HEALTH_UNAVAILABLE"
+                else:
+                    feed_health = (
+                        self.market_data_service.get_execution_feed_health(
+                            max_age_seconds=(
+                                self.live_market_data_max_age_seconds
+                            ),
+                        )
+                    )
+                    if not bool(feed_health.get("healthy")):
+                        health_reason = (
+                            "MARKET_DATA_STALE_OR_DOWN:"
+                            + ";".join(
+                                feed_health.get("reasons") or ["UNKNOWN"]
+                            )
+                        )
+
+            if health_reason is not None:
+                logger.error(
+                    "Execution blocked by final runtime health check: %s",
+                    health_reason,
+                )
+                await self.bus.publish(
+                    EventEnvelope(
+                        topic=Topics.BROKER_ORDER_EVENT,
+                        payload={
+                            "client_order_id": order.client_order_id,
+                            "broker_order_id": None,
+                            "status": "FAILED_SAFE",
+                            "filled_quantity": order.filled_quantity,
+                            "average_price": order.average_price,
+                            "message": (
+                                "Execution blocked at final runtime health "
+                                f"boundary: {health_reason}"
+                            ),
+                        },
+                    )
+                )
+                return
 
         # LIVE authorization gates exposure increases. Explicit reduce-only
         # exits remain available after gate expiry/revocation.
