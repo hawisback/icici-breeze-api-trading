@@ -397,7 +397,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
         <div className="flex items-center space-x-2">
           <div className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse" />
           <span className="font-bold tracking-wider text-sm bg-gradient-to-r from-blue-400 to-teal-300 bg-clip-text text-transparent">
-            ICICI BREEZE TERMINAL
+            NIFTY TRADING TERMINAL
           </span>
           <span className="text-[10px] px-1.5 py-0.5 bg-slate-800 text-slate-400 rounded font-mono border border-slate-700">
             v2.0
@@ -982,7 +982,9 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
               </form>
 
               <div className="text-[10px] text-slate-500 leading-normal">
-                💡 <span className="font-medium text-slate-400">Zero-copy auto-redirect:</span> In your ICICI Direct Developer Console, set your Redirect URL to <code className="text-blue-400">http://127.0.0.1:8000/api/v1/broker/session/callback</code>.
+                💡 <span className="font-medium text-slate-400">Redirect:</span>{" "}
+                Configure the {brokerBackend === "kite" ? "Kite app" : "ICICI Direct app"} callback as{" "}
+                <code className="text-blue-400">http://127.0.0.1:8000/api/v1/broker/session/callback</code>.
               </div>
             </div>
           </div>
