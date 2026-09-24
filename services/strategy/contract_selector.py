@@ -77,6 +77,18 @@ class ContractSelector:
             return None, [], "NAIVE_SELECTION_TIMESTAMP"
         option_type = OptionType.CALL if direction is TradeDirection.BULLISH else OptionType.PUT
         leg_key = "call" if option_type is OptionType.CALL else "put"
+        capabilities = chain.get("capabilities")
+        if strategy_a and isinstance(capabilities, dict):
+            if capabilities.get("verified_delta_available") is False:
+                return (
+                    None,
+                    [],
+                    str(
+                        capabilities.get("strategy_a_rejection_reason")
+                        or "VERIFIED_OPTION_DELTA_UNAVAILABLE"
+                    ),
+                )
+
         strikes_data = chain.get("strikes", [])
         if not strikes_data:
             return None, [], "NO_STRIKES_IN_OPTION_CHAIN"
