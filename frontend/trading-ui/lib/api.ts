@@ -147,6 +147,10 @@ export interface SystemHealth {
   services: {
     api_gateway: string;
     broker_session: string;
+    broker_sessions?: {
+      breeze?: string;
+      kite?: string;
+    };
     market_feed: string;
     order_feed: string;
     risk_engine: string;
@@ -156,6 +160,9 @@ export interface SystemHealth {
   };
   config?: {
     broker_backend?: "breeze" | "kite";
+    live_execution_broker?: "breeze" | "kite";
+    frequent_data_broker?: "breeze" | "kite";
+    reference_data_broker?: "breeze" | "kite";
     local_single_user_mode?: boolean;
     live_trading_enabled?: boolean;
     [key: string]: unknown;
@@ -467,14 +474,19 @@ export async function setSystemMode(mode: string): Promise<any> {
   return res.json();
 }
 
-export async function fetchLoginUrl(): Promise<{
+export async function fetchLoginUrl(
+  broker?: "breeze" | "kite",
+): Promise<{
   login_url: string;
   api_key: string;
   broker?: "breeze" | "kite";
   callback_state: string;
   state_expires_at?: string;
 }> {
-  const res = await authenticatedFetch(`${API_BASE}/broker/session/login-url`);
+  const suffix = broker ? `?broker=${broker}` : "";
+  const res = await authenticatedFetch(
+    `${API_BASE}/broker/session/login-url${suffix}`,
+  );
   if (!res.ok) throw new Error("Failed to fetch login URL");
   return res.json();
 }
