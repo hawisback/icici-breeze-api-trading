@@ -599,6 +599,8 @@ class ActiveTrade(BaseModel):
     pending_exit_reason: Optional[str] = None
     exit_filled_quantity: int = 0
     exit_proceeds: float = 0.0
+    exit_order_accounted_filled_quantity: int = 0
+    exit_order_accounted_proceeds: float = 0.0
     # Dynamic live tracking
     current_option_price: float
     current_spot_price: float
