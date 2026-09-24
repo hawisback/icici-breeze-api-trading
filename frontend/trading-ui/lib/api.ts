@@ -124,7 +124,7 @@ export interface LiveGateStatus {
   live_authorized: boolean;
   system_setting_enabled: boolean;
   expires_at: string | null;
-  allowed_accounts: string[];
+  allowed_account_count: number;
   time_remaining_sec: number;
 }
 
@@ -376,7 +376,6 @@ export async function fetchLiveGateStatus(): Promise<LiveGateStatus> {
 }
 
 export async function requestLiveGateChallenge(
-  accountId: string,
   durationMinutes: number = 30,
 ): Promise<LiveGateChallenge> {
   const session = getStoredAuthSession();
@@ -385,7 +384,7 @@ export async function requestLiveGateChallenge(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       operator_id: session?.user.user_id || "AUTHENTICATED_USER",
-      account_id: accountId,
+      account_id: "SERVER_SELECTED",
       duration_minutes: durationMinutes,
     }),
   });
