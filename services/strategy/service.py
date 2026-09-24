@@ -2683,6 +2683,21 @@ class StrategyService:
                         if strategy_a_trade is not None
                         else None
                     ),
+                    "broker_protective_stop_status": (
+                        strategy_a_trade.protective_stop_status
+                        if strategy_a_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_trigger": (
+                        strategy_a_trade.protective_stop_trigger_price
+                        if strategy_a_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_limit": (
+                        strategy_a_trade.protective_stop_limit_price
+                        if strategy_a_trade is not None
+                        else None
+                    ),
                     "active_trade_id": (
                         strategy_a_trade.trade_id
                         if strategy_a_trade is not None
@@ -2714,6 +2729,21 @@ class StrategyService:
                     ),
                     "current_trailing_stop": (
                         strategy_b_trade.current_trailing_stop
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_status": (
+                        strategy_b_trade.protective_stop_status
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_trigger": (
+                        strategy_b_trade.protective_stop_trigger_price
+                        if strategy_b_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_limit": (
+                        strategy_b_trade.protective_stop_limit_price
                         if strategy_b_trade is not None
                         else None
                     ),
