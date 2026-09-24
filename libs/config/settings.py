@@ -76,6 +76,12 @@ class PlatformSettings(BaseSettings):
         le=10,
         alias="LIVE_MAX_OPEN_POSITIONS",
     )
+    live_market_data_max_age_seconds: float = Field(
+        default=5.0,
+        gt=0.5,
+        le=30.0,
+        alias="LIVE_MARKET_DATA_MAX_AGE_SECONDS",
+    )
 
     # API & Network & Boundary Security
     api_host: str = Field(default="0.0.0.0", alias="API_HOST")
@@ -292,6 +298,7 @@ class PlatformSettings(BaseSettings):
             ),
             "live_max_order_notional": self.live_max_order_notional,
             "live_max_open_positions": self.live_max_open_positions,
+            "live_market_data_max_age_seconds": self.live_market_data_max_age_seconds,
             "cors_allowed_origins": self.cors_allowed_origins,
             "market_data_backend": self.market_data_backend.value,
             "broker_backend": self.broker_backend.value,
