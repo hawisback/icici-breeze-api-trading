@@ -277,6 +277,7 @@ class ExecutionService:
                 await self._publish_trade_fill(
                     order=order,
                     quantity=resp.filled_quantity,
+                    cumulative_filled_quantity=resp.filled_quantity,
                     price=resp.average_price or order.price,
                 )
         except Exception as exc:
@@ -300,17 +301,31 @@ class ExecutionService:
                 )
             )
 
-    async def _publish_trade_fill(self, *, order: Any, quantity: int, price: float) -> None:
+    async def _publish_trade_fill(
+        self,
+        *,
+        order: Any,
+        quantity: int,
+        cumulative_filled_quantity: int,
+        price: float,
+    ) -> None:
+        execution_id = (
+            f"FILL-{order.order_id}-{int(cumulative_filled_quantity)}"
+        )
         await self.bus.publish(
             EventEnvelope(
                 topic=Topics.BROKER_TRADE_EVENT,
                 payload={
+                    "execution_id": execution_id,
                     "order_id": order.order_id,
                     "client_order_id": order.client_order_id,
                     "instrument_id": order.instrument_id,
                     "symbol": order.symbol,
                     "side": order.side.value,
                     "quantity": quantity,
+                    "cumulative_filled_quantity": int(
+                        cumulative_filled_quantity
+                    ),
                     "price": price,
                     "trading_mode": order.trading_mode.value,
                     "execution_time": utc_now().isoformat(),
@@ -412,6 +427,7 @@ class ExecutionService:
                     await self._publish_trade_fill(
                         order=order,
                         quantity=delta_fill,
+                        cumulative_filled_quantity=new_filled,
                         price=float(
                             response.average_price
                             or order.average_price
