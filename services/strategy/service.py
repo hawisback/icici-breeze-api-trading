@@ -1499,6 +1499,43 @@ class StrategyService:
         await self.repo.save_trade(trade)
         return False
 
+    @staticmethod
+    def _apply_exit_order_progress(
+        trade: ActiveTrade,
+        order: Any,
+    ) -> None:
+        """Apply cumulative broker fill progress exactly once per exit order."""
+        new_filled = max(
+            0,
+            min(int(order.filled_quantity or 0), int(order.quantity or 0)),
+        )
+        accounted_filled = int(
+            trade.exit_order_accounted_filled_quantity or 0
+        )
+        if new_filled < accounted_filled:
+            return
+
+        cumulative_average = float(order.average_price or 0.0)
+        new_order_proceeds = cumulative_average * new_filled
+        accounted_proceeds = float(
+            trade.exit_order_accounted_proceeds or 0.0
+        )
+        delta_filled = new_filled - accounted_filled
+        delta_proceeds = new_order_proceeds - accounted_proceeds
+        if delta_filled or abs(delta_proceeds) > 1e-9:
+            trade.exit_filled_quantity = min(
+                trade.quantity,
+                trade.exit_filled_quantity + delta_filled,
+            )
+            trade.exit_proceeds += delta_proceeds
+            trade.exit_order_accounted_filled_quantity = new_filled
+            trade.exit_order_accounted_proceeds = new_order_proceeds
+
+    @staticmethod
+    def _reset_exit_order_progress(trade: ActiveTrade) -> None:
+        trade.exit_order_accounted_filled_quantity = 0
+        trade.exit_order_accounted_proceeds = 0.0
+
     async def _evaluate_active_trade(self, trade: ActiveTrade, features: MarketFeatures) -> None:
         """Evaluates active position stops, trailing updates, and thesis reversal score."""
         if trade.state == TradeLifecycleState.ENTRY_PENDING and not trade.entry_order_id:
@@ -1510,14 +1547,56 @@ class StrategyService:
             order = await self.oms.get_order(trade.entry_order_id)
             if not order:
                 return
-            terminal = order.status.value in ("FILLED", "CANCELLED", "REJECTED", "RISK_REJECTED", "EXPIRED", "FAILED_SAFE")
+            terminal = order.status.value in (
+                "FILLED",
+                "CANCELLED",
+                "REJECTED",
+                "RISK_REJECTED",
+                "EXPIRED",
+                "FAILED_SAFE",
+            )
             gateway = getattr(self.hist_svc, "broker_gateway", None)
+
+            # Persist cumulative partial-entry progress immediately. Assignment,
+            # rather than addition, makes restart/replay idempotent.
+            if order.filled_quantity > 0:
+                filled_quantity = int(order.filled_quantity)
+                if (
+                    trade.filled_quantity != filled_quantity
+                    or (
+                        order.average_price > 0
+                        and trade.entry_option_price != order.average_price
+                    )
+                ):
+                    trade.filled_quantity = filled_quantity
+                    if order.average_price > 0:
+                        trade.entry_option_price = float(order.average_price)
+                        trade.option_hard_stop_price = round(
+                            float(order.average_price)
+                            * (
+                                1
+                                - self.config.risk.option_hard_stop_pct
+                                / 100
+                            ),
+                            2,
+                        )
+                    await self.repo.save_trade(trade)
+
             if not terminal:
-                # Cancel the remainder of partial fills before managing a fixed quantity.
-                timed_out = (utc_now()-trade.entry_time).total_seconds() >= self.config.risk.entry_order_timeout_sec
-                if (order.filled_quantity > 0 or timed_out) and order.broker_order_id and gateway:
-                    await gateway.cancel_order(order.broker_order_id, mode=order.trading_mode)
+                timed_out = (
+                    utc_now() - trade.entry_time
+                ).total_seconds() >= self.config.risk.entry_order_timeout_sec
+                if (
+                    (order.filled_quantity > 0 or timed_out)
+                    and order.broker_order_id
+                    and gateway
+                ):
+                    await gateway.cancel_order(
+                        order.broker_order_id,
+                        mode=order.trading_mode,
+                    )
                 return
+
             if order.filled_quantity <= 0:
                 trade.state = TradeLifecycleState.CLOSED
                 trade.exit_time = utc_now()
@@ -1527,13 +1606,23 @@ class StrategyService:
                 await self._save_runtime()
                 await self.repo.save_trade(trade)
                 return
-            if trade.filled_quantity != order.filled_quantity:
-                trade.filled_quantity = order.filled_quantity
-                trade.quantity = order.filled_quantity
-                trade.entry_option_price = order.average_price
-                trade.option_hard_stop_price = round(order.average_price * (1-self.config.risk.option_hard_stop_pct/100), 2)
-                trade.state = TradeLifecycleState.OPEN_INITIAL_RISK
-                await self.repo.save_trade(trade)
+
+            trade.filled_quantity = int(order.filled_quantity)
+            trade.quantity = int(order.filled_quantity)
+            trade.initial_quantity = int(order.filled_quantity)
+            trade.remaining_quantity = int(order.filled_quantity)
+            if order.average_price > 0:
+                trade.entry_option_price = float(order.average_price)
+                trade.option_hard_stop_price = round(
+                    float(order.average_price)
+                    * (
+                        1
+                        - self.config.risk.option_hard_stop_pct / 100
+                    ),
+                    2,
+                )
+            trade.state = TradeLifecycleState.OPEN_INITIAL_RISK
+            await self.repo.save_trade(trade)
 
         if trade.mode == AutoTradingMode.LIVE and trade.filled_quantity > 0:
             protection_ready = await self._sync_live_protective_stop(
@@ -1547,22 +1636,43 @@ class StrategyService:
             order = await self.oms.get_order(trade.exit_order_id)
             if not order:
                 return
-            if order.status.value == "FILLED":
-                trade.exit_proceeds += order.average_price * order.filled_quantity
-                trade.exit_filled_quantity += order.filled_quantity
-                await self._close_trade(trade, features, trade.exit_proceeds/trade.quantity, trade.pending_exit_reason)
+
+            self._apply_exit_order_progress(trade, order)
+
+            if (
+                order.status.value == "FILLED"
+                or trade.exit_filled_quantity >= trade.quantity
+            ):
+                await self.repo.save_trade(trade)
+                await self._close_trade(
+                    trade,
+                    features,
+                    trade.exit_proceeds / trade.quantity,
+                    trade.pending_exit_reason,
+                )
                 return
-            if order.status.value in ("CANCELLED", "REJECTED", "RISK_REJECTED", "EXPIRED", "FAILED_SAFE"):
-                trade.exit_proceeds += order.average_price * order.filled_quantity
-                trade.exit_filled_quantity += order.filled_quantity
+
+            if order.status.value in (
+                "CANCELLED",
+                "REJECTED",
+                "RISK_REJECTED",
+                "EXPIRED",
+                "FAILED_SAFE",
+            ):
                 trade.exit_order_id = None
+                self._reset_exit_order_progress(trade)
                 await self.repo.save_trade(trade)
             else:
+                await self.repo.save_trade(trade)
                 bid = await self._executable_bid(trade)
                 gateway = getattr(self.hist_svc, "broker_gateway", None)
                 if gateway and bid and order.broker_order_id:
                     if bid != order.price:
-                        await gateway.modify_order(order.broker_order_id, price=bid, mode=order.trading_mode)
+                        await gateway.modify_order(
+                            order.broker_order_id,
+                            price=bid,
+                            mode=order.trading_mode,
+                        )
                 return
 
         quote = await self._resolve_option_quote(trade)
@@ -1722,6 +1832,7 @@ class StrategyService:
                     reduce_only=True)
                 order = await self.oms.create_order_intent(intent)
                 trade.exit_order_id = order.order_id
+                self._reset_exit_order_progress(trade)
                 trade.pending_exit_reason = exit_reason
                 trade.state = TradeLifecycleState.EXIT_PENDING
                 await self.repo.save_trade(trade)
@@ -1939,6 +2050,7 @@ class StrategyService:
             )
             order = await self.oms.create_order_intent(intent)
             target.exit_order_id = order.order_id
+            self._reset_exit_order_progress(target)
             target.pending_exit_reason = reason
             target.state = TradeLifecycleState.EXIT_PENDING
             await self.repo.save_trade(target)
