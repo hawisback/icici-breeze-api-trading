@@ -12,6 +12,32 @@ from services.api_gateway.main import app
 from services.api_gateway.service_container import initialize_services
 
 
+async def _operator_headers(client: httpx.AsyncClient) -> dict[str, str]:
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={
+            "username": "operator",
+            "password": "Operator@Trading123!",
+        },
+    )
+    assert login.status_code == 200
+    return {
+        "Authorization": f"Bearer {login.json()['access_token']}"
+    }
+
+
+async def _issue_broker_login_state(
+    client: httpx.AsyncClient,
+) -> dict[str, object]:
+    headers = await _operator_headers(client)
+    response = await client.get(
+        "/api/v1/broker/session/login-url",
+        headers=headers,
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
 @pytest.mark.asyncio
 async def test_session_login_url_endpoint(tmp_path: Path, monkeypatch):
     test_key = "TEST_API_KEY_BREEZE_XYZ"
@@ -29,11 +55,19 @@ async def test_session_login_url_endpoint(tmp_path: Path, monkeypatch):
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        res = await client.get("/api/v1/broker/session/login-url")
+        headers = await _operator_headers(client)
+        res = await client.get(
+            "/api/v1/broker/session/login-url",
+            headers=headers,
+        )
         assert res.status_code == 200
         data = res.json()
-        assert "login_url" in data
-        assert f"api_key={test_key}" in data["login_url"]
+        assert data["api_key"] == test_key
+        assert data["login_url"].startswith(
+            "http://127.0.0.1:8000/api/v1/broker/session/start?state="
+        )
+        assert data["callback_state"]
+        assert data["state_expires_at"]
         assert "redirect_url_hint" in data
 
 
@@ -87,9 +121,14 @@ async def test_oauth_callback_success_json_and_env_update(tmp_path: Path, monkey
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        login_flow = await _issue_broker_login_state(client)
         callback_token = "2948104857201948"
         res = await client.get(
-            f"/api/v1/broker/session/callback?apisession={callback_token}",
+            "/api/v1/broker/session/callback",
+            params={
+                "apisession": callback_token,
+                "state": login_flow["callback_state"],
+            },
             headers={"Accept": "application/json"},
         )
         assert res.status_code == 200
@@ -132,8 +171,15 @@ async def test_oauth_callback_html_response_and_aliases(tmp_path: Path, monkeypa
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        # Test root /callback alias
-        res = await client.get("/callback?apisession=ROOT_CALLBACK_TOKEN_XYZ")
+        login_flow = await _issue_broker_login_state(client)
+        # Test root /callback alias with the one-time correlated login state.
+        res = await client.get(
+            "/callback",
+            params={
+                "apisession": "ROOT_CALLBACK_TOKEN_XYZ",
+                "state": login_flow["callback_state"],
+            },
+        )
         assert res.status_code == 200
         assert "ICICI Breeze Session Authenticated" in res.text
         assert "ROOT..._XYZ" in res.text
