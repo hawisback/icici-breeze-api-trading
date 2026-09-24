@@ -217,7 +217,6 @@ async def test_strategy_b_snapshot_fields_survive_repository_round_trip(tmp_path
 async def test_strategy_b_live_entry_records_confirmed_broker_fill_only():
     service, repo, oms = _service()
     now = datetime(2026, 9, 20, 10, 5, tzinfo=timezone.utc)
-    trade = service.position_manager.create_test_trade if False else None
     from services.strategy.models import ActiveTrade, TradeLifecycleState
 
     trade = ActiveTrade(
