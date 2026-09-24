@@ -539,6 +539,21 @@ class IciciBreezeAdapter(BrokerAdapter):
                 average_price=float(pos.average_price),
                 ltp=float(pos.ltp),
                 pnl=float(pos.total_pnl),
+                strike_price=(
+                    float(pos.instrument.strike)
+                    if pos.instrument.strike is not None
+                    else None
+                ),
+                right=(
+                    pos.instrument.option_right.value.lower()
+                    if pos.instrument.option_right is not None
+                    else None
+                ),
+                expiry_date=(
+                    pos.instrument.expiry.isoformat()
+                    if pos.instrument.expiry is not None
+                    else None
+                ),
             )
             for pos in positions
         ]
