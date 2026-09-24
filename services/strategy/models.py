@@ -609,6 +609,7 @@ class ActiveTrade(BaseModel):
     protective_stop_trigger_price: Optional[float] = None
     protective_stop_limit_price: Optional[float] = None
     protective_stop_filled_quantity: int = 0
+    protective_stop_filled_proceeds: float = 0.0
     protective_stop_cancel_for_exit: bool = False
     protective_stop_failures: int = 0
     current_r: float = 0.0
