@@ -106,10 +106,14 @@ def strategy_d_signal_from_status(
     payload = status.get("execution_signal") or {}
     signal_id = status.get("execution_signal_id")
     if not payload:
-        tracked = status.get("active_paper_trade") or {}
+        tracked = (
+            status.get("active_execution_trade")
+            or status.get("active_paper_trade")
+            or {}
+        )
         payload = tracked.get("signal") or {}
         signal_id = tracked.get("signal_id")
-        if tracked.get("paper_status") not in {"OPEN", "EXIT_QUOTE_PENDING"}:
+        if not payload:
             return None
     timestamp = _aware_timestamp(payload.get("timestamp"))
     if not signal_id or timestamp is None or not _is_fresh(timestamp, as_of):
