@@ -469,11 +469,27 @@ export async function fetchLoginUrl(): Promise<{ login_url: string; api_key: str
 // Auto-Trading Strategy API
 // ==============================================================================
 
+export interface StrategyExecutionPolicyData {
+  policy_version: string;
+  strategy: string;
+  call_mode: "PAPER" | "SHADOW_ONLY" | "LIVE" | "DISABLED";
+  put_mode: "PAPER" | "SHADOW_ONLY" | "LIVE" | "DISABLED";
+  live_trading_allowed: boolean;
+  promotion_state: string;
+  live_block_reason: string;
+  force_entry_allowed: boolean;
+}
+
 export interface StrategyFleetStatusData {
   enabled: boolean;
   label?: string;
   state: string;
   execution_mode?: string;
+  effective_call_mode?: string;
+  effective_put_mode?: string;
+  promotion_state?: string;
+  live_block_reason?: string;
+  force_entry_allowed?: boolean;
   live_trading_allowed?: boolean;
   candidate_id?: string | null;
   candidate_spec_fingerprint?: string | null;
@@ -509,6 +525,7 @@ export interface CandidatePaperStatusData {
 }
 
 export interface StrategyStatusData {
+  execution_policy?: Record<string, StrategyExecutionPolicyData>;
   scheduler?: {
     running: boolean;
     task_done?: boolean | null;
