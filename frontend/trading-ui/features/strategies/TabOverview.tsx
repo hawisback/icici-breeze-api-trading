@@ -113,16 +113,16 @@ export const TabOverview: React.FC<TabOverviewProps> = ({ status, onRefresh }) =
         <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-3">
           <div className="text-[11px] text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-            Live Authorization
+            System Arm
           </div>
           <div className="text-sm font-semibold">
             {config.system_armed ? (
               <span className="text-rose-400 font-bold flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
-                ARMED FOR LIVE
+                ARMED
               </span>
             ) : (
-              <span className="text-slate-400">DISARMED (SAFE)</span>
+              <span className="text-slate-400">DISARMED</span>
             )}
           </div>
         </div>
