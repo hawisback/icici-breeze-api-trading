@@ -61,12 +61,19 @@ class BrokerSessionService:
             "expires_in_seconds": int((expires_at - now).total_seconds()),
         }
 
-    def validate_login_challenge(self, state: str) -> bool:
+    def validate_login_challenge(
+        self,
+        state: str,
+        broker_backend: Optional[str] = None,
+    ) -> bool:
         """Check whether a broker-login correlation state is still valid."""
         now = utc_now()
         self._purge_login_challenges(now)
         challenge = self._login_challenges.get(str(state or ""))
-        return bool(challenge and challenge["expires_at"] > now)
+        if not challenge or challenge["expires_at"] <= now:
+            return False
+        expected = challenge.get("broker_backend")
+        return not expected or expected == self._normalize_broker(broker_backend)
 
     def consume_login_challenge(self, state: str) -> Optional[dict[str, Any]]:
         """Consume a valid broker-login correlation state exactly once."""
@@ -77,6 +84,7 @@ class BrokerSessionService:
             return None
         return {
             "initiated_by": challenge["initiated_by"],
+            "broker_backend": challenge.get("broker_backend"),
             "expires_at": challenge["expires_at"].isoformat(),
         }
 
