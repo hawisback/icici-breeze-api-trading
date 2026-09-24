@@ -3688,6 +3688,11 @@ class StrategyService:
                 "status": (
                     "STRATEGY_A_FORCE_ENTRY_DISABLED"
                     if strategy == StrategyName.TREND_PULLBACK
+                    else "FROZEN_CANDIDATE_FORCE_ENTRY_DISABLED"
+                    if strategy in {
+                        StrategyName.DI_CONTINUATION,
+                        StrategyName.SR_MOMENTUM_BREAKOUT,
+                    }
                     else "EXECUTION_POLICY_FORCE_ENTRY_DISABLED"
                 ),
                 "reason": (
