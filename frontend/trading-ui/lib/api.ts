@@ -147,16 +147,16 @@ export interface SystemHealth {
   services: {
     api_gateway: string;
     broker_session: string;
-    broker_sessions?: {
-      breeze?: string;
-      kite?: string;
-    };
     market_feed: string;
     order_feed: string;
     risk_engine: string;
     oms: string;
     portfolio: string;
     system_mode: string;
+  };
+  broker_sessions?: {
+    breeze?: string;
+    kite?: string;
   };
   config?: {
     broker_backend?: "breeze" | "kite";
