@@ -153,9 +153,15 @@ class PlatformSettings(BaseSettings):
         # identity and real-market safeguards, even if APP_ENV was left in a
         # non-production profile.
         if self.live_trading_enabled:
-            if not self.auth_signing_key or not self.auth_signing_key.get_secret_value():
+            signing_key = (
+                self.auth_signing_key.get_secret_value()
+                if self.auth_signing_key
+                else ""
+            )
+            if len(signing_key.encode("utf-8")) < 32:
                 raise ValueError(
-                    "AUTH_SIGNING_KEY is mandatory whenever LIVE_TRADING_ENABLED=true."
+                    "AUTH_SIGNING_KEY must be at least 32 bytes whenever "
+                    "LIVE_TRADING_ENABLED=true."
                 )
             if not self.live_allowed_accounts:
                 raise ValueError(
