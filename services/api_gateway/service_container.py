@@ -198,8 +198,13 @@ async def initialize_services(
         live_account_id=live_account_id,
         portfolio_service=portfolio_svc,
         broker_gateway=gateway_svc,
+        broker_session_service=session_svc,
+        market_data_service=market_svc,
         live_max_order_notional=app_settings.live_max_order_notional,
         live_max_open_positions=app_settings.live_max_open_positions,
+        live_market_data_max_age_seconds=(
+            app_settings.live_market_data_max_age_seconds
+        ),
     )
     await risk_svc.initialize()
 
