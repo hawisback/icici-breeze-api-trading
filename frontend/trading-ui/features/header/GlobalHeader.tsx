@@ -133,8 +133,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
       setShowLiveGateModal(true);
       return;
     }
-    const accountId = liveGate.allowed_accounts?.[0];
-    if (!accountId) {
+    if (!liveGate.allowed_account_count) {
       setLiveGateError("No allowlisted LIVE account is configured.");
       setShowLiveGateModal(true);
       return;
@@ -142,7 +141,7 @@ export function GlobalHeader({ activeView = "terminal", onViewChange }: GlobalHe
     setLiveGateSubmitting(true);
     setLiveGateError("");
     try {
-      const challenge = await requestLiveGateChallenge(accountId, 30);
+      const challenge = await requestLiveGateChallenge(30);
       setLiveChallenge({
         challenge_id: challenge.challenge_id,
         challenge_token: challenge.challenge_token,
