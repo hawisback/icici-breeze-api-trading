@@ -347,6 +347,16 @@ async def test_live_entries_have_independent_notional_position_and_funds_caps(tm
         live_gate=gate,
         portfolio_service=portfolio,
         broker_gateway=gateway,
+        broker_session_service=SimpleNamespace(
+            get_session_status=AsyncMock(
+                return_value={"connected": True, "status": "CONNECTED"}
+            )
+        ),
+        market_data_service=SimpleNamespace(
+            get_execution_feed_health=Mock(
+                return_value={"healthy": True, "reasons": []}
+            )
+        ),
         live_max_order_notional=50000.0,
         live_max_open_positions=1,
     )
