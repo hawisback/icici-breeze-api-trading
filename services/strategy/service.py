@@ -1325,6 +1325,7 @@ class StrategyService:
         }:
             trade.protective_stop_order_id = None
             trade.protective_stop_filled_quantity = 0
+            trade.protective_stop_filled_proceeds = 0.0
             trade.protective_stop_cancel_for_exit = False
             await self.repo.save_trade(trade)
             return True
