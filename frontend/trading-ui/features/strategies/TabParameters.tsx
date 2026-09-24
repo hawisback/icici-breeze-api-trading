@@ -17,6 +17,8 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
   const [saveSuccess, setSaveSuccess] = useState(false);
   const strategyC = status.strategy_c_paper;
   const strategyD = status.strategy_d_paper;
+  const strategyCExecution = status.strategies.di_continuation;
+  const strategyDExecution = status.strategies.sr_momentum_breakout;
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -45,14 +47,14 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
         <div className="bg-slate-900/90 border border-violet-900/60 rounded-xl p-5 shadow-lg space-y-3">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-violet-300">Strategy C · Frozen Candidate</div>
+              <div className="text-xs font-bold uppercase tracking-wider text-violet-300">Strategy C · Frozen Live Strategy</div>
               <div className="text-sm font-bold text-slate-100">DI Continuation V1</div>
             </div>
-            <span className="px-2 py-1 rounded text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/30">PAPER · READ ONLY</span>
+            <span className="px-2 py-1 rounded text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/30">{strategyCExecution.execution_mode || form.mode}</span>
           </div>
           <div className="grid grid-cols-2 gap-2 text-[10px]">
             <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Monitor</div><div className="font-bold text-slate-200">{strategyC?.status || "NOT_INITIALIZED"}</div></div>
-            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Live routing</div><div className="font-bold text-amber-300">LOCKED</div></div>
+            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Promotion</div><div className="font-bold text-emerald-300">{strategyCExecution.promotion_state || "LIVE_PROMOTED"}</div></div>
             <div className="bg-slate-950 rounded p-2 col-span-2"><div className="text-slate-500">Candidate</div><div className="font-mono text-violet-300 truncate">{strategyC?.candidate_id || "--"}</div></div>
           </div>
           <div className="text-[10px] text-slate-500">15m context → native 5m setup → native 1m trigger. Frozen lifecycle manages initial stop, breakeven, trailing stop, hard target, and forced exit.</div>
@@ -61,14 +63,14 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
         <div className="bg-slate-900/90 border border-fuchsia-900/60 rounded-xl p-5 shadow-lg space-y-3">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-fuchsia-300">Strategy D · Frozen Candidate</div>
+              <div className="text-xs font-bold uppercase tracking-wider text-fuchsia-300">Strategy D · Frozen Live Strategy</div>
               <div className="text-sm font-bold text-slate-100">S&amp;R Momentum Breakout V2</div>
             </div>
-            <span className="px-2 py-1 rounded text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/30">PAPER · READ ONLY</span>
+            <span className="px-2 py-1 rounded text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/30">{strategyDExecution.execution_mode || form.mode}</span>
           </div>
           <div className="grid grid-cols-2 gap-2 text-[10px]">
             <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Monitor</div><div className="font-bold text-slate-200">{strategyD?.status || "NOT_INITIALIZED"}</div></div>
-            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Live routing</div><div className="font-bold text-amber-300">LOCKED</div></div>
+            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Promotion</div><div className="font-bold text-emerald-300">{strategyDExecution.promotion_state || "LIVE_PROMOTED"}</div></div>
             <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">RSI clearance</div><div className="font-bold text-fuchsia-300">CALL &gt; 62 · PUT &lt; 38</div></div>
             <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Range regime</div><div className="font-bold text-fuchsia-300">PD range / ATR &lt; 8</div></div>
             <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Initial stop</div><div className="font-bold text-rose-300">1.5 × ATR</div></div>
@@ -532,41 +534,33 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-            <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-200">
-              <input
-                type="checkbox"
-                checked={form.tunables.trend_pullback_enabled}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    tunables: {
-                      ...form.tunables,
-                      trend_pullback_enabled: e.target.checked,
-                    },
-                  })
-                }
-                className="rounded accent-cyan-500"
-              />
-              Enable Strategy A (Trend Pullback)
-            </label>
-
-            <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-200">
-              <input
-                type="checkbox"
-                checked={form.tunables.volatility_breakout_enabled}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    tunables: {
-                      ...form.tunables,
-                      volatility_breakout_enabled: e.target.checked,
-                    },
-                  })
-                }
-                className="rounded accent-cyan-500"
-              />
-              Enable Strategy B (Volatility Breakout)
-            </label>
+            {([
+              ["trend_pullback_enabled", "Enable Strategy A (Trend Pullback)"],
+              ["volatility_breakout_enabled", "Enable Strategy B (Volatility Breakout)"],
+              ["di_continuation_enabled", "Enable Strategy C (DI Continuation)"],
+              ["sr_momentum_breakout_enabled", "Enable Strategy D (S&R Momentum)"],
+            ] as const).map(([key, label]) => (
+              <label key={key} className="flex items-center gap-2 cursor-pointer text-xs text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={form.tunables[key]}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      tunables: {
+                        ...form.tunables,
+                        [key]: e.target.checked,
+                      },
+                    })
+                  }
+                  className="rounded accent-cyan-500"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+          <div className="text-[10px] text-slate-500">
+            C/D retain their frozen signal rules. In global LIVE mode they use the same system arming, platform live permission, OMS, broker-held catastrophe stop, and reconciliation gates as A/B. Manual force-entry remains disabled for C/D.
           </div>
 
           <div className="grid grid-cols-3 gap-3">
