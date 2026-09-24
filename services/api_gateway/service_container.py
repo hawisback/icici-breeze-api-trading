@@ -9,6 +9,7 @@ import logging
 from typing import Optional
 
 from libs.config.settings import BrokerBackend, MarketDataBackend, PlatformSettings, get_platform_settings
+from libs.contracts.models import SystemMode, TradingMode
 from libs.events.bus import EventBus, InMemoryEventBus, get_event_bus
 from services.audit.repository import AuditRepository
 from services.audit.service import AuditService
@@ -233,6 +234,49 @@ async def initialize_services(
         historical_service=historical_svc,
     )
     await strategy_svc.initialize()
+
+    # Startup reconciliation never grants authority. It only compares durable
+    # local LIVE state with broker truth and, on verified inconsistencies,
+    # blocks new entries until an operator resolves them.
+    startup_orders = await oms_svc.list_orders(limit=500)
+    startup_broker_positions = []
+    startup_broker_verified = False
+    startup_broker_error = None
+    startup_session = await session_svc.get_session_status()
+    if startup_session.get("connected"):
+        try:
+            startup_broker_positions = await gateway_svc.get_positions(
+                mode=TradingMode.LIVE
+            )
+            startup_broker_verified = True
+        except Exception as exc:
+            startup_broker_error = type(exc).__name__
+            logger.exception(
+                "Startup LIVE broker position reconciliation failed"
+            )
+    else:
+        startup_broker_error = "BROKER_SESSION_NOT_CONNECTED"
+
+    startup_reconciliation = (
+        await strategy_svc.build_live_reconciliation_report(
+            broker_positions=startup_broker_positions,
+            orders=startup_orders,
+            broker_verified=startup_broker_verified,
+            broker_error=startup_broker_error,
+        )
+    )
+    if (
+        app_settings.live_trading_enabled
+        and startup_broker_verified
+        and startup_reconciliation.get("issues")
+    ):
+        current_risk_mode = await risk_svc.get_system_mode()
+        if current_risk_mode == SystemMode.NORMAL:
+            await risk_svc.set_system_mode(SystemMode.ENTRY_BLOCKED)
+            logger.warning(
+                "LIVE startup reconciliation found inconsistencies; "
+                "Risk mode moved to ENTRY_BLOCKED."
+            )
 
     audit_repo = AuditRepository(db_path=app_settings.audit_db_path)
     audit_svc = AuditService(repository=audit_repo, event_bus=bus)
