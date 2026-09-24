@@ -1319,6 +1319,36 @@ class StrategyService:
         execution_mode = self._execution_mode_for_signal(signal)
         chain = await self._get_option_chain()
         is_strategy_a = self._is_strategy_a(signal.strategy)
+        if (
+            is_strategy_a
+            and execution_mode == AutoTradingMode.LIVE
+            and not bool(
+                self._market_data_status.get(
+                    "strategy_a_option_execution_ready",
+                    False,
+                )
+            )
+        ):
+            reason = str(
+                self._market_data_status.get(
+                    "strategy_a_option_execution_reason"
+                )
+                or "VERIFIED_OPTION_DELTA_UNAVAILABLE"
+            )
+            await self._log_decision(
+                "RISK",
+                signal.strategy.value,
+                "Strategy A LIVE entry blocked: option execution readiness degraded",
+                {"reason": reason, "signal_id": signal.signal_id},
+            )
+            await self._reject_strategy_a_execution(
+                signal,
+                f"EXECUTION_REJECTED_OPTION_READINESS:{reason}",
+            )
+            return {
+                "status": "STRATEGY_A_OPTION_EXECUTION_BLOCKED",
+                "reason": reason,
+            }
         if is_strategy_a and signal.underlying_entry_price is None:
             await self._log_decision("RISK", signal.strategy.value, "Strategy A signal missing authoritative futures entry", signal.model_dump(mode="json"))
             await self._reject_strategy_a_execution(signal, "EXECUTION_REJECTED_INVALID_ENTRY_REFERENCE")
