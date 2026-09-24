@@ -524,6 +524,10 @@ export interface StrategyStatusData {
     futures_instrument?: string | null;
     futures_candle_count: number;
     latest_futures_candle?: string | null;
+    option_chain_source?: string | null;
+    option_chain_captured_at?: string | null;
+    strategy_a_option_execution_ready?: boolean;
+    strategy_a_option_execution_reason?: string | null;
     last_error?: string | null;
     last_evaluation_time?: string | null;
   };
