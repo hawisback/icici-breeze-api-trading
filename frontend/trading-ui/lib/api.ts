@@ -4,6 +4,122 @@
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
+export interface AuthUser {
+  user_id: string;
+  username: string;
+  role: "ADMIN" | "OPERATOR" | "TRADER" | "VIEWER";
+  is_active: boolean;
+}
+
+export interface AuthSession {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+  user: AuthUser;
+}
+
+const AUTH_SESSION_KEY = "trading_operator_session";
+
+export function getStoredAuthSession(): AuthSession | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.sessionStorage.getItem(AUTH_SESSION_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as AuthSession;
+  } catch {
+    window.sessionStorage.removeItem(AUTH_SESSION_KEY);
+    return null;
+  }
+}
+
+export function clearStoredAuthSession(): void {
+  if (typeof window !== "undefined") {
+    window.sessionStorage.removeItem(AUTH_SESSION_KEY);
+  }
+}
+
+function storeAuthSession(session: AuthSession): void {
+  if (typeof window !== "undefined") {
+    window.sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(session));
+  }
+}
+
+export async function loginUser(
+  username: string,
+  password: string,
+): Promise<AuthSession> {
+  const res = await fetch(`${API_BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) {
+    throw new Error("Invalid username or password");
+  }
+  const session = (await res.json()) as AuthSession;
+  storeAuthSession(session);
+  return session;
+}
+
+export async function logoutUser(): Promise<void> {
+  const session = getStoredAuthSession();
+  try {
+    if (session?.refresh_token) {
+      await fetch(`${API_BASE}/auth/logout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: session.refresh_token }),
+      });
+    }
+  } finally {
+    clearStoredAuthSession();
+  }
+}
+
+async function refreshAuthSession(session: AuthSession): Promise<AuthSession | null> {
+  const res = await fetch(`${API_BASE}/auth/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: session.refresh_token }),
+  });
+  if (!res.ok) {
+    clearStoredAuthSession();
+    return null;
+  }
+  const refreshed = (await res.json()) as AuthSession;
+  storeAuthSession(refreshed);
+  return refreshed;
+}
+
+async function authenticatedFetch(
+  input: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  let session = getStoredAuthSession();
+  if (!session?.access_token) {
+    throw new Error("Operator authentication required");
+  }
+
+  const execute = (accessToken: string) =>
+    fetch(input, {
+      ...init,
+      headers: {
+        ...(init.headers || {}),
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+  let res = await execute(session.access_token);
+  if (res.status !== 401) return res;
+
+  session = await refreshAuthSession(session);
+  if (!session) {
+    throw new Error("Operator session expired; sign in again");
+  }
+  res = await execute(session.access_token);
+  return res;
+}
+
 export interface SystemHealth {
   status: string;
   timestamp: string;
