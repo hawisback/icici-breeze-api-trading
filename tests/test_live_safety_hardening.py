@@ -308,8 +308,12 @@ async def test_live_entries_have_independent_notional_position_and_funds_caps(tm
     await bus.start()
     settings = PlatformSettings(
         data_root=str(tmp_path),
-        live_trading_enabled=False,
+        live_trading_enabled=True,
         live_allowed_accounts=["ICICI_PRIMARY"],
+        auth_signing_key="live-safety-test-signing-key-32-bytes-minimum",
+        market_data_backend="breeze",
+        breeze_api_key="test-live-key",
+        breeze_secret_key="test-live-secret",
     )
     gate = LiveTradingGate(settings=settings, event_bus=bus)
     challenge = await gate.request_activation_challenge(
