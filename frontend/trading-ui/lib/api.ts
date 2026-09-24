@@ -97,7 +97,11 @@ async function authenticatedFetch(
 ): Promise<Response> {
   let session = getStoredAuthSession();
   if (!session?.access_token) {
-    throw new Error("Operator authentication required");
+    const res = await fetch(input, init);
+    if (res.status === 401) {
+      throw new Error("Operator authentication required");
+    }
+    return res;
   }
 
   const execute = (accessToken: string) =>
