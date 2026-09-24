@@ -70,6 +70,27 @@ async def test_live_gate_default_disabled(clean_gate):
 
 
 @pytest.mark.asyncio
+async def test_local_single_user_live_gate_needs_no_confirmation():
+    settings = _live_capable_settings(
+        local_single_user_mode=True,
+        api_host="127.0.0.1",
+    )
+    gate = LiveTradingGate(
+        settings=settings,
+        event_bus=InMemoryEventBus(),
+    )
+
+    status = gate.get_status()
+    assert status["live_authorized"] is True
+    assert status["authorization_required"] is False
+    assert status["local_single_user_mode"] is True
+
+    allowed, reason = gate.validate_live_order("ICICI_PRIMARY")
+    assert allowed is True
+    assert "single-user" in reason.lower()
+
+
+@pytest.mark.asyncio
 async def test_server_capability_disabled_rejects_activation_challenge():
     gate = LiveTradingGate(
         settings=PlatformSettings(
