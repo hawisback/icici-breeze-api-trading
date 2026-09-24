@@ -7,7 +7,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v
 export interface AuthUser {
   user_id: string;
   username: string;
-  role: "ADMIN" | "OPERATOR" | "TRADER" | "VIEWER";
+  role: "ADMIN" | "OPERATOR" | "TRADER" | "READ_ONLY";
   is_active: boolean;
 }
 
@@ -222,7 +222,9 @@ export interface OrderData {
   instrument_id: string;
   symbol: string;
   side: "BUY" | "SELL";
-  order_type: "LIMIT" | "MARKET";
+  order_type: "LIMIT" | "MARKET" | "STOP_LIMIT";
+  trigger_price?: number | null;
+  reduce_only?: boolean;
   quantity: number;
   filled_quantity: number;
   remaining_quantity: number;
