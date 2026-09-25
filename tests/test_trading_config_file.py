@@ -176,3 +176,47 @@ async def test_invalid_operator_config_file_fails_closed(tmp_path):
 
     with pytest.raises(RuntimeError, match="Unable to read trading config file"):
         await repo.get_auto_config()
+
+
+@pytest.mark.asyncio
+async def test_strategy_e_old_90_second_default_migrates_to_180(tmp_path):
+    config_path = tmp_path / "trading.json"
+    payload = AutoTradingConfig().model_dump(mode="json")
+    payload["strategy_e_revision"] = 1
+    payload["tunables"]["strategy_e_max_signal_age_seconds"] = 90.0
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    repo = StrategyRepository(
+        db_path=tmp_path / "strategy.db",
+        config_path=config_path,
+    )
+    await repo.initialize()
+    loaded = await repo.get_auto_config()
+
+    assert loaded.strategy_e_revision == 2
+    assert loaded.tunables.strategy_e_max_signal_age_seconds == 180.0
+
+    normalized = json.loads(config_path.read_text(encoding="utf-8"))
+    assert normalized["strategy_e_revision"] == 2
+    assert normalized["tunables"]["strategy_e_max_signal_age_seconds"] == 180.0
+
+
+@pytest.mark.asyncio
+async def test_strategy_e_custom_signal_age_is_preserved_during_revision_migration(
+    tmp_path,
+):
+    config_path = tmp_path / "trading.json"
+    payload = AutoTradingConfig().model_dump(mode="json")
+    payload["strategy_e_revision"] = 1
+    payload["tunables"]["strategy_e_max_signal_age_seconds"] = 120.0
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    repo = StrategyRepository(
+        db_path=tmp_path / "strategy.db",
+        config_path=config_path,
+    )
+    await repo.initialize()
+    loaded = await repo.get_auto_config()
+
+    assert loaded.strategy_e_revision == 2
+    assert loaded.tunables.strategy_e_max_signal_age_seconds == 120.0
