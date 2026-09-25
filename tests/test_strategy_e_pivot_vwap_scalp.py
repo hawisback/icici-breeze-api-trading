@@ -93,6 +93,12 @@ def _strategy(**updates) -> PivotVwapScalpStrategy:
 def test_strategy_e_defaults_disabled_but_live_policy_is_promoted():
     config = StrategyTunablesConfig()
     assert config.pivot_vwap_scalp_enabled is False
+    assert config.strategy_e_max_signal_age_seconds == 180.0
+
+    service = StrategyService(oms_service=Mock(), repository=Mock())
+    assert service._strategy_e_signal_data_fresh(150.0) is True
+    assert service._strategy_e_signal_data_fresh(180.0) is True
+    assert service._strategy_e_signal_data_fresh(180.001) is False
 
     policy = resolve_strategy_execution_policy(
         StrategyName.PIVOT_VWAP_SCALP,
@@ -132,7 +138,13 @@ def test_strategy_e_emits_trend_long_and_deduplicates_completed_bar():
         ),
     ]
     bars = [*_previous_session(), *current]
-    decision = strategy.evaluate(bars, as_of=current[-1].end_time)
+    # The historical service intentionally allows up to 120 seconds for a
+    # just-closed bar to become authoritative. Strategy E must still accept
+    # that safely completed bar inside its 180-second window.
+    decision = strategy.evaluate(
+        bars,
+        as_of=current[-1].end_time + timedelta(seconds=150),
+    )
 
     assert decision.result == "TREND_LONG"
     assert decision.signal is not None
@@ -146,7 +158,10 @@ def test_strategy_e_emits_trend_long_and_deduplicates_completed_bar():
     assert decision.signal.structural_stop == 97.8
     assert decision.signal.features_snapshot["target_price"] == 123.5
 
-    duplicate = strategy.evaluate(bars, as_of=current[-1].end_time)
+    duplicate = strategy.evaluate(
+        bars,
+        as_of=current[-1].end_time + timedelta(seconds=151),
+    )
     assert duplicate.signal is None
     assert duplicate.reason == "NO_NEW_COMPLETED_5M_BAR"
 
