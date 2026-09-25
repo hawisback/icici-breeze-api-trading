@@ -19,9 +19,15 @@ def ist_now() -> datetime:
     return datetime.now(IST)
 
 
+def market_date(value: datetime | None = None) -> date:
+    """Return the India-market calendar date for an instant."""
+    instant = value or datetime.now(UTC)
+    return as_ist(instant).date()
+
+
 def ist_today() -> date:
     """Return the current India-market calendar date."""
-    return ist_now().date()
+    return market_date()
 
 
 def as_ist(value: datetime) -> datetime:
