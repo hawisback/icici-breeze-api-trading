@@ -1228,7 +1228,8 @@ export interface SimulationResultData {
   net_pnl: number | null;
   total_realized_r: number;
   max_drawdown_pnl: number | null;
-  profit_factor: number;
+  profit_factor: number | null;
+  max_drawdown_r?: number | null;
   trades: SimulatedTradeRecordData[];
   timeline: SimulationBarSnapshotData[];
   decision_logs: DecisionLogData[];
@@ -1241,10 +1242,12 @@ export interface SimulationRequestData {
   date?: string | null;
   instrument_id?: string;
   overrides?: Partial<ThresholdOverridesData>;
+  /** Accepted for API compatibility; current Day Replay does not apply historical sizing parity. */
   capital?: number;
   bypass_window?: boolean;
   bypass_entry_window?: boolean;
   historical_source?: "BREEZE" | "KITE" | "LIVE" | "MIXED";
+  /** Accepted for API compatibility; current Day Replay does not enforce chronological daily trade gates. */
   max_trades_per_day?: number;
 }
 
