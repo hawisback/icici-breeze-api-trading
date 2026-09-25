@@ -302,8 +302,8 @@ class VolatilityBreakoutReplayAdapter:
             max_age_bars=tunables.box_max_age_bars,
             breakout_buffer_atr=tunables.breakout_buffer_atr,
             max_extension_atr=tunables.breakout_max_extension_atr,
-            evaluation_start=session.strategy_b_no_new_trade_before,
-            evaluation_end=session.no_new_trade_after,
+            entry_start=session.strategy_b_no_new_trade_before,
+            entry_end=session.no_new_trade_after,
         )
 
     def strategy_metadata(self) -> ReplayStrategyMetadata:
@@ -463,7 +463,7 @@ class ReplayStrategyRegistry:
             adapter.prepare_session(context)
 
     @staticmethod
-    def entry_window_active(
+    def evaluation_window_active(
         metadata: ReplayStrategyMetadata,
         at: datetime,
         *,
@@ -479,14 +479,14 @@ class ReplayStrategyRegistry:
         end_h, end_m = map(int, metadata.evaluation_end.split(":"))
         return start_h * 60 + start_m <= minutes <= end_h * 60 + end_m
 
-    def any_entry_window_active(
+    def any_evaluation_window_active(
         self,
         at: datetime,
         *,
         bypass_entry_window: bool,
     ) -> bool:
         return any(
-            self.entry_window_active(
+            self.evaluation_window_active(
                 meta,
                 at,
                 bypass_entry_window=bypass_entry_window,
