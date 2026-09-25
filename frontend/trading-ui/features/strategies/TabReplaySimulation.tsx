@@ -124,6 +124,11 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const netPnl = result?.net_pnl;
   const grossPnl = result?.total_pnl;
   const hasNetPnl = netPnl !== null && netPnl !== undefined;
+  const executionNetPnl = result?.option_mark_metrics?.net_estimated_executable_pnl;
+  const executionGrossPnl = result?.option_mark_metrics?.gross_estimated_executable_pnl;
+  const executionSlippage = result?.option_mark_metrics?.estimated_slippage_costs;
+  const executionCosts = result?.option_mark_metrics?.estimated_execution_transaction_costs;
+  const hasExecutionPnl = executionNetPnl !== null && executionNetPnl !== undefined;
   const replayDiagnostics = result?.replay_metadata?.strategy_a_replay_diagnostics as
     | {
         directional_evaluations?: number;
@@ -159,6 +164,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
     | {
         applied_overrides?: Record<string, unknown>;
         applied_request_controls?: Record<string, unknown>;
+        conditionally_applied_overrides?: Record<string, { value?: unknown; reason?: string }>;
         not_applied_overrides?: Record<string, { value?: unknown; reason?: string }>;
         not_applied_request_controls?: Record<string, { value?: unknown; reason?: string }>;
       }
@@ -167,6 +173,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
     ...Object.entries(controlApplication?.applied_overrides || {}),
     ...Object.entries(controlApplication?.applied_request_controls || {}),
   ];
+  const conditionalReplayControls = Object.entries(controlApplication?.conditionally_applied_overrides || {});
   const ignoredReplayOverrides = Object.entries(controlApplication?.not_applied_overrides || {});
   const unsupportedRequestControls = Object.entries(controlApplication?.not_applied_request_controls || {});
 
@@ -312,7 +319,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
           <div className="text-[10px] leading-relaxed text-slate-400">
             {replayMode === "RESEARCH"
               ? "Discovers qualified strategy signals independently, then resolves each lifecycle afterward. Useful for hypothesis analysis."
-              : "Walks forward chronologically: active positions are managed before new entries, A→B priority is enforced, production numeric risk gates are applied, and accepted quantity is sized from replay capital/risk. Contract selection still uses the historical approximation until the next increment."}
+              : "Walks forward chronologically with production numeric risk gates and sizing. Exact stored point-in-time chain snapshots rerun the production ContractSelector; other dates are explicitly APPROXIMATED_SELECTION. Historical marks remain separate from estimated fills."}
           </div>
         </div>
 
@@ -323,7 +330,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               Strategy B signal overrides apply in both modes. In Execution Parity, replay capital,
               risk-per-trade %, daily trade limits, concurrent-position limits, cooldown, daily-R loss
               limits, and per-strategy limits are applied. Strategy A keeps its canonical signal contract.
-              Premium-cap selection and the legacy hard-ADX control remain unapplied.
+              Premium-cap selection is conditional on exact point-in-time chain evidence; approximated selection cannot prove liquidity/premium gates. The legacy hard-ADX control remains unapplied.
             </div>
 
             {replayMode === "EXECUTION_PARITY" && (
@@ -472,7 +479,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 </span>
               </div>
             </div>
-            {(appliedReplayControls.length > 0 || ignoredReplayOverrides.length > 0 || unsupportedRequestControls.length > 0) && (
+            {(appliedReplayControls.length > 0 || conditionalReplayControls.length > 0 || ignoredReplayOverrides.length > 0 || unsupportedRequestControls.length > 0) && (
               <div className="mt-3 rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-[10px]">
                 <div className="font-bold uppercase tracking-wider text-slate-400">Replay control application</div>
                 <div className="mt-1 text-emerald-300">
@@ -480,6 +487,11 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                     ? appliedReplayControls.map(([name, value]) => `${name}=${String(value)}`).join(", ")
                     : "none"}
                 </div>
+                {conditionalReplayControls.length > 0 && (
+                  <div className="mt-1 text-cyan-300">
+                    Conditional: {conditionalReplayControls.map(([name]) => name).join(", ")}
+                  </div>
+                )}
                 <div className="mt-1 text-amber-300">
                   Not applied: {[
                     ...ignoredReplayOverrides.map(([name]) => name),
@@ -608,23 +620,24 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                   : "Historical option marks unavailable."}
               </div>
             </div>
-            {/*
-              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
-                Simulated Net PnL
+            {replayMode === "EXECUTION_PARITY" && (
+              <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
+                <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
+                  Estimated Executable P&L
+                </div>
+                <div className={`text-xl font-mono font-bold ${!hasExecutionPnl ? "text-slate-300" : (executionNetPnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                  {formatPnl(executionNetPnl)}
+                </div>
+                <div className="text-[10px] text-slate-400 mt-1">
+                  Gross fills: {formatAmount(executionGrossPnl)} · Slippage: {formatAmount(executionSlippage)} · Costs: {formatAmount(executionCosts)}
+                </div>
+                <div className="text-[10px] text-cyan-300 mt-1">
+                  {hasExecutionPnl
+                    ? `${result?.option_mark_metrics?.bid_ask_supported_trades ?? 0} trade(s) fully bid/ask-supported; ${result?.option_mark_metrics?.mark_fallback_fill_trades ?? 0} used mark±slippage fallback.`
+                    : "Estimated fill economics unavailable for one or more resolved trades."}
+                </div>
               </div>
-              <div
-                className={`text-xl font-mono font-bold ${
-                  !hasNetPnl ? "text-slate-300" : netPnl >= 0 ? "text-emerald-400" : "text-rose-400"
-                }`}
-              >
-                {result.net_pnl >= 0 ? "+" : ""}₹{result.net_pnl.toLocaleString()}
-              </div>
-              <div className="text-[10px] text-slate-400 mt-1">
-                Gross: ₹{result.total_pnl.toLocaleString()}
-              </div>
-            </div>
-
-            */}
+            )}
 
             {/* Realized R */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
