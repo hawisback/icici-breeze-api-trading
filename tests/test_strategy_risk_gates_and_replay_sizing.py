@@ -176,3 +176,42 @@ def test_strategy_a_replay_sizing_changes_with_capital_and_risk_budget():
     assert high.quantity == 400
     assert low.lots == 1
     assert low.quantity == 50
+
+    exact = calculate_replay_sizing(
+        signal=signal,
+        contract=_contract(),
+        entry_mark=100.0,
+        risk_config=RiskConfig(
+            account_equity=500000.0,
+            risk_per_trade_pct_of_account=0.5,
+            max_trade_capital=50000.0,
+        ),
+        option_selection=option_selection,
+        session_config=SessionTimersConfig(),
+        strategy_config=StrategyTunablesConfig(),
+        account_equity=500000.0,
+        option_delta=0.55,
+        option_delta_source="BROKER",
+        price_basis="POINT_IN_TIME_ASK",
+    )
+    assert exact.method == "UNDERLYING_R_WITH_POINT_IN_TIME_DELTA"
+    assert exact.delta_proxy == 0.55
+    assert exact.delta_source == "BROKER"
+    assert exact.price_basis == "POINT_IN_TIME_ASK"
+    assert exact.lots == 9
+
+
+def test_daily_loss_pct_gate_uses_estimated_execution_pnl_when_available():
+    risk = RiskConfig(
+        account_equity=100000.0,
+        max_daily_loss_r=10.0,
+        max_daily_loss_pct=1.5,
+    )
+    gate = check_daily_loss_limits(
+        risk,
+        realized_r_total=0.0,
+        net_pnl_total=-1500.0,
+    )
+
+    assert gate.status == "DAILY_LOSS_LIMIT_REACHED"
+    assert gate.details["reasons"] == ["MAX_DAILY_LOSS_PCT"]
