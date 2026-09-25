@@ -98,6 +98,8 @@ async def test_config_file_is_canonical_after_bootstrap_marker_is_consumed(
     assert loaded.tunables.pivot_vwap_scalp_enabled is True
     # Files can select LIVE/PAPER/SHADOW mode, but never restore arm authority.
     assert loaded.system_armed is False
+    normalized_file = json.loads(config_path.read_text(encoding="utf-8"))
+    assert normalized_file["system_armed"] is False
 
     async with repo.engine.connect() as conn:
         row = await (
