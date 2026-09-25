@@ -240,7 +240,10 @@ async def initialize_services(
     )
     await exec_svc.initialize()
 
-    strategy_repo = StrategyRepository(db_path=app_settings.strategy_db_path)
+    strategy_repo = StrategyRepository(
+        db_path=app_settings.strategy_db_path,
+        config_path=app_settings.trading_config_path,
+    )
     strategy_svc = StrategyService(
         repository=strategy_repo,
         oms_service=oms_svc,
