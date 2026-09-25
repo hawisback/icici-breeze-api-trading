@@ -245,6 +245,7 @@ def test_strategy_e_emits_countertrend_long_from_support_micro_reversal():
         strategy_e_stop_buffer_points=0.5,
         strategy_e_sr_buffer_points=0.5,
         strategy_e_counter_zone_points=2.5,
+        strategy_e_chop_cross_threshold=4,
         strategy_e_min_reward_risk=0.2,
         strategy_e_min_room_to_level_points=0.5,
     )
