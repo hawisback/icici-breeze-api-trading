@@ -726,6 +726,9 @@ def attach_historical_option_prices(
             "pricing_field": "completed_candle_close",
             "mark_policy": "latest_completed_candle_close_at_event",
             "contract_selection_method": "nearest_strike_first_expiry_on_or_after_replay_date",
+            "sizing_status": record.sizing_status,
+            "sizing_method": record.sizing_method,
+            "sizing_price_basis": record.sizing_price_basis,
             "bid_ask_available": False,
             "executable_fill_equivalent": False,
             "entry": _historical_mark_provenance(None, record.simulated_entry_timestamp),
@@ -767,7 +770,7 @@ def attach_historical_option_prices(
             record.option_data_quality_reason = "Breeze historical option candle unavailable at entry or exit"
             continue
 
-        quantity = selected["lot_size"]
+        quantity = int(record.replay_quantity or selected["lot_size"])
         gross = round((exit_price - entry_price) * quantity, 2)
         turnover = (entry_price + exit_price) * quantity
         buy_turnover = entry_price * quantity
@@ -824,8 +827,12 @@ def build_simulated_trade_records(records: Iterable[ReplayManifestRecord]) -> li
                 initial_r_points=record.initial_risk_points,
                 peak_r=record.mfe_r if record.mfe_r is not None else record.peak_r,
                 realized_r=float(record.realized_r),
-                quantity=int(record.option_lot_size or 1),
-                lots=1,
+                quantity=int(
+                    record.replay_quantity
+                    or record.option_lot_size
+                    or 1
+                ),
+                lots=int(record.replay_lots or 1),
                 gross_pnl=record.option_gross_pnl,
                 net_pnl=record.option_net_pnl,
                 hold_duration_mins=hold_duration_mins,
