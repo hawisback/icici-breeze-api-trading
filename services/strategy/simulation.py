@@ -815,7 +815,7 @@ class SimulationEngine:
                 as_of=bar.end_time,
             )
             clock = bar.end_time.astimezone(IST)
-            in_window = strategy_registry.any_entry_window_active(
+            in_window = strategy_registry.any_evaluation_window_active(
                 bar.end_time,
                 bypass_entry_window=bypass_entry_window,
             )
@@ -867,7 +867,7 @@ class SimulationEngine:
 
             for evaluation in evaluations:
                 metadata = evaluation.metadata
-                in_strategy_window = strategy_registry.entry_window_active(
+                in_strategy_window = strategy_registry.evaluation_window_active(
                     metadata,
                     bar.end_time,
                     bypass_entry_window=bypass_entry_window,
