@@ -57,6 +57,11 @@ class PlatformSettings(BaseSettings):
     app_env: AppEnv = Field(default=AppEnv.DEVELOPMENT, alias="APP_ENV")
     service_name: str = Field(default="trading-platform", alias="SERVICE_NAME")
     data_root: Path = Field(default=Path("./data"), alias="DATA_ROOT")
+    trading_config_path: Path = Field(
+        default=Path("./config/trading.json"),
+        alias="TRADING_CONFIG_PATH",
+        description="Canonical non-secret operator trading configuration file",
+    )
 
     # Eventing
     event_bus_backend: EventBusBackend = Field(default=EventBusBackend.MEMORY, alias="EVENT_BUS_BACKEND")
@@ -175,8 +180,9 @@ class PlatformSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_safety_invariants(self) -> PlatformSettings:
-        # Resolve data_root
+        # Resolve filesystem-backed configuration/data paths.
         self.data_root = self.data_root.resolve()
+        self.trading_config_path = self.trading_config_path.resolve()
 
         if (
             self.local_single_user_mode
@@ -379,6 +385,7 @@ class PlatformSettings(BaseSettings):
             "app_env": self.app_env.value,
             "service_name": self.service_name,
             "data_root": str(self.data_root),
+            "trading_config_path": str(self.trading_config_path),
             "event_bus_backend": self.event_bus_backend.value,
             "redpanda_brokers": self.redpanda_brokers or "[NONE]",
             "redis_url": self.redis_url or "[NONE]",
