@@ -548,6 +548,9 @@ export interface StrategyFleetStatusData {
   broker_protective_stop_trigger?: number | null;
   broker_protective_stop_limit?: number | null;
   active_trade_id?: string | null;
+  signal_type?: string | null;
+  target_price?: number | null;
+  last_reason?: string | null;
 }
 
 export interface CandidatePaperStatusData {
@@ -603,8 +606,10 @@ export interface StrategyStatusData {
     execution_feed_max_age_seconds?: number | null;
     latest_spot_5m_candle_age_seconds?: number | null;
     latest_futures_15m_candle_age_seconds?: number | null;
+    latest_futures_5m_candle_age_seconds?: number | null;
     strategy_a_signal_data_fresh?: boolean;
     strategy_b_signal_data_fresh?: boolean;
+    strategy_e_signal_data_fresh?: boolean;
     last_error?: string | null;
     last_evaluation_time?: string | null;
   };
@@ -664,6 +669,28 @@ export interface StrategyStatusData {
       volatility_breakout_enabled: boolean;
       di_continuation_enabled: boolean;
       sr_momentum_breakout_enabled: boolean;
+      pivot_vwap_scalp_enabled: boolean;
+      strategy_e_countertrend_enabled: boolean;
+      strategy_e_swing_lookback: number;
+      strategy_e_volume_lookback: number;
+      strategy_e_rvol_confirmation: number;
+      strategy_e_sr_lookback_bars: number;
+      strategy_e_sr_buffer_points: number;
+      strategy_e_counter_zone_points: number;
+      strategy_e_stop_buffer_points: number;
+      strategy_e_max_stop_points: number;
+      strategy_e_trend_target_points: number;
+      strategy_e_counter_target_points: number;
+      strategy_e_min_reward_risk: number;
+      strategy_e_min_room_to_level_points: number;
+      strategy_e_chop_lookback_bars: number;
+      strategy_e_chop_cross_threshold: number;
+      strategy_e_flat_vwap_lookback_bars: number;
+      strategy_e_flat_vwap_threshold_points: number;
+      strategy_e_lots: number;
+      strategy_e_entry_start: string;
+      strategy_e_entry_end: string;
+      strategy_e_forced_exit_time: string;
       ema_fast_period: number;
       ema_slow_period: number;
       adx_period: number;
@@ -731,11 +758,13 @@ export interface StrategyStatusData {
   strategy_c_shadow?: CandidatePaperStatusData;
   strategy_c_paper?: CandidatePaperStatusData;
   strategy_d_paper?: CandidatePaperStatusData;
+  strategy_e_decision?: Record<string, any>;
   strategies: {
     trend_pullback: StrategyFleetStatusData;
     volatility_breakout: StrategyFleetStatusData;
     di_continuation: StrategyFleetStatusData;
     sr_momentum_breakout: StrategyFleetStatusData;
+    pivot_vwap_scalp: StrategyFleetStatusData;
   };
   trigger_diagnostics?: TriggerDiagnosticsResponseData;
   active_overrides?: ThresholdOverridesData;
