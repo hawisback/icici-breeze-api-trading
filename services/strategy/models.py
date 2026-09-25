@@ -906,7 +906,6 @@ class SimulationRequest(BaseModel):
     overrides: Optional[ThresholdOverrides] = None
     capital: float = Field(
         default=500000.0,
-        gt=0,
         description="Compatibility-only in current Day Replay; historical sizing parity is not applied yet.",
     )
     bypass_window: bool = False
@@ -916,7 +915,6 @@ class SimulationRequest(BaseModel):
     historical_source: HistoricalReplaySource = HistoricalReplaySource.BREEZE
     max_trades_per_day: int = Field(
         default=5,
-        ge=1,
         description="Compatibility-only in current Day Replay; chronological daily trade gating is not applied yet.",
     )
 
