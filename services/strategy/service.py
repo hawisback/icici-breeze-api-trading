@@ -4559,8 +4559,10 @@ class StrategyService:
     def _strategy_e_trigger_diagnostics(
         self,
     ) -> list[StrategyTriggerDiagnostics]:
-        decision = self.strategy_e.last_decision
+        decision = self._strategy_e_analysis
         metrics = decision.metrics or {}
+        now = utc_now()
+        entry_window_open = self._strategy_e_entry_window_open(now)
         active_trade = next(
             (
                 trade
@@ -4664,6 +4666,24 @@ class StrategyService:
                 ),
             ),
             TriggerCondition(
+                id="entry_window",
+                name="Entry window",
+                current_value="OPEN" if entry_window_open else "CLOSED",
+                target_threshold=(
+                    f"{self.config.tunables.strategy_e_entry_start}-"
+                    f"{self.config.tunables.strategy_e_entry_end} IST"
+                ),
+                status="PASSED" if entry_window_open else "PENDING",
+                gap_description=(
+                    "Strategy E may open new entries"
+                    if entry_window_open
+                    else (
+                        "Outside Strategy E entry window; candle analysis "
+                        "continues but execution is blocked"
+                    )
+                ),
+            ),
+            TriggerCondition(
                 id="latest_setup",
                 name="Latest 5m setup",
                 current_value=decision.result,
@@ -4682,7 +4702,7 @@ class StrategyService:
             overall = "BLOCKED"
         elif active_trade is not None:
             overall = "ACTIVE"
-        elif signal_ready:
+        elif signal_ready and entry_window_open:
             overall = "READY_TO_TRIGGER"
         else:
             overall = "WAITING"
@@ -4703,7 +4723,11 @@ class StrategyService:
                 key_blocker=(
                     "Active Strategy E trade"
                     if active_trade is not None
-                    else decision.reason
+                    else (
+                        "OUTSIDE_ENTRY_WINDOW"
+                        if signal_ready and not entry_window_open
+                        else decision.reason
+                    )
                 ),
                 target_entry_level=(
                     float(metrics["entry_price"])
@@ -4720,6 +4744,12 @@ class StrategyService:
                     "relative_volume": metrics.get("relative_volume"),
                     "target": metrics.get("target"),
                     "execution_mode": execution_mode.value,
+                    "entry_window_open": entry_window_open,
+                    "entry_window": (
+                        f"{self.config.tunables.strategy_e_entry_start}-"
+                        f"{self.config.tunables.strategy_e_entry_end} IST"
+                    ),
+                    "analysis_source": "COMPLETED_5M_HISTORY",
                 },
                 conditions=conditions,
             )
