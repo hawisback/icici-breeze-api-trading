@@ -345,6 +345,84 @@ def test_historical_option_candles_populate_net_pnl():
     assert mark_summary["net_mark_pnl"] == sized_trade.net_pnl
 
 
+def test_option_pricing_keeps_execution_parity_sizing_contract_locked():
+    record = _resolved_manifest(2, 1.0)
+    record.simulated_entry_price = 23306.0
+    record.sizing_contract_instrument_id = "OPT-SIZED-23300"
+    record.sizing_contract_symbol = "NIFTY23300CE"
+    record.sizing_contract_expiry = "2026-09-22"
+    record.sizing_contract_strike = 23300.0
+    record.sizing_contract_lot_size = 25
+    record.sizing_entry_mark = 100.0
+    record.replay_lots = 1
+    record.replay_quantity = 25
+
+    sized_contract = SimpleNamespace(
+        instrument_id="OPT-SIZED-23300",
+        stock_code="NIFTY23300CE",
+        expiry="2026-09-22",
+        strike=23300.0,
+        option_right=SimpleNamespace(value="CALL"),
+        lot_size=25,
+    )
+    closer_contract = SimpleNamespace(
+        instrument_id="OPT-CLOSER-23305",
+        stock_code="NIFTY23305CE",
+        expiry="2026-09-22",
+        strike=23305.0,
+        option_right=SimpleNamespace(value="CALL"),
+        lot_size=25,
+    )
+
+    def marks(contract_id: str, entry: float, exit_: float) -> list[Candle]:
+        return [
+            Candle(
+                instrument_id=contract_id,
+                interval="1m",
+                start_time=record.simulated_entry_timestamp - timedelta(minutes=1),
+                end_time=record.simulated_entry_timestamp,
+                open=entry,
+                high=entry,
+                low=entry,
+                close=entry,
+                volume=100,
+                source="BREEZE",
+            ),
+            Candle(
+                instrument_id=contract_id,
+                interval="1m",
+                start_time=record.exit_timestamp - timedelta(minutes=1),
+                end_time=record.exit_timestamp,
+                open=exit_,
+                high=exit_,
+                low=exit_,
+                close=exit_,
+                volume=100,
+                source="BREEZE",
+            ),
+        ]
+
+    attach_historical_option_prices(
+        [record],
+        [sized_contract, closer_contract],
+        {
+            sized_contract.instrument_id: marks(
+                sized_contract.instrument_id, 100.0, 110.0
+            ),
+            closer_contract.instrument_id: marks(
+                closer_contract.instrument_id, 200.0, 250.0
+            ),
+        },
+        RiskConfig(),
+    )
+
+    assert record.option_contract_instrument_id == sized_contract.instrument_id
+    assert record.option_entry_price == 100.0
+    assert record.option_exit_price == 110.0
+    assert record.option_gross_pnl == 250.0
+    assert record.historical_option_provenance["sizing_contract_locked"] is True
+
+
 def test_option_mark_summary_never_partially_aggregates_missing_marks():
     priced = _resolved_manifest(1, 0.5)
     priced.option_data_status = "AVAILABLE"
