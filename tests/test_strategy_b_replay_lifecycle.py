@@ -278,8 +278,20 @@ def test_chronological_executor_does_not_scan_future_and_blocks_capacity():
         StrategyName.VOLATILITY_BREAKOUT.value: 1
     }
     assert executor.state.realized_r_total < 0
+    assert executor.state.last_loss_exit_time is None
+    assert executor.state.loss_cooldown_until is None
+
+    record.simulated_gross_pnl = -100.0
+    record.simulated_net_pnl = -125.0
+    executor.apply_execution_economics(record)
+    executor.apply_execution_economics(record)  # idempotent
+
     assert executor.state.last_loss_exit_time == record.exit_timestamp
     assert executor.state.loss_cooldown_until is not None
+    assert executor.state.realized_net_pnl_total == -125.0
+    assert executor.state.failed_entries_by_strategy == {
+        StrategyName.VOLATILITY_BREAKOUT.value: 1
+    }
     assert executor.can_accept_entry() is True
 
 
