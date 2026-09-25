@@ -269,6 +269,13 @@ class PivotVwapScalpStrategy:
             )
 
         latest = candles[-1]
+        if self.last_processed_candle == latest.end_time:
+            return StrategyEDecision(
+                "NO_TRADE",
+                "NO_NEW_COMPLETED_5M_BAR",
+                self.last_decision.metrics,
+            )
+        self.last_processed_candle = latest.end_time
         signal_age_seconds = max(
             0.0,
             (as_of - latest.end_time).total_seconds(),
@@ -281,13 +288,6 @@ class PivotVwapScalpStrategy:
                     "max_signal_age_seconds": cfg.strategy_e_max_signal_age_seconds,
                 },
             )
-        if self.last_processed_candle == latest.end_time:
-            return StrategyEDecision(
-                "NO_TRADE",
-                "NO_NEW_COMPLETED_5M_BAR",
-                self.last_decision.metrics,
-            )
-        self.last_processed_candle = latest.end_time
 
         current_date = self._session_date(latest)
         session = [c for c in candles if self._session_date(c) == current_date]
