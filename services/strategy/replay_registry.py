@@ -462,23 +462,37 @@ class ReplayStrategyRegistry:
         for adapter in self.adapters:
             adapter.prepare_session(context)
 
+    @staticmethod
+    def entry_window_active(
+        metadata: ReplayStrategyMetadata,
+        at: datetime,
+        *,
+        bypass_entry_window: bool,
+    ) -> bool:
+        if not metadata.enabled:
+            return False
+        if bypass_entry_window:
+            return True
+        clock = at.astimezone(IST)
+        minutes = clock.hour * 60 + clock.minute
+        start_h, start_m = map(int, metadata.entry_start.split(":"))
+        end_h, end_m = map(int, metadata.entry_end.split(":"))
+        return start_h * 60 + start_m <= minutes <= end_h * 60 + end_m
+
     def any_entry_window_active(
         self,
         at: datetime,
         *,
         bypass_entry_window: bool,
     ) -> bool:
-        if bypass_entry_window:
-            return any(meta.enabled for meta in self.strategy_metadata())
-        minutes = at.astimezone(IST).hour * 60 + at.astimezone(IST).minute
-        for meta in self.strategy_metadata():
-            if not meta.enabled:
-                continue
-            start_h, start_m = map(int, meta.entry_start.split(":"))
-            end_h, end_m = map(int, meta.entry_end.split(":"))
-            if start_h * 60 + start_m <= minutes <= end_h * 60 + end_m:
-                return True
-        return False
+        return any(
+            self.entry_window_active(
+                meta,
+                at,
+                bypass_entry_window=bypass_entry_window,
+            )
+            for meta in self.strategy_metadata()
+        )
 
     def evaluate_completed_bar(
         self,
