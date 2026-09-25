@@ -14,17 +14,15 @@ import sqlite3
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from zoneinfo import ZoneInfo
 
 from libs.contracts.models import Candle
+from libs.market_time import IST
 from services.strategy.futures_signal import (
     FuturesContractResolver,
     aggregate_completed_15m,
     canonical_active_futures_stream,
     contract_expiry,
 )
-
-IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
 SESSION_START = time(9, 15)
 RAW_SESSION_LAST_START = time(15, 25)
