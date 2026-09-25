@@ -937,6 +937,52 @@ class SimulationEngine:
             and name != "bypass_entry_window"
         }
         effective_overrides = ThresholdOverrides.model_validate(applied_overrides)
+
+        risk_updates: dict[str, Any] = {}
+        applied_request_controls: dict[str, Any] = {}
+        not_applied_request_controls: dict[str, Any] = {}
+        if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY:
+            if "capital" in request.model_fields_set:
+                risk_updates["account_equity"] = request.capital
+                applied_request_controls["capital"] = request.capital
+            if request.risk_per_trade_pct is not None:
+                risk_updates["risk_per_trade_pct_of_account"] = (
+                    request.risk_per_trade_pct
+                )
+                applied_request_controls["risk_per_trade_pct"] = (
+                    request.risk_per_trade_pct
+                )
+            if "max_trades_per_day" in request.model_fields_set:
+                risk_updates["max_trades_per_day"] = request.max_trades_per_day
+                applied_request_controls["max_trades_per_day"] = (
+                    request.max_trades_per_day
+                )
+        else:
+            not_applied_request_controls = {
+                "capital": {
+                    "value": request.capital,
+                    "reason": (
+                        "Research replay does not apply portfolio sizing."
+                    ),
+                },
+                "risk_per_trade_pct": {
+                    "value": request.risk_per_trade_pct,
+                    "reason": (
+                        "Research replay does not apply portfolio sizing."
+                    ),
+                },
+                "max_trades_per_day": {
+                    "value": request.max_trades_per_day,
+                    "reason": (
+                        "Research replay intentionally does not apply "
+                        "chronological daily trade gates."
+                    ),
+                },
+            }
+        effective_risk_config = self.risk_config.model_copy(
+            update=risk_updates
+        )
+
         missing_data: list[str] = []
         if source_diagnostics["spot"]["missing_selected_source"] or not session:
             missing_data.append("spot")
@@ -982,22 +1028,30 @@ class SimulationEngine:
             "control_application": {
                 "applied_overrides": applied_overrides,
                 "not_applied_overrides": not_applied_overrides,
-                "not_applied_request_controls": {
-                    "capital": {
-                        "value": request.capital,
-                        "reason": (
-                            "Historical position-sizing parity is not implemented; "
-                            "resolved option mark P&L currently uses one reconstructed lot."
-                        ),
-                    },
-                    "max_trades_per_day": {
-                        "value": request.max_trades_per_day,
-                        "reason": (
-                            "Daily trade-count gating is deferred to the risk-gate "
-                            "parity increment, including in EXECUTION_PARITY mode."
-                        ),
-                    },
-                },
+                "applied_request_controls": applied_request_controls,
+                "not_applied_request_controls": not_applied_request_controls,
+            },
+            "effective_risk_config": {
+                "account_equity": effective_risk_config.account_equity,
+                "risk_per_trade_pct_of_account": (
+                    effective_risk_config.risk_per_trade_pct_of_account
+                ),
+                "max_trade_capital": effective_risk_config.max_trade_capital,
+                "max_lots_per_trade": effective_risk_config.max_lots_per_trade,
+                "max_trades_per_day": effective_risk_config.max_trades_per_day,
+                "max_trades_per_strategy_per_day": (
+                    effective_risk_config.max_trades_per_strategy_per_day
+                ),
+                "max_failed_trades_per_strategy": (
+                    effective_risk_config.max_failed_trades_per_strategy
+                ),
+                "max_concurrent_positions": (
+                    effective_risk_config.max_concurrent_positions
+                ),
+                "cooldown_after_loss_min": (
+                    effective_risk_config.cooldown_after_loss_min
+                ),
+                "max_daily_loss_r": effective_risk_config.max_daily_loss_r,
             },
         }
         one_minute_candles = await self._load_replay_one_minute_candles(
@@ -1005,6 +1059,12 @@ class SimulationEngine:
             request.instrument_id,
             historical_source,
         )
+        replay_option_universe = (
+            await self._load_replay_option_universe(date_str)
+            if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+            else []
+        )
+        replay_sizing_option_candle_cache: dict[str, list[Candle]] = {}
         timeline, logs = [], []
         replay_trigger_diagnostics: list[dict[str, Any]] = []
         replay_diagnostic_keys: set[tuple[str, str, str]] = set()
@@ -1020,7 +1080,7 @@ class SimulationEngine:
         )
         strategy_registry.prepare_session(replay_session)
         lifecycle_replayer = HistoricalPositionManagerReplayer(
-            risk_config=self.risk_config,
+            risk_config=effective_risk_config,
             session_config=self.session_config,
             strategy_config=self.tunables,
             recorder=replay_manifest_recorder,
@@ -1034,7 +1094,7 @@ class SimulationEngine:
             ChronologicalReplayExecutor(
                 lifecycle_replayer=lifecycle_replayer,
                 registry=strategy_registry,
-                risk_config=self.risk_config,
+                risk_config=effective_risk_config,
             )
             if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
             else None
