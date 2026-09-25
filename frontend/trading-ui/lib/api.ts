@@ -1216,9 +1216,71 @@ export interface SimulatedTradeRecordData {
   hold_duration_mins: number;
 }
 
+export interface ReplaySignalMetricsData {
+  price_basis: string;
+  calculation_basis: string;
+  total_bars_evaluated: number;
+  qualified_signals: number;
+  ambiguous_signals: number;
+  unresolved_signals: number;
+}
+
+export interface ReplayUnderlyingLifecycleMetricsData {
+  price_basis: string;
+  calculation_basis: string;
+  resolved_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  breakeven_trades: number;
+  win_rate_pct: number;
+  total_realized_r: number;
+  average_realized_r: number;
+  median_realized_r: number;
+  average_winner_r: number;
+  average_loser_r: number;
+  profit_factor_r: number | null;
+  max_drawdown_r: number;
+  max_consecutive_losses: number;
+}
+
+export interface ReplayOptionMarkMetricsData {
+  price_basis: string;
+  calculation_basis: string;
+  priced_trades: number;
+  unpriced_trades: number;
+  all_resolved_trades_priced: boolean;
+  gross_mark_pnl: number | null;
+  estimated_transaction_costs: number | null;
+  net_mark_pnl: number | null;
+}
+
+export interface ReplayPortfolioMetricsData {
+  price_basis: string;
+  calculation_basis: string;
+  available: boolean;
+  max_drawdown_pnl: number | null;
+  limitation: string;
+}
+
+export interface ReplayDataQualityData {
+  price_basis: string;
+  calculation_basis: string;
+  historical_source: string;
+  missing_data: string[];
+  underlying_issue_counts: Record<string, number>;
+  option_mark_available_trades: number;
+  option_mark_unavailable_trades: number;
+  option_mark_quality_reasons: Record<string, number>;
+}
+
 export interface SimulationResultData {
   limitation?: string;
   session_date: string;
+  signal_metrics: ReplaySignalMetricsData;
+  underlying_lifecycle_metrics: ReplayUnderlyingLifecycleMetricsData;
+  option_mark_metrics: ReplayOptionMarkMetricsData;
+  portfolio_metrics: ReplayPortfolioMetricsData;
+  data_quality: ReplayDataQualityData;
   total_bars_evaluated: number;
   total_trades: number;
   winning_trades: number;
