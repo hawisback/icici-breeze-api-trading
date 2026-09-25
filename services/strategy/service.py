@@ -44,6 +44,7 @@ from services.strategy.models import (
     OptionType,
     SimulationRequest,
     SimulationResult,
+    STRATEGY_A_DISPLAY_LABEL,
     StrategyName,
     StrategySignal,
     StrategyState,
@@ -5351,7 +5352,7 @@ class StrategyService:
             "strategies": {
                 "trend_pullback": {
                     "enabled": self.config.tunables.trend_pullback_enabled,
-                    "label": "Strategy A · Trend Pullback V3",
+                    "label": STRATEGY_A_DISPLAY_LABEL,
                     "state": (
                         strategy_a_trade.state.value
                         if strategy_a_trade is not None
