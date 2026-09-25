@@ -766,6 +766,7 @@ async def test_breeze_no_positions_response_is_empty_portfolio() -> None:
         "Error": "No Positions available.",
     }
     client = BreezeClientManager(custom_sdk_instance=sdk)
+    client._status = SessionStatus.ACTIVE
     adapter = BreezeTradingAdapter(client_manager=client)
 
     positions = await adapter.get_positions()
