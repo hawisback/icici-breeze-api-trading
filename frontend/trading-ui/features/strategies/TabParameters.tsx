@@ -211,7 +211,7 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
               className="w-full accent-cyan-500 cursor-pointer"
             />
             <p className="text-[11px] text-slate-400 mt-1">
-              Strategy B uses this premium cap. Strategy A V3 ignores premium caps and selects options from its configured delta/expiry/liquidity bands.
+              Strategy B uses this premium cap. Strategy A R5 ignores premium caps and selects options from its configured delta/expiry/liquidity bands.
             </p>
           </div>
 
@@ -501,13 +501,13 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
             </div>
           </div>
           <p className="text-[11px] text-slate-400">
-            These shared timers primarily serve Strategy B. Strategy A V3 uses its dedicated 09:45–14:45 entry window and 15:15 forced exit shown below.
+            These shared timers primarily serve Strategy B. Strategy A R5 uses its dedicated 09:45–14:45 entry window and 15:15 forced exit shown below.
           </p>
         </div>
 
         <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
           <div className="text-sm font-bold uppercase tracking-wider text-cyan-400">Strategy A Option Execution Bands</div>
-          <p className="text-[11px] text-slate-400">Strategy A V3 contract selection is delta/expiry/liquidity based, not premium-cap based.</p>
+          <p className="text-[11px] text-slate-400">Strategy A R5 contract selection is delta/expiry/liquidity based, not premium-cap based.</p>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
             {([
               ["preferred_delta_min","Preferred delta min",0.01,0.99,0.01],
@@ -526,10 +526,10 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
           </div>
         </div>
 
-        {/* Strategy A V3 — authoritative completed-15m futures contract */}
+        {/* Strategy A R5 — authoritative completed-15m futures contract */}
         <div className="bg-slate-900/90 border border-cyan-900/60 rounded-xl p-5 shadow-lg space-y-4">
-          <div className="flex items-center gap-2 pb-2 border-b border-slate-800 text-cyan-400 text-sm font-bold uppercase tracking-wider"><TrendingUp className="w-4 h-4" />Strategy A V3 — NIFTY Trend-Pullback Momentum</div>
-          <p className="text-[11px] text-slate-400">Signal and structural-risk settings use completed 15-minute NIFTY futures bars. V3 replaces the hard ADX floor with momentum health: two-bar ADX change and directional EMA20 slope. Options remain execution-only.</p>
+          <div className="flex items-center gap-2 pb-2 border-b border-slate-800 text-cyan-400 text-sm font-bold uppercase tracking-wider"><TrendingUp className="w-4 h-4" />Strategy A R5 — NIFTY Trend-Pullback Momentum</div>
+          <p className="text-[11px] text-slate-400">Signal and structural-risk settings use completed 15-minute NIFTY futures bars. R5 uses momentum health instead of a hard ADX floor: two-bar ADX change and directional EMA20 slope. Options remain execution-only.</p>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
             {([
               ["ema_fast_period","Fast EMA",1,100,1],["ema_slow_period","Slow EMA",2,200,1],["adx_period","ADX period",1,50,1],["momentum_adx_min_delta_2bars","Min ADX 2-bar delta",-10,10,0.1],["momentum_ema20_slope_min_atr","Min directional EMA20 slope (ATR)",0,1,0.01],["momentum_ema20_slope_max_atr","Max directional EMA20 slope (ATR)",0.01,1,0.01],["atr_period","ATR period",1,50,1],
@@ -640,7 +640,7 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
                 disabled
                 className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-1.5 text-xs text-slate-500 cursor-not-allowed"
               />
-              <p className="text-[10px] text-slate-500 mt-1">Retained for persisted V2 compatibility; not an active Strategy A V3 entry gate.</p>
+              <p className="text-[10px] text-slate-500 mt-1">Retained only for legacy persisted-configuration compatibility; not an active Strategy A R5 entry gate.</p>
             </div>
 
             <div>
