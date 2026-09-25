@@ -417,3 +417,67 @@ async def test_inactive_selected_provider_does_not_leak_other_broker_cache(tmp_p
         allow_provider_fallback=True, allow_synthetic_fallback=False,
     )
     assert candles == []
+
+
+@pytest.mark.asyncio
+async def test_live_kite_history_drops_forming_candle_beyond_expected_boundary(
+    tmp_path,
+):
+    repo = HistoricalRepository(db_path=tmp_path / "historical.db")
+    await repo.initialize()
+
+    instrument_id = "INST-NIFTY-FUT-2026-09-29"
+    expected_end = datetime(2026, 9, 25, 8, 5, tzinfo=timezone.utc)
+    completed = Candle(
+        instrument_id=instrument_id,
+        interval="5m",
+        start_time=expected_end - timedelta(minutes=5),
+        end_time=expected_end,
+        open=23400,
+        high=23420,
+        low=23390,
+        close=23410,
+        volume=100,
+        open_interest=1000,
+        source="KITE",
+    )
+    forming = Candle(
+        instrument_id=instrument_id,
+        interval="5m",
+        start_time=expected_end,
+        end_time=expected_end + timedelta(minutes=5),
+        open=23410,
+        high=23430,
+        low=23400,
+        close=23425,
+        volume=25,
+        open_interest=1005,
+        source="KITE",
+    )
+
+    kite = SimpleNamespace(
+        is_active=True,
+        fetch_historical_candles=AsyncMock(
+            return_value=[completed, forming]
+        ),
+    )
+    gateway = SimpleNamespace(
+        frequent_data_broker_name="kite",
+        frequent_data_adapter=kite,
+        active_broker_name="kite",
+        active_adapter=kite,
+        kite_adapter=kite,
+    )
+    service = HistoricalService(repository=repo, broker_gateway=gateway)
+    service._expected_completed_end = Mock(return_value=expected_end)
+
+    candles = await service.get_candles(
+        instrument_id,
+        "5m",
+        requested_source="MIXED",
+        allow_synthetic_fallback=False,
+    )
+
+    assert candles == [completed]
+    cached = await repo.get_candles(instrument_id, "5m")
+    assert cached == [completed]
