@@ -1096,7 +1096,27 @@ class SimulationEngine:
                     effective_risk_config.cooldown_after_loss_min
                 ),
                 "max_daily_loss_r": effective_risk_config.max_daily_loss_r,
-            },
+            },            "execution_authority_scope": (
+                {
+                    "session_entry_windows": "APPLIED",
+                    "kill_switch": (
+                        "NOT_REPLAYED_POINT_IN_TIME_OPERATIONAL_STATE_UNAVAILABLE"
+                    ),
+                    "auto_trade_enabled": (
+                        "NOT_REPLAYED_POINT_IN_TIME_OPERATIONAL_STATE_UNAVAILABLE"
+                    ),
+                    "live_system_armed": (
+                        "NOT_APPLICABLE_TO_HISTORICAL_EXECUTION_PARITY"
+                    ),
+                    "daily_loss_pct": (
+                        "NOT_ENFORCED_UNTIL_CHRONOLOGICAL_EXECUTABLE_OPTION_PNL"
+                    ),
+                }
+                if request.replay_mode
+                == HistoricalReplayMode.EXECUTION_PARITY
+                else None
+            ),
+
         }
         one_minute_candles = await self._load_replay_one_minute_candles(
             date_str,
