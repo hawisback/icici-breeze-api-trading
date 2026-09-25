@@ -118,6 +118,21 @@ def test_strategy_b_replay_sizing_uses_production_premium_risk_math():
     assert decision.lots == 2
     assert decision.quantity == 100
 
+    rejected = calculate_replay_sizing(
+        signal=_signal(StrategyName.VOLATILITY_BREAKOUT),
+        contract=_contract(),
+        entry_mark=100.0,
+        risk_config=risk.model_copy(update={"account_equity": 100000.0}),
+        option_selection=OptionSelectionConfig(),
+        session_config=SessionTimersConfig(),
+        strategy_config=StrategyTunablesConfig(),
+        account_equity=100000.0,
+    )
+    assert rejected.status == "REJECTED"
+    assert rejected.lots == 0
+    assert rejected.quantity == 0
+    assert rejected.rejection_reason == "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"
+
 
 def test_strategy_a_replay_sizing_changes_with_capital_and_risk_budget():
     signal = _signal(StrategyName.TREND_PULLBACK)
