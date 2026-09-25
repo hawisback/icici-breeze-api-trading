@@ -692,6 +692,16 @@ def test_replay_metadata_discloses_applied_and_ignored_controls():
         "max_trades_per_day": 2,
     }
     assert parity_controls["not_applied_request_controls"] == {}
+    assert (
+        parity_controls["conditionally_applied_overrides"][
+            "max_option_premium_cap"
+        ]["value"]
+        == 85.0
+    )
+    assert (
+        "max_option_premium_cap"
+        not in parity_controls["not_applied_overrides"]
+    )
     effective_risk = parity_result.replay_metadata["effective_risk_config"]
     assert effective_risk["account_equity"] == 750000.0
     assert effective_risk["risk_per_trade_pct_of_account"] == 0.75
@@ -699,7 +709,9 @@ def test_replay_metadata_discloses_applied_and_ignored_controls():
     authority_scope = parity_result.replay_metadata["execution_authority_scope"]
     assert authority_scope["session_entry_windows"] == "APPLIED"
     assert authority_scope["kill_switch"].startswith("NOT_REPLAYED_")
-    assert authority_scope["daily_loss_pct"].startswith("NOT_ENFORCED_")
+    assert authority_scope["daily_loss_pct"].startswith(
+        "APPLIED_WHEN_ALL_PRIOR_RESOLVED_TRADES_HAVE_"
+    )
     assert (
         parity_result.replay_metadata["configuration_fingerprint"]
         != result.replay_metadata["configuration_fingerprint"]
