@@ -1222,11 +1222,27 @@ class StrategyService:
         # silently gated by the shared legacy 09:20 schedule.
         strategy_a_window = self.position_manager.is_within_strategy_a_entry_window(now)
         strategy_b_window = self.position_manager.is_within_entry_window()
+        now_ist_hhmm = now.astimezone(
+            timezone(timedelta(hours=5, minutes=30))
+        ).strftime("%H:%M")
+        strategy_e_window = (
+            self.config.tunables.strategy_e_entry_start
+            <= now_ist_hhmm
+            <= self.config.tunables.strategy_e_entry_end
+        )
         enabled_window = (
             strategy_a_window if self.config.tunables.trend_pullback_enabled and not self.config.tunables.volatility_breakout_enabled
             else strategy_b_window if self.config.tunables.volatility_breakout_enabled and not self.config.tunables.trend_pullback_enabled
             else strategy_a_window or strategy_b_window
         )
+        if self.config.tunables.pivot_vwap_scalp_enabled:
+            if (
+                not self.config.tunables.trend_pullback_enabled
+                and not self.config.tunables.volatility_breakout_enabled
+            ):
+                enabled_window = strategy_e_window
+            else:
+                enabled_window = enabled_window or strategy_e_window
         if not (enabled_window or self._active_overrides.bypass_entry_window):
             self._reset_setups(now)
             await self._save_runtime()
@@ -1427,6 +1443,25 @@ class StrategyService:
                 entry_data_blockers["PIVOT_VWAP_SCALP"] = list(
                     dict.fromkeys(reasons)
                 )
+
+            # E is evaluated after C/D dedupe, so perform its deterministic
+            # repository dedupe here. A persisted signal with no trade may
+            # still retry transient downstream failures within its freshness
+            # window; a signal that already created a trade may not.
+            signal_already_persisted = False
+            if signal and self._is_strategy_e(signal.strategy):
+                prior_signals = await self.repo.list_strategy_signals(limit=1000)
+                prior_ids = {
+                    str(item.get("signal_id"))
+                    for item in prior_signals
+                    if isinstance(item, dict) and item.get("signal_id")
+                }
+                signal_already_persisted = signal.signal_id in prior_ids
+                if signal_already_persisted and any(
+                    str(trade.signal_id or "") == signal.signal_id
+                    for trade in today_trades
+                ):
+                    signal = None
 
         if not signal:
             enabled_blocked = (
