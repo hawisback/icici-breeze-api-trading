@@ -730,6 +730,16 @@ class StrategyService:
         """Resolve signal execution under the authoritative per-strategy policy."""
         return self._execution_mode_for_strategy(signal.strategy, signal.option_type)
 
+    def _strategy_e_signal_data_fresh(
+        self,
+        candle_age_seconds: float | None,
+    ) -> bool:
+        return bool(
+            candle_age_seconds is not None
+            and candle_age_seconds
+            <= self.config.tunables.strategy_e_max_signal_age_seconds
+        )
+
     def _paper_slippage(self) -> float:
         return float(self.config.risk.paper_slippage_points)
 
@@ -3987,10 +3997,8 @@ class StrategyService:
                 spot_5m_age is not None
                 and spot_5m_age <= 600.0
             ),
-            "strategy_e_signal_data_fresh": bool(
-                futures_5m_age is not None
-                and futures_5m_age
-                <= self.config.tunables.strategy_e_max_signal_age_seconds
+            "strategy_e_signal_data_fresh": (
+                self._strategy_e_signal_data_fresh(futures_5m_age)
             ),
         })
 
