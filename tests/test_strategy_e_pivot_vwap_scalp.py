@@ -184,6 +184,73 @@ def test_strategy_e_emits_trend_short():
     assert decision.signal.features_snapshot["target_price"] == 76.5
 
 
+
+def test_strategy_e_volume_is_confirmation_not_a_hard_gate():
+    strategy = _strategy()
+    current = [
+        _candle(24, 0, open_=100.2, high=101.0, low=100.0, close=100.6),
+        _candle(24, 1, open_=100.6, high=103.0, low=100.5, close=102.0),
+        _candle(24, 2, open_=102.0, high=102.2, low=100.2, close=100.8),
+        _candle(24, 3, open_=100.8, high=101.2, low=99.8, close=100.5),
+        _candle(24, 4, open_=100.5, high=102.0, low=100.4, close=101.6),
+        _candle(
+            24,
+            5,
+            open_=101.6,
+            high=104.0,
+            low=101.3,
+            close=103.5,
+            volume=800,
+        ),
+    ]
+    decision = strategy.evaluate(
+        [*_previous_session(), *current],
+        as_of=current[-1].end_time,
+    )
+
+    assert decision.result == "TREND_LONG"
+    assert decision.signal is not None
+    assert decision.metrics["relative_volume"] < 1.2
+    assert decision.metrics["volume_confirmed"] is False
+
+
+def test_strategy_e_emits_countertrend_long_from_support_micro_reversal():
+    strategy = _strategy(
+        strategy_e_stop_buffer_points=0.5,
+        strategy_e_sr_buffer_points=0.5,
+        strategy_e_counter_zone_points=2.5,
+        strategy_e_min_reward_risk=0.2,
+        strategy_e_min_room_to_level_points=0.5,
+    )
+    current = [
+        _candle(24, 0, open_=97.0, high=97.6, low=96.5, close=97.0),
+        _candle(24, 1, open_=97.0, high=98.0, low=96.8, close=97.5),
+        _candle(24, 2, open_=97.5, high=97.8, low=95.5, close=96.2),
+        _candle(24, 3, open_=96.2, high=97.0, low=96.0, close=96.6),
+        _candle(24, 4, open_=96.6, high=97.2, low=96.0, close=96.4),
+        _candle(
+            24,
+            5,
+            open_=96.4,
+            high=98.5,
+            low=96.2,
+            close=98.0,
+            volume=1100,
+        ),
+    ]
+    decision = strategy.evaluate(
+        [*_previous_session(), *current],
+        as_of=current[-1].end_time,
+    )
+
+    assert decision.result == "COUNTER_LONG"
+    assert decision.signal is not None
+    assert decision.signal.direction is TradeDirection.BULLISH
+    assert decision.signal.option_type is OptionType.CALL
+    assert decision.metrics["counter_confirmation"] == "BULLISH_MICRO_SWING"
+    assert decision.metrics["price"] < decision.metrics["pivot"]
+
+
 def _active_e_trade(mode: AutoTradingMode) -> ActiveTrade:
     now = datetime(2026, 9, 24, 11, 0, tzinfo=IST)
     return ActiveTrade(
