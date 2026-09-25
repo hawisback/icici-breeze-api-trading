@@ -4360,6 +4360,160 @@ class StrategyService:
             )
         return rows
 
+    def _strategy_e_trigger_diagnostics(
+        self,
+    ) -> list[StrategyTriggerDiagnostics]:
+        decision = self.strategy_e.last_decision
+        metrics = decision.metrics or {}
+        active_trade = next(
+            (
+                trade
+                for trade in self._active_trades_cache
+                if trade.strategy == StrategyName.PIVOT_VWAP_SCALP
+            ),
+            None,
+        )
+        bullish = decision.result in {"TREND_LONG", "COUNTER_LONG"}
+        bearish = decision.result in {"TREND_SHORT", "COUNTER_SHORT"}
+        if not bullish and not bearish:
+            price = float(metrics.get("price") or 0.0)
+            pivot = float(metrics.get("pivot") or 0.0)
+            bullish = bool(price >= pivot)
+        direction = (
+            TradeDirection.BULLISH
+            if bullish
+            else TradeDirection.BEARISH
+        )
+        option_type = (
+            OptionType.CALL
+            if bullish
+            else OptionType.PUT
+        )
+        execution_mode = self._execution_mode_for_strategy(
+            StrategyName.PIVOT_VWAP_SCALP,
+            option_type,
+        )
+        execution_ready = bool(
+            execution_mode in {
+                AutoTradingMode.PAPER,
+                AutoTradingMode.SHADOW_ONLY,
+            }
+            or (
+                execution_mode == AutoTradingMode.LIVE
+                and self.config.system_armed
+                and self._live_orders_enabled()
+            )
+        )
+        data_ready = bool(
+            self._strategy_e_futures_5m
+            and self._market_data_status.get(
+                "strategy_e_signal_data_fresh",
+                False,
+            )
+        )
+        enabled = self.config.tunables.pivot_vwap_scalp_enabled
+        signal_ready = decision.signal is not None
+        conditions = [
+            TriggerCondition(
+                id="strategy_enabled",
+                name="Strategy enabled",
+                current_value="ON" if enabled else "OFF",
+                target_threshold="ON",
+                status="PASSED" if enabled else "BLOCKED",
+                gap_description=(
+                    "Strategy E is enabled"
+                    if enabled
+                    else "Enable Strategy E in tunables"
+                ),
+            ),
+            TriggerCondition(
+                id="futures_5m_data",
+                name="Real futures 5m data",
+                current_value=(
+                    "FRESH" if data_ready else "STALE_OR_MISSING"
+                ),
+                target_threshold="Fresh completed real 5m futures candle",
+                status="PASSED" if data_ready else "BLOCKED",
+                gap_description=(
+                    "5m futures input is fresh"
+                    if data_ready
+                    else "Waiting for fresh BREEZE/KITE/LIVE futures candles"
+                ),
+            ),
+            TriggerCondition(
+                id="execution_mode",
+                name="Execution mode",
+                current_value=execution_mode.value,
+                target_threshold="PAPER/SHADOW or armed LIVE",
+                status="PASSED" if execution_ready else "BLOCKED",
+                gap_description=(
+                    f"{execution_mode.value} execution path is ready"
+                    if execution_ready
+                    else "LIVE requires platform permission and system arming"
+                ),
+            ),
+            TriggerCondition(
+                id="latest_setup",
+                name="Latest 5m setup",
+                current_value=decision.result,
+                target_threshold=(
+                    "TREND_LONG / TREND_SHORT / "
+                    "COUNTER_LONG / COUNTER_SHORT"
+                ),
+                status="PASSED" if signal_ready else "PENDING",
+                gap_description=decision.reason,
+            ),
+        ]
+        passed = sum(item.status == "PASSED" for item in conditions)
+        if not enabled:
+            overall = "DISABLED"
+        elif not data_ready or not execution_ready:
+            overall = "BLOCKED"
+        elif active_trade is not None:
+            overall = "ACTIVE"
+        elif signal_ready:
+            overall = "READY_TO_TRIGGER"
+        else:
+            overall = "WAITING"
+
+        return [
+            StrategyTriggerDiagnostics(
+                strategy=StrategyName.PIVOT_VWAP_SCALP,
+                strategy_label="Strategy E · Pivot/VWAP Scalp",
+                direction=direction,
+                option_type=option_type,
+                overall_status=overall,
+                passed_count=passed,
+                total_count=len(conditions),
+                ready_pct=round(
+                    100.0 * passed / len(conditions),
+                    1,
+                ),
+                key_blocker=(
+                    "Active Strategy E trade"
+                    if active_trade is not None
+                    else decision.reason
+                ),
+                target_entry_level=(
+                    float(metrics["entry_price"])
+                    if metrics.get("entry_price") is not None
+                    else None
+                ),
+                current_spot=float(metrics.get("price") or 0.0),
+                phase_state=overall,
+                phase_summary={
+                    "result": decision.result,
+                    "reason": decision.reason,
+                    "pivot": metrics.get("pivot"),
+                    "vwap": metrics.get("vwap"),
+                    "relative_volume": metrics.get("relative_volume"),
+                    "target": metrics.get("target"),
+                    "execution_mode": execution_mode.value,
+                },
+                conditions=conditions,
+            )
+        ]
+
     async def get_trigger_diagnostics(self) -> TriggerDiagnosticsResponse:
         """Gathers granular condition diagnostics across all strategies and session gates."""
         features = self._last_features or MarketFeatures(timestamp=utc_now(), data_reason="Awaiting first completed evaluation")
@@ -4530,10 +4684,12 @@ class StrategyService:
             ),
         )
 
+        diag_e = self._strategy_e_trigger_diagnostics()
+
         return TriggerDiagnosticsResponse(
             system_time=now,
             gates=gates,
-            strategies=[*diag_a, *diag_b, *diag_c, *diag_d],
+            strategies=[*diag_a, *diag_b, *diag_c, *diag_d, *diag_e],
             active_overrides=self._active_overrides,
         )
 
