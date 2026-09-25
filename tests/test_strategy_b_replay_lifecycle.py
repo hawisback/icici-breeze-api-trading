@@ -14,6 +14,7 @@ from services.strategy.models import (
     ThresholdOverrides,
     TradeDirection,
 )
+from services.strategy.replay_execution import ChronologicalReplayExecutor
 from services.strategy.replay_lifecycle import (
     HistoricalPositionManagerReplayer,
     _entry_trade,
@@ -22,6 +23,7 @@ from services.strategy.replay_manifest import ReplayManifestRecorder
 from services.strategy.replay_registry import (
     ReplayBarContext,
     ReplaySessionContext,
+    ReplayStrategyRegistry,
     VolatilityBreakoutReplayAdapter,
 )
 
@@ -169,6 +171,79 @@ def test_strategy_b_adapter_rejects_wrong_strategy_and_noncompleted_timestamp():
     wrong_time = _signal(candle.end_time - timedelta(seconds=1))
     with pytest.raises(ValueError, match="completed breakout candle end time"):
         adapter.on_entry_confirmed(wrong_time, context)
+
+
+def test_chronological_executor_does_not_scan_future_and_blocks_capacity():
+    entry_bar = _breakout_candle(datetime(2026, 7, 1, 4, 0, tzinfo=UTC))
+    second_bar = entry_bar.model_copy(update={
+        "start_time": entry_bar.end_time,
+        "end_time": entry_bar.end_time + timedelta(minutes=5),
+        "open": 101.0,
+        "high": 101.4,
+        "low": 100.6,
+        "close": 101.2,
+    })
+    stop_bar = second_bar.model_copy(update={
+        "start_time": second_bar.end_time,
+        "end_time": second_bar.end_time + timedelta(minutes=5),
+        "open": 101.0,
+        "high": 101.2,
+        "low": 99.0,
+        "close": 99.4,
+    })
+    recorder = ReplayManifestRecorder()
+    tunables = StrategyTunablesConfig()
+    session = SessionTimersConfig()
+    registry = ReplayStrategyRegistry.default(tunables, session)
+    replay_session = ReplaySessionContext(
+        trading_date="2026-07-01",
+        instrument_id="INDEX",
+        overrides=ThresholdOverrides(),
+        recorder=recorder,
+    )
+    registry.prepare_session(replay_session)
+    context = ReplayBarContext(
+        session=replay_session,
+        bar=entry_bar,
+        features=MarketFeatures(spot_price=101.0),
+        spot_candles_5m=[entry_bar],
+        spot_candles_15m=[],
+        futures_candles=[],
+    )
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=RiskConfig(max_concurrent_positions=1),
+        session_config=session,
+        recorder=recorder,
+        instrument_id="INDEX",
+        warmup_candles=[],
+        session_candles=[entry_bar, second_bar, stop_bar],
+        futures_candles=[],
+    )
+    executor = ChronologicalReplayExecutor(
+        lifecycle_replayer=replayer,
+        registry=registry,
+        risk_config=RiskConfig(max_concurrent_positions=1),
+    )
+
+    record = executor.accept_signal(_signal(entry_bar.end_time), context)
+
+    # Future stop data already exists in the replay dataset, but accepting the
+    # signal must not resolve it ahead of chronological time.
+    assert record.lifecycle_status == "PENDING"
+    assert executor.state.daily_entries == 1
+    assert executor.can_accept_entry() is False
+
+    executor.manage_completed_bar(second_bar, [entry_bar, second_bar])
+    assert record.lifecycle_status == "PENDING"
+    assert executor.can_accept_entry() is False
+
+    executor.manage_completed_bar(
+        stop_bar,
+        [entry_bar, second_bar, stop_bar],
+    )
+    assert record.lifecycle_status == "RESOLVED"
+    assert executor.state.completed_positions == 1
+    assert executor.can_accept_entry() is True
 
 
 def test_strategy_b_manifest_hydrates_strategy_specific_active_trade():
