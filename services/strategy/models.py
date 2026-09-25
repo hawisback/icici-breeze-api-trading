@@ -1034,7 +1034,7 @@ class ReplayOptionMarkMetrics(BaseModel):
 
     price_basis: str = "HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARKS"
     calculation_basis: str = (
-        "ONE_RECONSTRUCTED_LOT_USING_REPLAY_CONTRACT_APPROXIMATION_AND_PAPER_COST_SCHEDULE"
+        "REPLAY_QUANTITY_USING_REPLAY_CONTRACT_APPROXIMATION_AND_PAPER_COST_SCHEDULE"
     )
     priced_trades: int
     unpriced_trades: int
