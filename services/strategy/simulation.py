@@ -1170,7 +1170,9 @@ class SimulationEngine:
                 )
                 if not global_gate.allowed:
                     strategy_registry.reset_all(bar.end_time)
-                    chronological_executor.note_entry_evaluation_suppressed()
+                    chronological_executor.note_entry_evaluation_suppressed(
+                        global_gate.status
+                    )
                     evaluations = strategy_registry.evaluate_completed_bar(
                         bar_context,
                         allow_evaluation=False,
