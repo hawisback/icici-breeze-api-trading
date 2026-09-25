@@ -10,6 +10,8 @@ from services.strategy.models import (
     SessionTimersConfig,
     StrategyName,
     StrategySignal,
+    StrategyTunablesConfig,
+    ThresholdOverrides,
     TradeDirection,
 )
 from services.strategy.replay_lifecycle import (
@@ -17,7 +19,11 @@ from services.strategy.replay_lifecycle import (
     _entry_trade,
 )
 from services.strategy.replay_manifest import ReplayManifestRecorder
-from services.strategy.simulation import _record_strategy_b_manifest
+from services.strategy.replay_registry import (
+    ReplayBarContext,
+    ReplaySessionContext,
+    VolatilityBreakoutReplayAdapter,
+)
 
 
 UTC = timezone.utc
@@ -70,12 +76,24 @@ def _recorded_b_record() -> tuple[ReplayManifestRecorder, object, Candle]:
     recorder = ReplayManifestRecorder()
     candle = _breakout_candle(datetime(2026, 7, 1, 4, 0, tzinfo=UTC))
     signal = _signal(candle.end_time)
-    _record_strategy_b_manifest(
-        recorder,
-        signal,
-        trading_date="2026-07-01",
-        breakout_candle=candle,
+    adapter = VolatilityBreakoutReplayAdapter(
+        StrategyTunablesConfig(),
+        SessionTimersConfig(),
     )
+    context = ReplayBarContext(
+        session=ReplaySessionContext(
+            trading_date="2026-07-01",
+            instrument_id="INDEX",
+            overrides=ThresholdOverrides(),
+            recorder=recorder,
+        ),
+        bar=candle,
+        features=MarketFeatures(spot_price=101.0),
+        spot_candles_5m=[candle],
+        spot_candles_15m=[],
+        futures_candles=[],
+    )
+    adapter.on_entry_confirmed(signal, context)
     return recorder, recorder.records()[0], candle
 
 
@@ -101,12 +119,24 @@ def test_strategy_b_manifest_entry_preserves_completed_bar_state_and_deduplicate
     assert record.effective_confirmation_score == 3
     assert record.oi_wall_penalty == 1
     with pytest.raises(ValueError, match="duplicate replay manifest signal"):
-        _record_strategy_b_manifest(
-            recorder,
-            _signal(candle.end_time),
-            trading_date="2026-07-01",
-            breakout_candle=candle,
+        adapter = VolatilityBreakoutReplayAdapter(
+            StrategyTunablesConfig(),
+            SessionTimersConfig(),
         )
+        context = ReplayBarContext(
+            session=ReplaySessionContext(
+                trading_date="2026-07-01",
+                instrument_id="INDEX",
+                overrides=ThresholdOverrides(),
+                recorder=recorder,
+            ),
+            bar=candle,
+            features=MarketFeatures(spot_price=101.0),
+            spot_candles_5m=[candle],
+            spot_candles_15m=[],
+            futures_candles=[],
+        )
+        adapter.on_entry_confirmed(_signal(candle.end_time), context)
 
 
 def test_strategy_b_manifest_hydrates_strategy_specific_active_trade():
