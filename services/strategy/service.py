@@ -2863,6 +2863,241 @@ class StrategyService:
 
         await self.repo.save_trade(trade)
 
+    async def _evaluate_strategy_e_active_trade(
+        self,
+        trade: ActiveTrade,
+        features: MarketFeatures,
+        quote: dict[str, Any],
+    ) -> None:
+        """Manage Strategy E from its underlying futures stop/target thesis.
+
+        LIVE uses fresh futures ticks when available and the shared broker-held
+        option catastrophe stop. Completed 5m fallback is conservative: if the
+        same candle spans both stop and target, the stop wins.
+        """
+        quote_valid = bool(
+            quote.get("status") == "VALID"
+            and quote.get("bid")
+            and float(quote["bid"]) > 0
+        )
+        current_option = quote.get("ltp") or quote.get("bid")
+        if current_option and float(current_option) > 0:
+            trade.current_option_price = round(float(current_option), 2)
+            remaining = max(
+                0,
+                int(trade.quantity) - int(trade.exit_filled_quantity or 0),
+            )
+            trade.unrealized_pnl = round(
+                (trade.current_option_price - trade.entry_option_price)
+                * remaining,
+                2,
+            )
+
+        # A previously-decided underlying exit remains authoritative while we
+        # wait for a usable option quote or a LIVE exit order.
+        if trade.pending_exit_reason:
+            if not quote_valid:
+                await self.repo.save_trade(trade)
+                return
+            if trade.mode == AutoTradingMode.LIVE:
+                await self._submit_live_final_exit(
+                    trade,
+                    features,
+                    quote,
+                    trade.pending_exit_reason,
+                )
+                return
+            sell_price = max(
+                0.0,
+                round(float(quote["bid"]) - self._paper_slippage(), 2),
+            )
+            if sell_price <= 0:
+                await self.repo.save_trade(trade)
+                return
+            await self._close_trade(
+                trade,
+                features,
+                sell_price,
+                trade.pending_exit_reason,
+                quote=quote,
+            )
+            return
+
+        underlying_price: float | None = None
+        tick_timestamp: datetime | None = None
+        if self.mkt_svc and trade.futures_contract_id:
+            tick = self.mkt_svc.get_latest_quote(trade.futures_contract_id)
+            if tick:
+                freshness = max(
+                    0.0,
+                    (utc_now() - tick.timestamp).total_seconds(),
+                )
+                if (
+                    getattr(tick, "source", "UNKNOWN")
+                    in ("BREEZE", "KITE", "LIVE")
+                    and getattr(tick, "last_price", 0) > 0
+                    and freshness <= 30.0
+                ):
+                    underlying_price = float(tick.last_price)
+                    tick_timestamp = tick.timestamp
+
+        fallback_candle: Candle | None = None
+        if underlying_price is None:
+            matching = [
+                candle
+                for candle in self._strategy_e_futures_5m
+                if (
+                    not trade.futures_contract_id
+                    or candle.instrument_id == trade.futures_contract_id
+                )
+            ]
+            if matching:
+                fallback_candle = matching[-1]
+                underlying_price = float(fallback_candle.close)
+                tick_timestamp = fallback_candle.end_time
+
+        if underlying_price is None or underlying_price <= 0:
+            trade.option_data_status = "AWAITING_STRATEGY_E_UNDERLYING"
+            await self.repo.save_trade(trade)
+            return
+
+        entry = float(
+            trade.underlying_entry_price
+            or trade.entry_spot_price
+            or 0.0
+        )
+        risk = float(trade.initial_r_points or trade.underlying_r or 0.0)
+        stop = float(
+            trade.current_trailing_stop
+            or trade.initial_structural_stop
+            or 0.0
+        )
+        target = float(trade.strategy_target_price or 0.0)
+        if entry <= 0 or risk <= 0 or stop <= 0 or target <= 0:
+            trade.option_data_status = "INVALID_STRATEGY_E_LIFECYCLE"
+            await self.repo.save_trade(trade)
+            return
+
+        trade.current_spot_price = round(underlying_price, 2)
+        trade.underlying_current_price = round(underlying_price, 2)
+        trade.current_r = underlying_r_for_price(
+            trade.direction,
+            entry,
+            risk,
+            underlying_price,
+        )
+        trade.peak_r = max(float(trade.peak_r or 0.0), trade.current_r)
+        trade.option_data_status = (
+            "VALID" if quote_valid else trade.option_data_status
+        )
+
+        now_ist = (tick_timestamp or utc_now()).astimezone(
+            timezone(timedelta(hours=5, minutes=30))
+        )
+        force_exit = (
+            now_ist.strftime("%H:%M")
+            >= self.config.tunables.strategy_e_forced_exit_time
+        )
+
+        stop_hit = False
+        target_hit = False
+        if fallback_candle is not None:
+            if trade.direction == TradeDirection.BULLISH:
+                stop_hit = float(fallback_candle.low) <= stop
+                target_hit = float(fallback_candle.high) >= target
+            else:
+                stop_hit = float(fallback_candle.high) >= stop
+                target_hit = float(fallback_candle.low) <= target
+        else:
+            if trade.direction == TradeDirection.BULLISH:
+                stop_hit = underlying_price <= stop
+                target_hit = underlying_price >= target
+            else:
+                stop_hit = underlying_price >= stop
+                target_hit = underlying_price <= target
+
+        # Conservative OHLC ambiguity rule: stop has precedence over target.
+        exit_reason: str | None = None
+        decision_price = underlying_price
+        if stop_hit:
+            exit_reason = "STRATEGY_E_STOP_LOSS"
+            decision_price = stop
+        elif target_hit:
+            exit_reason = "STRATEGY_E_TARGET"
+            decision_price = target
+        elif force_exit:
+            exit_reason = "STRATEGY_E_FORCED_EXIT"
+
+        # PAPER/SHADOW retains the shared emergency option stop. LIVE is owned
+        # by _sync_live_protective_stop above and must never race a second SELL.
+        if (
+            exit_reason is None
+            and trade.mode != AutoTradingMode.LIVE
+            and quote_valid
+            and current_option
+            and float(current_option) <= float(trade.option_hard_stop_price)
+        ):
+            exit_reason = OPTION_EMERGENCY_STOP
+            decision_price = underlying_price
+
+        if not exit_reason:
+            await self.repo.save_trade(trade)
+            return
+
+        trade.pending_exit_reason = exit_reason
+        trade.underlying_exit_reason = (
+            exit_reason
+            if not is_option_emergency_stop(exit_reason)
+            else OPTION_EMERGENCY_STOP_UNDERLYING_REASON
+        )
+        trade.underlying_exit_time = tick_timestamp or features.timestamp
+        trade.underlying_exit_price = round(float(decision_price), 2)
+        if is_option_emergency_stop(exit_reason):
+            trade.option_exit_reason = OPTION_EMERGENCY_STOP
+            trade.underlying_outcome_status = (
+                OPTION_EMERGENCY_STOP_OUTCOME_STATUS
+            )
+
+        await self._log_decision(
+            category="EXIT",
+            strategy=StrategyName.PIVOT_VWAP_SCALP.value,
+            message=f"Strategy E exit decided: {exit_reason}",
+            details={
+                "trade_id": trade.trade_id,
+                "signal_type": trade.strategy_signal_type,
+                "underlying_price": underlying_price,
+                "stop": stop,
+                "target": target,
+                "current_r": trade.current_r,
+            },
+        )
+
+        if not quote_valid:
+            await self.repo.save_trade(trade)
+            return
+        if trade.mode == AutoTradingMode.LIVE:
+            await self._submit_live_final_exit(
+                trade,
+                features,
+                quote,
+                exit_reason,
+            )
+            return
+        sell_price = max(
+            0.0,
+            round(float(quote["bid"]) - self._paper_slippage(), 2),
+        )
+        if sell_price <= 0:
+            await self.repo.save_trade(trade)
+            return
+        await self._close_trade(
+            trade,
+            features,
+            sell_price,
+            exit_reason,
+            quote=quote,
+        )
+
     async def _evaluate_active_trade(self, trade: ActiveTrade, features: MarketFeatures) -> None:
         """Evaluates active position stops, trailing updates, and thesis reversal score."""
         if trade.state == TradeLifecycleState.ENTRY_PENDING and not trade.entry_order_id:
@@ -3208,6 +3443,14 @@ class StrategyService:
 
         if self._is_candidate_execution_strategy(trade.strategy):
             await self._evaluate_candidate_active_trade(
+                trade,
+                features,
+                quote,
+            )
+            return
+
+        if self._is_strategy_e(trade.strategy):
+            await self._evaluate_strategy_e_active_trade(
                 trade,
                 features,
                 quote,
