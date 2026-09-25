@@ -3948,7 +3948,11 @@ class StrategyService:
         self._market_data_status.update({
             "futures_instrument": active_instrument,
             "futures_candle_count": len(futures),
-            "latest_futures_candle": futures[-1].end_time.isoformat() if futures else None,
+            "latest_futures_candle": (
+                futures[-1].end_time.astimezone(IST).isoformat()
+                if futures
+                else None
+            ),
         })
         if active_instrument and not futures:
             self._market_data_status["last_error"] = "FUTURES_HISTORY_UNAVAILABLE"
@@ -4034,12 +4038,12 @@ class StrategyService:
                 else None
             ),
             "latest_futures_5m_candle": (
-                latest_futures_5m_end.isoformat()
+                latest_futures_5m_end.astimezone(IST).isoformat()
                 if latest_futures_5m_end is not None
                 else None
             ),
             "expected_futures_5m_candle_end": (
-                expected_futures_5m_end.isoformat()
+                expected_futures_5m_end.astimezone(IST).isoformat()
                 if expected_futures_5m_end is not None
                 else None
             ),
@@ -5535,7 +5539,7 @@ class StrategyService:
             },
             "trigger_diagnostics": diagnostics.model_dump(mode="json"),
             "active_overrides": self._active_overrides.model_dump(mode="json"),
-            "system_time": utc_now().isoformat(),
+            "system_time": utc_now().astimezone(IST).isoformat(),
             "in_trading_window": (
                 self.position_manager.is_within_strategy_a_entry_window(utc_now())
                 if self.config.tunables.trend_pullback_enabled and not self.config.tunables.volatility_breakout_enabled
