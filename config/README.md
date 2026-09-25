@@ -3,7 +3,10 @@
 `config/trading.json` is the canonical **non-secret operator configuration** for
 the strategy service.
 
-It contains the complete `AutoTradingConfig`:
+It contains the complete `AutoTradingConfig`. Standard JSON does not support
+comments, so the optional top-level `_meta` object contains human-readable
+annotations. The loader ignores `_meta`, and repository writes preserve those
+annotations across UI/API saves.
 
 - global strategy execution mode: `PAPER`, `SHADOW_ONLY`, or `LIVE`
 - master auto-trade and kill-switch controls
@@ -58,6 +61,41 @@ Therefore setting `"mode": "LIVE"` in `trading.json` does not by itself allow
 live orders. The platform must also be LIVE-capable through environment
 configuration, pass preflight/reconciliation checks, and be explicitly armed.
 
+Conversely, `LIVE_TRADING_ENABLED=true` in `.env` does **not** force strategies
+to trade LIVE. If the operator selects **PAPER** in the strategy UI, the UI
+persists `"mode": "PAPER"`, forces `system_armed=false`, and all A-E execution
+policies resolve to PAPER. Broker order routing is therefore not used for those
+strategy entries. Switching back to LIVE also disarms and requires a fresh
+runtime ARM after LIVE preflight passes.
+
+## Recommended LIVE broker/data routing
+
+The tracked `.env.local-live.example` is the recommended local LIVE profile.
+Copy it to the gitignored `.env` on the trading host and replace all credential
+placeholders.
+
+Its routing is:
+
+```text
+LIVE orders / reconciliation      -> Zerodha Kite
+Frequent quotes / candles/history -> Zerodha Kite
+Reference / option chain / Greeks -> ICICI Breeze
+```
+
+The corresponding environment settings are:
+
+```text
+LIVE_TRADING_ENABLED=true
+LIVE_EXECUTION_BROKER=kite
+MARKET_DATA_BACKEND=hybrid
+FREQUENT_DATA_BROKER=kite
+REFERENCE_DATA_BROKER=breeze
+```
+
+Both broker sessions may be active at the same time. The execution broker owns
+the entire real-order lifecycle; the data-routing roles do not split ownership
+of a single order across brokers.
+
 ## Strategy enable switches
 
 The primary strategy switches are under `tunables`:
@@ -68,7 +106,7 @@ The primary strategy switches are under `tunables`:
   "volatility_breakout_enabled": true,
   "di_continuation_enabled": true,
   "sr_momentum_breakout_enabled": true,
-  "pivot_vwap_scalp_enabled": false,
+  "pivot_vwap_scalp_enabled": true,
   "strategy_e_countertrend_enabled": true
 }
 ```

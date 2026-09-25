@@ -1,4 +1,16 @@
 {
+  "_meta": {
+    "purpose": "Canonical non-secret operator configuration for automated strategies A-E.",
+    "mode_note": "mode controls strategy execution. LIVE requests broker execution when all server-side LIVE gates pass; PAPER always uses paper execution; SHADOW_ONLY observes without broker orders. UI mode changes persist here and disarm the system.",
+    "safety_note": "system_armed is durable-documentation only and must remain false. Arming is runtime-only, is cleared on restart/mode switch, and is required before any LIVE strategy can create new exposure.",
+    "routing_note": "Broker credentials and routing live in .env. The tracked live profile uses Kite for LIVE order execution and frequent market-data operations, with Breeze for lower-frequency reference/option-chain/Greeks data.",
+    "sections": {
+      "option_selection": "Shared contract-liquidity, premium, delta, expiry and quote-age constraints.",
+      "risk": "Shared sizing, exposure, loss, position, protective-stop and PAPER cost guardrails.",
+      "session": "Global intraday entry/exit windows used by shared strategy controls.",
+      "tunables": "Strategy A-E enable switches and strategy-specific signal parameters."
+    }
+  },
   "mode": "LIVE",
   "auto_trade_enabled": true,
   "system_armed": false,

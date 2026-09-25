@@ -220,3 +220,32 @@ async def test_strategy_e_custom_signal_age_is_preserved_during_revision_migrati
 
     assert loaded.strategy_e_revision == 2
     assert loaded.tunables.strategy_e_max_signal_age_seconds == 120.0
+
+
+@pytest.mark.asyncio
+async def test_descriptive_meta_survives_normal_config_save(tmp_path):
+    config_path = tmp_path / "trading.json"
+    payload = AutoTradingConfig().model_dump(mode="json")
+    payload = {
+        "_meta": {
+            "purpose": "operator documentation",
+            "routing_note": "Kite frequent; Breeze reference",
+        },
+        **payload,
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    repo = StrategyRepository(
+        db_path=tmp_path / "strategy.db",
+        config_path=config_path,
+    )
+    await repo.initialize()
+    loaded = await repo.get_auto_config()
+    loaded.auto_trade_enabled = False
+    await repo.save_auto_config(loaded)
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["_meta"]["purpose"] == "operator documentation"
+    assert saved["_meta"]["routing_note"] == "Kite frequent; Breeze reference"
+    assert saved["auto_trade_enabled"] is False
+    assert saved["system_armed"] is False
