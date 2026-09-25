@@ -555,7 +555,7 @@ def _as_exchange_datetime(
     exchange_tz: ZoneInfo,
 ) -> datetime:
     """Convert internal UTC/aware timestamps to Kite's exchange wall clock."""
-    aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=IST)
     return aware.astimezone(exchange_tz)
 
 
