@@ -28,7 +28,7 @@ async def test_strategy_api_endpoints():
             "sr_momentum_breakout",
             "pivot_vwap_scalp",
         }
-        assert data["strategies"]["pivot_vwap_scalp"]["enabled"] is False
+        assert data["strategies"]["pivot_vwap_scalp"]["enabled"] is True
         assert "strategy_c_paper" in data
         assert "strategy_d_paper" in data
         assert "strategy_e_decision" in data
