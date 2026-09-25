@@ -62,8 +62,9 @@ class ChronologicalReplayExecutor:
     """Advance accepted replay positions in the same time direction as signals.
 
     Numeric production risk gates are evaluated from the same shared helpers
-    as the live service. Historical loss/cooldown gates use underlying realized
-    R until executable option-outcome parity is available.
+    as the live service. Loss cooldown and failure counts use underlying
+    realized R; the daily percentage-loss gate additionally uses chronological
+    estimated executable net P&L when all prior resolved trades are priced.
     """
 
     def __init__(
