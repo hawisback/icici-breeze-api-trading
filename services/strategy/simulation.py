@@ -763,6 +763,7 @@ class SimulationEngine:
             "historical_source": historical_source.value,
             "bypass_entry_window": bypass_entry_window,
             "missing_data": sorted(set(missing_data)),
+            "strategy_registry": strategy_registry.metadata_snapshot(),
             "control_application": {
                 "applied_overrides": applied_overrides,
                 "not_applied_overrides": not_applied_overrides,
