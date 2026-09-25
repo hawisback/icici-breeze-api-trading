@@ -17,6 +17,7 @@ from typing import Any, Optional
 import uuid
 
 from libs.contracts.models import OrderSide as PlatformOrderSide
+from libs.market_time import ist_today
 from services.broker_gateway.domain.enums import (
     BrokerWriteStatus,
     Exchange,
@@ -220,7 +221,7 @@ class BreezeTradingAdapter(BrokerTradingPort):
         """Fetch all orders from Breeze order book for the current day."""
         await self.rate_limiter.acquire_read()
         sdk = self.client_manager.get_sdk_client()
-        today = datetime.now(timezone.utc).date()
+        today = ist_today()
         today_iso = f"{to_breeze_date_str(today)}T06:00:00.000Z"
 
         raw_resp = await self.client_manager.sdk_runner.run(
@@ -262,7 +263,7 @@ class BreezeTradingAdapter(BrokerTradingPort):
         """Fetch executed trade fills for the day."""
         await self.rate_limiter.acquire_read()
         sdk = self.client_manager.get_sdk_client()
-        today = datetime.now(timezone.utc).date()
+        today = ist_today()
         today_iso = f"{to_breeze_date_str(today)}T06:00:00.000Z"
 
         raw_resp = await self.client_manager.sdk_runner.run(
