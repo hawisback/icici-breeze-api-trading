@@ -786,156 +786,158 @@ class SimulationEngine:
         }
         timeline, logs = [], []
         replay_trigger_diagnostics: list[dict[str, Any]] = []
-        replay_diagnostic_keys: set[tuple[str, str]] = set()
-        strategy_a_event_keys: set[tuple[str, str, str | None]] = set()
-        strategy_a_event_counts: Counter[str] = Counter()
+        replay_diagnostic_keys: set[tuple[str, str, str]] = set()
+        replay_event_keys: dict[StrategyName, set[tuple[str, str, str | None]]] = {}
+        replay_event_counts: dict[StrategyName, Counter[str]] = {}
         replay_manifest_recorder = self.replay_manifest_recorder or ReplayManifestRecorder()
         replay_manifest_recorder.set_replay_metadata(replay_metadata)
+        replay_session = ReplaySessionContext(
+            trading_date=date_str,
+            instrument_id=request.instrument_id,
+            overrides=effective_overrides,
+            recorder=replay_manifest_recorder,
+        )
+        strategy_registry.prepare_session(replay_session)
+
         running = list(warmup)
         for idx, bar in enumerate(session):
             running.append(bar)
             macro = self.resample_to_15m(running, request.instrument_id)
             futures = [c for c in futures_history if c.end_time <= bar.end_time]
-            strategy_a_futures = [
+            strategy_futures = [
                 c for c in strategy_a_futures_history if c.end_time <= bar.end_time
             ]
-            features = FeatureEngine.compute_all_features(running, macro, futures,
-                                                          spot_price=bar.close, as_of=bar.end_time)
-            diags_a = strat_a.diagnose(
-                features,
+            features = FeatureEngine.compute_all_features(
                 running,
                 macro,
-                overrides=effective_overrides,
-                futures_candles=strategy_a_futures,
+                futures,
+                spot_price=bar.close,
+                as_of=bar.end_time,
             )
-            diags_b = strat_b.diagnose(features, running, overrides=effective_overrides)
             clock = bar.end_time.astimezone(IST)
-            minutes = clock.hour*60+clock.minute
-            a_start_h, a_start_m = map(int, self.tunables.entry_session_start.split(":"))
-            a_end_h, a_end_m = map(int, self.tunables.entry_session_end.split(":"))
-            b_start_h, b_start_m = map(int, self.session_config.no_new_trade_before.split(":"))
-            b_end_h, b_end_m = map(int, self.session_config.no_new_trade_after.split(":"))
-            a_window = a_start_h * 60 + a_start_m <= minutes <= a_end_h * 60 + a_end_m
-            b_window = b_start_h * 60 + b_start_m <= minutes <= b_end_h * 60 + b_end_m
-            in_window = bypass_entry_window or (
-                (self.tunables.trend_pullback_enabled and a_window)
-                or (self.tunables.volatility_breakout_enabled and b_window)
+            in_window = strategy_registry.any_entry_window_active(
+                bar.end_time,
+                bypass_entry_window=bypass_entry_window,
             )
+            allow_evaluation = bool(
+                in_window
+                and (
+                    strategy_futures
+                    or features.data_ready
+                    or features.breakout_data_ready
+                )
+            )
+            bar_context = ReplayBarContext(
+                session=replay_session,
+                bar=bar,
+                features=features,
+                spot_candles_5m=running,
+                spot_candles_15m=macro,
+                futures_candles=strategy_futures,
+            )
+            evaluations = strategy_registry.evaluate_completed_bar(
+                bar_context,
+                allow_evaluation=allow_evaluation,
+            )
+
             event, details = None, None
-            effective_diags_a = diags_a
-            sig_a = None
-            strategy_a_event = None
-            if (strategy_a_futures and in_window) or (features.data_ready or features.breakout_data_ready) and in_window:
-                if cfg.trend_pullback_enabled and strategy_a_futures:
-                    # Strategy A replay calls the exact production state
-                    # machine over the canonical multi-contract futures stream.
-                    # There is no replay-only trigger evaluator.
-                    sig_a = strat_a.evaluate(
-                        features,
-                        running,
-                        macro,
-                        strategy_a_futures,
-                        effective_overrides,
+            signal = strategy_registry.first_signal(evaluations)
+            if signal is not None:
+                event = "SIGNAL_ONLY"
+                details = (
+                    "Qualified signal; historical executable option quotes unavailable"
+                )
+                logs.append(
+                    DecisionLogEntry(
+                        id=f"SIM-{idx}",
+                        timestamp=bar.end_time,
+                        category="SETUP",
+                        strategy=signal.strategy.value,
+                        message=details,
+                        details=signal.model_dump(mode="json"),
                     )
-                    strategy_a_event = strat_a.last_event
-                    effective_diags_a = strat_a.diagnose(
-                        features,
-                        running,
-                        macro,
-                        overrides=effective_overrides,
-                        futures_candles=strategy_a_futures,
+                )
+            elif not allow_evaluation:
+                strategy_registry.reset_all(bar.end_time)
+                details = (
+                    features.data_reason
+                    if not features.data_ready
+                    else "Outside entry window"
+                )
+
+            for evaluation in evaluations:
+                metadata = evaluation.metadata
+                in_strategy_window = strategy_registry.entry_window_active(
+                    metadata,
+                    bar.end_time,
+                    bypass_entry_window=bypass_entry_window,
+                )
+                if not in_strategy_window:
+                    continue
+
+                if (
+                    metadata.audit_events
+                    and evaluation.event is not None
+                    and evaluation.event.event != "DUPLICATE_IGNORED"
+                ):
+                    event_keys = replay_event_keys.setdefault(
+                        metadata.strategy,
+                        set(),
                     )
-                    if sig_a is not None:
-                        snapshot = sig_a.features_snapshot
-                        replay_manifest_recorder.record_entry(
-                            signal=sig_a, trading_date=date_str,
-                            trigger_source_candle_timestamp=bar.end_time,
-                            trigger_level=float(snapshot.get("trigger", sig_a.underlying_entry_price or sig_a.spot_reference_price)),
-                            simulated_entry_timestamp=bar.end_time,
-                            simulated_entry_price=float(snapshot.get("entry_price", sig_a.underlying_entry_price or sig_a.spot_reference_price)),
-                            entry_5m_candle_timestamp=bar.end_time,
-                            entry_occurred_intrabar=False, entry_features=snapshot,
-                            setup_id=sig_a.signal_id,
-                            pullback_swing_low=None, pullback_swing_high=None,
-                            impulse_low=None, impulse_high=None,
-                            atr_at_entry=float(snapshot.get("atr14", 0.0)),
-                            initial_structural_stop=float(sig_a.structural_stop),
-                            initial_risk_points=float(sig_a.r_points),
-                            initial_risk_atr=(float(sig_a.r_points) / float(snapshot.get("atr14", 1.0))) if snapshot.get("atr14") else 0.0,
-                            current_trailing_stop=float(sig_a.structural_stop), current_r=0.0,
-                            highest_favorable_price=float(sig_a.underlying_entry_price or sig_a.spot_reference_price),
-                            lowest_favorable_price=float(sig_a.underlying_entry_price or sig_a.spot_reference_price),
-                            peak_r=0.0, protected_breakeven_active=False, profit_lock_active=False,
-                            runner_mode_active=False, current_ladder_stage="OPEN_INITIAL_RISK", reversal_score=0,
-                            adverse_health_counters={}, entry_bar_timestamp=bar.end_time,
-                            last_managed_completed_bar_timestamp=None,
-                        )
-                        strat_a.confirm_entry(sig_a.timestamp)
-                        effective_diags_a = strat_a.diagnose(
-                            features,
-                            running,
-                            macro,
-                            overrides=effective_overrides,
-                            futures_candles=strategy_a_futures,
-                        )
-                sig_b = strat_b.evaluate(features, running, overrides=effective_overrides) if cfg.volatility_breakout_enabled else None
-                if sig_b is not None:
-                    _record_strategy_b_manifest(
-                        replay_manifest_recorder,
-                        sig_b,
-                        trading_date=date_str,
-                        breakout_candle=bar,
+                    event_counts = replay_event_counts.setdefault(
+                        metadata.strategy,
+                        Counter(),
                     )
-                signal = sig_a or sig_b
-                if signal:
-                    event, details = "SIGNAL_ONLY", "Qualified signal; historical executable option quotes unavailable"
-                    logs.append(DecisionLogEntry(id=f"SIM-{idx}", timestamp=bar.end_time, category="SETUP",
-                                                 strategy=signal.strategy.value, message=details,
-                                                 details=signal.model_dump(mode="json")))
-            else:
-                strat_a.reset(bar.end_time)
-                strat_b.reset(bar.end_time)
-                details = features.data_reason if not features.data_ready else "Outside entry window"
-            strategy_a_summary_window = bypass_entry_window or a_window
-            if strategy_a_summary_window:
-                if strategy_a_event is not None and strategy_a_event.event != "DUPLICATE_IGNORED":
                     event_key = (
-                        strategy_a_event.event,
-                        strategy_a_event.timestamp.isoformat(),
-                        strategy_a_event.reason,
+                        evaluation.event.event,
+                        evaluation.event.timestamp.isoformat(),
+                        evaluation.event.reason,
                     )
-                    if event_key not in strategy_a_event_keys:
-                        strategy_a_event_keys.add(event_key)
-                        strategy_a_event_counts[strategy_a_event.event] += 1
-                for diag in effective_diags_a:
-                    completed_ts = str((diag.phase_summary or {}).get("completed_candle_timestamp") or bar.end_time.isoformat())
-                    key = (diag.direction.value, completed_ts)
-                    if key in replay_diagnostic_keys:
-                        continue
-                    replay_diagnostic_keys.add(key)
-                    replay_trigger_diagnostics.append({
-                        "timestamp": bar.end_time.isoformat(),
-                        "completed_futures_candle": completed_ts,
-                        "strategy": diag.strategy.value,
-                        "direction": diag.direction.value,
-                        "option_type": diag.option_type.value,
-                        "phase_state": diag.phase_state,
-                        "key_blocker": diag.key_blocker,
-                        "passed_count": diag.passed_count,
-                        "total_count": diag.total_count,
-                        "ready_pct": diag.ready_pct,
-                        "conditions": [item.model_dump(mode="json") for item in diag.conditions],
-                        "strategy_a_contract": (diag.phase_summary or {}).get("strategy_a_contract", {}),
-                    })
-            timeline.append(SimulationBarSnapshot(
-                bar_index=idx, timestamp=bar.end_time.isoformat(), ist_time=clock.strftime("%H:%M"),
-                open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, spot=bar.close,
-                ema9_5m=features.ema9_5m, ema20_5m=features.ema20_5m,
-                supertrend=features.supertrend_direction, adx_15m=features.adx_15m,
-                rvol_5m=features.rvol_5m, bb_width_percentile=features.bb_width_percentile,
-                strategy_a_phase=(max(effective_diags_a, key=lambda d: d.passed_count).phase_state if effective_diags_a else strat_a.snapshot.state.value),
-                strategy_b_phase=max(diags_b, key=lambda d: d.passed_count).phase_state,
-                event=event, event_details=details))
+                    if event_key not in event_keys:
+                        event_keys.add(event_key)
+                        event_counts[str(evaluation.event.event)] += 1
+
+                if metadata.audit_diagnostics:
+                    for row in evaluation.audit_records:
+                        key = (
+                            str(row.get("strategy") or metadata.strategy.value),
+                            str(row.get("direction") or ""),
+                            str(row.get("completed_futures_candle") or ""),
+                        )
+                        if key in replay_diagnostic_keys:
+                            continue
+                        replay_diagnostic_keys.add(key)
+                        replay_trigger_diagnostics.append(row)
+
+            phases = strategy_registry.timeline_phases(evaluations)
+            timeline.append(
+                SimulationBarSnapshot(
+                    bar_index=idx,
+                    timestamp=bar.end_time.isoformat(),
+                    ist_time=clock.strftime("%H:%M"),
+                    open=bar.open,
+                    high=bar.high,
+                    low=bar.low,
+                    close=bar.close,
+                    volume=bar.volume,
+                    spot=bar.close,
+                    ema9_5m=features.ema9_5m,
+                    ema20_5m=features.ema20_5m,
+                    supertrend=features.supertrend_direction,
+                    adx_15m=features.adx_15m,
+                    rvol_5m=features.rvol_5m,
+                    bb_width_percentile=features.bb_width_percentile,
+                    strategy_a_phase=phases.get("strategy_a_phase", "FLAT"),
+                    strategy_b_phase=phases.get("strategy_b_phase", "RESET"),
+                    event=event,
+                    event_details=details,
+                )
+            )
+
+        strategy_a_event_counts = replay_event_counts.get(
+            StrategyName.TREND_PULLBACK,
+            Counter(),
+        )
 
         # Replay-only lifecycle pass.  It consumes the frozen signal manifests
         # after signal generation has completed, so PositionManager state can
