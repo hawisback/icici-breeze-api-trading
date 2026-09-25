@@ -1950,6 +1950,20 @@ class SimulationEngine:
         option_complete = bool(resolved_records) and bool(
             option_mark_summary["all_resolved_trades_priced"]
         )
+        selection_evidence_counts = Counter(
+            record.contract_selection_evidence_status or "NOT_APPLIED"
+            for record in resolved_records
+        )
+        fill_method_counts = Counter()
+        for record in resolved_records:
+            if record.simulated_entry_fill_method:
+                fill_method_counts[
+                    f"ENTRY:{record.simulated_entry_fill_method}"
+                ] += 1
+            if record.simulated_exit_fill_method:
+                fill_method_counts[
+                    f"EXIT:{record.simulated_exit_fill_method}"
+                ] += 1
         data_quality_reasons = {"STALE_FUTURES_DATA", "FUTURES_DATA_UNAVAILABLE", "INCOMPLETE_FUTURES_DATA"}
         blocker_counts = Counter(
             item["key_blocker"]
@@ -2056,6 +2070,19 @@ class SimulationEngine:
                 f"{len(replay_manifest_recorder.records())} signal(s) were identified, but no lifecycle "
                 "could be resolved from the available post-entry historical bars."
             )
+        elif (
+            request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+            and option_complete
+        ):
+            limitation = (
+                "Historical option completed-candle marks are reported separately "
+                "from estimated executable fills. Contract selection uses the "
+                "production selector only for exact point-in-time signal snapshots; "
+                "otherwise it is explicitly APPROXIMATED_SELECTION. Estimated fills "
+                "use point-in-time bid/ask plus configured slippage when available, "
+                "otherwise completed-mark +/- slippage. Partial option exits are not "
+                "modeled in this increment."
+            )
         elif option_complete:
             limitation = (
                 "Real historical option OHLC completed-candle close marks used for entry/exit PNL; "
@@ -2106,12 +2133,48 @@ class SimulationEngine:
             max_consecutive_losses=lifecycle_report["max_consecutive_losses"],
         )
         option_mark_metrics = ReplayOptionMarkMetrics(
+            calculation_basis=(
+                "SEPARATE_HISTORICAL_MARK_AND_ESTIMATED_EXECUTABLE_ECONOMICS"
+                if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+                else (
+                    "REPLAY_QUANTITY_USING_REPLAY_CONTRACT_APPROXIMATION_"
+                    "AND_PAPER_COST_SCHEDULE"
+                )
+            ),
             priced_trades=option_mark_summary["priced_trades"],
             unpriced_trades=option_mark_summary["unpriced_trades"],
-            all_resolved_trades_priced=option_mark_summary["all_resolved_trades_priced"],
+            all_resolved_trades_priced=option_mark_summary[
+                "all_resolved_trades_priced"
+            ],
             gross_mark_pnl=option_mark_summary["gross_mark_pnl"],
-            estimated_transaction_costs=option_mark_summary["estimated_transaction_costs"],
+            estimated_transaction_costs=option_mark_summary[
+                "estimated_transaction_costs"
+            ],
             net_mark_pnl=option_mark_summary["net_mark_pnl"],
+            execution_estimated_trades=option_mark_summary[
+                "execution_estimated_trades"
+            ],
+            execution_unavailable_trades=option_mark_summary[
+                "execution_unavailable_trades"
+            ],
+            bid_ask_supported_trades=option_mark_summary[
+                "bid_ask_supported_trades"
+            ],
+            mark_fallback_fill_trades=option_mark_summary[
+                "mark_fallback_fill_trades"
+            ],
+            gross_estimated_executable_pnl=option_mark_summary[
+                "gross_estimated_executable_pnl"
+            ],
+            estimated_slippage_costs=option_mark_summary[
+                "estimated_slippage_costs"
+            ],
+            estimated_execution_transaction_costs=option_mark_summary[
+                "estimated_execution_transaction_costs"
+            ],
+            net_estimated_executable_pnl=option_mark_summary[
+                "net_estimated_executable_pnl"
+            ],
         )
         portfolio_metrics = (
             ReplayPortfolioMetrics(
@@ -2134,6 +2197,10 @@ class SimulationEngine:
             option_mark_available_trades=option_mark_summary["priced_trades"],
             option_mark_unavailable_trades=option_mark_summary["unpriced_trades"],
             option_mark_quality_reasons=option_mark_summary["quality_reasons"],
+            contract_selection_evidence_counts=dict(
+                selection_evidence_counts
+            ),
+            execution_fill_method_counts=dict(fill_method_counts),
         )
 
         return SimulationResult(
