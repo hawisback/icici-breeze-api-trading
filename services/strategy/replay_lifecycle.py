@@ -734,18 +734,48 @@ def attach_historical_option_prices(
             "entry": _historical_mark_provenance(None, record.simulated_entry_timestamp),
             "exit": _historical_mark_provenance(None, record.exit_timestamp),
         }
-        direction = "CALL" if record.direction == "CALL" else "PUT"
-        candidates = [
-            item for item in normalized
-            if item["right"] in {direction, "CE" if direction == "CALL" else "PE"}
-            and item["expiry"] >= record.trading_date
-        ]
-        if not candidates:
-            record.option_data_quality_reason = "No historical contract metadata for replay date"
-            continue
-        expiry = min(item["expiry"] for item in candidates)
-        candidates = [item for item in candidates if item["expiry"] == expiry]
-        selected = min(candidates, key=lambda item: abs(item["strike"] - record.simulated_entry_price))
+        sizing_contract_id = record.sizing_contract_instrument_id
+        if sizing_contract_id:
+            selected = next(
+                (
+                    item
+                    for item in normalized
+                    if item["instrument_id"] == sizing_contract_id
+                ),
+                None,
+            )
+            record.historical_option_provenance["sizing_contract_locked"] = True
+            if selected is None:
+                record.option_data_quality_reason = (
+                    "Historical sizing contract metadata unavailable"
+                )
+                continue
+        else:
+            record.historical_option_provenance["sizing_contract_locked"] = False
+            direction = "CALL" if record.direction == "CALL" else "PUT"
+            candidates = [
+                item for item in normalized
+                if item["right"] in {
+                    direction,
+                    "CE" if direction == "CALL" else "PE",
+                }
+                and item["expiry"] >= record.trading_date
+            ]
+            if not candidates:
+                record.option_data_quality_reason = (
+                    "No historical contract metadata for replay date"
+                )
+                continue
+            expiry = min(item["expiry"] for item in candidates)
+            candidates = [
+                item for item in candidates if item["expiry"] == expiry
+            ]
+            selected = min(
+                candidates,
+                key=lambda item: abs(
+                    item["strike"] - record.simulated_entry_price
+                ),
+            )
         record.option_contract_instrument_id = selected["instrument_id"]
         record.option_contract_symbol = selected["symbol"]
         record.option_expiry = selected["expiry"]
