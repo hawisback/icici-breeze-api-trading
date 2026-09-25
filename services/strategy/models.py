@@ -100,6 +100,18 @@ class HistoricalReplaySource(str, Enum):
     MIXED = "MIXED"
 
 
+class HistoricalReplayMode(str, Enum):
+    """Replay orchestration mode.
+
+    RESEARCH preserves independent signal discovery followed by lifecycle
+    resolution. EXECUTION_PARITY walks forward chronologically and lets an
+    active position suppress later entry evaluation as production does.
+    """
+
+    RESEARCH = "RESEARCH"
+    EXECUTION_PARITY = "EXECUTION_PARITY"
+
+
 class OptionType(str, Enum):
     CALL = "CALL"
     PUT = "PUT"
@@ -913,6 +925,7 @@ class SimulationRequest(BaseModel):
     # canonical name without breaking existing API/debug callers.
     bypass_entry_window: Optional[bool] = None
     historical_source: HistoricalReplaySource = HistoricalReplaySource.BREEZE
+    replay_mode: HistoricalReplayMode = HistoricalReplayMode.RESEARCH
     max_trades_per_day: int = Field(
         default=5,
         description="Compatibility-only in current Day Replay; chronological daily trade gating is not applied yet.",
