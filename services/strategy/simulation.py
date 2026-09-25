@@ -96,6 +96,158 @@ class SimulationEngine:
         self.tunables = tunables or StrategyTunablesConfig()
         self.replay_manifest_recorder = replay_manifest_recorder
 
+    async def _load_replay_option_universe(
+        self,
+        date_str: str,
+    ) -> list[Any]:
+        """Load option contract metadata available for replay approximation."""
+        inst_svc = getattr(self.hist_svc, "instrument_service", None)
+        if not inst_svc:
+            return []
+        try:
+            instruments = await inst_svc.repo.search(
+                query="NIFTY",
+                underlying="NIFTY",
+                limit=10000,
+            )
+        except Exception as exc:
+            logger.warning("Historical option universe lookup failed: %s", exc)
+            return []
+        return [
+            instrument
+            for instrument in instruments
+            if str(getattr(instrument, "segment", "")).upper() == "OPTIONS"
+            and getattr(instrument, "expiry", None)
+            and str(instrument.expiry) >= date_str
+            and getattr(instrument, "strike", None) is not None
+            and getattr(instrument, "option_right", None)
+            and int(getattr(instrument, "lot_size", 0) or 0) > 0
+        ]
+
+    @staticmethod
+    def _select_replay_sizing_contract(
+        signal: Any,
+        *,
+        date_str: str,
+        option_universe: list[Any],
+    ) -> Any | None:
+        direction = "CALL" if signal.direction == TradeDirection.BULLISH else "PUT"
+        rights = {direction, "CE" if direction == "CALL" else "PE"}
+        candidates = [
+            instrument
+            for instrument in option_universe
+            if str(
+                getattr(
+                    getattr(instrument, "option_right", None),
+                    "value",
+                    getattr(instrument, "option_right", None),
+                )
+            ).upper()
+            in rights
+            and str(getattr(instrument, "expiry", "")) >= date_str
+        ]
+        if not candidates:
+            return None
+        expiry = min(str(instrument.expiry) for instrument in candidates)
+        candidates = [
+            instrument
+            for instrument in candidates
+            if str(instrument.expiry) == expiry
+        ]
+        underlying_entry = float(
+            signal.underlying_entry_price or signal.spot_reference_price
+        )
+        return min(
+            candidates,
+            key=lambda instrument: abs(
+                float(instrument.strike) - underlying_entry
+            ),
+        )
+
+    async def _resolve_replay_sizing(
+        self,
+        *,
+        signal: Any,
+        date_str: str,
+        historical_source: HistoricalReplaySource,
+        option_universe: list[Any],
+        option_candle_cache: dict[str, list[Candle]],
+        effective_risk_config: RiskConfig,
+    ) -> tuple[ReplaySizingDecision | None, str | None]:
+        """Resolve sizing from current replay approximation and completed marks."""
+        contract = self._select_replay_sizing_contract(
+            signal,
+            date_str=date_str,
+            option_universe=option_universe,
+        )
+        if contract is None:
+            return None, "NO_HISTORICAL_OPTION_CONTRACT_METADATA"
+
+        instrument_id = str(contract.instrument_id)
+        candles = option_candle_cache.get(instrument_id)
+        if candles is None:
+            candles = []
+            if self.hist_svc and hasattr(self.hist_svc, "repo"):
+                target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                start = datetime(
+                    target_date.year,
+                    target_date.month,
+                    target_date.day,
+                    9,
+                    15,
+                    tzinfo=IST,
+                ).astimezone(timezone.utc)
+                end = datetime(
+                    target_date.year,
+                    target_date.month,
+                    target_date.day,
+                    15,
+                    30,
+                    tzinfo=IST,
+                ).astimezone(timezone.utc)
+                try:
+                    candles = await self.hist_svc.repo.get_candles(
+                        instrument_id,
+                        "1m",
+                        start_time=start,
+                        end_time=end,
+                        limit=1000,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Historical sizing option query failed for %s: %s",
+                        instrument_id,
+                        exc,
+                    )
+            allowed = (
+                {"BREEZE", "KITE", "LIVE"}
+                if historical_source == HistoricalReplaySource.MIXED
+                else {historical_source.value}
+            )
+            candles = sorted(
+                [candle for candle in candles if candle.source in allowed],
+                key=lambda candle: candle.start_time,
+            )
+            option_candle_cache[instrument_id] = candles
+
+        entry_mark = _historical_close_at(candles, signal.timestamp)
+        if entry_mark is None:
+            return None, "HISTORICAL_OPTION_ENTRY_MARK_UNAVAILABLE"
+
+        return (
+            calculate_replay_sizing(
+                signal=signal,
+                contract=contract,
+                entry_mark=float(entry_mark),
+                risk_config=effective_risk_config,
+                option_selection=self.option_selection_config,
+                session_config=self.session_config,
+                strategy_config=self.tunables,
+                account_equity=effective_risk_config.account_equity,
+            ),
+            None,
+        )
+
     async def _fetch_replay_option_candles(
         self,
         records: list[Any],
