@@ -1096,7 +1096,8 @@ class SimulationEngine:
                     effective_risk_config.cooldown_after_loss_min
                 ),
                 "max_daily_loss_r": effective_risk_config.max_daily_loss_r,
-            },            "execution_authority_scope": (
+            },
+            "execution_authority_scope": (
                 {
                     "session_entry_windows": "APPLIED",
                     "kill_switch": (
@@ -1116,7 +1117,6 @@ class SimulationEngine:
                 == HistoricalReplayMode.EXECUTION_PARITY
                 else None
             ),
-
         }
         one_minute_candles = await self._load_replay_one_minute_candles(
             date_str,
