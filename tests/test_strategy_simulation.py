@@ -19,6 +19,7 @@ from services.strategy.models import (
     SimulatedTradeRecord,
     SimulationRequest,
     SimulationResult,
+    HistoricalReplayMode,
     HistoricalReplaySource,
     RiskConfig,
     ThresholdOverrides,
@@ -485,6 +486,34 @@ def test_simulation_engine_missing_data():
     assert result.net_pnl == result.option_mark_metrics.net_mark_pnl
 
 
+def test_execution_parity_mode_is_explicit_and_chronological_on_empty_session():
+    engine = SimulationEngine()
+    request = SimulationRequest(
+        date="2026-09-17",
+        replay_mode=HistoricalReplayMode.EXECUTION_PARITY,
+        bypass_window=True,
+    )
+
+    import asyncio
+    result = asyncio.run(engine.run_day_simulation(request))
+
+    assert result.replay_mode == "EXECUTION_PARITY"
+    assert result.replay_metadata["requested_replay_mode"] == "EXECUTION_PARITY"
+    execution = result.replay_metadata["execution_parity"]
+    assert execution["daily_entries"] == 0
+    assert execution["completed_positions"] == 0
+    assert execution["entry_evaluation_suppressed_cycles"] == 0
+    assert execution["chronology_indeterminate"] is False
+    assert (
+        result.signal_metrics.calculation_basis
+        == "PRODUCTION_PRIORITY_SIGNAL_DISCOVERY_WITH_ACTIVE_POSITION_SUPPRESSION"
+    )
+    assert (
+        result.portfolio_metrics.calculation_basis
+        == "CHRONOLOGICAL_EXECUTION_AVAILABLE_PORTFOLIO_ANALYTICS_NOT_IMPLEMENTED"
+    )
+
+
 def test_simulation_overrides_cannot_bypass_missing_real_data():
     """Relaxing thresholds cannot generate trades from missing history."""
     engine = SimulationEngine()
@@ -622,7 +651,8 @@ async def test_simulation_rest_endpoints():
         assert "win_rate_pct" in sim_json
         assert "timeline" in sim_json
         assert "trades" in sim_json
-        assert sim_json["replay_mode"] in {"SIGNALS_ONLY", "POSITION_MANAGER_REPLAY"}
+        assert sim_json["replay_mode"] == "POSITION_MANAGER_REPLAY"
+        assert sim_json["replay_metadata"]["requested_replay_mode"] == "RESEARCH"
         assert sim_json["total_bars_evaluated"] == sim_json["signal_metrics"]["total_bars_evaluated"]
         assert sim_json["total_trades"] == sim_json["underlying_lifecycle_metrics"]["resolved_trades"]
         assert sim_json["win_rate_pct"] == sim_json["underlying_lifecycle_metrics"]["win_rate_pct"]
@@ -630,6 +660,22 @@ async def test_simulation_rest_endpoints():
         assert sim_json["net_pnl"] == sim_json["option_mark_metrics"]["net_mark_pnl"]
         assert sim_json["max_drawdown_pnl"] == sim_json["portfolio_metrics"]["max_drawdown_pnl"]
         assert sim_json["total_trades"] == len(sim_json["trades"])
+
+        parity_res = await client.post(
+            "/api/v1/strategies/simulate",
+            json={
+                **payload,
+                "replay_mode": "EXECUTION_PARITY",
+            },
+        )
+        assert parity_res.status_code == 200
+        parity_json = parity_res.json()
+        assert parity_json["replay_mode"] == "EXECUTION_PARITY"
+        assert (
+            parity_json["replay_metadata"]["requested_replay_mode"]
+            == "EXECUTION_PARITY"
+        )
+        assert "execution_parity" in parity_json["replay_metadata"]
 
     await container.strategy_svc.stop()
 
