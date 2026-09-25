@@ -25,7 +25,7 @@ from services.strategy.models import (
     ThresholdOverrides,
     TradeDirection,
 )
-from services.strategy.replay_manifest import ReplayManifestRecorder
+from services.strategy.replay_manifest import ReplayManifestRecord, ReplayManifestRecorder
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 
@@ -91,7 +91,7 @@ class ReplayStrategyAdapter(Protocol):
         self,
         signal: StrategySignal,
         context: ReplayBarContext,
-    ) -> None: ...
+    ) -> ReplayManifestRecord: ...
 
     def on_exit(self, direction: TradeDirection, at: datetime) -> None: ...
 
@@ -187,8 +187,6 @@ class TrendPullbackReplayAdapter:
                 context.session.overrides,
             )
             event = self.strategy.last_event
-            if signal is not None:
-                self.on_entry_confirmed(signal, context)
             diagnostics = self.strategy.diagnose(
                 context.features,
                 context.spot_candles_5m,
@@ -215,7 +213,7 @@ class TrendPullbackReplayAdapter:
         self,
         signal: StrategySignal,
         context: ReplayBarContext,
-    ) -> None:
+    ) -> ReplayManifestRecord:
         snapshot = signal.features_snapshot
         atr = float(snapshot.get("atr14", 0.0))
         entry_price = float(
@@ -224,7 +222,7 @@ class TrendPullbackReplayAdapter:
                 signal.underlying_entry_price or signal.spot_reference_price,
             )
         )
-        context.session.recorder.record_entry(
+        record = context.session.recorder.record_entry(
             signal=signal,
             trading_date=context.session.trading_date,
             trigger_source_candle_timestamp=context.bar.end_time,
@@ -267,6 +265,7 @@ class TrendPullbackReplayAdapter:
             last_managed_completed_bar_timestamp=None,
         )
         self.strategy.confirm_entry(signal.timestamp)
+        return record
 
     def on_exit(self, direction: TradeDirection, at: datetime) -> None:
         self.strategy.on_exit(direction, at)
@@ -347,8 +346,6 @@ class VolatilityBreakoutReplayAdapter:
                 context.spot_candles_5m,
                 overrides=context.session.overrides,
             )
-            if signal is not None:
-                self.on_entry_confirmed(signal, context)
         phase = (
             max(diagnostics, key=lambda item: item.passed_count).phase_state
             if diagnostics
@@ -365,7 +362,7 @@ class VolatilityBreakoutReplayAdapter:
         self,
         signal: StrategySignal,
         context: ReplayBarContext,
-    ) -> None:
+    ) -> ReplayManifestRecord:
         if signal.strategy != StrategyName.VOLATILITY_BREAKOUT:
             raise ValueError(
                 "Strategy B replay adapter received a non-Strategy-B signal"
@@ -388,7 +385,7 @@ class VolatilityBreakoutReplayAdapter:
         if atr_at_lock <= 0 or box_high <= box_low:
             raise ValueError(f"Invalid Strategy B replay state for {signal.signal_id}")
 
-        context.session.recorder.record_entry(
+        record = context.session.recorder.record_entry(
             signal=signal,
             trading_date=context.session.trading_date,
             trigger_source_candle_timestamp=signal.timestamp,
@@ -432,6 +429,7 @@ class VolatilityBreakoutReplayAdapter:
             entry_bar_timestamp=context.bar.start_time,
             last_managed_completed_bar_timestamp=None,
         )
+        return record
 
     def on_exit(self, direction: TradeDirection, at: datetime) -> None:
         return None
@@ -538,14 +536,39 @@ class ReplayStrategyRegistry:
         context: ReplayBarContext,
         *,
         allow_evaluation: bool,
+        stop_after_signal: bool = False,
     ) -> list[ReplayStrategyEvaluation]:
-        return [
-            adapter.evaluate_completed_bar(
+        results: list[ReplayStrategyEvaluation] = []
+        for adapter in self.adapters:
+            result = adapter.evaluate_completed_bar(
                 context,
                 allow_evaluation=allow_evaluation,
             )
-            for adapter in self.adapters
-        ]
+            results.append(result)
+            if stop_after_signal and result.signal is not None:
+                break
+        return results
+
+    def confirm_entry(
+        self,
+        signal: StrategySignal,
+        context: ReplayBarContext,
+    ) -> ReplayManifestRecord:
+        for adapter in self.adapters:
+            if adapter.strategy_metadata().strategy == signal.strategy:
+                return adapter.on_entry_confirmed(signal, context)
+        raise ValueError(f"Replay registry has no adapter for {signal.strategy.value}")
+
+    def notify_exit(
+        self,
+        strategy: StrategyName,
+        direction: TradeDirection,
+        at: datetime,
+    ) -> None:
+        for adapter in self.adapters:
+            if adapter.strategy_metadata().strategy == strategy:
+                adapter.on_exit(direction, at)
+                return
 
     def reset_all(self, at: datetime) -> None:
         for adapter in self.adapters:
