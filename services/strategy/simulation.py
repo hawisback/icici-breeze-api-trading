@@ -1158,11 +1158,29 @@ class SimulationEngine:
                 )
             if "premium" in name:
                 return (
-                    "Historical option reconstruction does not apply production "
-                    "premium-based contract selection."
+                    "Research replay does not apply option contract-selection "
+                    "overrides."
+                    if request.replay_mode == HistoricalReplayMode.RESEARCH
+                    else (
+                        "Execution Parity applies this override only when an "
+                        "exact point-in-time chain snapshot supports the "
+                        "production ContractSelector; APPROXIMATED_SELECTION "
+                        "cannot prove the premium/liquidity rule."
+                    )
                 )
             return "Current A/B Day Replay does not consume this override."
 
+        conditional_overrides = {
+            name: {
+                "value": value,
+                "reason": replay_override_reason(name),
+            }
+            for name, value in override_values.items()
+            if (
+                request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+                and "premium" in name
+            )
+        }
         not_applied_overrides = {
             name: {
                 "value": value,
@@ -1171,6 +1189,7 @@ class SimulationEngine:
             for name, value in override_values.items()
             if name not in supported_replay_overrides
             and name != "bypass_entry_window"
+            and name not in conditional_overrides
         }
         effective_overrides = ThresholdOverrides.model_validate(applied_overrides)
 
@@ -1307,6 +1326,7 @@ class SimulationEngine:
             "strategy_registry": strategy_registry.metadata_snapshot(),
             "control_application": {
                 "applied_overrides": applied_overrides,
+                "conditionally_applied_overrides": conditional_overrides,
                 "not_applied_overrides": not_applied_overrides,
                 "applied_request_controls": applied_request_controls,
                 "not_applied_request_controls": not_applied_request_controls,
