@@ -16,7 +16,7 @@ import logging
 from typing import Any, Sequence
 
 from libs.contracts.models import Candle, generate_id
-from services.historical.strategy_a_data_audit import IST
+from libs.market_time import IST
 from services.historical.strategy_d_candidate_manifest import (
     CANDIDATE_ID,
     FREEZE_DATE,
