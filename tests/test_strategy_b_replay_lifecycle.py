@@ -244,7 +244,7 @@ def test_chronological_executor_does_not_scan_future_and_blocks_capacity():
         contract_expiry="2026-07-02",
         contract_strike=100.0,
         lot_size=50,
-        entry_mark=100.0,
+        entry_reference_price=100.0,
     )
     record = executor.accept_signal(
         _signal(entry_bar.end_time),
@@ -258,6 +258,7 @@ def test_chronological_executor_does_not_scan_future_and_blocks_capacity():
     assert record.sizing_status == "APPLIED"
     assert record.sizing_contract_instrument_id == "OPT-TEST"
     assert record.sizing_contract_lot_size == 50
+    assert record.sizing_entry_reference_price == 100.0
     assert record.sizing_entry_mark == 100.0
     assert record.replay_lots == 2
     assert record.replay_quantity == 100
