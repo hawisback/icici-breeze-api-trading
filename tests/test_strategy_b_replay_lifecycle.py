@@ -26,6 +26,7 @@ from services.strategy.replay_registry import (
     ReplayStrategyRegistry,
     VolatilityBreakoutReplayAdapter,
 )
+from services.strategy.replay_sizing import ReplaySizingDecision
 
 
 UTC = timezone.utc
@@ -225,7 +226,31 @@ def test_chronological_executor_does_not_scan_future_and_blocks_capacity():
         risk_config=RiskConfig(max_concurrent_positions=1),
     )
 
-    record = executor.accept_signal(_signal(entry_bar.end_time), context)
+    sizing = ReplaySizingDecision(
+        status="APPLIED",
+        method="OPTION_HARD_STOP_PREMIUM_RISK",
+        price_basis="HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARK",
+        account_equity=500000.0,
+        risk_per_trade_pct=0.5,
+        risk_budget=2500.0,
+        option_loss_per_lot=1250.0,
+        delta_proxy=None,
+        delta_source=None,
+        lots=2,
+        quantity=100,
+        rejection_reason=None,
+        contract_instrument_id="OPT-TEST",
+        contract_symbol="OPT-TEST",
+        contract_expiry="2026-07-02",
+        contract_strike=100.0,
+        lot_size=50,
+        entry_mark=100.0,
+    )
+    record = executor.accept_signal(
+        _signal(entry_bar.end_time),
+        context,
+        sizing=sizing,
+    )
 
     # Future stop data already exists in the replay dataset, but accepting the
     # signal must not resolve it ahead of chronological time.
