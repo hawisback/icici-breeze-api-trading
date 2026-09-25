@@ -321,6 +321,21 @@ def test_historical_option_candles_populate_net_pnl():
     assert record.historical_option_provenance["bid_ask_available"] is False
     assert record.historical_option_provenance["executable_fill_equivalent"] is False
 
+    # Execution-parity sizing must flow through to mark economics instead of
+    # silently reverting to one lot.
+    record.replay_lots = 2
+    record.replay_quantity = 50
+    attach_historical_option_prices(
+        [record],
+        [contract],
+        {contract.instrument_id: candles},
+        RiskConfig(),
+    )
+    sized_trade = build_simulated_trade_records([record])[0]
+    assert sized_trade.lots == 2
+    assert sized_trade.quantity == 50
+    assert sized_trade.gross_pnl == -500.0
+
     mark_summary = summarize_historical_option_marks([record])
     assert mark_summary["priced_trades"] == 1
     assert mark_summary["unpriced_trades"] == 0
