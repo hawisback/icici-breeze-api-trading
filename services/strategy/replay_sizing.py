@@ -35,7 +35,7 @@ class ReplaySizingDecision:
     contract_expiry: str
     contract_strike: float
     lot_size: int
-    entry_mark: float
+    entry_reference_price: float
 
     def to_manifest_kwargs(self) -> dict[str, Any]:
         return {
@@ -53,7 +53,12 @@ class ReplaySizingDecision:
             "contract_expiry": self.contract_expiry,
             "contract_strike": self.contract_strike,
             "contract_lot_size": self.lot_size,
-            "entry_mark": self.entry_mark,
+            "entry_reference_price": self.entry_reference_price,
+            "entry_mark": (
+                self.entry_reference_price
+                if "MARK" in self.price_basis
+                else None
+            ),
             "lots": self.lots,
             "quantity": self.quantity,
             "rejection_reason": self.rejection_reason,
@@ -64,7 +69,7 @@ def calculate_replay_sizing(
     *,
     signal: StrategySignal,
     contract: Any,
-    entry_mark: float,
+    entry_reference_price: float,
     risk_config: RiskConfig,
     option_selection: OptionSelectionConfig,
     session_config: SessionTimersConfig,
@@ -96,7 +101,7 @@ def calculate_replay_sizing(
     )
     budget = account_equity * risk_config.risk_per_trade_pct_of_account / 100.0
 
-    if lot_size <= 0 or entry_mark <= 0:
+    if lot_size <= 0 or entry_reference_price <= 0:
         return ReplaySizingDecision(
             status="UNAVAILABLE",
             method=None,
@@ -115,7 +120,7 @@ def calculate_replay_sizing(
             contract_expiry=expiry,
             contract_strike=strike,
             lot_size=lot_size,
-            entry_mark=entry_mark,
+            entry_reference_price=entry_reference_price,
         )
 
     if signal.strategy == StrategyName.TREND_PULLBACK:
@@ -139,7 +144,7 @@ def calculate_replay_sizing(
                 contract_expiry=expiry,
                 contract_strike=strike,
                 lot_size=lot_size,
-                entry_mark=entry_mark,
+                entry_reference_price=entry_reference_price,
             )
 
         use_actual_delta = (
@@ -163,7 +168,7 @@ def calculate_replay_sizing(
             underlying_stop=float(signal.structural_stop),
             option_delta=delta_proxy,
             lot_size=lot_size,
-            option_entry=entry_mark,
+            option_entry=entry_reference_price,
             account_equity=account_equity,
         )
         status = "APPLIED" if sizing.lots >= 1 else "REJECTED"
@@ -193,7 +198,7 @@ def calculate_replay_sizing(
             contract_expiry=expiry,
             contract_strike=strike,
             lot_size=lot_size,
-            entry_mark=entry_mark,
+            entry_reference_price=entry_reference_price,
         )
 
     manager = PositionManager(
@@ -202,12 +207,12 @@ def calculate_replay_sizing(
         strategy_config=strategy_config,
     )
     lots, quantity = manager.calculate_position_size(
-        entry_premium=entry_mark,
+        entry_premium=entry_reference_price,
         account_equity=account_equity,
         lot_size=lot_size,
     )
     option_loss_per_lot = (
-        entry_mark
+        entry_reference_price
         * (risk_config.option_hard_stop_pct / 100.0)
         * lot_size
     )
@@ -231,5 +236,5 @@ def calculate_replay_sizing(
         contract_expiry=expiry,
         contract_strike=strike,
         lot_size=lot_size,
-        entry_mark=entry_mark,
+        entry_reference_price=entry_reference_price,
     )
