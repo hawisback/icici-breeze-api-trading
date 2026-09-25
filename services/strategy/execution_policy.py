@@ -1,4 +1,4 @@
-"""Authoritative execution-permission policy for Strategies A/B/C/D.
+"""Authoritative execution-permission policy for Strategies A/B/C/D/E.
 
 This module separates a strategy's requested platform mode from the maximum
 execution authority currently granted to that strategy. Promotion to LIVE is
@@ -14,7 +14,7 @@ from typing import Any
 from services.strategy.models import AutoTradingMode, OptionType, StrategyName
 
 
-POLICY_VERSION = "strategy_execution_policy_v4"
+POLICY_VERSION = "strategy_execution_policy_v5"
 
 
 @dataclass(frozen=True)
@@ -52,7 +52,7 @@ def resolve_strategy_execution_policy(
 ) -> StrategyExecutionPolicy:
     """Return the maximum currently-approved execution authority.
 
-    Strategies A/B/C/D are LIVE-promoted through this single authority boundary.
+    Strategies A/B/C/D/E are LIVE-promoted through this single authority boundary.
     Runtime health, account allowlisting, arming, market-data readiness, and each
     strategy's frozen signal contract remain separate fail-closed gates.
     """
@@ -94,6 +94,18 @@ def resolve_strategy_execution_policy(
         )
 
     if strategy == StrategyName.SR_MOMENTUM_BREAKOUT:
+        effective = requested_mode
+        return StrategyExecutionPolicy(
+            strategy=strategy,
+            call_mode=effective,
+            put_mode=effective,
+            live_trading_allowed=True,
+            promotion_state="LIVE_PROMOTED",
+            live_block_reason="",
+            force_entry_allowed=False,
+        )
+
+    if strategy == StrategyName.PIVOT_VWAP_SCALP:
         effective = requested_mode
         return StrategyExecutionPolicy(
             strategy=strategy,
