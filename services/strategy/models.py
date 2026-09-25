@@ -967,20 +967,102 @@ class SimulatedTradeRecord(BaseModel):
     hold_duration_mins: float = 0.0
 
 
+class ReplaySignalMetrics(BaseModel):
+    """Signal-discovery metrics, separated from lifecycle and option economics."""
+
+    price_basis: str = "COMPLETED_UNDERLYING_SPOT_FUTURES_CANDLES"
+    calculation_basis: str = "STRATEGY_SIGNAL_DISCOVERY_ON_COMPLETED_HISTORICAL_BARS"
+    total_bars_evaluated: int
+    qualified_signals: int
+    ambiguous_signals: int
+    unresolved_signals: int
+
+
+class ReplayUnderlyingLifecycleMetrics(BaseModel):
+    """Underlying lifecycle outcomes expressed only in structural-R terms."""
+
+    price_basis: str = "UNDERLYING_SPOT_OR_FUTURES_REPLAY_EVENT_PRICES"
+    calculation_basis: str = "POSITION_MANAGER_RESOLVED_LIFECYCLES_USING_INITIAL_STRUCTURAL_RISK"
+    resolved_trades: int
+    winning_trades: int
+    losing_trades: int
+    breakeven_trades: int
+    win_rate_pct: float
+    total_realized_r: float
+    average_realized_r: float
+    median_realized_r: float
+    average_winner_r: float
+    average_loser_r: float
+    profit_factor_r: float | None
+    max_drawdown_r: float
+    max_consecutive_losses: int
+
+
+class ReplayOptionMarkMetrics(BaseModel):
+    """Historical option mark economics; these values are not executable fills."""
+
+    price_basis: str = "HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARKS"
+    calculation_basis: str = (
+        "ONE_RECONSTRUCTED_LOT_USING_REPLAY_CONTRACT_APPROXIMATION_AND_PAPER_COST_SCHEDULE"
+    )
+    priced_trades: int
+    unpriced_trades: int
+    all_resolved_trades_priced: bool
+    gross_mark_pnl: float | None
+    estimated_transaction_costs: float | None
+    net_mark_pnl: float | None
+
+
+class ReplayPortfolioMetrics(BaseModel):
+    """Portfolio metrics are explicit even when chronological execution is unavailable."""
+
+    price_basis: str = "NOT_AVAILABLE"
+    calculation_basis: str = "CHRONOLOGICAL_PORTFOLIO_EXECUTION_NOT_IMPLEMENTED"
+    available: bool = False
+    max_drawdown_pnl: float | None = None
+    limitation: str = (
+        "Current Day Replay resolves signals independently after discovery; "
+        "portfolio-level chronological equity and risk-gate metrics are unavailable."
+    )
+
+
+class ReplayDataQuality(BaseModel):
+    """Data availability/provenance facts used to qualify the replay result."""
+
+    price_basis: str = "HISTORICAL_SOURCE_AND_REPLAY_PROVENANCE"
+    calculation_basis: str = "SOURCE_DIAGNOSTICS_PLUS_REPLAY_RECORD_AVAILABILITY_COUNTS"
+    historical_source: str
+    missing_data: list[str] = Field(default_factory=list)
+    underlying_issue_counts: dict[str, int] = Field(default_factory=dict)
+    option_mark_available_trades: int = 0
+    option_mark_unavailable_trades: int = 0
+    option_mark_quality_reasons: dict[str, int] = Field(default_factory=dict)
+
+
 class SimulationResult(BaseModel):
     replay_mode: str = "SIGNALS_ONLY"
     limitation: str = "Real completed spot/futures candles only. Historical executable option quotes are unavailable; option-dependent rules are unavailable."
     session_date: str
-    total_bars_evaluated: int
-    total_trades: int
-    winning_trades: int
-    losing_trades: int
-    win_rate_pct: float
-    total_pnl: float | None
-    net_pnl: float | None
-    total_realized_r: float
-    max_drawdown_pnl: float | None
-    profit_factor: float | None
+
+    # Canonical replay result model. Compatibility fields below are projections
+    # of these sections and must not be calculated independently.
+    signal_metrics: ReplaySignalMetrics
+    underlying_lifecycle_metrics: ReplayUnderlyingLifecycleMetrics
+    option_mark_metrics: ReplayOptionMarkMetrics
+    portfolio_metrics: ReplayPortfolioMetrics
+    data_quality: ReplayDataQuality
+
+    # Temporary compatibility projection for the existing frontend/API.
+    total_bars_evaluated: int = 0
+    total_trades: int = 0
+    winning_trades: int = 0
+    losing_trades: int = 0
+    win_rate_pct: float = 0.0
+    total_pnl: float | None = None
+    net_pnl: float | None = None
+    total_realized_r: float = 0.0
+    max_drawdown_pnl: float | None = None
+    profit_factor: float | None = None
     max_drawdown_r: float | None = None
     trades: list[SimulatedTradeRecord] = Field(default_factory=list)
     timeline: list[SimulationBarSnapshot] = Field(default_factory=list)
@@ -989,3 +1071,22 @@ class SimulationResult(BaseModel):
     replay_manifests: list[dict[str, Any]] = Field(default_factory=list)
     replay_metadata: dict[str, Any] = Field(default_factory=dict)
     replay_lifecycle: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def derive_compatibility_metrics(self) -> "SimulationResult":
+        signal = self.signal_metrics
+        lifecycle = self.underlying_lifecycle_metrics
+        option = self.option_mark_metrics
+        portfolio = self.portfolio_metrics
+        self.total_bars_evaluated = signal.total_bars_evaluated
+        self.total_trades = lifecycle.resolved_trades
+        self.winning_trades = lifecycle.winning_trades
+        self.losing_trades = lifecycle.losing_trades
+        self.win_rate_pct = lifecycle.win_rate_pct
+        self.total_pnl = option.gross_mark_pnl
+        self.net_pnl = option.net_mark_pnl
+        self.total_realized_r = lifecycle.total_realized_r
+        self.max_drawdown_pnl = portfolio.max_drawdown_pnl
+        self.profit_factor = lifecycle.profit_factor_r
+        self.max_drawdown_r = lifecycle.max_drawdown_r
+        return self
