@@ -9,7 +9,7 @@ and labels that result explicitly.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from libs.contracts.models import Candle
@@ -205,10 +205,10 @@ class HistoricalContractSelectionProvider:
         target = datetime.strptime(self.date_str, "%Y-%m-%d").date()
         start = datetime(
             target.year, target.month, target.day, 9, 15, tzinfo=IST
-        ).astimezone()
+        ).astimezone(timezone.utc)
         end = datetime(
             target.year, target.month, target.day, 15, 30, tzinfo=IST
-        ).astimezone()
+        ).astimezone(timezone.utc)
         candles: list[Candle] = []
         if self.hist_svc is not None and hasattr(self.hist_svc, "repo"):
             try:
