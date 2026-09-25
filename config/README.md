@@ -28,12 +28,12 @@ When an operator saves strategy configuration through the UI/API, the validated
 configuration is written to both the JSON file and SQLite. The JSON file is
 therefore the visible durable source for normal operator settings.
 
-For rollout compatibility, the checked-in seed file carries a one-time
-`bootstrap_from_database_if_present` marker. If an existing SQLite
-configuration is present, that existing operator state wins on the first
-startup and is exported into the JSON file; the marker is then consumed. Fresh
-installations use the checked-in JSON defaults. If neither file nor database
-state exists, model defaults are created and saved to both.
+The checked-in `config/trading.json` is now authoritative whenever it is
+present. The repository still supports the legacy one-time
+`bootstrap_from_database_if_present` marker for explicit migrations, but the
+current checked-in operator config does not carry that marker. This prevents
+stale SQLite values from silently overriding the file-selected trading mode or
+strategy enable switches.
 
 An invalid JSON file is a startup error; the service does not silently ignore a
 malformed operator configuration.
