@@ -52,83 +52,13 @@ from services.strategy.replay_metadata import (
 )
 from services.strategy.position_manager import PositionManager
 from services.strategy.replay_manifest import ReplayManifestRecorder
-from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
-from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
+from services.strategy.replay_registry import (
+    ReplayBarContext,
+    ReplaySessionContext,
+    ReplayStrategyRegistry,
+)
 
 logger = logging.getLogger(__name__)
-
-def _record_strategy_b_manifest(
-    recorder: ReplayManifestRecorder,
-    signal: Any,
-    *,
-    trading_date: str,
-    breakout_candle: Candle,
-) -> None:
-    """Record one completed-candle Strategy B signal for lifecycle replay."""
-    if signal.strategy != StrategyName.VOLATILITY_BREAKOUT:
-        raise ValueError("Strategy B manifest helper received a non-Strategy-B signal")
-    if signal.timestamp != breakout_candle.end_time:
-        raise ValueError("Strategy B replay entry must use the completed breakout candle end time")
-
-    snapshot = signal.features_snapshot
-    required = ("box_high", "box_low", "atr_at_lock", "breakout_trigger_price")
-    missing = [key for key in required if snapshot.get(key) is None]
-    if missing:
-        raise ValueError(
-            f"Strategy B signal {signal.signal_id} is missing replay state: {', '.join(missing)}"
-        )
-
-    box_high = float(snapshot["box_high"])
-    box_low = float(snapshot["box_low"])
-    atr_at_lock = float(snapshot["atr_at_lock"])
-    if atr_at_lock <= 0 or box_high <= box_low:
-        raise ValueError(f"Invalid Strategy B replay state for {signal.signal_id}")
-
-    recorder.record_entry(
-        signal=signal,
-        trading_date=trading_date,
-        trigger_source_candle_timestamp=signal.timestamp,
-        trigger_level=float(snapshot["breakout_trigger_price"]),
-        simulated_entry_timestamp=signal.timestamp,
-        simulated_entry_price=float(signal.spot_reference_price),
-        entry_5m_candle_timestamp=breakout_candle.start_time,
-        entry_occurred_intrabar=False,
-        entry_features={
-            **snapshot,
-            "entry_reference_spot": float(signal.spot_reference_price),
-            "entry_bar_timestamp": breakout_candle.start_time.isoformat(),
-        },
-        setup_id=(
-            f"VOLATILITY_BREAKOUT:{snapshot.get('box_created_time', 'UNKNOWN')}"
-            f"->{signal.timestamp.isoformat()}"
-        ),
-        pullback_swing_low=None,
-        pullback_swing_high=None,
-        impulse_low=None,
-        impulse_high=None,
-        atr_at_entry=atr_at_lock,
-        initial_structural_stop=float(signal.structural_stop),
-        initial_risk_points=float(signal.r_points),
-        initial_risk_atr=round(float(signal.r_points) / atr_at_lock, 2),
-        box_high=box_high,
-        box_low=box_low,
-        atr_at_lock=atr_at_lock,
-        consecutive_inside_box_closes=0,
-        current_trailing_stop=float(signal.structural_stop),
-        current_r=0.0,
-        highest_favorable_price=float(signal.spot_reference_price),
-        lowest_favorable_price=float(signal.spot_reference_price),
-        peak_r=0.0,
-        protected_breakeven_active=False,
-        profit_lock_active=False,
-        runner_mode_active=False,
-        current_ladder_stage="OPEN_INITIAL_RISK",
-        reversal_score=0,
-        adverse_health_counters={},
-        entry_bar_timestamp=breakout_candle.start_time,
-        last_managed_completed_bar_timestamp=None,
-    )
-
 
 class SimulationEngine:
     """Replays historical 5m candles bar-by-bar to simulate intraday trading."""
@@ -629,15 +559,6 @@ class SimulationEngine:
             "expiry": expiry,
         }] if active_instrument and contract else []
         return active_instrument, selected
-
-    def _strategy_a_config_for_replay(self, _overrides: ThresholdOverrides) -> Any:
-        """Return the canonical Strategy A config used by Day Replay.
-
-        The current Strategy A evaluator has no replay-time signal threshold
-        override. In particular, adx_threshold is a retained compatibility
-        field and is not a hard entry gate.
-        """
-        return self.tunables
 
     def _strategy_a_futures_coverage(
         self,
