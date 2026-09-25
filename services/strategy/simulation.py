@@ -1244,17 +1244,39 @@ class SimulationEngine:
                 {
                     "mode": request.replay_mode.value,
                     "risk": effective_risk_config.model_dump(mode="json"),
+                    "contract_selection": {
+                        "desired_method": "PRODUCTION_CONTRACT_SELECTOR",
+                        "exact_evidence": (
+                            "EXACT_STRATEGY_SIGNAL_ID_POINT_IN_TIME_CHAIN_SNAPSHOT"
+                        ),
+                        "fallback": "APPROXIMATED_SELECTION",
+                        "premium_cap_override": (
+                            overrides.max_option_premium_cap
+                            or overrides.max_option_premium
+                        ),
+                    },
                     "sizing": {
-                        "strategy_a_delta_proxy": (
+                        "strategy_a_fallback_delta_proxy": (
                             self.option_selection_config.preferred_delta_min
                             + self.option_selection_config.preferred_delta_max
                         )
                         / 2.0,
-                        "historical_price_basis": (
+                        "exact_selection_price_basis": "POINT_IN_TIME_ASK",
+                        "approximate_selection_price_basis": (
                             "HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARK"
                         ),
-                        "contract_selection": (
-                            "nearest_strike_first_expiry_on_or_after_replay_date"
+                    },
+                    "execution_model": {
+                        "entry": (
+                            "ask_plus_slippage_when_bid_ask_available_else_"
+                            "completed_mark_plus_slippage_estimate"
+                        ),
+                        "exit": (
+                            "bid_minus_slippage_when_bid_ask_available_else_"
+                            "completed_mark_minus_slippage_estimate"
+                        ),
+                        "cost_assumptions": (
+                            effective_risk_config.model_dump(mode="json")
                         ),
                     },
                 }
@@ -1324,7 +1346,8 @@ class SimulationEngine:
                         "NOT_APPLICABLE_TO_HISTORICAL_EXECUTION_PARITY"
                     ),
                     "daily_loss_pct": (
-                        "NOT_ENFORCED_UNTIL_CHRONOLOGICAL_EXECUTABLE_OPTION_PNL"
+                        "APPLIED_WHEN_ALL_PRIOR_RESOLVED_TRADES_HAVE_"
+                        "ESTIMATED_EXECUTABLE_NET_PNL"
                     ),
                 }
                 if request.replay_mode
@@ -1337,12 +1360,24 @@ class SimulationEngine:
             request.instrument_id,
             historical_source,
         )
-        replay_option_universe = (
-            await self._load_replay_option_universe(date_str)
+        contract_provider = (
+            HistoricalContractSelectionProvider(
+                historical_service=self.hist_svc,
+                strategy_repository=self.strategy_repo,
+                option_config=self.option_selection_config,
+            )
             if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
-            else []
+            else None
         )
-        replay_sizing_option_candle_cache: dict[str, list[Candle]] = {}
+        if contract_provider is not None:
+            await contract_provider.prepare_session(
+                date_str=date_str,
+                historical_source=historical_source,
+            )
+        replay_selection_decisions: dict[
+            str, ReplayContractSelectionDecision
+        ] = {}
+        execution_economics_applied: set[str] = set()
         timeline, logs = [], []
         replay_trigger_diagnostics: list[dict[str, Any]] = []
         replay_diagnostic_keys: set[tuple[str, str, str]] = set()
