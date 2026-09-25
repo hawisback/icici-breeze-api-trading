@@ -35,6 +35,7 @@ class ChronologicalExecutionState:
     last_loss_exit_time: datetime | None = None
     chronology_indeterminate: bool = False
     chronology_block_reason: str | None = None
+    positions_open_at_session_end: int = 0
 
 
 class ChronologicalReplayExecutor:
@@ -149,6 +150,9 @@ class ChronologicalReplayExecutor:
         return record
 
     def finalize_session(self) -> None:
+        self.state.positions_open_at_session_end = len(
+            self.state.active_positions
+        )
         for position in self.state.active_positions:
             self.lifecycle_replayer.finalize_record(position)
             if position.record.lifecycle_status in {"AMBIGUOUS", "UNRESOLVED"}:
@@ -159,7 +163,7 @@ class ChronologicalReplayExecutor:
         return {
             "daily_entries": self.state.daily_entries,
             "completed_positions": self.state.completed_positions,
-            "active_positions_at_end": len(self.state.active_positions),
+            "active_positions_at_end": self.state.positions_open_at_session_end,
             "entry_evaluation_suppressed_cycles": (
                 self.state.entry_evaluation_suppressed_cycles
             ),
