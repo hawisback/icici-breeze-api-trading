@@ -81,8 +81,8 @@ def _snapshot(signal_id: str, candidates: list[dict]) -> dict:
     return {
         "snapshot_id": "SNAP-1",
         "strategy_signal_id": signal_id,
-        "captured_at": "2026-09-17T04:30:01+00:00",
-        "selector_timestamp": "2026-09-17T04:30:00+00:00",
+        "captured_at": "2026-09-17T04:31:00+00:00",
+        "selector_timestamp": "2026-09-17T04:31:00+00:00",
         "signal_timestamp": "2026-09-17T04:30:00+00:00",
         "chain_snapshot_timestamp": "2026-09-17T04:30:00+00:00",
         "spot_price": 24000.0,
@@ -127,6 +127,53 @@ def test_exact_signal_snapshot_reruns_production_contract_selector():
     assert decision.entry_price_basis == "POINT_IN_TIME_ASK"
     assert decision.entry_reference_price == 100.0
     assert decision.unsupported_evidence == ()
+
+
+def test_snapshot_with_mismatched_signal_timestamp_is_not_claimed_exact():
+    signal = _signal(signal_id="SIG-MISMATCH")
+    snapshot = _snapshot(
+        signal.signal_id,
+        [_candidate(24000.0, 0.62, "OPT-EXACT")],
+    )
+    snapshot["signal_timestamp"] = "2026-09-17T04:29:00+00:00"
+    contract = SimpleNamespace(
+        instrument_id="OPT-APPROX",
+        stock_code="NIFTY24000CE",
+        strike=24000.0,
+        expiry="2026-09-24",
+        option_right=SimpleNamespace(value="CALL"),
+        lot_size=50,
+        segment="OPTIONS",
+    )
+    provider = HistoricalContractSelectionProvider(
+        historical_service=None,
+        strategy_repository=None,
+        option_config=OptionSelectionConfig(),
+    )
+    provider.date_str = "2026-09-17"
+    provider.historical_source = HistoricalReplaySource.BREEZE
+    provider.snapshots = [snapshot]
+    provider.option_universe = [contract]
+    provider.candle_cache[contract.instrument_id] = [
+        Candle(
+            instrument_id=contract.instrument_id,
+            interval="1m",
+            start_time=signal.timestamp - timedelta(minutes=1),
+            end_time=signal.timestamp,
+            open=120.0,
+            high=120.0,
+            low=120.0,
+            close=120.0,
+            volume=100,
+            source="BREEZE",
+        )
+    ]
+
+    decision = asyncio.run(provider.select_contract(signal))
+
+    assert decision.evidence_status == "APPROXIMATED_SELECTION"
+    assert decision.production_rules_applied is False
+    assert decision.selected_contract.instrument_id == "OPT-APPROX"
 
 
 def test_exact_snapshot_rejection_never_falls_back_to_approximation():
