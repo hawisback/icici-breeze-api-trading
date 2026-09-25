@@ -36,6 +36,11 @@ class StrategyName(str, Enum):
     PIVOT_VWAP_SCALP = "PIVOT_VWAP_SCALP"
 
 
+STRATEGY_A_REVISION = 5
+STRATEGY_A_VERSION_ID = "trend_pullback_r5"
+STRATEGY_A_DISPLAY_LABEL = "Strategy A · Trend Pullback R5"
+
+
 class StrategyState(str, Enum):
     """Deterministic Strategy A lifecycle states.
 
@@ -252,7 +257,7 @@ class StrategyTunablesConfig(BaseModel):
         default=22.0,
         ge=0.0,
         le=100.0,
-        description="Strategy A V2 compatibility value; V3 does not use a hard ADX floor",
+        description="Legacy hard-ADX compatibility value; Strategy A R5 does not use a hard ADX floor",
     )
     momentum_adx_min_delta_2bars: float = Field(
         default=-2.0,
@@ -513,7 +518,7 @@ class AutoTradingConfig(BaseModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     session: SessionTimersConfig = Field(default_factory=SessionTimersConfig)
     tunables: StrategyTunablesConfig = Field(default_factory=StrategyTunablesConfig)
-    strategy_a_revision: int = 5
+    strategy_a_revision: int = STRATEGY_A_REVISION
     strategy_e_revision: int = 2
 
 
