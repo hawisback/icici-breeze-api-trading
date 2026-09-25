@@ -336,6 +336,48 @@ def test_chronological_executor_enforces_daily_and_strategy_risk_gates():
     assert gate.status == "STRATEGY_FAILURE_LIMIT_REACHED"
 
 
+def test_chronological_executor_daily_pct_gate_uses_execution_estimate():
+    recorder = ReplayManifestRecorder()
+    session = SessionTimersConfig()
+    risk = RiskConfig(
+        account_equity=100000.0,
+        max_daily_loss_r=10.0,
+        max_daily_loss_pct=1.5,
+        cooldown_after_loss_min=0,
+    )
+    registry = ReplayStrategyRegistry.default(
+        StrategyTunablesConfig(),
+        session,
+    )
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=risk,
+        session_config=session,
+        recorder=recorder,
+        instrument_id="INDEX",
+        warmup_candles=[],
+        session_candles=[],
+        futures_candles=[],
+    )
+    executor = ChronologicalReplayExecutor(
+        lifecycle_replayer=replayer,
+        registry=registry,
+        risk_config=risk,
+    )
+    _, record, _ = _recorded_b_record()
+    record.lifecycle_status = "RESOLVED"
+    record.simulated_net_pnl = -1600.0
+
+    executor.apply_execution_economics(record)
+
+    gate = executor.global_entry_gate(
+        datetime(2026, 7, 1, 6, 0, tzinfo=UTC)
+    )
+    assert gate.status == "DAILY_LOSS_LIMIT_REACHED"
+    assert gate.details["reasons"] == ["MAX_DAILY_LOSS_PCT"]
+    assert executor.state.realized_net_pnl_total == -1600.0
+    assert executor.state.realized_net_pnl_complete is True
+
+
 def test_strategy_b_manifest_hydrates_strategy_specific_active_trade():
     _, record, _ = _recorded_b_record()
 
