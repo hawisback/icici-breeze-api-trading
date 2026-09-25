@@ -625,18 +625,14 @@ class SimulationEngine:
         }] if active_instrument and contract else []
         return active_instrument, selected
 
-    def _strategy_a_config_for_replay(self, overrides: ThresholdOverrides) -> Any:
-        """Apply only Strategy A V2 overrides that the replay actually supports.
+    def _strategy_a_config_for_replay(self, _overrides: ThresholdOverrides) -> Any:
+        """Return the canonical Strategy A config used by Day Replay.
 
-        This keeps the replay configuration snapshot honest: an ADX override
-        shown in the UI must affect the Strategy A evaluator, not just metadata.
-        Legacy confirmation-score knobs are intentionally not mapped onto the
-        V2 candle-confirmation contract.
+        The current Strategy A evaluator has no replay-time signal threshold
+        override. In particular, adx_threshold is a retained compatibility
+        field and is not a hard entry gate.
         """
-        updates: dict[str, Any] = {}
-        if overrides.adx_threshold is not None:
-            updates["adx_threshold"] = float(overrides.adx_threshold)
-        return self.tunables.model_copy(update=updates) if updates else self.tunables
+        return self.tunables
 
     def _strategy_a_futures_coverage(
         self,
@@ -758,6 +754,53 @@ class SimulationEngine:
         overrides = request.overrides or ThresholdOverrides()
         if bypass_entry_window:
             overrides = overrides.model_copy(update={"bypass_entry_window": True})
+
+        override_values = overrides.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude_defaults=True,
+        )
+        strategy_b_replay_overrides = {
+            "rvol_threshold",
+            "strat_b_min_confirmation",
+            "strat_b_min_available_confirmations",
+            "box_max_height_atr",
+            "bb_width_percentile",
+            "strat_b_box_max_age_bars",
+            "strat_b_breakout_buffer_atr",
+            "breakout_buffer_atr",
+            "strat_b_max_extension_atr",
+        }
+        applied_overrides = {
+            name: value
+            for name, value in override_values.items()
+            if name in strategy_b_replay_overrides
+        }
+        if bypass_entry_window:
+            applied_overrides["bypass_entry_window"] = True
+
+        def replay_override_reason(name: str) -> str:
+            if name == "adx_threshold":
+                return (
+                    "Strategy A uses momentum-health gates (ADX change and EMA20 slope), "
+                    "not a hard ADX floor."
+                )
+            if "premium" in name:
+                return (
+                    "Historical option reconstruction does not apply production "
+                    "premium-based contract selection."
+                )
+            return "Current A/B Day Replay does not consume this override."
+
+        not_applied_overrides = {
+            name: {
+                "value": value,
+                "reason": replay_override_reason(name),
+            }
+            for name, value in override_values.items()
+            if name not in strategy_b_replay_overrides
+            and name != "bypass_entry_window"
+        }
         cfg = self.tunables
         strategy_a_cfg = self._strategy_a_config_for_replay(overrides)
         strat_a = TrendPullbackStrategy(config=strategy_a_cfg, allow_session_bypass=True)
@@ -811,6 +854,26 @@ class SimulationEngine:
             "historical_source": historical_source.value,
             "bypass_entry_window": bypass_entry_window,
             "missing_data": sorted(set(missing_data)),
+            "control_application": {
+                "applied_overrides": applied_overrides,
+                "not_applied_overrides": not_applied_overrides,
+                "not_applied_request_controls": {
+                    "capital": {
+                        "value": request.capital,
+                        "reason": (
+                            "Historical position-sizing parity is not implemented; "
+                            "resolved option mark P&L currently uses one reconstructed lot."
+                        ),
+                    },
+                    "max_trades_per_day": {
+                        "value": request.max_trades_per_day,
+                        "reason": (
+                            "Signal-first Day Replay does not enforce chronological "
+                            "portfolio/day trade gates yet."
+                        ),
+                    },
+                },
+            },
         }
         timeline, logs = [], []
         replay_trigger_diagnostics: list[dict[str, Any]] = []
