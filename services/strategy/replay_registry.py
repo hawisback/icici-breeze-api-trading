@@ -17,6 +17,7 @@ from libs.market_time import IST
 from services.strategy.models import (
     MarketFeatures,
     SessionTimersConfig,
+    STRATEGY_A_DISPLAY_LABEL,
     StrategyName,
     StrategySignal,
     StrategyTriggerDiagnostics,
@@ -38,6 +39,8 @@ class ReplayStrategyMetadata:
     enabled: bool
     evaluation_start: str
     evaluation_end: str
+    entry_start: str
+    entry_end: str
     supported_override_fields: frozenset[str] = frozenset()
     audit_diagnostics: bool = False
     audit_events: bool = False
@@ -109,11 +112,13 @@ class TrendPullbackReplayAdapter:
         return ReplayStrategyMetadata(
             registry_key="trend_pullback",
             strategy=StrategyName.TREND_PULLBACK,
-            display_name="Strategy A · Trend Pullback R5",
+            display_name=STRATEGY_A_DISPLAY_LABEL,
             priority=10,
             enabled=self.tunables.trend_pullback_enabled,
             evaluation_start=self.tunables.entry_session_start,
             evaluation_end=self.tunables.entry_session_end,
+            entry_start=self.tunables.entry_session_start,
+            entry_end=self.tunables.entry_session_end,
             supported_override_fields=frozenset(),
             audit_diagnostics=True,
             audit_events=True,
@@ -315,6 +320,8 @@ class VolatilityBreakoutReplayAdapter:
             enabled=self.tunables.volatility_breakout_enabled,
             evaluation_start=self.session.no_new_trade_before,
             evaluation_end=self.session.no_new_trade_after,
+            entry_start=self.session.strategy_b_no_new_trade_before,
+            entry_end=self.session.no_new_trade_after,
             supported_override_fields=self.SUPPORTED_OVERRIDES,
             timeline_phase_key="strategy_b_phase",
         )
@@ -450,6 +457,30 @@ class ReplayStrategyRegistry:
 
     def strategy_metadata(self) -> list[ReplayStrategyMetadata]:
         return [adapter.strategy_metadata() for adapter in self.adapters]
+
+    def metadata_snapshot(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "registry_key": meta.registry_key,
+                "strategy": meta.strategy.value,
+                "display_name": meta.display_name,
+                "priority": meta.priority,
+                "enabled": meta.enabled,
+                "evaluation_window": {
+                    "start": meta.evaluation_start,
+                    "end": meta.evaluation_end,
+                },
+                "entry_window": {
+                    "start": meta.entry_start,
+                    "end": meta.entry_end,
+                },
+                "supported_override_fields": sorted(meta.supported_override_fields),
+                "audit_diagnostics": meta.audit_diagnostics,
+                "audit_events": meta.audit_events,
+                "timeline_phase_key": meta.timeline_phase_key,
+            }
+            for meta in self.strategy_metadata()
+        ]
 
     def supported_override_fields(self) -> frozenset[str]:
         fields: set[str] = set()
