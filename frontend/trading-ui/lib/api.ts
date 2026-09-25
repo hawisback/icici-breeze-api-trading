@@ -688,6 +688,7 @@ export interface StrategyStatusData {
       strategy_e_flat_vwap_lookback_bars: number;
       strategy_e_flat_vwap_threshold_points: number;
       strategy_e_lots: number;
+      strategy_e_max_signal_age_seconds: number;
       strategy_e_entry_start: string;
       strategy_e_entry_end: string;
       strategy_e_forced_exit_time: string;
