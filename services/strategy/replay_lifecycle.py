@@ -803,14 +803,15 @@ def _basic(rows: list[ReplayManifestRecord]) -> dict[str, Any]:
     rs = [float(r.realized_r) for r in ordered]
     winners = [r for r in rs if r > 0]
     losers = [r for r in rs if r < 0]
-    total_r = round(sum(rs), 4)
+    raw_total_r = sum(rs)
+    total_r = round(raw_total_r, 4)
     return {
         "trades": len(ordered), "winners": len(winners), "losers": len(losers),
         "breakeven": sum(1 for r in rs if r == 0),
         "win_rate_pct": round(len(winners) / len(rs) * 100, 2) if rs else 0.0,
         "average_winner_r": round(sum(winners) / len(winners), 4) if winners else 0.0,
         "average_loser_r": round(sum(losers) / len(losers), 4) if losers else 0.0,
-        "average_r": round(total_r / len(rs), 4) if rs else 0.0,
+        "average_r": round(raw_total_r / len(rs), 4) if rs else 0.0,
         "median_r": round(float(median(rs)), 4) if rs else 0.0,
         "total_r": total_r,
         "profit_factor": round(sum(winners) / abs(sum(losers)), 4) if losers else None,
