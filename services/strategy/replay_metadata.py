@@ -17,6 +17,8 @@ from libs.contracts.models import Candle
 from services.strategy.models import (
     HistoricalReplaySource,
     SessionTimersConfig,
+    STRATEGY_A_REVISION,
+    STRATEGY_A_VERSION_ID,
     StrategyTunablesConfig,
     ThresholdOverrides,
 )
@@ -133,7 +135,8 @@ def build_configuration_snapshot(
         "entry_session_end", "forced_exit_time",
     )
     strategy_a = {
-        "evaluator_version": "trend_pullback_momentum_v3",
+        "evaluator_version": STRATEGY_A_VERSION_ID,
+        "revision": STRATEGY_A_REVISION,
         "contract_config": {name: (getattr(overrides, name) if getattr(overrides, name, None) is not None else getattr(tunables, name)) for name in contract_fields},
         "compatibility_config": {
             "legacy_fields": {
