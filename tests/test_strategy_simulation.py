@@ -393,6 +393,14 @@ def test_replay_metadata_discloses_applied_and_ignored_controls():
     assert controls["not_applied_request_controls"]["capital"]["value"] == 750000.0
     assert controls["not_applied_request_controls"]["max_trades_per_day"]["value"] == 2
 
+    snapshot_overrides = result.replay_metadata["configuration_snapshot"]["threshold_overrides"]
+    assert snapshot_overrides["rvol_threshold"] == 1.4
+    assert snapshot_overrides["strat_b_min_confirmation"] == 4
+    assert snapshot_overrides["box_max_height_atr"] == 1.5
+    assert snapshot_overrides["bypass_entry_window"] is True
+    assert snapshot_overrides.get("adx_threshold") is None
+    assert snapshot_overrides.get("max_option_premium_cap") is None
+
 
 def test_simulation_available_dates():
     """Validates discovery of available trading session dates."""
