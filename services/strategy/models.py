@@ -969,7 +969,8 @@ class SimulationResult(BaseModel):
     net_pnl: float | None
     total_realized_r: float
     max_drawdown_pnl: float | None
-    profit_factor: float
+    profit_factor: float | None
+    max_drawdown_r: float | None = None
     trades: list[SimulatedTradeRecord] = Field(default_factory=list)
     timeline: list[SimulationBarSnapshot] = Field(default_factory=list)
     decision_logs: list[DecisionLogEntry] = Field(default_factory=list)
