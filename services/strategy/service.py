@@ -1376,16 +1376,19 @@ class StrategyService:
                 as_of=now,
             )
 
-        candidate_signal_already_persisted = False
-        if signal and self._is_candidate_execution_strategy(signal.strategy):
+        signal_already_persisted = False
+        if signal and (
+            self._is_candidate_execution_strategy(signal.strategy)
+            or self._is_strategy_e(signal.strategy)
+        ):
             prior_signals = await self.repo.list_strategy_signals(limit=1000)
             prior_ids = {
                 str(item.get("signal_id"))
                 for item in prior_signals
                 if isinstance(item, dict) and item.get("signal_id")
             }
-            candidate_signal_already_persisted = signal.signal_id in prior_ids
-            if candidate_signal_already_persisted and any(
+            signal_already_persisted = signal.signal_id in prior_ids
+            if signal_already_persisted and any(
                 str(trade.signal_id or "") == signal.signal_id
                 for trade in today_trades
             ):
@@ -1466,10 +1469,11 @@ class StrategyService:
         if failures >= self.config.risk.max_failed_trades_per_strategy:
             return {"status": "STRATEGY_FAILURE_LIMIT_REACHED"}
 
-        # Persist candidate signals once while allowing a fresh candidate to
-        # retry transient downstream failures until a trade exists or the
-        # frozen signal freshness window expires.
-        if not candidate_signal_already_persisted:
+        # Persist deterministic C/D/E signals once while allowing the same
+        # fresh signal to retry transient downstream failures until a trade
+        # exists. A completed Strategy E bar therefore cannot create a second
+        # trade after restart/config refresh.
+        if not signal_already_persisted:
             await self.repo.save_strategy_signal(signal)
             await self._log_decision(
                 category="SETUP",
