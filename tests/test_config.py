@@ -6,6 +6,7 @@ from pydantic import SecretStr
 
 from libs.config.settings import (
     AppEnv,
+    BrokerBackend,
     EventBusBackend,
     MarketDataBackend,
     PlatformSettings,
@@ -135,3 +136,15 @@ def test_local_single_user_mode_requires_loopback_host():
     assert settings.local_single_user_mode is True
     assert settings.get_redacted_summary()["local_single_user_mode"] is True
 
+
+
+def test_live_execution_broker_canonical_alias_beats_legacy_alias(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LIVE_EXECUTION_BROKER=kite\nBROKER_BACKEND=breeze\n",
+        encoding="utf-8",
+    )
+
+    settings = PlatformSettings(_env_file=env_file)
+
+    assert settings.broker_backend is BrokerBackend.KITE
