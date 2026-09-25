@@ -600,6 +600,25 @@ def test_replay_metadata_discloses_applied_and_ignored_controls():
     assert controls["not_applied_request_controls"]["capital"]["value"] == 750000.0
     assert controls["not_applied_request_controls"]["max_trades_per_day"]["value"] == 2
 
+    parity_request = request.model_copy(
+        update={
+            "replay_mode": HistoricalReplayMode.EXECUTION_PARITY,
+            "risk_per_trade_pct": 0.75,
+        }
+    )
+    parity_result = asyncio.run(engine.run_day_simulation(parity_request))
+    parity_controls = parity_result.replay_metadata["control_application"]
+    assert parity_controls["applied_request_controls"] == {
+        "capital": 750000.0,
+        "risk_per_trade_pct": 0.75,
+        "max_trades_per_day": 2,
+    }
+    assert parity_controls["not_applied_request_controls"] == {}
+    effective_risk = parity_result.replay_metadata["effective_risk_config"]
+    assert effective_risk["account_equity"] == 750000.0
+    assert effective_risk["risk_per_trade_pct_of_account"] == 0.75
+    assert effective_risk["max_trades_per_day"] == 2
+
     snapshot_overrides = result.replay_metadata["configuration_snapshot"]["threshold_overrides"]
     assert snapshot_overrides["rvol_threshold"] == 1.4
     assert snapshot_overrides["strat_b_min_confirmation"] == 4
