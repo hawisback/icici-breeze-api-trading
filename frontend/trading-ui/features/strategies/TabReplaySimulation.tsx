@@ -56,11 +56,9 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
 
   // Overrides panel state
   const [showOverrides, setShowOverrides] = useState<boolean>(false);
-  const [adxThreshold, setAdxThreshold] = useState<number>(22.0);
   const [rvolThreshold, setRvolThreshold] = useState<number>(1.20);
   const [stratBMinConf, setStratBMinConf] = useState<number>(3);
   const [boxMaxHeightAtr, setBoxMaxHeightAtr] = useState<number>(1.30);
-  const [premiumCap, setPremiumCap] = useState<number>(70.0);
   const [bypassWindow, setBypassWindow] = useState<boolean>(false);
 
   useEffect(() => {
@@ -90,11 +88,9 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
       const res = await runStrategySimulation({
         date: targetDate,
         overrides: {
-          adx_threshold: Number(adxThreshold),
           rvol_threshold: Number(rvolThreshold),
           strat_b_min_confirmation: Number(stratBMinConf),
           box_max_height_atr: Number(boxMaxHeightAtr),
-          max_option_premium_cap: Number(premiumCap),
         },
         bypass_window: bypassWindow,
         historical_source: historicalSource,
@@ -147,6 +143,16 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const replayData = result?.replay_metadata?.data_fingerprint as
     | { missing_data?: string[]; source_diagnostics?: Record<string, any> }
     | undefined;
+  const controlApplication = result?.replay_metadata?.control_application as
+    | {
+        applied_overrides?: Record<string, unknown>;
+        not_applied_overrides?: Record<string, { value?: unknown; reason?: string }>;
+        not_applied_request_controls?: Record<string, { value?: unknown; reason?: string }>;
+      }
+    | undefined;
+  const appliedReplayControls = Object.entries(controlApplication?.applied_overrides || {});
+  const ignoredReplayOverrides = Object.entries(controlApplication?.not_applied_overrides || {});
+  const unsupportedRequestControls = Object.entries(controlApplication?.not_applied_request_controls || {});
 
   const jumpToNextEvent = () => {
     if (!result?.timeline) return;
@@ -266,24 +272,9 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
         {showOverrides && (
           <div className="mt-4 pt-4 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 bg-slate-950/60 p-4 rounded-lg border border-slate-800/80">
             <div className="sm:col-span-2 lg:col-span-3 rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-3 py-2 text-[11px] text-slate-300">
-              Strategy A V3 has no hard ADX-floor what-if override. Its momentum-health gate comes from the replay configuration.
-              RVOL, Strategy B confirmation/box controls, legacy ADX compatibility, and the premium cap do not change Strategy A V3 signal generation.
-            </div>
-            {/* ADX Threshold */}
-            <div>
-              <div className="flex justify-between text-xs mb-1">
-                <span className="text-slate-300 font-medium">Legacy ADX Compatibility (not A V3)</span>
-                <span className="font-bold text-indigo-400">{adxThreshold} pts</span>
-              </div>
-              <input
-                type="range"
-                min="10"
-                max="35"
-                step="1"
-                value={adxThreshold}
-                disabled
-                className="w-full h-1.5 bg-slate-800 rounded-lg cursor-not-allowed opacity-50 accent-indigo-400"
-              />
+              Only the Strategy B controls shown below are applied by the current Day Replay.
+              Strategy A uses its canonical configured momentum/confirmation contract. Capital sizing,
+              max-trades/day, premium-cap selection, and the legacy hard-ADX control are not applied yet.
             </div>
 
             {/* RVOL Threshold */}
@@ -346,22 +337,6 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               />
             </div>
 
-            {/* Max Option Premium Cap */}
-            <div>
-              <div className="flex justify-between text-xs mb-1">
-                <span className="text-slate-300 font-medium">Option Premium Cap (not A V2 signal)</span>
-                <span className="font-bold text-amber-400">₹{premiumCap}</span>
-              </div>
-              <input
-                type="range"
-                min="30"
-                max="200"
-                step="5"
-                value={premiumCap}
-                onChange={(e) => setPremiumCap(Number(e.target.value))}
-                className="w-full h-1.5 bg-slate-800 rounded-lg cursor-pointer accent-amber-400"
-              />
-            </div>
           </div>
         )}
       </div>
@@ -405,6 +380,22 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 </span>
               </div>
             </div>
+            {(appliedReplayControls.length > 0 || ignoredReplayOverrides.length > 0 || unsupportedRequestControls.length > 0) && (
+              <div className="mt-3 rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-[10px]">
+                <div className="font-bold uppercase tracking-wider text-slate-400">Replay control application</div>
+                <div className="mt-1 text-emerald-300">
+                  Applied: {appliedReplayControls.length > 0
+                    ? appliedReplayControls.map(([name, value]) => `${name}=${String(value)}`).join(", ")
+                    : "none"}
+                </div>
+                <div className="mt-1 text-amber-300">
+                  Not applied: {[
+                    ...ignoredReplayOverrides.map(([name]) => name),
+                    ...unsupportedRequestControls.map(([name]) => name),
+                  ].join(", ") || "none"}
+                </div>
+              </div>
+            )}
             {gateFunnelEntries.length > 0 && (
               <div className="mt-3">
                 <div className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-1.5">
@@ -494,7 +485,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
             {/* Win Rate */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
               <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
-                Win Rate
+                Underlying Win Rate
               </div>
               <div
                 className={`text-xl font-mono font-bold ${
@@ -504,26 +495,26 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 {trades.length > 0 ? `${result.win_rate_pct}%` : "N/A"}
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
-                Profit Factor: <span className="font-bold text-slate-200">{trades.length > 0 ? result.profit_factor : "N/A"}</span>
+                R Profit Factor: <span className="font-bold text-slate-200">{trades.length > 0 && result.profit_factor != null ? result.profit_factor : "N/A"}</span>
               </div>
             </div>
 
             {/* Total PnL */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
               <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
-                Simulated Net PnL
+                Historical Option Mark P&L
               </div>
               <div className={`text-xl font-mono font-bold ${!hasNetPnl ? "text-slate-300" : netPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
                 {formatPnl(netPnl)}
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
-                Gross: {formatAmount(grossPnl)}
+                Gross mark: {formatAmount(grossPnl)}
               </div>
-              {!hasNetPnl && (
-                <div className="text-[10px] text-amber-300 mt-1" title="Historical option prices unavailable">
-                  Historical option prices unavailable
-                </div>
-              )}
+              <div className="text-[10px] text-amber-300 mt-1">
+                {hasNetPnl
+                  ? "Completed-candle close marks with estimated costs; not executable fills."
+                  : "Historical option marks unavailable."}
+              </div>
             </div>
             {/*
               <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
@@ -546,7 +537,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
             {/* Realized R */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
               <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
-                Total Realized R
+                Underlying Realized R
               </div>
               <div
                 className={`text-xl font-mono font-bold ${
@@ -561,16 +552,16 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               </div>
             </div>
 
-            {/* Max Drawdown */}
+            {/* Underlying R Drawdown */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
               <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
-                Max Drawdown
+                Underlying R Drawdown
               </div>
               <div className="text-xl font-mono font-bold text-slate-300">
-                {result.max_drawdown_pnl == null ? "N/A" : formatAmount(result.max_drawdown_pnl)}
+                {result.max_drawdown_r == null ? "N/A" : `${result.max_drawdown_r}R`}
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
-                Intraday peak-to-trough
+                Realized lifecycle peak-to-trough
               </div>
             </div>
             {/*
@@ -605,10 +596,10 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
           <div className="bg-slate-900/95 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
             <div className="bg-slate-950 px-5 py-3.5 border-b border-slate-800 flex items-center justify-between">
               <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-                Simulated Trades ({trades.length})
+                Resolved Replay Lifecycles ({trades.length})
               </h3>
               <span className="text-[11px] text-slate-400">
-                Executed under production position sizing & trailing stop ladder
+                Underlying lifecycle replay; option ₹ figures are historical close marks with one-lot reconstruction when available.
               </span>
             </div>
 
@@ -636,7 +627,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                       <th className="py-2.5 px-3 font-medium">Exit</th>
                       <th className="py-2.5 px-3 font-medium">Exit Reason</th>
                       <th className="py-2.5 px-3 font-medium text-right">Realized R</th>
-                      <th className="py-2.5 px-4 font-medium text-right">Net PnL</th>
+                      <th className="py-2.5 px-4 font-medium text-right">Net Mark P&L</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/50 font-mono">
@@ -680,7 +671,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                           <td className="py-3 px-3 text-slate-300">
                             <div>{t.entry_time}</div>
                             <div className="text-[10px] text-slate-400">
-                              Option price: {formatAmount(t.entry_premium)} (Spot: {formatAmount(t.entry_spot)})
+                              Option mark: {formatAmount(t.entry_premium)} (Spot: {formatAmount(t.entry_spot)})
                             </div>
                             <div className="hidden">
                               ₹{t.entry_premium} (Spot ₹{t.entry_spot})
@@ -689,7 +680,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                           <td className="py-3 px-3 text-slate-300">
                             <div>{t.exit_time || "-"}</div>
                             <div className="text-[10px] text-slate-400">
-                              Option price: {formatAmount(t.exit_premium)} (Spot: {formatAmount(t.exit_spot)})
+                              Option mark: {formatAmount(t.exit_premium)} (Spot: {formatAmount(t.exit_spot)})
                             </div>
                             <div className="hidden">
                               ₹{t.exit_premium ?? "-"} (Spot ₹{t.exit_spot ?? "-"})
