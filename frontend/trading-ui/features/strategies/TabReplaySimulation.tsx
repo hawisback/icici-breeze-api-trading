@@ -163,7 +163,10 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
         not_applied_request_controls?: Record<string, { value?: unknown; reason?: string }>;
       }
     | undefined;
-  const appliedReplayControls = Object.entries(controlApplication?.applied_overrides || {});
+  const appliedReplayControls = [
+    ...Object.entries(controlApplication?.applied_overrides || {}),
+    ...Object.entries(controlApplication?.applied_request_controls || {}),
+  ];
   const ignoredReplayOverrides = Object.entries(controlApplication?.not_applied_overrides || {});
   const unsupportedRequestControls = Object.entries(controlApplication?.not_applied_request_controls || {});
 
