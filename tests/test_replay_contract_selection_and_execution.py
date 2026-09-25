@@ -77,7 +77,11 @@ def _candidate(
     }
 
 
-def _snapshot(signal_id: str, candidates: list[dict]) -> dict:
+def _snapshot(
+    signal_id: str,
+    candidates: list[dict],
+    strategy: StrategyName = StrategyName.TREND_PULLBACK,
+) -> dict:
     return {
         "snapshot_id": "SNAP-1",
         "strategy_signal_id": signal_id,
@@ -88,7 +92,7 @@ def _snapshot(signal_id: str, candidates: list[dict]) -> dict:
         "spot_price": 24000.0,
         "expiry": "2026-09-24",
         "source": "KITE",
-        "strategy": StrategyName.TREND_PULLBACK.value,
+        "strategy": strategy.value,
         "direction": TradeDirection.BULLISH.value,
         "selector_candidates": candidates,
         "chain_candidates": [],
@@ -208,6 +212,41 @@ def test_exact_snapshot_rejection_never_falls_back_to_approximation():
     assert decision.production_rules_applied is True
     assert decision.selected_contract is None
     assert decision.rejection_reason == "NO_ELIGIBLE_DELTA_AWARE_CONTRACT"
+
+
+def test_strategy_b_exact_snapshot_applies_premium_cap_override():
+    signal = _signal(
+        signal_id="SIG-B-PREMIUM",
+        strategy=StrategyName.VOLATILITY_BREAKOUT,
+    )
+    provider = HistoricalContractSelectionProvider(
+        historical_service=None,
+        strategy_repository=None,
+        option_config=OptionSelectionConfig(),
+    )
+    provider.date_str = "2026-09-17"
+    provider.snapshots = [
+        _snapshot(
+            signal.signal_id,
+            [_candidate(24000.0, 0.40, "OPT-B-100")],
+            strategy=StrategyName.VOLATILITY_BREAKOUT,
+        )
+    ]
+
+    decision = asyncio.run(
+        provider.select_contract(
+            signal,
+            override_premium_cap=85.0,
+        )
+    )
+
+    assert decision.evidence_status == "POINT_IN_TIME_CHAIN_SNAPSHOT"
+    assert decision.production_rules_applied is True
+    assert decision.selected_contract is None
+    assert any(
+        row["status"] == "REJECTED_LEGACY_LIQUIDITY"
+        for row in decision.inspected_candidates
+    )
 
 
 def test_missing_chain_uses_explicit_approximated_selection():
@@ -343,8 +382,14 @@ def test_bid_ask_fill_and_mark_fallback_are_explicitly_different():
     assert execution.exit.executable_quote_equivalent is True
     assert execution.gross_execution_pnl == 400.0
     assert execution.slippage_cost == 100.0
-    assert execution.transaction_costs is not None
-    assert execution.net_execution_pnl < execution.gross_execution_pnl
+    assert execution.brokerage == 40.0
+    assert execution.exchange_charges == 3.68
+    assert execution.stt == 5.45
+    assert execution.gst == 7.86
+    assert execution.sebi_charges == 0.01
+    assert execution.stamp_duty == 0.15
+    assert execution.transaction_costs == 57.15
+    assert execution.net_execution_pnl == 342.85
 
     mark = ReplayPriceEvidence(
         status="AVAILABLE",
