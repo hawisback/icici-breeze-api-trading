@@ -73,21 +73,21 @@ def _previous_session() -> list[Candle]:
 
 
 def _strategy(**updates) -> PivotVwapScalpStrategy:
-    config = StrategyTunablesConfig(
-        pivot_vwap_scalp_enabled=True,
-        strategy_e_swing_lookback=1,
-        strategy_e_volume_lookback=5,
-        strategy_e_stop_buffer_points=2.0,
-        strategy_e_max_stop_points=30.0,
-        strategy_e_trend_target_points=20.0,
-        strategy_e_counter_target_points=10.0,
-        strategy_e_min_reward_risk=1.0,
-        strategy_e_min_room_to_level_points=5.0,
-        strategy_e_chop_cross_threshold=3,
-        strategy_e_flat_vwap_threshold_points=0.1,
-        **updates,
-    )
-    return PivotVwapScalpStrategy(config)
+    values = {
+        "pivot_vwap_scalp_enabled": True,
+        "strategy_e_swing_lookback": 1,
+        "strategy_e_volume_lookback": 5,
+        "strategy_e_stop_buffer_points": 2.0,
+        "strategy_e_max_stop_points": 30.0,
+        "strategy_e_trend_target_points": 20.0,
+        "strategy_e_counter_target_points": 10.0,
+        "strategy_e_min_reward_risk": 1.0,
+        "strategy_e_min_room_to_level_points": 5.0,
+        "strategy_e_chop_cross_threshold": 3,
+        "strategy_e_flat_vwap_threshold_points": 0.1,
+    }
+    values.update(updates)
+    return PivotVwapScalpStrategy(StrategyTunablesConfig(**values))
 
 
 def test_strategy_e_defaults_disabled_but_live_policy_is_promoted():
