@@ -102,6 +102,15 @@ class HistoricalService:
             boundary -= timedelta(minutes=step)
         return boundary.astimezone(timezone.utc) if boundary >= session_open else None
 
+    @classmethod
+    def expected_completed_end(
+        cls,
+        interval: str,
+        now: datetime,
+    ) -> Optional[datetime]:
+        """Return the latest provider-safe candle end expected at the given time."""
+        return cls._expected_completed_end(interval, now)
+
     async def fetch_candles_from_active_provider(self, instrument_id: str, interval: str = "5m", days_back: int = 5) -> list[Candle]:
         name, adapter = self._active_provider()
         retry_key = (name, instrument_id, interval)
