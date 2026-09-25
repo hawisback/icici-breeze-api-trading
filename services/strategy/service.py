@@ -730,13 +730,38 @@ class StrategyService:
         """Resolve signal execution under the authoritative per-strategy policy."""
         return self._execution_mode_for_strategy(signal.strategy, signal.option_type)
 
+    def _strategy_e_expected_completed_end(
+        self,
+        now: datetime,
+    ) -> datetime | None:
+        resolver = getattr(self.hist_svc, "expected_completed_end", None)
+        if callable(resolver):
+            try:
+                return resolver("5m", now)
+            except Exception:
+                logger.exception("Strategy E completed-boundary resolution failed")
+        return None
+
     def _strategy_e_signal_data_fresh(
         self,
-        candle_age_seconds: float | None,
+        latest_end: datetime | None,
+        *,
+        now: datetime,
+        expected_completed_end: datetime | None = None,
     ) -> bool:
+        if latest_end is None:
+            return False
+        if expected_completed_end is not None:
+            return bool(
+                latest_end.astimezone(timezone.utc)
+                >= expected_completed_end.astimezone(timezone.utc)
+            )
+        candle_age_seconds = max(
+            0.0,
+            (now - latest_end).total_seconds(),
+        )
         return bool(
-            candle_age_seconds is not None
-            and candle_age_seconds
+            candle_age_seconds
             <= self.config.tunables.strategy_e_max_signal_age_seconds
         )
 
@@ -1434,6 +1459,9 @@ class StrategyService:
                 decision_e = self.strategy_e.evaluate(
                     self._strategy_e_futures_5m,
                     as_of=now,
+                    expected_completed_end=(
+                        self._strategy_e_expected_completed_end(now)
+                    ),
                 )
                 if decision_e.reason != "NO_NEW_COMPLETED_5M_BAR":
                     await self._log_decision(
@@ -3929,6 +3957,21 @@ class StrategyService:
         self._strategy_e_futures_5m = futures_5m
 
         now = utc_now()
+        latest_futures_5m_end = (
+            futures_5m[-1].end_time if futures_5m else None
+        )
+        expected_futures_5m_end = self._strategy_e_expected_completed_end(now)
+        futures_5m_completed_lag_seconds = (
+            max(
+                0.0,
+                (
+                    expected_futures_5m_end - latest_futures_5m_end
+                ).total_seconds(),
+            )
+            if latest_futures_5m_end is not None
+            and expected_futures_5m_end is not None
+            else None
+        )
         spot_5m_age = (
             max(0.0, (now - candles_5m[-1].end_time).total_seconds())
             if candles_5m
@@ -3989,6 +4032,21 @@ class StrategyService:
                 if futures_5m_age is not None
                 else None
             ),
+            "latest_futures_5m_candle": (
+                latest_futures_5m_end.isoformat()
+                if latest_futures_5m_end is not None
+                else None
+            ),
+            "expected_futures_5m_candle_end": (
+                expected_futures_5m_end.isoformat()
+                if expected_futures_5m_end is not None
+                else None
+            ),
+            "futures_5m_completed_lag_seconds": (
+                round(futures_5m_completed_lag_seconds, 3)
+                if futures_5m_completed_lag_seconds is not None
+                else None
+            ),
             "strategy_a_signal_data_fresh": bool(
                 futures_15m_age is not None
                 and futures_15m_age <= 1200.0
@@ -3998,7 +4056,11 @@ class StrategyService:
                 and spot_5m_age <= 600.0
             ),
             "strategy_e_signal_data_fresh": (
-                self._strategy_e_signal_data_fresh(futures_5m_age)
+                self._strategy_e_signal_data_fresh(
+                    latest_futures_5m_end,
+                    now=now,
+                    expected_completed_end=expected_futures_5m_end,
+                )
             ),
         })
 
@@ -4495,9 +4557,24 @@ class StrategyService:
                 target_threshold="Fresh completed real 5m futures candle",
                 status="PASSED" if data_ready else "BLOCKED",
                 gap_description=(
-                    "5m futures input is fresh"
+                    "5m futures input matches the provider-safe completed boundary"
                     if data_ready
-                    else "Waiting for fresh BREEZE/KITE/LIVE futures candles"
+                    else (
+                        "provider="
+                        f"{self._market_data_status.get('provider', 'unknown')}; "
+                        "active="
+                        f"{self._market_data_status.get('provider_active', False)}; "
+                        "instrument="
+                        f"{self._market_data_status.get('futures_instrument') or 'NONE'}; "
+                        "latest="
+                        f"{self._market_data_status.get('latest_futures_5m_candle') or 'NONE'}; "
+                        "expected="
+                        f"{self._market_data_status.get('expected_futures_5m_candle_end') or 'UNKNOWN'}; "
+                        "lag_seconds="
+                        f"{self._market_data_status.get('futures_5m_completed_lag_seconds')}; "
+                        "error="
+                        f"{self._market_data_status.get('last_error') or 'NONE'}"
+                    )
                 ),
             ),
             TriggerCondition(
