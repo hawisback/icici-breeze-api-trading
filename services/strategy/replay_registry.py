@@ -36,8 +36,8 @@ class ReplayStrategyMetadata:
     display_name: str
     priority: int
     enabled: bool
-    entry_start: str
-    entry_end: str
+    evaluation_start: str
+    evaluation_end: str
     supported_override_fields: frozenset[str] = frozenset()
     audit_diagnostics: bool = False
     audit_events: bool = False
@@ -112,8 +112,8 @@ class TrendPullbackReplayAdapter:
             display_name="Strategy A · Trend Pullback R5",
             priority=10,
             enabled=self.tunables.trend_pullback_enabled,
-            entry_start=self.tunables.entry_session_start,
-            entry_end=self.tunables.entry_session_end,
+            evaluation_start=self.tunables.entry_session_start,
+            evaluation_end=self.tunables.entry_session_end,
             supported_override_fields=frozenset(),
             audit_diagnostics=True,
             audit_events=True,
@@ -182,6 +182,8 @@ class TrendPullbackReplayAdapter:
                 context.session.overrides,
             )
             event = self.strategy.last_event
+            if signal is not None:
+                self.on_entry_confirmed(signal, context)
             diagnostics = self.strategy.diagnose(
                 context.features,
                 context.spot_candles_5m,
@@ -189,8 +191,6 @@ class TrendPullbackReplayAdapter:
                 overrides=context.session.overrides,
                 futures_candles=context.futures_candles,
             )
-            if signal is not None:
-                self.on_entry_confirmed(signal, context)
 
         phase = (
             max(diagnostics, key=lambda item: item.passed_count).phase_state
@@ -302,8 +302,8 @@ class VolatilityBreakoutReplayAdapter:
             max_age_bars=tunables.box_max_age_bars,
             breakout_buffer_atr=tunables.breakout_buffer_atr,
             max_extension_atr=tunables.breakout_max_extension_atr,
-            entry_start=session.strategy_b_no_new_trade_before,
-            entry_end=session.no_new_trade_after,
+            evaluation_start=session.strategy_b_no_new_trade_before,
+            evaluation_end=session.no_new_trade_after,
         )
 
     def strategy_metadata(self) -> ReplayStrategyMetadata:
@@ -313,8 +313,8 @@ class VolatilityBreakoutReplayAdapter:
             display_name="Strategy B · Volatility Breakout",
             priority=20,
             enabled=self.tunables.volatility_breakout_enabled,
-            entry_start=self.session.strategy_b_no_new_trade_before,
-            entry_end=self.session.no_new_trade_after,
+            evaluation_start=self.session.no_new_trade_before,
+            evaluation_end=self.session.no_new_trade_after,
             supported_override_fields=self.SUPPORTED_OVERRIDES,
             timeline_phase_key="strategy_b_phase",
         )
@@ -475,8 +475,8 @@ class ReplayStrategyRegistry:
             return True
         clock = at.astimezone(IST)
         minutes = clock.hour * 60 + clock.minute
-        start_h, start_m = map(int, metadata.entry_start.split(":"))
-        end_h, end_m = map(int, metadata.entry_end.split(":"))
+        start_h, start_m = map(int, metadata.evaluation_start.split(":"))
+        end_h, end_m = map(int, metadata.evaluation_end.split(":"))
         return start_h * 60 + start_m <= minutes <= end_h * 60 + end_m
 
     def any_entry_window_active(
