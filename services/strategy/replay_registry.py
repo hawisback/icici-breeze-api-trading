@@ -549,6 +549,31 @@ class ReplayStrategyRegistry:
                 break
         return results
 
+    def refresh_diagnostics(
+        self,
+        evaluations: Sequence[ReplayStrategyEvaluation],
+        context: ReplayBarContext,
+    ) -> list[ReplayStrategyEvaluation]:
+        """Refresh read-only diagnostics after entry/state transitions."""
+        refreshed: list[ReplayStrategyEvaluation] = []
+        originals = {
+            item.metadata.strategy: item
+            for item in evaluations
+        }
+        for adapter in self.adapters:
+            metadata = adapter.strategy_metadata()
+            original = originals.get(metadata.strategy)
+            if original is None:
+                continue
+            current = adapter.evaluate_completed_bar(
+                context,
+                allow_evaluation=False,
+            )
+            current.signal = original.signal
+            current.event = original.event
+            refreshed.append(current)
+        return refreshed
+
     def confirm_entry(
         self,
         signal: StrategySignal,
