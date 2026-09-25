@@ -340,9 +340,9 @@ def test_historical_option_candles_populate_net_pnl():
     assert mark_summary["priced_trades"] == 1
     assert mark_summary["unpriced_trades"] == 0
     assert mark_summary["all_resolved_trades_priced"] is True
-    assert mark_summary["gross_mark_pnl"] == trade.gross_pnl
+    assert mark_summary["gross_mark_pnl"] == sized_trade.gross_pnl
     assert mark_summary["estimated_transaction_costs"] == record.option_transaction_costs
-    assert mark_summary["net_mark_pnl"] == trade.net_pnl
+    assert mark_summary["net_mark_pnl"] == sized_trade.net_pnl
 
 
 def test_option_mark_summary_never_partially_aggregates_missing_marks():
