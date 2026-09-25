@@ -52,7 +52,14 @@ from services.strategy.replay_metadata import (
     configuration_fingerprint,
 )
 from services.strategy.position_manager import PositionManager
+from services.strategy.replay_contract_selection import (
+    HistoricalContractSelectionProvider,
+    ReplayContractSelectionDecision,
+)
 from services.strategy.replay_execution import ChronologicalReplayExecutor
+from services.strategy.replay_execution_model import (
+    estimate_round_trip_execution,
+)
 from services.strategy.replay_lifecycle import (
     HistoricalPositionManagerReplayer,
     attach_historical_option_prices,
@@ -84,9 +91,11 @@ class SimulationEngine:
         session_config: Optional[SessionTimersConfig] = None,
         tunables=None,
         option_selection_config: Optional[OptionSelectionConfig] = None,
+        strategy_repository: Optional[Any] = None,
         replay_manifest_recorder: Optional[ReplayManifestRecorder] = None,
     ) -> None:
         self.hist_svc = historical_service
+        self.strategy_repo = strategy_repository
         self.risk_config = risk_config or RiskConfig()
         self.session_config = session_config or SessionTimersConfig()
         self.option_selection_config = (
@@ -269,6 +278,176 @@ class SimulationEngine:
             ),
             None,
         )
+
+    async def _attach_execution_parity_economics(
+        self,
+        *,
+        record: Any,
+        provider: HistoricalContractSelectionProvider,
+        risk_config: RiskConfig,
+        selection: ReplayContractSelectionDecision | None,
+        recorder: ReplayManifestRecorder,
+    ) -> None:
+        if (
+            record.lifecycle_status != "RESOLVED"
+            or record.exit_timestamp is None
+        ):
+            return
+        instrument_id = str(
+            record.sizing_contract_instrument_id
+            or record.option_contract_instrument_id
+            or ""
+        )
+        quantity = int(record.replay_quantity or 0)
+        if not instrument_id or quantity <= 0:
+            record.option_data_quality_reason = (
+                "Historical selected contract or replay quantity unavailable"
+            )
+            return
+
+        record.option_contract_instrument_id = instrument_id
+        record.option_contract_symbol = record.sizing_contract_symbol
+        record.option_expiry = record.sizing_contract_expiry
+        record.option_strike = record.sizing_contract_strike
+        record.option_lot_size = record.sizing_contract_lot_size
+
+        mark_entry = await provider.completed_mark_evidence(
+            instrument_id=instrument_id,
+            event_time=record.simulated_entry_timestamp,
+        )
+        mark_exit = await provider.completed_mark_evidence(
+            instrument_id=instrument_id,
+            event_time=record.exit_timestamp,
+        )
+        mark_risk = risk_config.model_copy(
+            update={"paper_slippage_points": 0.0}
+        )
+        mark_round_trip = estimate_round_trip_execution(
+            entry_evidence=mark_entry,
+            exit_evidence=mark_exit,
+            quantity=quantity,
+            risk_config=mark_risk,
+        )
+        if (
+            mark_entry.mark_price is not None
+            and mark_exit.mark_price is not None
+            and mark_round_trip.gross_execution_pnl is not None
+        ):
+            record.option_entry_price = round(
+                float(mark_entry.mark_price),
+                2,
+            )
+            record.option_exit_price = round(
+                float(mark_exit.mark_price),
+                2,
+            )
+            record.option_gross_pnl = mark_round_trip.gross_execution_pnl
+            record.option_transaction_costs = (
+                mark_round_trip.transaction_costs
+            )
+            record.option_net_pnl = mark_round_trip.net_execution_pnl
+            record.option_price_source = (
+                "HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARK"
+            )
+            record.option_data_status = "AVAILABLE"
+            record.option_data_quality_reason = None
+        else:
+            record.option_data_status = "UNAVAILABLE"
+            record.option_data_quality_reason = (
+                "Historical option completed mark unavailable at entry or exit"
+            )
+
+        entry_evidence = await provider.price_evidence(
+            instrument_id=instrument_id,
+            signal_id=record.replay_signal_id,
+            event_time=record.simulated_entry_timestamp,
+            side="BUY",
+            selection=selection,
+        )
+        exit_evidence = await provider.price_evidence(
+            instrument_id=instrument_id,
+            signal_id=record.replay_signal_id,
+            event_time=record.exit_timestamp,
+            side="SELL",
+            selection=None,
+        )
+        execution = estimate_round_trip_execution(
+            entry_evidence=entry_evidence,
+            exit_evidence=exit_evidence,
+            quantity=quantity,
+            risk_config=risk_config,
+        )
+        recorder.set_execution_estimate(
+            record.replay_signal_id,
+            entry_fill_price=execution.entry.executable_price,
+            exit_fill_price=execution.exit.executable_price,
+            entry_method=execution.entry.method,
+            exit_method=execution.exit.method,
+            entry_basis=execution.entry.evidence_basis,
+            exit_basis=execution.exit.evidence_basis,
+            quote_equivalent=(
+                execution.entry.executable_quote_equivalent
+                and execution.exit.executable_quote_equivalent
+            ),
+            gross_pnl=execution.gross_execution_pnl,
+            slippage_cost=execution.slippage_cost,
+            transaction_costs=execution.transaction_costs,
+            net_pnl=execution.net_execution_pnl,
+            cost_breakdown={
+                "brokerage": execution.brokerage,
+                "exchange_charges": execution.exchange_charges,
+                "stt": execution.stt,
+                "gst": execution.gst,
+                "sebi_charges": execution.sebi_charges,
+                "stamp_duty": execution.stamp_duty,
+                "cost_assumption_version": (
+                    execution.cost_assumption_version
+                ),
+            },
+            provenance={
+                "entry": execution.entry.to_dict(),
+                "exit": execution.exit.to_dict(),
+                "partial_option_exits_modeled": False,
+                "limitation": (
+                    "Execution estimate currently models one option entry and "
+                    "the final option exit; partial option exits remain deferred."
+                ),
+            },
+        )
+        record.historical_option_provenance = {
+            "contract_selection": (
+                selection.to_manifest_metadata()
+                if selection is not None
+                else {}
+            ),
+            "mark_entry": {
+                "basis": mark_entry.basis,
+                "source": mark_entry.source,
+                "evidence_timestamp": (
+                    mark_entry.evidence_timestamp.isoformat()
+                    if mark_entry.evidence_timestamp
+                    else None
+                ),
+                "mark_price": mark_entry.mark_price,
+                "freshness_seconds": mark_entry.freshness_seconds,
+            },
+            "mark_exit": {
+                "basis": mark_exit.basis,
+                "source": mark_exit.source,
+                "evidence_timestamp": (
+                    mark_exit.evidence_timestamp.isoformat()
+                    if mark_exit.evidence_timestamp
+                    else None
+                ),
+                "mark_price": mark_exit.mark_price,
+                "freshness_seconds": mark_exit.freshness_seconds,
+            },
+            "execution_estimate": execution.to_dict(),
+            "bid_ask_available_for_both_fills": (
+                record.simulated_fill_quote_equivalent
+            ),
+            "historical_marks_are_executable_fills": False,
+        }
 
     async def _fetch_replay_option_candles(
         self,
