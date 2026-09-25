@@ -11,6 +11,11 @@ from services.api_gateway.main import app
 from services.api_gateway.service_container import initialize_services
 from services.historical.repository import HistoricalRepository
 from services.strategy.models import (
+    ReplayDataQuality,
+    ReplayOptionMarkMetrics,
+    ReplayPortfolioMetrics,
+    ReplaySignalMetrics,
+    ReplayUnderlyingLifecycleMetrics,
     SimulatedTradeRecord,
     SimulationRequest,
     SimulationResult,
@@ -23,6 +28,7 @@ from services.strategy.replay_lifecycle import (
     attach_historical_option_prices,
     build_lifecycle_report,
     build_simulated_trade_records,
+    summarize_historical_option_marks,
     summarize_simulated_pnl,
 )
 from services.strategy.replay_manifest import ReplayManifestRecord
@@ -63,22 +69,78 @@ def _resolved_manifest(index: int, realized_r: float) -> ReplayManifestRecord:
     )
 
 
+def _canonical_sections(
+    *,
+    bars: int,
+    qualified_signals: int,
+    resolved: int,
+    winners: int,
+    losers: int,
+    breakeven: int,
+    win_rate_pct: float,
+    total_r: float,
+    profit_factor_r: float | None,
+    max_drawdown_r: float,
+    gross_mark_pnl: float | None = None,
+    net_mark_pnl: float | None = None,
+) -> dict:
+    return {
+        "signal_metrics": ReplaySignalMetrics(
+            total_bars_evaluated=bars,
+            qualified_signals=qualified_signals,
+            ambiguous_signals=0,
+            unresolved_signals=max(qualified_signals - resolved, 0),
+        ),
+        "underlying_lifecycle_metrics": ReplayUnderlyingLifecycleMetrics(
+            resolved_trades=resolved,
+            winning_trades=winners,
+            losing_trades=losers,
+            breakeven_trades=breakeven,
+            win_rate_pct=win_rate_pct,
+            total_realized_r=total_r,
+            average_realized_r=round(total_r / resolved, 4) if resolved else 0.0,
+            median_realized_r=0.0,
+            average_winner_r=0.0,
+            average_loser_r=0.0,
+            profit_factor_r=profit_factor_r,
+            max_drawdown_r=max_drawdown_r,
+            max_consecutive_losses=0,
+        ),
+        "option_mark_metrics": ReplayOptionMarkMetrics(
+            priced_trades=0 if gross_mark_pnl is None else resolved,
+            unpriced_trades=resolved if gross_mark_pnl is None else 0,
+            all_resolved_trades_priced=gross_mark_pnl is not None,
+            gross_mark_pnl=gross_mark_pnl,
+            estimated_transaction_costs=(
+                None
+                if gross_mark_pnl is None or net_mark_pnl is None
+                else round(gross_mark_pnl - net_mark_pnl, 2)
+            ),
+            net_mark_pnl=net_mark_pnl,
+        ),
+        "portfolio_metrics": ReplayPortfolioMetrics(),
+        "data_quality": ReplayDataQuality(historical_source="BREEZE"),
+    }
+
+
 def test_simulation_result_trades_are_the_canonical_summary_rows():
     """Resolved lifecycle records populate the same rows the UI renders."""
     records = [_resolved_manifest(1, 0.2), _resolved_manifest(2, 0.1), _resolved_manifest(3, -0.1611)]
     trades = build_simulated_trade_records(records)
     result = SimulationResult(
         session_date="2026-09-17",
-        total_bars_evaluated=75,
-        total_trades=len(trades),
-        winning_trades=sum(t.realized_r > 0 for t in trades),
-        losing_trades=sum(t.realized_r < 0 for t in trades),
-        win_rate_pct=66.67,
-        total_pnl=None,
-        net_pnl=None,
-        total_realized_r=sum(t.realized_r for t in trades),
-        max_drawdown_pnl=None,
-        profit_factor=1.86,
+        **_canonical_sections(
+            bars=75,
+            qualified_signals=3,
+            resolved=3,
+            winners=2,
+            losers=1,
+            breakeven=0,
+            win_rate_pct=66.67,
+            total_r=sum(t.realized_r for t in trades),
+            profit_factor_r=1.86,
+            max_drawdown_r=-0.1611,
+        ),
         trades=trades,
     )
 
@@ -89,6 +151,11 @@ def test_simulation_result_trades_are_the_canonical_summary_rows():
     assert all(trade.net_pnl is None for trade in result.trades)
     assert summarize_simulated_pnl(result.trades) == (None, None)
     serialized = result.model_dump(mode="json")
+    assert serialized["signal_metrics"]["price_basis"] == "COMPLETED_UNDERLYING_SPOT_FUTURES_CANDLES"
+    assert serialized["underlying_lifecycle_metrics"]["profit_factor_r"] == 1.86
+    assert serialized["option_mark_metrics"]["net_mark_pnl"] is None
+    assert serialized["portfolio_metrics"]["available"] is False
+    assert serialized["data_quality"]["historical_source"] == "BREEZE"
     assert serialized["trades"][0]["realized_r"] == 0.2
     assert serialized["trades"][0]["entry_premium"] is None
     assert serialized["trades"][0]["net_pnl"] is None
@@ -105,20 +172,66 @@ def test_simulation_result_trades_are_the_canonical_summary_rows():
 
     empty_result = SimulationResult(
         session_date="2026-09-17",
-        total_bars_evaluated=75,
-        total_trades=0,
-        winning_trades=0,
-        losing_trades=0,
-        win_rate_pct=0.0,
-        total_pnl=0.0,
-        net_pnl=0.0,
-        total_realized_r=0.0,
-        max_drawdown_pnl=None,
-        profit_factor=None,
-        max_drawdown_r=0.0,
+        **_canonical_sections(
+            bars=75,
+            qualified_signals=0,
+            resolved=0,
+            winners=0,
+            losers=0,
+            breakeven=0,
+            win_rate_pct=0.0,
+            total_r=0.0,
+            profit_factor_r=None,
+            max_drawdown_r=0.0,
+            gross_mark_pnl=0.0,
+            net_mark_pnl=0.0,
+        ),
         trades=build_simulated_trade_records([]),
     )
     assert empty_result.total_trades == 0 == len(empty_result.trades)
+
+
+def test_legacy_metric_fields_are_projections_of_canonical_sections():
+    result = SimulationResult(
+        session_date="2026-09-17",
+        **_canonical_sections(
+            bars=42,
+            qualified_signals=4,
+            resolved=3,
+            winners=2,
+            losers=1,
+            breakeven=0,
+            win_rate_pct=66.67,
+            total_r=1.25,
+            profit_factor_r=2.5,
+            max_drawdown_r=-0.75,
+            gross_mark_pnl=2500.0,
+            net_mark_pnl=2200.0,
+        ),
+        total_bars_evaluated=999,
+        total_trades=999,
+        winning_trades=999,
+        losing_trades=999,
+        win_rate_pct=1.0,
+        total_pnl=999.0,
+        net_pnl=999.0,
+        total_realized_r=999.0,
+        max_drawdown_pnl=999.0,
+        profit_factor=999.0,
+        max_drawdown_r=999.0,
+    )
+
+    assert result.total_bars_evaluated == 42
+    assert result.total_trades == 3
+    assert result.winning_trades == 2
+    assert result.losing_trades == 1
+    assert result.win_rate_pct == 66.67
+    assert result.total_pnl == 2500.0
+    assert result.net_pnl == 2200.0
+    assert result.total_realized_r == 1.25
+    assert result.profit_factor == 2.5
+    assert result.max_drawdown_r == -0.75
+    assert result.max_drawdown_pnl is None
 
 
 def test_lifecycle_report_exposes_realized_r_profit_factor_and_drawdown():
