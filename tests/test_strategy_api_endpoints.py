@@ -21,9 +21,17 @@ async def test_strategy_api_endpoints():
         assert "features" in data
         assert "active_trades" in data
         assert "strategies" in data
-        assert set(data["strategies"]) == {"trend_pullback", "volatility_breakout", "di_continuation", "sr_momentum_breakout"}
+        assert set(data["strategies"]) == {
+            "trend_pullback",
+            "volatility_breakout",
+            "di_continuation",
+            "sr_momentum_breakout",
+            "pivot_vwap_scalp",
+        }
+        assert data["strategies"]["pivot_vwap_scalp"]["enabled"] is False
         assert "strategy_c_paper" in data
         assert "strategy_d_paper" in data
+        assert "strategy_e_decision" in data
 
         # 2. GET /api/v1/strategies/config
         res = await client.get("/api/v1/strategies/config")
