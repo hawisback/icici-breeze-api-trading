@@ -681,26 +681,21 @@ class SimulationEngine:
         if bypass_entry_window:
             overrides = overrides.model_copy(update={"bypass_entry_window": True})
 
+        cfg = self.tunables
+        strategy_registry = ReplayStrategyRegistry.default(
+            cfg,
+            self.session_config,
+        )
         override_values = overrides.model_dump(
             mode="json",
             exclude_none=True,
             exclude_defaults=True,
         )
-        strategy_b_replay_overrides = {
-            "rvol_threshold",
-            "strat_b_min_confirmation",
-            "strat_b_min_available_confirmations",
-            "box_max_height_atr",
-            "bb_width_percentile",
-            "strat_b_box_max_age_bars",
-            "strat_b_breakout_buffer_atr",
-            "breakout_buffer_atr",
-            "strat_b_max_extension_atr",
-        }
+        supported_replay_overrides = strategy_registry.supported_override_fields()
         applied_overrides = {
             name: value
             for name, value in override_values.items()
-            if name in strategy_b_replay_overrides
+            if name in supported_replay_overrides
         }
         if bypass_entry_window:
             applied_overrides["bypass_entry_window"] = True
@@ -724,23 +719,10 @@ class SimulationEngine:
                 "reason": replay_override_reason(name),
             }
             for name, value in override_values.items()
-            if name not in strategy_b_replay_overrides
+            if name not in supported_replay_overrides
             and name != "bypass_entry_window"
         }
         effective_overrides = ThresholdOverrides.model_validate(applied_overrides)
-        cfg = self.tunables
-        strategy_a_cfg = self._strategy_a_config_for_replay(effective_overrides)
-        strat_a = TrendPullbackStrategy(config=strategy_a_cfg, allow_session_bypass=True)
-        strat_b = VolatilityBreakoutStrategy(rvol_threshold=cfg.rvol_threshold, adx_threshold=cfg.strategy_b_adx_threshold,
-                                             min_confirmation_score=cfg.strat_b_min_confirmation,
-                                             box_max_height_atr=cfg.box_max_height_atr,
-                                             bb_width_percentile_threshold=cfg.bb_width_percentile_threshold,
-                                             lookback_bars=cfg.compression_lookback_bars,
-                                             max_age_bars=cfg.box_max_age_bars,
-                                             breakout_buffer_atr=cfg.breakout_buffer_atr,
-                                             max_extension_atr=cfg.breakout_max_extension_atr,
-                                             entry_start=self.session_config.strategy_b_no_new_trade_before,
-                                             entry_end=self.session_config.no_new_trade_after)
         missing_data: list[str] = []
         if source_diagnostics["spot"]["missing_selected_source"] or not session:
             missing_data.append("spot")
