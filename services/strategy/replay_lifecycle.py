@@ -779,19 +779,42 @@ def summarize_simulated_pnl(
     )
 
 
+def _max_drawdown_r(rs: list[float]) -> float:
+    """Return peak-to-trough drawdown for a realized-R sequence."""
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for value in rs:
+        equity += value
+        peak = max(peak, equity)
+        max_drawdown = min(max_drawdown, equity - peak)
+    return round(max_drawdown, 4)
+
+
 def _basic(rows: list[ReplayManifestRecord]) -> dict[str, Any]:
-    rs = [float(r.realized_r) for r in rows]
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            row.exit_timestamp or row.simulated_entry_timestamp,
+            row.simulated_entry_timestamp,
+            row.replay_signal_id,
+        ),
+    )
+    rs = [float(r.realized_r) for r in ordered]
     winners = [r for r in rs if r > 0]
     losers = [r for r in rs if r < 0]
+    total_r = round(sum(rs), 4)
     return {
-        "trades": len(rows), "winners": len(winners), "losers": len(losers),
+        "trades": len(ordered), "winners": len(winners), "losers": len(losers),
         "breakeven": sum(1 for r in rs if r == 0),
         "win_rate_pct": round(len(winners) / len(rs) * 100, 2) if rs else 0.0,
         "average_winner_r": round(sum(winners) / len(winners), 4) if winners else 0.0,
         "average_loser_r": round(sum(losers) / len(losers), 4) if losers else 0.0,
-        "average_r": round(sum(rs) / len(rs), 4) if rs else 0.0,
+        "average_r": round(total_r / len(rs), 4) if rs else 0.0,
         "median_r": round(float(median(rs)), 4) if rs else 0.0,
-        "profit_factor": round(sum(winners) / abs(sum(losers)), 4) if losers else 0.0,
+        "total_r": total_r,
+        "profit_factor": round(sum(winners) / abs(sum(losers)), 4) if losers else None,
+        "max_drawdown_r": _max_drawdown_r(rs),
         "max_consecutive_losses": _max_consecutive_losses(rs),
     }
 
