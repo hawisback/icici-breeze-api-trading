@@ -32,7 +32,13 @@ class InstrumentService:
             return
 
         logger.info("Seeding default NIFTY & BANKNIFTY option contracts into instruments.db")
-        expiry = "2026-09-24"  # Default weekly expiry
+        today = date.today()
+        expiry_date = self._monthly_expiry(today.year, today.month)
+        if expiry_date < today:
+            year = today.year + (1 if today.month == 12 else 0)
+            month = 1 if today.month == 12 else today.month + 1
+            expiry_date = self._monthly_expiry(year, month)
+        expiry = expiry_date.isoformat()
 
         # Seed Spot / Futures indices
         await self.repo.save_instrument(
