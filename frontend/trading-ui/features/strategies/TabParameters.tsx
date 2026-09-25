@@ -568,6 +568,7 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
               ["strategy_e_flat_vwap_lookback_bars","Flat VWAP lookback",1,10,1],
               ["strategy_e_flat_vwap_threshold_points","Flat VWAP threshold (pts)",0,50,0.5],
               ["strategy_e_lots","Maximum Strategy E lots",1,20,1],
+              ["strategy_e_max_signal_age_seconds","Max signal age (sec)",5,300,5],
             ] as const).map(([key,label,min,max,step]) => (
               <label key={key} className="text-xs text-slate-400">{label}
                 <input type="number" min={min} max={max} step={step} value={form.tunables[key]}
