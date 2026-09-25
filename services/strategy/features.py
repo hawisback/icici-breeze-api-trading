@@ -5,13 +5,11 @@ Implements Sections 7, 9, 10, 11, 12 of NIFTY_INTRADAY_OPTIONS_AUTO_TRADING_STRA
 from __future__ import annotations
 
 import math
-from datetime import timedelta, timezone
 from statistics import median
 from typing import Any, Optional
 from libs.contracts.models import Candle
+from libs.market_time import IST
 from services.strategy.models import MarketFeatures, utc_now
-
-IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class FeatureEngine:
