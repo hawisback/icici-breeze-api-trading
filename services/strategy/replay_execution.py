@@ -44,6 +44,7 @@ class ChronologicalExecutionState:
     completed_positions: int = 0
     realized_r_total: float = 0.0
     entry_evaluation_suppressed_cycles: int = 0
+    entry_gate_block_counts: dict[str, int] = field(default_factory=dict)
     last_loss_exit_time: datetime | None = None
     loss_cooldown_until: datetime | None = None
     chronology_indeterminate: bool = False
@@ -215,8 +216,15 @@ class ChronologicalReplayExecutor:
             "details": details or {},
         })
 
-    def note_entry_evaluation_suppressed(self) -> None:
+    def note_entry_evaluation_suppressed(
+        self,
+        status: str | None = None,
+    ) -> None:
         self.state.entry_evaluation_suppressed_cycles += 1
+        if status:
+            self.state.entry_gate_block_counts[status] = (
+                self.state.entry_gate_block_counts.get(status, 0) + 1
+            )
 
     def accept_signal(
         self,
@@ -314,6 +322,9 @@ class ChronologicalReplayExecutor:
             "active_positions_at_end": self.state.positions_open_at_session_end,
             "entry_evaluation_suppressed_cycles": (
                 self.state.entry_evaluation_suppressed_cycles
+            ),
+            "entry_gate_block_counts": dict(
+                sorted(self.state.entry_gate_block_counts.items())
             ),
             "last_loss_exit_time": (
                 self.state.last_loss_exit_time.isoformat()
