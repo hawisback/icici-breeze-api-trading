@@ -316,6 +316,36 @@ def test_historical_option_candles_populate_net_pnl():
     assert record.historical_option_provenance["bid_ask_available"] is False
     assert record.historical_option_provenance["executable_fill_equivalent"] is False
 
+    mark_summary = summarize_historical_option_marks([record])
+    assert mark_summary["priced_trades"] == 1
+    assert mark_summary["unpriced_trades"] == 0
+    assert mark_summary["all_resolved_trades_priced"] is True
+    assert mark_summary["gross_mark_pnl"] == trade.gross_pnl
+    assert mark_summary["estimated_transaction_costs"] == record.option_transaction_costs
+    assert mark_summary["net_mark_pnl"] == trade.net_pnl
+
+
+def test_option_mark_summary_never_partially_aggregates_missing_marks():
+    priced = _resolved_manifest(1, 0.5)
+    priced.option_data_status = "AVAILABLE"
+    priced.option_gross_pnl = 100.0
+    priced.option_transaction_costs = 20.0
+    priced.option_net_pnl = 80.0
+
+    missing = _resolved_manifest(2, -0.5)
+    missing.option_data_status = "UNAVAILABLE"
+    missing.option_data_quality_reason = "Historical option candle missing"
+
+    summary = summarize_historical_option_marks([priced, missing])
+
+    assert summary["priced_trades"] == 1
+    assert summary["unpriced_trades"] == 1
+    assert summary["all_resolved_trades_priced"] is False
+    assert summary["gross_mark_pnl"] is None
+    assert summary["estimated_transaction_costs"] is None
+    assert summary["net_mark_pnl"] is None
+    assert summary["quality_reasons"] == {"Historical option candle missing": 1}
+
 
 def _option_candle(start: datetime, close: float) -> Candle:
     return Candle(
