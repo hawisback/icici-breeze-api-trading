@@ -1109,50 +1109,24 @@ class SimulationEngine:
                 )
             )
 
-            )
-
         strategy_a_event_counts = replay_event_counts.get(
             StrategyName.TREND_PULLBACK,
             Counter(),
         )
 
-        # Replay-only lifecycle pass.  It consumes the frozen signal manifests
-        # after signal generation has completed, so PositionManager state can
-        # never suppress or alter Strategy A signal discovery.
-        one_minute_candles: list[Candle] = []
-        if self.hist_svc and hasattr(self.hist_svc, "repo"):
-            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            one_minute_start = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST).astimezone(timezone.utc)
-            one_minute_end = datetime(target_date.year, target_date.month, target_date.day, 15, 30, tzinfo=IST).astimezone(timezone.utc)
-            try:
-                one_minute_candles = await self.hist_svc.repo.get_candles(
-                    request.instrument_id, "1m", start_time=one_minute_start,
-                    end_time=one_minute_end, limit=1000,
-                )
-                allowed = {"BREEZE", "KITE", "LIVE"} if historical_source == HistoricalReplaySource.MIXED else {historical_source.value}
-                one_minute_candles = [c for c in one_minute_candles if c.source in allowed]
-            except Exception as ex:
-                logger.warning("Historical 1m replay query error: %s", ex)
-
-        from services.strategy.replay_lifecycle import (
-            HistoricalPositionManagerReplayer,
-            attach_historical_option_prices,
-            build_lifecycle_report,
-            build_simulated_trade_records,
-            summarize_historical_option_marks,
-        )
-        lifecycle_replayer = HistoricalPositionManagerReplayer(
-            risk_config=self.risk_config,
-            session_config=self.session_config,
-            strategy_config=self.tunables,
-            recorder=replay_manifest_recorder,
-            instrument_id=request.instrument_id,
-            warmup_candles=warmup,
-            session_candles=session,
-            futures_candles=futures_history,
-            one_minute_candles=one_minute_candles,
-        )
-        lifecycle_resolver = lifecycle_replayer.replay(replay_manifest_recorder.records())
+        if chronological_executor is not None:
+            chronological_executor.finalize_session()
+            replay_metadata["execution_parity"] = (
+                chronological_executor.metadata()
+            )
+            lifecycle_resolver = {
+                "resolver": dict(sorted(lifecycle_replayer.stats.items())),
+                "one_minute_candles": len(one_minute_candles),
+            }
+        else:
+            lifecycle_resolver = lifecycle_replayer.replay(
+                replay_manifest_recorder.records()
+            )
         lifecycle_report = build_lifecycle_report(replay_manifest_recorder.records(), lifecycle_resolver)
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         option_session_start = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST).astimezone(timezone.utc)
