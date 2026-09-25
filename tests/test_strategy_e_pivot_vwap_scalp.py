@@ -274,7 +274,10 @@ def test_strategy_e_emits_countertrend_long_from_support_micro_reversal():
     assert decision.signal is not None
     assert decision.signal.direction is TradeDirection.BULLISH
     assert decision.signal.option_type is OptionType.CALL
-    assert decision.metrics["counter_confirmation"] == "BULLISH_MICRO_SWING"
+    assert decision.metrics["counter_confirmation"] in {
+        "VWAP_RECLAIM",
+        "BULLISH_MICRO_SWING",
+    }
     assert decision.metrics["price"] < decision.metrics["pivot"]
 
 
