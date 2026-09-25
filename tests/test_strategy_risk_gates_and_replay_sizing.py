@@ -103,7 +103,7 @@ def test_strategy_b_replay_sizing_uses_production_premium_risk_math():
     decision = calculate_replay_sizing(
         signal=_signal(StrategyName.VOLATILITY_BREAKOUT),
         contract=_contract(),
-        entry_mark=100.0,
+        entry_reference_price=100.0,
         risk_config=risk,
         option_selection=OptionSelectionConfig(),
         session_config=SessionTimersConfig(),
@@ -121,7 +121,7 @@ def test_strategy_b_replay_sizing_uses_production_premium_risk_math():
     rejected = calculate_replay_sizing(
         signal=_signal(StrategyName.VOLATILITY_BREAKOUT),
         contract=_contract(),
-        entry_mark=100.0,
+        entry_reference_price=100.0,
         risk_config=risk.model_copy(update={"account_equity": 100000.0}),
         option_selection=OptionSelectionConfig(),
         session_config=SessionTimersConfig(),
@@ -143,7 +143,7 @@ def test_strategy_a_replay_sizing_changes_with_capital_and_risk_budget():
     high = calculate_replay_sizing(
         signal=signal,
         contract=_contract(),
-        entry_mark=100.0,
+        entry_reference_price=100.0,
         risk_config=RiskConfig(
             account_equity=500000.0,
             risk_per_trade_pct_of_account=0.5,
@@ -157,7 +157,7 @@ def test_strategy_a_replay_sizing_changes_with_capital_and_risk_budget():
     low = calculate_replay_sizing(
         signal=signal,
         contract=_contract(),
-        entry_mark=100.0,
+        entry_reference_price=100.0,
         risk_config=RiskConfig(
             account_equity=100000.0,
             risk_per_trade_pct_of_account=0.5,
@@ -180,7 +180,7 @@ def test_strategy_a_replay_sizing_changes_with_capital_and_risk_budget():
     exact = calculate_replay_sizing(
         signal=signal,
         contract=_contract(),
-        entry_mark=100.0,
+        entry_reference_price=100.0,
         risk_config=RiskConfig(
             account_equity=500000.0,
             risk_per_trade_pct_of_account=0.5,
