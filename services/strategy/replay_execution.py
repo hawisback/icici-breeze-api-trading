@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from libs.contracts.models import Candle
@@ -30,9 +30,12 @@ class ChronologicalExecutionState:
         default_factory=list
     )
     daily_entries: int = 0
+    daily_entries_by_strategy: dict[str, int] = field(default_factory=dict)
     completed_positions: int = 0
+    realized_r_total: float = 0.0
     entry_evaluation_suppressed_cycles: int = 0
     last_loss_exit_time: datetime | None = None
+    loss_cooldown_until: datetime | None = None
     chronology_indeterminate: bool = False
     chronology_block_reason: str | None = None
     positions_open_at_session_end: int = 0
@@ -101,11 +104,16 @@ class ChronologicalReplayExecutor:
                     self._record_direction(record),
                     exit_time,
                 )
+                if record.realized_r is not None:
+                    self.state.realized_r_total += float(record.realized_r)
                 if (
                     record.realized_r is not None
                     and float(record.realized_r) < 0
                 ):
                     self.state.last_loss_exit_time = exit_time
+                    self.state.loss_cooldown_until = exit_time + timedelta(
+                        minutes=self.risk_config.cooldown_after_loss_min
+                    )
             elif record.lifecycle_status in {"AMBIGUOUS", "UNRESOLVED"}:
                 # Once we cannot know whether exposure remains, taking another
                 # trade would be optimistic. Block new entries for the session.
@@ -138,6 +146,9 @@ class ChronologicalReplayExecutor:
         if position is not None:
             self.state.active_positions.append(position)
             self.state.daily_entries += 1
+            self.state.daily_entries_by_strategy[record.strategy_id] = (
+                self.state.daily_entries_by_strategy.get(record.strategy_id, 0) + 1
+            )
             return record
 
         # Intrabar entry resolution may determine that no fill occurred, or it
@@ -146,6 +157,9 @@ class ChronologicalReplayExecutor:
             self._mark_indeterminate(record)
         elif record.lifecycle_status == "RESOLVED":
             self.state.daily_entries += 1
+            self.state.daily_entries_by_strategy[record.strategy_id] = (
+                self.state.daily_entries_by_strategy.get(record.strategy_id, 0) + 1
+            )
             self.state.completed_positions += 1
             exit_time = record.exit_timestamp or context.bar.end_time
             self.registry.notify_exit(
@@ -153,11 +167,16 @@ class ChronologicalReplayExecutor:
                 self._record_direction(record),
                 exit_time,
             )
+            if record.realized_r is not None:
+                self.state.realized_r_total += float(record.realized_r)
             if (
                 record.realized_r is not None
                 and float(record.realized_r) < 0
             ):
                 self.state.last_loss_exit_time = exit_time
+                self.state.loss_cooldown_until = exit_time + timedelta(
+                    minutes=self.risk_config.cooldown_after_loss_min
+                )
         return record
 
     def finalize_session(self) -> None:
@@ -173,7 +192,11 @@ class ChronologicalReplayExecutor:
     def metadata(self) -> dict[str, Any]:
         return {
             "daily_entries": self.state.daily_entries,
+            "daily_entries_by_strategy": dict(
+                sorted(self.state.daily_entries_by_strategy.items())
+            ),
             "completed_positions": self.state.completed_positions,
+            "realized_r_total": round(self.state.realized_r_total, 4),
             "active_positions_at_end": self.state.positions_open_at_session_end,
             "entry_evaluation_suppressed_cycles": (
                 self.state.entry_evaluation_suppressed_cycles
@@ -181,6 +204,11 @@ class ChronologicalReplayExecutor:
             "last_loss_exit_time": (
                 self.state.last_loss_exit_time.isoformat()
                 if self.state.last_loss_exit_time
+                else None
+            ),
+            "loss_cooldown_until": (
+                self.state.loss_cooldown_until.isoformat()
+                if self.state.loss_cooldown_until
                 else None
             ),
             "chronology_indeterminate": self.state.chronology_indeterminate,
