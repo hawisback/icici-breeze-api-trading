@@ -370,15 +370,21 @@ class StrategyRepository:
             )
         return payload
 
-    def _validate_file_payload(self, payload: dict[str, Any]) -> AutoTradingConfig:
+    def _validate_file_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[AutoTradingConfig, bool]:
         payload = dict(payload)
         payload.pop("_meta", None)
-        payload, _ = self._migrate_auto_config_data(payload)
+        payload, migrated = self._migrate_auto_config_data(payload)
         # Arming is intentionally process-local. A file can choose mode but
         # can never grant live order authority after restart.
+        armed_normalized = payload.get("system_armed") is not False
         payload["system_armed"] = False
         try:
-            return AutoTradingConfig.model_validate(payload)
+            return AutoTradingConfig.model_validate(payload), (
+                migrated or armed_normalized
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"Invalid trading config file {self.config_path}: {exc}"
@@ -433,10 +439,11 @@ class StrategyRepository:
             return config
 
         if file_payload is not None:
-            file_config = self._validate_file_payload(file_payload)
+            file_config, normalized = self._validate_file_payload(file_payload)
             await self.save_auto_config(file_config, persist_file=False)
-            # Consume the bootstrap marker on a fresh installation too.
-            if bootstrap_from_db:
+            # Consume bootstrap metadata, schema migrations, and any attempted
+            # file-based arming by rewriting the canonical safe representation.
+            if bootstrap_from_db or normalized:
                 self._write_config_file(file_config)
             return file_config
 
