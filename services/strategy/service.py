@@ -68,7 +68,10 @@ from services.strategy.strategies.candidate_runtime import (
     strategy_c_signal_from_status,
     strategy_d_signal_from_status,
 )
-from services.strategy.strategies.pivot_vwap_scalp import PivotVwapScalpStrategy
+from services.strategy.strategies.pivot_vwap_scalp import (
+    PivotVwapScalpStrategy,
+    StrategyEDecision,
+)
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 from services.strategy.strategy_c_shadow_monitor import StrategyCShadowMonitor
@@ -124,6 +127,11 @@ class StrategyService:
 
         self.strategy_a = TrendPullbackStrategy(config=self.config.tunables)
         self.strategy_e = PivotVwapScalpStrategy(self.config.tunables)
+        self._strategy_e_analysis = StrategyEDecision(
+            "NO_TRADE",
+            "NOT_EVALUATED",
+            {},
+        )
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
             adx_threshold=self.config.tunables.strategy_b_adx_threshold,
@@ -601,6 +609,7 @@ class StrategyService:
         self.strategy_a.restore_state(await self.repo.get_runtime())
         self.strategy_b.restore_state(await self.repo.get_runtime("volatility_breakout"))
         self.strategy_e.restore_state(await self.repo.get_runtime("pivot_vwap_scalp"))
+        self._strategy_e_analysis = self.strategy_e.last_decision
         self._active_trades_cache = await self.repo.get_active_trades()
 
         # Repair the only two crash-consistency mismatches permitted by older
@@ -765,6 +774,66 @@ class StrategyService:
             candle_age_seconds
             <= self.config.tunables.strategy_e_max_signal_age_seconds
         )
+
+    def _strategy_e_entry_window_open(
+        self,
+        now: datetime,
+    ) -> bool:
+        now_ist_hhmm = now.astimezone(IST).strftime("%H:%M")
+        return bool(
+            self.config.tunables.strategy_e_entry_start
+            <= now_ist_hhmm
+            <= self.config.tunables.strategy_e_entry_end
+        )
+
+    def _refresh_strategy_e_analysis(
+        self,
+        now: datetime,
+    ) -> StrategyEDecision:
+        """Refresh passive Strategy E diagnostics from completed history.
+
+        This never mutates the execution evaluator's processed-candle state and
+        never creates/persists an order signal. Entry authority remains in the
+        normal gated execution path later in the cycle.
+        """
+        if not self.config.tunables.pivot_vwap_scalp_enabled:
+            self._strategy_e_analysis = StrategyEDecision(
+                "NO_TRADE",
+                "STRATEGY_DISABLED",
+                {},
+            )
+            return self._strategy_e_analysis
+
+        if not self._strategy_e_futures_5m:
+            self._strategy_e_analysis = StrategyEDecision(
+                "NO_TRADE",
+                "INSUFFICIENT_5M_HISTORY",
+                {
+                    "completed_5m_bars": 0,
+                    "required_bars": max(
+                        self.config.tunables.strategy_e_volume_lookback + 1,
+                        (2 * self.config.tunables.strategy_e_swing_lookback) + 5,
+                    ),
+                },
+            )
+            return self._strategy_e_analysis
+
+        try:
+            self._strategy_e_analysis = self.strategy_e.analyze_snapshot(
+                self._strategy_e_futures_5m,
+                as_of=now,
+                expected_completed_end=(
+                    self._strategy_e_expected_completed_end(now)
+                ),
+            )
+        except Exception as exc:
+            logger.exception("Passive Strategy E analysis failed")
+            self._strategy_e_analysis = StrategyEDecision(
+                "NO_TRADE",
+                f"ANALYSIS_FAILED:{type(exc).__name__}",
+                {},
+            )
+        return self._strategy_e_analysis
 
     def _paper_slippage(self) -> float:
         return float(self.config.risk.paper_slippage_points)
@@ -1010,9 +1079,12 @@ class StrategyService:
             )
 
         runtime = self.strategy_a.export_state()
+        strategy_e_runtime = self.strategy_e.export_state()
         self.config = new_config
         self._sync_subcomponents()
         self.strategy_a.restore_state(runtime)
+        self.strategy_e.restore_state(strategy_e_runtime)
+        self._strategy_e_analysis = self.strategy_e.last_decision
         self.strategy_b.reset(utc_now())
         await self._save_runtime()
         await self.repo.save_auto_config(new_config)
@@ -1128,6 +1200,10 @@ class StrategyService:
         # managed even when the entry kill switch is active.
         features = await self._gather_features()
         self._last_features = features
+        # Keep Strategy E diagnostics analytical even when entry execution is
+        # blocked later by time windows, cooldowns, risk gates, arming, or
+        # higher-priority strategies.
+        self._refresh_strategy_e_analysis(now)
 
         # Passive Strategy C research observation. This sidecar never creates
         # ActiveTrade state or OMS intents and cannot affect Strategy A/B gates.
@@ -1267,14 +1343,7 @@ class StrategyService:
         # silently gated by the shared legacy 09:20 schedule.
         strategy_a_window = self.position_manager.is_within_strategy_a_entry_window(now)
         strategy_b_window = self.position_manager.is_within_entry_window()
-        now_ist_hhmm = now.astimezone(
-            IST
-        ).strftime("%H:%M")
-        strategy_e_window = (
-            self.config.tunables.strategy_e_entry_start
-            <= now_ist_hhmm
-            <= self.config.tunables.strategy_e_entry_end
-        )
+        strategy_e_window = self._strategy_e_entry_window_open(now)
         enabled_window = (
             strategy_a_window if self.config.tunables.trend_pullback_enabled and not self.config.tunables.volatility_breakout_enabled
             else strategy_b_window if self.config.tunables.volatility_breakout_enabled and not self.config.tunables.trend_pullback_enabled
@@ -5242,7 +5311,8 @@ class StrategyService:
             "strategy_c_shadow": self._last_strategy_c_shadow_status,
             "strategy_c_paper": self._last_strategy_c_shadow_status,
             "strategy_d_paper": self._last_strategy_d_paper_status,
-            "strategy_e_decision": self.strategy_e.last_decision.to_dict(),
+            "strategy_e_decision": self._strategy_e_analysis.to_dict(),
+            "strategy_e_execution_decision": self.strategy_e.last_decision.to_dict(),
             "startup_reconciliation": self._startup_reconciliation,
             "live_reconciliation": self._last_live_reconciliation,
             "features": features.model_dump(mode="json"),
@@ -5481,7 +5551,7 @@ class StrategyService:
                     "state": (
                         strategy_e_trade.state.value
                         if strategy_e_trade is not None
-                        else self.strategy_e.last_decision.result
+                        else self._strategy_e_analysis.result
                     ),
                     "execution_mode": (
                         strategy_e_trade.mode.value
