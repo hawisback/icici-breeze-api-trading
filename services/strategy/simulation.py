@@ -219,6 +219,28 @@ class SimulationEngine:
                         instrument_id,
                         exc,
                     )
+            if (
+                not candles
+                and hasattr(self.hist_svc, "fetch_candles_from_breeze_window")
+                and historical_source
+                in (
+                    HistoricalReplaySource.BREEZE,
+                    HistoricalReplaySource.MIXED,
+                )
+            ):
+                try:
+                    candles = await self.hist_svc.fetch_candles_from_breeze_window(
+                        instrument_id,
+                        interval="1m",
+                        start_time=start,
+                        end_time=end,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Historical sizing option fetch failed for %s: %s",
+                        instrument_id,
+                        exc,
+                    )
             allowed = (
                 {"BREEZE", "KITE", "LIVE"}
                 if historical_source == HistoricalReplaySource.MIXED
