@@ -24,6 +24,7 @@ from libs.broker_models.adapter import (
     BrokerTradeResponse,
 )
 from libs.contracts.models import Candle, Quote, utc_now
+from libs.market_time import IST, exchange_datetime_to_utc, ist_today
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         if self._nfo_instruments is None:
             self._nfo_instruments = await self._run(lambda: self._kite.instruments("NFO"))
         clean = "BANKNIFTY" if "BANK" in underlying.upper() else "NIFTY"
-        today = date.today().isoformat()
+        today = ist_today().isoformat()
         rows = [row for row in self._nfo_instruments or []
                 if str(row.get("name", "")).upper() == clean
                 and str(row.get("instrument_type", "")).upper() == "FUT"
@@ -151,7 +152,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         if self._nfo_instruments is None:
             self._nfo_instruments = await self._run(lambda: self._kite.instruments("NFO"))
         clean = "BANKNIFTY" if "BANK" in underlying.upper() else "NIFTY"
-        today = date.today().isoformat()
+        today = ist_today().isoformat()
         return sorted({str(row.get("expiry", ""))[:10] for row in self._nfo_instruments or []
                        if str(row.get("name", "")).upper() == clean
                        and str(row.get("instrument_type", "")).upper() in {"CE", "PE"}
@@ -477,7 +478,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         if not token:
             logger.warning("No Kite instrument token found for %s", instrument_id)
             return []
-        exchange_tz = ZoneInfo("Asia/Kolkata")
+        exchange_tz = IST
         start_exchange = _as_exchange_datetime(start_time, exchange_tz)
         end_exchange = _as_exchange_datetime(end_time, exchange_tz)
         rows = await self._run(
@@ -537,7 +538,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
                 None,
             )
             return int(exact["instrument_token"]) if exact else None
-        today = date.today().isoformat()
+        today = ist_today().isoformat()
         futures = [row for row in all_futures if str(row.get("expiry", ""))[:10] >= today]
         futures.sort(key=lambda row: str(row.get("expiry", ""))[:10])
         return int(futures[0]["instrument_token"]) if futures else None
@@ -560,7 +561,7 @@ def _as_exchange_datetime(
 
 def _parse_exchange_quote_datetime(value: Any) -> Optional[datetime]:
     """Parse Kite market timestamp without replacing missing data with now."""
-    ist = ZoneInfo("Asia/Kolkata")
+    ist = IST
     if isinstance(value, datetime):
         parsed = value
         if parsed.tzinfo is None:
@@ -597,12 +598,12 @@ def _failure(client_order_id: str, message: str, broker_order_id: Optional[str] 
 
 def _parse_datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return exchange_datetime_to_utc(value)
     if value:
         raw = str(value).replace("Z", "+00:00")
         try:
             parsed = datetime.fromisoformat(raw)
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            return exchange_datetime_to_utc(parsed)
         except ValueError:
             pass
     return utc_now()
