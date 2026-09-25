@@ -240,6 +240,7 @@ class StrategyTunablesConfig(BaseModel):
     strategy_e_flat_vwap_lookback_bars: int = Field(default=3, ge=1, le=10)
     strategy_e_flat_vwap_threshold_points: float = Field(default=3.0, ge=0.0, le=50.0)
     strategy_e_lots: int = Field(default=1, ge=1, le=20)
+    strategy_e_max_signal_age_seconds: float = Field(default=90.0, gt=0.0, le=300.0)
     strategy_e_entry_start: str = Field(default="09:25", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     strategy_e_entry_end: str = Field(default="14:45", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     strategy_e_forced_exit_time: str = Field(default="15:15", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
