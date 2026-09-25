@@ -42,6 +42,7 @@ class ReplayConfigurationSnapshot(BaseModel):
     warmup: dict[str, Any]
     indicator_warmup_requirements: dict[str, int]
     futures_selection_rule: str
+    execution_parity: dict[str, Any] | None = None
 
 
 class ReplayDataFingerprint(BaseModel):
@@ -119,6 +120,7 @@ def build_configuration_snapshot(
     overrides: ThresholdOverrides,
     tunables: StrategyTunablesConfig,
     session: SessionTimersConfig,
+    execution_parity: dict[str, Any] | None = None,
 ) -> ReplayConfigurationSnapshot:
     """Capture effective values without changing strategy construction."""
 
@@ -186,12 +188,13 @@ def build_configuration_snapshot(
             "Select the earliest NIFTY FUTURES contract with expiry >= replay date; "
             "replay only its selected historical source candles."
         ),
+        execution_parity=execution_parity,
     )
 
 
 def configuration_fingerprint(snapshot: ReplayConfigurationSnapshot) -> str:
     canonical = json.dumps(
-        snapshot.model_dump(mode="json"),
+        snapshot.model_dump(mode="json", exclude_none=True),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
