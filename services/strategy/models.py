@@ -995,6 +995,18 @@ class SimulatedTradeRecord(BaseModel):
     lots: int
     gross_pnl: float | None = None
     net_pnl: float | None = None
+    entry_mark: float | None = None
+    exit_mark: float | None = None
+    simulated_entry_fill: float | None = None
+    simulated_exit_fill: float | None = None
+    simulated_entry_fill_method: str | None = None
+    simulated_exit_fill_method: str | None = None
+    estimated_executable_gross_pnl: float | None = None
+    estimated_slippage_cost: float | None = None
+    estimated_transaction_costs: float | None = None
+    estimated_executable_net_pnl: float | None = None
+    contract_selection_evidence_status: str | None = None
+    contract_selection_method: str | None = None
     hold_duration_mins: float = 0.0
 
 
@@ -1042,6 +1054,17 @@ class ReplayOptionMarkMetrics(BaseModel):
     gross_mark_pnl: float | None
     estimated_transaction_costs: float | None
     net_mark_pnl: float | None
+    execution_price_basis: str = (
+        "POINT_IN_TIME_BID_ASK_WHEN_AVAILABLE_ELSE_COMPLETED_MARK_REFERENCE"
+    )
+    execution_estimated_trades: int = 0
+    execution_unavailable_trades: int = 0
+    bid_ask_supported_trades: int = 0
+    mark_fallback_fill_trades: int = 0
+    gross_estimated_executable_pnl: float | None = None
+    estimated_slippage_costs: float | None = None
+    estimated_execution_transaction_costs: float | None = None
+    net_estimated_executable_pnl: float | None = None
 
 
 class ReplayPortfolioMetrics(BaseModel):
@@ -1068,6 +1091,8 @@ class ReplayDataQuality(BaseModel):
     option_mark_available_trades: int = 0
     option_mark_unavailable_trades: int = 0
     option_mark_quality_reasons: dict[str, int] = Field(default_factory=dict)
+    contract_selection_evidence_counts: dict[str, int] = Field(default_factory=dict)
+    execution_fill_method_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class SimulationResult(BaseModel):
