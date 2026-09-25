@@ -186,7 +186,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
           Historical source: <span className="font-mono font-bold text-cyan-300">{historicalSource}</span>
         </span>
         <span>
-          Replay mode: <span className="font-mono font-bold text-indigo-300">{result?.replay_mode || replayMode}</span>
+          Replay mode: <span className="font-mono font-bold text-indigo-300">{(result?.replay_metadata?.requested_replay_mode as string | undefined) || replayMode}</span>
         </span>
       </div>
       {/* 1. Simulation Control & Session Selector */}
