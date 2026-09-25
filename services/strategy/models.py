@@ -899,13 +899,21 @@ class SimulationRequest(BaseModel):
     date: Optional[str] = None  # YYYY-MM-DD or None for today/latest
     instrument_id: str = "INST-NIFTY-INDEX"
     overrides: Optional[ThresholdOverrides] = None
-    capital: float = 500000.0
+    capital: float = Field(
+        default=500000.0,
+        gt=0,
+        description="Compatibility-only in current Day Replay; historical sizing parity is not applied yet.",
+    )
     bypass_window: bool = False
     # Kept separate from ``bypass_window`` so replay metadata uses the
     # canonical name without breaking existing API/debug callers.
     bypass_entry_window: Optional[bool] = None
     historical_source: HistoricalReplaySource = HistoricalReplaySource.BREEZE
-    max_trades_per_day: int = 5
+    max_trades_per_day: int = Field(
+        default=5,
+        ge=1,
+        description="Compatibility-only in current Day Replay; chronological daily trade gating is not applied yet.",
+    )
 
 
 class SimulationBarSnapshot(BaseModel):
