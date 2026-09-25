@@ -540,7 +540,13 @@ def test_replay_metadata_discloses_applied_and_ignored_controls():
     import asyncio
     result = asyncio.run(engine.run_day_simulation(request))
     controls = result.replay_metadata["control_application"]
+    registry_snapshot = result.replay_metadata["strategy_registry"]
 
+    assert [item["strategy"] for item in registry_snapshot] == [
+        "TREND_PULLBACK",
+        "VOLATILITY_BREAKOUT",
+    ]
+    assert registry_snapshot[0]["priority"] < registry_snapshot[1]["priority"]
     assert controls["applied_overrides"]["rvol_threshold"] == 1.4
     assert controls["applied_overrides"]["strat_b_min_confirmation"] == 4
     assert controls["applied_overrides"]["box_max_height_atr"] == 1.5
@@ -758,6 +764,20 @@ def test_default_replay_registry_orders_a_before_b_and_owns_supported_overrides(
     assert "adx_threshold" not in registry.supported_override_fields()
     assert "rvol_threshold" in registry.supported_override_fields()
     assert "strat_b_min_confirmation" in registry.supported_override_fields()
+
+    # Preserve the pre-registry orchestration distinction: Strategy B is
+    # evaluated from the global 09:20 replay window, while its own production
+    # entry gate remains 09:25.
+    assert metadata[1].evaluation_start == engine.session_config.no_new_trade_before
+    assert metadata[1].entry_start == engine.session_config.strategy_b_no_new_trade_before
+    assert metadata[1].evaluation_start == "09:20"
+    assert metadata[1].entry_start == "09:25"
+
+    snapshot = registry.metadata_snapshot()
+    assert snapshot[0]["strategy"] == "TREND_PULLBACK"
+    assert snapshot[1]["strategy"] == "VOLATILITY_BREAKOUT"
+    assert snapshot[1]["evaluation_window"]["start"] == "09:20"
+    assert snapshot[1]["entry_window"]["start"] == "09:25"
 
 
 def test_strategy_a_futures_coverage_reports_missing_entry_window_bar():
