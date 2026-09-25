@@ -1029,36 +1029,7 @@ class SimulationEngine:
             execution_parity=(
                 {
                     "mode": request.replay_mode.value,
-                    "risk": {
-                        "account_equity": effective_risk_config.account_equity,
-                        "risk_per_trade_pct_of_account": (
-                            effective_risk_config.risk_per_trade_pct_of_account
-                        ),
-                        "max_trade_capital": (
-                            effective_risk_config.max_trade_capital
-                        ),
-                        "max_lots_per_trade": (
-                            effective_risk_config.max_lots_per_trade
-                        ),
-                        "max_trades_per_day": (
-                            effective_risk_config.max_trades_per_day
-                        ),
-                        "max_trades_per_strategy_per_day": (
-                            effective_risk_config.max_trades_per_strategy_per_day
-                        ),
-                        "max_failed_trades_per_strategy": (
-                            effective_risk_config.max_failed_trades_per_strategy
-                        ),
-                        "max_concurrent_positions": (
-                            effective_risk_config.max_concurrent_positions
-                        ),
-                        "cooldown_after_loss_min": (
-                            effective_risk_config.cooldown_after_loss_min
-                        ),
-                        "max_daily_loss_r": (
-                            effective_risk_config.max_daily_loss_r
-                        ),
-                    },
+                    "risk": effective_risk_config.model_dump(mode="json"),
                     "sizing": {
                         "strategy_a_delta_proxy": (
                             self.option_selection_config.preferred_delta_min
