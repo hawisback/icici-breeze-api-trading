@@ -618,6 +618,10 @@ def test_replay_metadata_discloses_applied_and_ignored_controls():
     assert effective_risk["account_equity"] == 750000.0
     assert effective_risk["risk_per_trade_pct_of_account"] == 0.75
     assert effective_risk["max_trades_per_day"] == 2
+    authority_scope = parity_result.replay_metadata["execution_authority_scope"]
+    assert authority_scope["session_entry_windows"] == "APPLIED"
+    assert authority_scope["kill_switch"].startswith("NOT_REPLAYED_")
+    assert authority_scope["daily_loss_pct"].startswith("NOT_ENFORCED_")
     assert (
         parity_result.replay_metadata["configuration_fingerprint"]
         != result.replay_metadata["configuration_fingerprint"]
