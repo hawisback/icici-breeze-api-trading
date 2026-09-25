@@ -1455,7 +1455,27 @@ class SimulationEngine:
             signal = None
 
             if chronological_executor is not None:
-                chronological_executor.manage_completed_bar(bar, running)
+                closed_records = chronological_executor.manage_completed_bar(
+                    bar,
+                    running,
+                )
+                if contract_provider is not None:
+                    for closed_record in closed_records:
+                        await self._attach_execution_parity_economics(
+                            record=closed_record,
+                            provider=contract_provider,
+                            risk_config=effective_risk_config,
+                            selection=replay_selection_decisions.get(
+                                closed_record.replay_signal_id
+                            ),
+                            recorder=replay_manifest_recorder,
+                        )
+                        chronological_executor.apply_execution_economics(
+                            closed_record
+                        )
+                        execution_economics_applied.add(
+                            closed_record.replay_signal_id
+                        )
                 global_gate = chronological_executor.global_entry_gate(
                     bar.end_time
                 )
@@ -1510,111 +1530,190 @@ class SimulationEngine:
                                 )
                             )
                         else:
-                            sizing, sizing_error = (
-                                await self._resolve_replay_sizing(
-                                    signal=signal,
-                                    date_str=date_str,
-                                    historical_source=historical_source,
-                                    option_universe=replay_option_universe,
-                                    option_candle_cache=(
-                                        replay_sizing_option_candle_cache
-                                    ),
-                                    effective_risk_config=(
-                                        effective_risk_config
-                                    ),
+                            if contract_provider is None:
+                                raise RuntimeError(
+                                    "execution-parity contract provider missing"
                                 )
+                            selection = await contract_provider.select_contract(
+                                signal,
+                                override_premium_cap=(
+                                    overrides.max_option_premium_cap
+                                    or overrides.max_option_premium
+                                ),
                             )
-                            if sizing is None:
+                            selection_meta = (
+                                selection.to_manifest_metadata()
+                            )
+                            if (
+                                not selection.selected
+                                or selection.entry_reference_price is None
+                            ):
                                 status = (
-                                    "HISTORICAL_SIZING_EVIDENCE_UNAVAILABLE"
+                                    selection.rejection_reason
+                                    or "CONTRACT_SELECTION_FAILED"
                                 )
                                 chronological_executor.record_rejection(
                                     at=bar.end_time,
-                                    status=status,
+                                    status="CONTRACT_SELECTION_REJECTED",
                                     strategy=signal.strategy,
                                     signal_id=signal.signal_id,
-                                    details={"reason": sizing_error},
+                                    details=selection_meta,
                                 )
                                 strategy_registry.notify_execution_rejected(
                                     signal,
-                                    status,
+                                    (
+                                        "EXECUTION_REJECTED_CONTRACT_SELECTION:"
+                                        f"{status}"
+                                    ),
                                 )
-                                event = "ENTRY_REJECTED_SIZING"
-                                details = sizing_error or status
-                            elif sizing.status != "APPLIED":
-                                status = (
-                                    sizing.rejection_reason
-                                    or "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"
-                                )
-                                chronological_executor.record_rejection(
-                                    at=bar.end_time,
-                                    status="SIZING_REJECTED",
-                                    strategy=signal.strategy,
-                                    signal_id=signal.signal_id,
-                                    details={
-                                        "reason": status,
-                                        "lots": sizing.lots,
-                                        "quantity": sizing.quantity,
-                                        "method": sizing.method,
-                                    },
-                                )
-                                strategy_registry.notify_execution_rejected(
-                                    signal,
-                                    f"EXECUTION_REJECTED_SIZING:{status}",
-                                )
-                                event = "ENTRY_REJECTED_SIZING"
+                                event = "ENTRY_REJECTED_CONTRACT_SELECTION"
                                 details = status
-                            else:
-                                record = (
-                                    chronological_executor.accept_signal(
-                                        signal,
-                                        bar_context,
-                                        sizing=sizing,
-                                    )
-                                )
-                                evaluations = (
-                                    strategy_registry.refresh_diagnostics(
-                                        evaluations,
-                                        bar_context,
-                                    )
-                                )
-                                event = "ENTRY_ACCEPTED"
-                                details = (
-                                    "Qualified signal accepted into "
-                                    "chronological execution-parity replay "
-                                    f"with {sizing.lots} lot(s) / "
-                                    f"{sizing.quantity} quantity."
-                                )
-                                if record.lifecycle_status != "PENDING":
-                                    event = "ENTRY_RESOLUTION"
-                                    details = (
-                                        "Signal entry was resolved on its "
-                                        "entry candle: "
-                                        f"{record.lifecycle_status}."
-                                    )
                                 logs.append(
                                     DecisionLogEntry(
                                         id=f"SIM-{idx}",
                                         timestamp=bar.end_time,
-                                        category="SETUP",
+                                        category="CONTRACT_SELECTION",
                                         strategy=signal.strategy.value,
-                                        message=details,
-                                        details={
-                                            **signal.model_dump(mode="json"),
-                                            "sizing": {
-                                                "method": sizing.method,
-                                                "lots": sizing.lots,
-                                                "quantity": sizing.quantity,
-                                                "risk_budget": (
-                                                    sizing.risk_budget
-                                                ),
-                                                "price_basis": (
-                                                    sizing.price_basis
-                                                ),
-                                            },
-                                        },
+                                        message=status,
+                                        details=selection_meta,
                                     )
                                 )
+                            else:
+                                contract = selection.selected_contract
+                                option_delta = getattr(
+                                    contract,
+                                    "delta",
+                                    None,
+                                )
+                                option_delta_source = getattr(
+                                    contract,
+                                    "greek_source",
+                                    None,
+                                )
+                                sizing = calculate_replay_sizing(
+                                    signal=signal,
+                                    contract=contract,
+                                    entry_mark=float(
+                                        selection.entry_reference_price
+                                    ),
+                                    risk_config=effective_risk_config,
+                                    option_selection=(
+                                        self.option_selection_config
+                                    ),
+                                    session_config=self.session_config,
+                                    strategy_config=self.tunables,
+                                    account_equity=(
+                                        effective_risk_config.account_equity
+                                    ),
+                                    option_delta=option_delta,
+                                    option_delta_source=option_delta_source,
+                                    price_basis=selection.entry_price_basis,
+                                )
+                                if sizing.status != "APPLIED":
+                                    status = (
+                                        sizing.rejection_reason
+                                        or "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"
+                                    )
+                                    chronological_executor.record_rejection(
+                                        at=bar.end_time,
+                                        status="SIZING_REJECTED",
+                                        strategy=signal.strategy,
+                                        signal_id=signal.signal_id,
+                                        details={
+                                            "reason": status,
+                                            "lots": sizing.lots,
+                                            "quantity": sizing.quantity,
+                                            "method": sizing.method,
+                                            "contract_selection": (
+                                                selection_meta
+                                            ),
+                                        },
+                                    )
+                                    strategy_registry.notify_execution_rejected(
+                                        signal,
+                                        (
+                                            "EXECUTION_REJECTED_SIZING:"
+                                            f"{status}"
+                                        ),
+                                    )
+                                    event = "ENTRY_REJECTED_SIZING"
+                                    details = status
+                                else:
+                                    replay_selection_decisions[
+                                        signal.signal_id
+                                    ] = selection
+                                    record = (
+                                        chronological_executor.accept_signal(
+                                            signal,
+                                            bar_context,
+                                            sizing=sizing,
+                                            selection=selection,
+                                        )
+                                    )
+                                    evaluations = (
+                                        strategy_registry.refresh_diagnostics(
+                                            evaluations,
+                                            bar_context,
+                                        )
+                                    )
+                                    event = "ENTRY_ACCEPTED"
+                                    details = (
+                                        "Qualified signal accepted into "
+                                        "execution-parity replay using "
+                                        f"{selection.evidence_status}; "
+                                        f"{sizing.lots} lot(s) / "
+                                        f"{sizing.quantity} quantity."
+                                    )
+                                    if record.lifecycle_status != "PENDING":
+                                        event = "ENTRY_RESOLUTION"
+                                        details = (
+                                            "Signal entry was resolved on its "
+                                            "entry candle: "
+                                            f"{record.lifecycle_status}."
+                                        )
+                                        await self._attach_execution_parity_economics(
+                                            record=record,
+                                            provider=contract_provider,
+                                            risk_config=effective_risk_config,
+                                            selection=selection,
+                                            recorder=replay_manifest_recorder,
+                                        )
+                                        chronological_executor.apply_execution_economics(
+                                            record
+                                        )
+                                        execution_economics_applied.add(
+                                            record.replay_signal_id
+                                        )
+                                    logs.append(
+                                        DecisionLogEntry(
+                                            id=f"SIM-{idx}",
+                                            timestamp=bar.end_time,
+                                            category="SETUP",
+                                            strategy=signal.strategy.value,
+                                            message=details,
+                                            details={
+                                                **signal.model_dump(
+                                                    mode="json"
+                                                ),
+                                                "contract_selection": (
+                                                    selection_meta
+                                                ),
+                                                "sizing": {
+                                                    "method": sizing.method,
+                                                    "lots": sizing.lots,
+                                                    "quantity": (
+                                                        sizing.quantity
+                                                    ),
+                                                    "risk_budget": (
+                                                        sizing.risk_budget
+                                                    ),
+                                                    "price_basis": (
+                                                        sizing.price_basis
+                                                    ),
+                                                },
+                                            },
+                                        )
+                                    )
                     elif not base_allow_evaluation:
                         strategy_registry.reset_all(bar.end_time)
                         details = (
