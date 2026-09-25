@@ -477,11 +477,14 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         if not token:
             logger.warning("No Kite instrument token found for %s", instrument_id)
             return []
+        exchange_tz = ZoneInfo("Asia/Kolkata")
+        start_exchange = _as_exchange_datetime(start_time, exchange_tz)
+        end_exchange = _as_exchange_datetime(end_time, exchange_tz)
         rows = await self._run(
             lambda: self._kite.historical_data(
                 instrument_token=token,
-                from_date=start_time,
-                to_date=end_time,
+                from_date=start_exchange,
+                to_date=end_exchange,
                 interval=_kite_interval(interval),
                 oi=True,
             )
@@ -544,6 +547,15 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             asyncio.to_thread(callback),
             timeout=self.request_timeout_sec,
         )
+
+
+def _as_exchange_datetime(
+    value: datetime,
+    exchange_tz: ZoneInfo,
+) -> datetime:
+    """Convert internal UTC/aware timestamps to Kite's exchange wall clock."""
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return aware.astimezone(exchange_tz)
 
 
 def _parse_exchange_quote_datetime(value: Any) -> Optional[datetime]:

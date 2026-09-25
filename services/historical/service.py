@@ -567,7 +567,16 @@ class HistoricalService:
             not latest_matches or (expected_end is not None and latest_candle.end_time < expected_end)
         ):
             attempted = True
-            fetched = await self.fetch_candles_from_active_provider(instrument_id, interval)
+            fetched = await self.fetch_candles_from_active_provider(
+                instrument_id,
+                interval,
+            )
+            if fetched and expected_end is not None:
+                fetched = [
+                    candle
+                    for candle in fetched
+                    if candle.end_time <= expected_end
+                ]
             if fetched:
                 await self.repo.purge_simulated_candles(instrument_id, interval)
                 await self.repo.save_candles(fetched)
@@ -586,7 +595,16 @@ class HistoricalService:
             candles = [x for x in candles if x.source == expected_source]
 
         if not candles and provider_active and expected_source and source_allows_provider and allow_provider_fallback and not attempted:
-            fetched = await self.fetch_candles_from_active_provider(instrument_id, interval)
+            fetched = await self.fetch_candles_from_active_provider(
+                instrument_id,
+                interval,
+            )
+            if fetched and expected_end is not None:
+                fetched = [
+                    candle
+                    for candle in fetched
+                    if candle.end_time <= expected_end
+                ]
             if fetched:
                 await self.repo.purge_simulated_candles(instrument_id, interval)
                 await self.repo.save_candles(fetched)

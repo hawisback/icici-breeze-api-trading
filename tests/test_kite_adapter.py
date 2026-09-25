@@ -159,3 +159,45 @@ async def test_kite_exact_historical_window_can_use_explicit_old_future_from_cac
     )
     assert candles and candles[0].source == "KITE"
     assert await adapter._find_instrument_token("INST-NIFTY-FUT-2026-08-25") == 8001
+
+
+class FakeKiteHistoricalTimezone(FakeKiteHistoricalMaster):
+    def __init__(self):
+        super().__init__()
+        self.history_args = None
+
+    def historical_data(self, instrument_token, from_date, to_date, interval, oi):
+        self.history_args = {
+            "instrument_token": instrument_token,
+            "from_date": from_date,
+            "to_date": to_date,
+            "interval": interval,
+            "oi": oi,
+        }
+        return []
+
+
+@pytest.mark.asyncio
+async def test_kite_historical_window_converts_utc_to_exchange_wall_clock():
+    client = FakeKiteHistoricalTimezone()
+    adapter = ZerodhaKiteAdapter(custom_client=client)
+    adapter._access_token = "access-token"
+
+    start = datetime(2026, 9, 25, 3, 45, tzinfo=timezone.utc)
+    end = datetime(2026, 9, 25, 8, 10, tzinfo=timezone.utc)
+
+    await adapter.fetch_historical_candles_window(
+        "INST-NIFTY-FUT-2026-09-29",
+        "5m",
+        start,
+        end,
+    )
+
+    args = client.history_args
+    assert args is not None
+    assert args["from_date"].utcoffset() == timedelta(hours=5, minutes=30)
+    assert args["from_date"].hour == 9
+    assert args["from_date"].minute == 15
+    assert args["to_date"].utcoffset() == timedelta(hours=5, minutes=30)
+    assert args["to_date"].hour == 13
+    assert args["to_date"].minute == 40
