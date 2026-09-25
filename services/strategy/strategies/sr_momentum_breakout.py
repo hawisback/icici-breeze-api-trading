@@ -19,15 +19,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time
 from typing import Iterable, Optional, Sequence
-from zoneinfo import ZoneInfo
-
 from libs.contracts.models import Candle
+from libs.market_time import IST
 from services.strategy.features import FeatureEngine
 from services.strategy.models import RiskConfig, SessionTimersConfig, TradeDirection
 from services.strategy.position_manager import PositionManager
 
-
-IST = ZoneInfo("Asia/Kolkata")
 STRATEGY_D_V1_ID = "STRATEGY_D_SR_MOMENTUM_BREAKOUT_V1"
 STRATEGY_D_V2_ID = "STRATEGY_D_SR_MOMENTUM_BREAKOUT_V2_CANDIDATE"
 # Backward-compatible public alias. Production wiring must use the explicit
