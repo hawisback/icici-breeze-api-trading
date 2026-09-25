@@ -25,6 +25,7 @@ from services.strategy.models import (
     ActiveTrade,
     AutoTradingMode,
     DecisionLogEntry,
+    HistoricalReplayMode,
     HistoricalReplaySource,
     MarketFeatures,
     OptionSelectionConfig,
@@ -602,6 +603,50 @@ class SimulationEngine:
             "coverage_pct": round((len(expected) - len(missing)) / len(expected) * 100, 2) if expected else 100.0,
             "missing_15m_bar_ends_ist": [value.isoformat() for value in missing],
         }
+
+    async def _load_replay_one_minute_candles(
+        self,
+        date_str: str,
+        instrument_id: str,
+        historical_source: HistoricalReplaySource,
+    ) -> list[Candle]:
+        """Load authoritative 1-minute candles used only for intrabar ordering."""
+        if not self.hist_svc or not hasattr(self.hist_svc, "repo"):
+            return []
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        start = datetime(
+            target_date.year,
+            target_date.month,
+            target_date.day,
+            9,
+            15,
+            tzinfo=IST,
+        ).astimezone(timezone.utc)
+        end = datetime(
+            target_date.year,
+            target_date.month,
+            target_date.day,
+            15,
+            30,
+            tzinfo=IST,
+        ).astimezone(timezone.utc)
+        try:
+            candles = await self.hist_svc.repo.get_candles(
+                instrument_id,
+                "1m",
+                start_time=start,
+                end_time=end,
+                limit=1000,
+            )
+        except Exception as exc:
+            logger.warning("Historical 1m replay query error: %s", exc)
+            return []
+        allowed = (
+            {"BREEZE", "KITE", "LIVE"}
+            if historical_source == HistoricalReplaySource.MIXED
+            else {historical_source.value}
+        )
+        return [candle for candle in candles if candle.source in allowed]
 
     async def run_day_simulation(self, request: SimulationRequest) -> SimulationResult:
         """Replay actual bars without inventing historical option fills or PnL."""
