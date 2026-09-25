@@ -1,4 +1,7 @@
 {
+  "_meta": {
+    "bootstrap_from_database_if_present": true
+  },
   "mode": "PAPER",
   "auto_trade_enabled": true,
   "system_armed": false,
