@@ -21,9 +21,14 @@ from services.strategy.models import (
 class StrategyRepository:
     """Manages strategy definitions, instances, auto-trading configuration, active trades, and decision logs."""
 
-    def __init__(self, db_path: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        db_path: Optional[Path] = None,
+        config_path: Optional[Path] = None,
+    ) -> None:
         path = db_path or Path("data/strategy/strategy.db")
         self.engine = SQLiteEngine(SQLiteConfig(db_path=path, synchronous="FULL"))
+        self.config_path = config_path
 
     async def initialize(self) -> None:
         await self.engine.initialize()
@@ -313,57 +318,111 @@ class StrategyRepository:
             await conn.commit()
 
     # --- Auto Trading Config ---
-    async def get_auto_config(self) -> AutoTradingConfig:
-        async with self.engine.connect() as conn:
-            cursor = await conn.execute("SELECT config_json FROM auto_strategy_config WHERE id = 'active'")
-            row = await cursor.fetchone()
-            if not row:
-                default_cfg = AutoTradingConfig()
-                await self.save_auto_config(default_cfg)
-                return default_cfg
-            data = json.loads(row["config_json"])
-            # Migrate only known schema/default changes. The old shared ADX
-            # value is captured before Strategy A V2 conversion so Strategy B
-            # and the frozen Strategy A evaluator retain old behavior.
-            tunables = data.setdefault("tunables", {})
-            old_shared_adx = tunables.get("adx_threshold", 20.0)
-            changed = False
-            if "strategy_b_adx_threshold" not in tunables:
-                tunables["strategy_b_adx_threshold"] = old_shared_adx
-                changed = True
-            if "legacy_strategy_a_adx_threshold" not in tunables:
-                tunables["legacy_strategy_a_adx_threshold"] = old_shared_adx
-                changed = True
+    @staticmethod
+    def _migrate_auto_config_data(data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Apply historical schema/default migrations to file or DB payloads."""
+        tunables = data.setdefault("tunables", {})
+        old_shared_adx = tunables.get("adx_threshold", 20.0)
+        changed = False
+        if "strategy_b_adx_threshold" not in tunables:
+            tunables["strategy_b_adx_threshold"] = old_shared_adx
+            changed = True
+        if "legacy_strategy_a_adx_threshold" not in tunables:
+            tunables["legacy_strategy_a_adx_threshold"] = old_shared_adx
+            changed = True
 
-            # Historical V2 migration: every old value exactly equal to the
-            # shared default 20 is converted to the V2 compatibility value 22.
-            # V3 preserves that field but no longer uses it as an entry gate.
-            if data.get("strategy_a_revision", 1) < 3:
-                session = data.setdefault("session", {})
-                if tunables.get("rvol_threshold") == 1.30:
-                    tunables["rvol_threshold"] = 1.20
-                    changed = True
-                if session.get("no_new_trade_before") == "09:30":
-                    session["no_new_trade_before"] = "09:20"
-                    changed = True
-                data["strategy_a_revision"] = 3
+        if data.get("strategy_a_revision", 1) < 3:
+            session = data.setdefault("session", {})
+            if tunables.get("rvol_threshold") == 1.30:
+                tunables["rvol_threshold"] = 1.20
                 changed = True
-            if data.get("strategy_a_revision", 1) < 4:
-                if tunables.get("adx_threshold") == 20.0:
-                    tunables["adx_threshold"] = 22.0
-                    changed = True
-                data["strategy_a_revision"] = 4
+            if session.get("no_new_trade_before") == "09:30":
+                session["no_new_trade_before"] = "09:20"
                 changed = True
-            if data.get("strategy_a_revision", 1) < 5:
-                tunables.setdefault("momentum_adx_min_delta_2bars", -2.0)
-                tunables.setdefault("momentum_ema20_slope_min_atr", 0.0)
-                tunables.setdefault("momentum_ema20_slope_max_atr", 0.15)
-                data["strategy_a_revision"] = 5
+            data["strategy_a_revision"] = 3
+            changed = True
+        if data.get("strategy_a_revision", 1) < 4:
+            if tunables.get("adx_threshold") == 20.0:
+                tunables["adx_threshold"] = 22.0
                 changed = True
+            data["strategy_a_revision"] = 4
+            changed = True
+        if data.get("strategy_a_revision", 1) < 5:
+            tunables.setdefault("momentum_adx_min_delta_2bars", -2.0)
+            tunables.setdefault("momentum_ema20_slope_min_atr", 0.0)
+            tunables.setdefault("momentum_ema20_slope_max_atr", 0.15)
+            data["strategy_a_revision"] = 5
+            changed = True
+        return data, changed
+
+    def _read_config_file(self) -> AutoTradingConfig | None:
+        if self.config_path is None or not self.config_path.exists():
+            return None
+        try:
+            payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Unable to read trading config file {self.config_path}: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"Trading config file {self.config_path} must contain a JSON object"
+            )
+        payload, _ = self._migrate_auto_config_data(payload)
+        # Arming is intentionally process-local. A file can choose mode but
+        # can never grant live order authority after restart.
+        payload["system_armed"] = False
+        try:
+            return AutoTradingConfig.model_validate(payload)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Invalid trading config file {self.config_path}: {exc}"
+            ) from exc
+
+    def _write_config_file(self, config: AutoTradingConfig) -> None:
+        if self.config_path is None:
+            return
+        payload = config.model_dump(mode="json")
+        payload["system_armed"] = False
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.config_path.with_suffix(
+            self.config_path.suffix + ".tmp"
+        )
+        temp_path.write_text(
+            json.dumps(payload, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(self.config_path)
+
+    async def get_auto_config(self) -> AutoTradingConfig:
+        # The JSON file is the canonical non-secret operator configuration
+        # whenever configured. SQLite remains the runtime/audit copy.
+        file_config = self._read_config_file()
+        if file_config is not None:
+            await self.save_auto_config(file_config, persist_file=False)
+            return file_config
+
+        async with self.engine.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT config_json FROM auto_strategy_config WHERE id = 'active'"
+            )
+            row = await cursor.fetchone()
+
+        if row:
+            data = json.loads(row["config_json"])
+            data, changed = self._migrate_auto_config_data(data)
+            config = AutoTradingConfig.model_validate(data)
+            # Existing SQLite installations are migrated into the visible
+            # file on first startup after this feature is deployed.
+            if self.config_path is not None:
+                self._write_config_file(config)
             if changed:
-                await conn.execute("UPDATE auto_strategy_config SET config_json = ? WHERE id = 'active'", (json.dumps(data),))
-                await conn.commit()
-            return AutoTradingConfig.model_validate(data)
+                await self.save_auto_config(config, persist_file=False)
+            return config
+
+        default_cfg = AutoTradingConfig()
+        await self.save_auto_config(default_cfg)
+        return default_cfg
 
     async def save_runtime(self, state: dict, strategy: str = "trend_pullback") -> None:
         async with self.engine.connect() as conn:
@@ -375,7 +434,12 @@ class StrategyRepository:
             row = await (await conn.execute("SELECT state_json FROM strategy_runtime WHERE id = ?", (strategy,))).fetchone()
             return json.loads(row["state_json"]) if row else {}
 
-    async def save_auto_config(self, config: AutoTradingConfig) -> None:
+    async def save_auto_config(
+        self,
+        config: AutoTradingConfig,
+        *,
+        persist_file: bool = True,
+    ) -> None:
         async with self.engine.connect() as conn:
             await conn.execute(
                 """
@@ -385,6 +449,8 @@ class StrategyRepository:
                 (config.model_dump_json(), utc_now().isoformat()),
             )
             await conn.commit()
+        if persist_file:
+            self._write_config_file(config)
 
     async def save_option_chain_snapshot(self, snapshot: dict[str, Any]) -> None:
         """Persist passive selector-input capture without affecting execution."""
