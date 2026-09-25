@@ -33,6 +33,7 @@ class StrategyName(str, Enum):
     VOLATILITY_BREAKOUT = "VOLATILITY_BREAKOUT"
     DI_CONTINUATION = "DI_CONTINUATION"
     SR_MOMENTUM_BREAKOUT = "SR_MOMENTUM_BREAKOUT"
+    PIVOT_VWAP_SCALP = "PIVOT_VWAP_SCALP"
 
 
 class StrategyState(str, Enum):
@@ -217,6 +218,31 @@ class StrategyTunablesConfig(BaseModel):
         default=True,
         description="Enable Strategy D S&R Momentum signal evaluation and execution",
     )
+    pivot_vwap_scalp_enabled: bool = Field(
+        default=True,
+        description="Enable Strategy E Pivot/VWAP 5-minute scalp evaluation and execution",
+    )
+    strategy_e_countertrend_enabled: bool = Field(default=True)
+    strategy_e_swing_lookback: int = Field(default=2, ge=1, le=5)
+    strategy_e_volume_lookback: int = Field(default=20, ge=5, le=100)
+    strategy_e_rvol_confirmation: float = Field(default=1.20, ge=0.5, le=5.0)
+    strategy_e_sr_lookback_bars: int = Field(default=30, ge=10, le=100)
+    strategy_e_sr_buffer_points: float = Field(default=2.0, ge=0.0, le=25.0)
+    strategy_e_counter_zone_points: float = Field(default=6.0, ge=0.0, le=50.0)
+    strategy_e_stop_buffer_points: float = Field(default=2.0, ge=0.0, le=25.0)
+    strategy_e_max_stop_points: float = Field(default=30.0, gt=0.0, le=200.0)
+    strategy_e_trend_target_points: float = Field(default=20.0, gt=0.0, le=200.0)
+    strategy_e_counter_target_points: float = Field(default=12.0, gt=0.0, le=100.0)
+    strategy_e_min_reward_risk: float = Field(default=1.0, gt=0.0, le=5.0)
+    strategy_e_min_room_to_level_points: float = Field(default=6.0, ge=0.0, le=100.0)
+    strategy_e_chop_lookback_bars: int = Field(default=6, ge=4, le=20)
+    strategy_e_chop_cross_threshold: int = Field(default=2, ge=1, le=10)
+    strategy_e_flat_vwap_lookback_bars: int = Field(default=3, ge=1, le=10)
+    strategy_e_flat_vwap_threshold_points: float = Field(default=3.0, ge=0.0, le=50.0)
+    strategy_e_lots: int = Field(default=1, ge=1, le=20)
+    strategy_e_entry_start: str = Field(default="09:25", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    strategy_e_entry_end: str = Field(default="14:45", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    strategy_e_forced_exit_time: str = Field(default="15:15", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     # Strategy A authoritative defaults.
     ema_fast_period: int = Field(default=20, ge=1, description="Fast EMA period on completed 15m bars")
     ema_slow_period: int = Field(default=50, ge=2, description="Slow EMA period on completed 15m bars")
@@ -303,6 +329,14 @@ class StrategyTunablesConfig(BaseModel):
             raise ValueError("momentum EMA20 slope band must satisfy min < max")
         if not (self.entry_session_start < self.entry_session_end < self.forced_exit_time):
             raise ValueError("Strategy A session must satisfy start < end < forced exit")
+        if not (
+            self.strategy_e_entry_start
+            < self.strategy_e_entry_end
+            < self.strategy_e_forced_exit_time
+        ):
+            raise ValueError("Strategy E session must satisfy start < end < forced exit")
+        if self.strategy_e_counter_target_points > self.strategy_e_trend_target_points:
+            raise ValueError("Strategy E countertrend target must not exceed trend target")
         return self
 
 
@@ -599,6 +633,9 @@ class ActiveTrade(BaseModel):
     entry_spot_price: float
     initial_structural_stop: float
     initial_r_points: float
+    strategy_signal_type: Optional[str] = None
+    strategy_target_price: Optional[float] = None
+    strategy_entry_context: dict[str, Any] = Field(default_factory=dict)
     pullback_swing_low: Optional[float] = None
     pullback_swing_high: Optional[float] = None
     box_high: Optional[float] = None
