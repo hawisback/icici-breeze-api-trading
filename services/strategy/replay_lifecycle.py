@@ -8,7 +8,7 @@ to decide when an intrabar event is chronologically usable.
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from statistics import median
