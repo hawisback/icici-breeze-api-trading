@@ -29,6 +29,7 @@ from libs.broker_models.adapter import (
 )
 from libs.config.settings import get_settings
 from libs.contracts.models import utc_now
+from libs.market_time import IST
 from services.broker_gateway.application.execution_guard import ExecutionGuard
 from services.broker_gateway.application.services.broker_service import BrokerApplicationService
 from services.broker_gateway.domain.enums import (
@@ -232,8 +233,7 @@ class IciciBreezeAdapter(BrokerAdapter):
         if not self.is_active:
             return None
         clean = "CNXBAN" if "BANK" in underlying.upper() else "NIFTY"
-        ist = timezone(timedelta(hours=5, minutes=30))
-        today = datetime.now(ist).date()
+        today = datetime.now(IST).date()
         key = f"{clean}:{today.isoformat()}"
         cached = self._resolved_future_cache.get(key)
         if cached and cached[0] == today:
