@@ -552,11 +552,11 @@ def test_nifty_monthly_expiry_fallback_respects_2025_weekday_transition():
     assert InstrumentService._monthly_expiry(2025, 9) == date(2025, 9, 30)
 
 
-def test_strategy_a_replay_adx_override_changes_effective_v2_config():
+def test_strategy_a_replay_ignores_legacy_hard_adx_override():
     engine = SimulationEngine()
     overrides = ThresholdOverrides(adx_threshold=17.0)
     config = engine._strategy_a_config_for_replay(overrides)
-    assert config.adx_threshold == 17.0
+    assert config.adx_threshold == engine.tunables.adx_threshold
     assert config.confirmation_min_body_ratio == engine.tunables.confirmation_min_body_ratio
 
 
