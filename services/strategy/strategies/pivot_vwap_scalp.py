@@ -69,6 +69,39 @@ class PivotVwapScalpStrategy:
         except (TypeError, ValueError):
             self.last_processed_candle = None
 
+        raw_decision = state.get("last_decision")
+        if isinstance(raw_decision, dict):
+            result = str(raw_decision.get("result") or "NO_TRADE")
+            reason = str(raw_decision.get("reason") or "NOT_EVALUATED")
+            metrics = {
+                key: value
+                for key, value in raw_decision.items()
+                if key not in {"result", "reason", "signal_id"}
+            }
+            # Signals are never resurrected from runtime state. Execution must
+            # be regenerated/deduped from authoritative completed candles.
+            self.last_decision = StrategyEDecision(
+                result,
+                reason,
+                metrics,
+                None,
+            )
+
+    def analyze_snapshot(
+        self,
+        futures_5m: Sequence[Candle],
+        *,
+        as_of: datetime,
+        expected_completed_end: datetime | None = None,
+    ) -> StrategyEDecision:
+        """Analyze completed history without mutating execution/dedupe state."""
+        probe = PivotVwapScalpStrategy(self.config)
+        return probe.evaluate(
+            futures_5m,
+            as_of=as_of,
+            expected_completed_end=expected_completed_end,
+        )
+
     def reset(self) -> None:
         self.last_processed_candle = None
         self.last_decision = StrategyEDecision(
