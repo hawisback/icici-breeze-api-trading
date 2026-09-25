@@ -8,7 +8,9 @@ import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
+
+from libs.market_time import IST
 
 from services.strategy.models import (
     ActiveTrade,
@@ -26,7 +28,6 @@ from services.strategy.models import (
 from services.strategy.reason_codes import OPTION_EMERGENCY_STOP
 
 logger = logging.getLogger(__name__)
-IST = timezone(timedelta(hours=5, minutes=30))
 
 
 @dataclass(frozen=True)
