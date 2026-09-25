@@ -294,12 +294,12 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               />
             </div>
 
-            {/* Strategy A V3 confirmation contract */}
+            {/* Strategy A R5 confirmation contract */}
             <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-2.5">
-              <div className="text-xs text-slate-300 font-medium">Strategy A V3 Confirmation</div>
+              <div className="text-xs text-slate-300 font-medium">Strategy A R5 Confirmation</div>
               <div className="text-[10px] text-slate-400 mt-1">
                 Fixed contract: body ≥ 40%, directional close location ≤ 30%, range ≤ 1.50 ATR.
-                The legacy confirmation-score slider does not apply to Strategy A V3.
+                The legacy confirmation-score slider does not apply to Strategy A R5.
               </div>
             </div>
 
