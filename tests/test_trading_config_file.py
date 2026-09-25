@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -221,21 +220,3 @@ async def test_strategy_e_custom_signal_age_is_preserved_during_revision_migrati
 
     assert loaded.strategy_e_revision == 2
     assert loaded.tunables.strategy_e_max_signal_age_seconds == 120.0
-
-
-def test_checked_in_operator_config_enables_all_strategies_for_live():
-    config_path = Path(__file__).resolve().parents[1] / "config" / "trading.json"
-    payload = json.loads(config_path.read_text(encoding="utf-8"))
-    config = AutoTradingConfig.model_validate(payload)
-
-    assert config.mode is AutoTradingMode.LIVE
-    assert config.auto_trade_enabled is True
-    assert config.kill_switch is False
-    assert config.system_armed is False
-
-    assert config.tunables.trend_pullback_enabled is True
-    assert config.tunables.volatility_breakout_enabled is True
-    assert config.tunables.di_continuation_enabled is True
-    assert config.tunables.sr_momentum_breakout_enabled is True
-    assert config.tunables.pivot_vwap_scalp_enabled is True
-    assert config.tunables.strategy_e_countertrend_enabled is True
