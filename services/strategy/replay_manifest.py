@@ -154,6 +154,12 @@ class ReplayManifestRecord(BaseModel):
     sizing_option_loss_per_lot: float | None = None
     sizing_delta_proxy: float | None = None
     sizing_delta_source: str | None = None
+    sizing_contract_instrument_id: str | None = None
+    sizing_contract_symbol: str | None = None
+    sizing_contract_expiry: str | None = None
+    sizing_contract_strike: float | None = None
+    sizing_contract_lot_size: int | None = None
+    sizing_entry_mark: float | None = None
     replay_lots: int | None = None
     replay_quantity: int | None = None
     sizing_rejection_reason: str | None = None
@@ -307,6 +313,12 @@ class ReplayManifestRecorder:
         option_loss_per_lot: float | None,
         delta_proxy: float | None,
         delta_source: str | None,
+        contract_instrument_id: str | None,
+        contract_symbol: str | None,
+        contract_expiry: str | None,
+        contract_strike: float | None,
+        contract_lot_size: int | None,
+        entry_mark: float | None,
         lots: int | None,
         quantity: int | None,
         rejection_reason: str | None = None,
@@ -321,6 +333,12 @@ class ReplayManifestRecorder:
         record.sizing_option_loss_per_lot = option_loss_per_lot
         record.sizing_delta_proxy = delta_proxy
         record.sizing_delta_source = delta_source
+        record.sizing_contract_instrument_id = contract_instrument_id
+        record.sizing_contract_symbol = contract_symbol
+        record.sizing_contract_expiry = contract_expiry
+        record.sizing_contract_strike = contract_strike
+        record.sizing_contract_lot_size = contract_lot_size
+        record.sizing_entry_mark = entry_mark
         record.replay_lots = lots
         record.replay_quantity = quantity
         record.sizing_rejection_reason = rejection_reason
