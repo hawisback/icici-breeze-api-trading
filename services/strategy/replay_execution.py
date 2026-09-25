@@ -147,6 +147,17 @@ class ChronologicalReplayExecutor:
         elif record.lifecycle_status == "RESOLVED":
             self.state.daily_entries += 1
             self.state.completed_positions += 1
+            exit_time = record.exit_timestamp or context.bar.end_time
+            self.registry.notify_exit(
+                StrategyName(record.strategy_id),
+                self._record_direction(record),
+                exit_time,
+            )
+            if (
+                record.realized_r is not None
+                and float(record.realized_r) < 0
+            ):
+                self.state.last_loss_exit_time = exit_time
         return record
 
     def finalize_session(self) -> None:
