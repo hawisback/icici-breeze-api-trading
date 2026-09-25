@@ -14,6 +14,7 @@ from statistics import mean
 from typing import Any, Sequence
 
 from libs.contracts.models import Candle
+from libs.market_time import IST
 from services.strategy.models import (
     OptionType,
     StrategyName,
@@ -21,9 +22,6 @@ from services.strategy.models import (
     StrategyTunablesConfig,
     TradeDirection,
 )
-
-
-IST = timezone(timedelta(hours=5, minutes=30))
 
 
 @dataclass(frozen=True)
