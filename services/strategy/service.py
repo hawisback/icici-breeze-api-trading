@@ -1177,6 +1177,10 @@ class StrategyService:
         bypass = getattr(self._active_overrides, "bypass_entry_window", False)
         _, _, futures_candles = self._market_snapshot
         strategy_a_data_ready = self.config.tunables.trend_pullback_enabled and bool(futures_candles)
+        strategy_e_data_ready = (
+            self.config.tunables.pivot_vwap_scalp_enabled
+            and bool(self._strategy_e_futures_5m)
+        )
         candidate_entry_available = bool(
             (
                 self.config.tunables.di_continuation_enabled
@@ -1192,6 +1196,7 @@ class StrategyService:
         )
         if not (
             strategy_a_data_ready
+            or strategy_e_data_ready
             or features.data_ready
             or features.breakout_data_ready
             or candidate_entry_available
@@ -1289,6 +1294,13 @@ class StrategyService:
                 False,
             )
         )
+        strategy_e_entry_data_ready = bool(
+            execution_feed_healthy
+            and self._market_data_status.get(
+                "strategy_e_signal_data_fresh",
+                False,
+            )
+        )
 
         signal: Optional[StrategySignal] = None
         entry_data_blockers: dict[str, list[str]] = {}
@@ -1364,6 +1376,40 @@ class StrategyService:
                 as_of=now,
             )
 
+        if not signal and self.config.tunables.pivot_vwap_scalp_enabled:
+            if strategy_e_entry_data_ready:
+                decision_e = self.strategy_e.evaluate(
+                    self._strategy_e_futures_5m,
+                    as_of=now,
+                )
+                if decision_e.reason != "NO_NEW_COMPLETED_5M_BAR":
+                    await self._log_decision(
+                        category="STRATEGY_E_EVALUATION",
+                        strategy=StrategyName.PIVOT_VWAP_SCALP.value,
+                        message=(
+                            f"Signal: {decision_e.result} · "
+                            f"{decision_e.reason}"
+                        ),
+                        details=decision_e.to_dict(),
+                    )
+                signal = decision_e.signal
+                await self._save_runtime()
+            else:
+                reasons = list(
+                    self._market_data_status.get(
+                        "execution_feed_reasons",
+                        [],
+                    )
+                )
+                if not self._market_data_status.get(
+                    "strategy_e_signal_data_fresh",
+                    False,
+                ):
+                    reasons.append("STALE_OR_MISSING_FUTURES_5M_CANDLE")
+                entry_data_blockers["PIVOT_VWAP_SCALP"] = list(
+                    dict.fromkeys(reasons)
+                )
+
         candidate_signal_already_persisted = False
         if signal and self._is_candidate_execution_strategy(signal.strategy):
             prior_signals = await self.repo.list_strategy_signals(limit=1000)
@@ -1389,6 +1435,10 @@ class StrategyService:
                     self.config.tunables.volatility_breakout_enabled
                     and not strategy_b_entry_data_ready
                 )
+                or (
+                    self.config.tunables.pivot_vwap_scalp_enabled
+                    and not strategy_e_entry_data_ready
+                )
             )
             return {
                 "status": (
@@ -1399,6 +1449,15 @@ class StrategyService:
                 "entry_data_blockers": entry_data_blockers,
                 "features": features.model_dump(mode="json"),
             }
+
+        if (
+            self._is_strategy_e(signal.strategy)
+            and any(
+                trade.strategy == StrategyName.PIVOT_VWAP_SCALP
+                for trade in self._active_trades_cache
+            )
+        ):
+            return {"status": "STRATEGY_E_POSITION_ALREADY_OPEN"}
 
         if sum(t.strategy == signal.strategy for t in today_trades) >= self.config.risk.max_trades_per_strategy_per_day:
             return {"status":"STRATEGY_DAILY_TRADE_LIMIT_REACHED"}
@@ -1496,6 +1555,7 @@ class StrategyService:
                 StrategyName.TREND_PULLBACK,
                 StrategyName.DI_CONTINUATION,
                 StrategyName.SR_MOMENTUM_BREAKOUT,
+                StrategyName.PIVOT_VWAP_SCALP,
             }
             and chain.get("source") not in ("BREEZE", "KITE", "LIVE")
         ):
@@ -1509,6 +1569,7 @@ class StrategyService:
             StrategyName.VOLATILITY_BREAKOUT,
             StrategyName.DI_CONTINUATION,
             StrategyName.SR_MOMENTUM_BREAKOUT,
+            StrategyName.PIVOT_VWAP_SCALP,
         }:
             try:
                 await self._capture_option_chain_snapshot(
@@ -1585,6 +1646,9 @@ class StrategyService:
                 account_equity=self.config.risk.account_equity,
                 lot_size=selected_contract.lot_size,
             )
+            if self._is_strategy_e(signal.strategy):
+                lots = min(lots, self.config.tunables.strategy_e_lots)
+                quantity = lots * selected_contract.lot_size
 
         if lots < 1:
             if is_strategy_a:
@@ -1651,8 +1715,21 @@ class StrategyService:
             entry_spot_price=underlying_entry,
             initial_structural_stop=signal.structural_stop,
             initial_r_points=signal.r_points,
-            pullback_swing_low=signal.features_snapshot.get("pullback_low"),
-            pullback_swing_high=signal.features_snapshot.get("pullback_high"),
+            strategy_signal_type=signal.features_snapshot.get("signal_type"),
+            strategy_target_price=signal.features_snapshot.get("target_price"),
+            strategy_entry_context=(
+                signal.features_snapshot
+                if self._is_strategy_e(signal.strategy)
+                else {}
+            ),
+            pullback_swing_low=(
+                signal.features_snapshot.get("pullback_low")
+                or signal.features_snapshot.get("swing_low")
+            ),
+            pullback_swing_high=(
+                signal.features_snapshot.get("pullback_high")
+                or signal.features_snapshot.get("swing_high")
+            ),
             box_high=signal.features_snapshot.get("box_high"),
             box_low=signal.features_snapshot.get("box_low"),
             atr_at_lock=signal.features_snapshot.get("atr_at_lock"),
