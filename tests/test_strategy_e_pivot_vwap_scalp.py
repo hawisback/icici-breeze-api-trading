@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from libs.contracts.models import Candle
 from services.strategy.execution_policy import resolve_strategy_execution_policy
+from services.historical.service import HistoricalService
 from services.strategy.models import (
     ActiveTrade,
     AutoTradingMode,
@@ -96,9 +97,19 @@ def test_strategy_e_defaults_disabled_but_live_policy_is_promoted():
     assert config.strategy_e_max_signal_age_seconds == 180.0
 
     service = StrategyService(oms_service=Mock(), repository=Mock())
-    assert service._strategy_e_signal_data_fresh(150.0) is True
-    assert service._strategy_e_signal_data_fresh(180.0) is True
-    assert service._strategy_e_signal_data_fresh(180.001) is False
+    now = datetime(2026, 9, 25, 13, 30, tzinfo=IST)
+    assert service._strategy_e_signal_data_fresh(
+        now - timedelta(seconds=150),
+        now=now,
+    ) is True
+    assert service._strategy_e_signal_data_fresh(
+        now - timedelta(seconds=180),
+        now=now,
+    ) is True
+    assert service._strategy_e_signal_data_fresh(
+        now - timedelta(seconds=180.001),
+        now=now,
+    ) is False
 
     policy = resolve_strategy_execution_policy(
         StrategyName.PIVOT_VWAP_SCALP,
@@ -109,6 +120,34 @@ def test_strategy_e_defaults_disabled_but_live_policy_is_promoted():
     assert policy.live_trading_allowed is True
     assert policy.force_entry_allowed is False
     assert policy.promotion_state == "LIVE_PROMOTED"
+
+
+def test_strategy_e_freshness_uses_provider_safe_completed_boundary():
+    hist = HistoricalService()
+    service = StrategyService(
+        oms_service=Mock(),
+        repository=Mock(),
+        historical_service=hist,
+    )
+    now = datetime(2026, 9, 25, 13, 40, 30, tzinfo=IST)
+    expected = hist.expected_completed_end("5m", now)
+
+    assert expected == datetime(2026, 9, 25, 13, 35, tzinfo=IST).astimezone(
+        timezone.utc
+    )
+    assert (now.astimezone(timezone.utc) - expected).total_seconds() > 180
+    assert service._strategy_e_signal_data_fresh(
+        expected,
+        now=now,
+        expected_completed_end=expected,
+    ) is True
+
+    one_bar_behind = expected - timedelta(minutes=5)
+    assert service._strategy_e_signal_data_fresh(
+        one_bar_behind,
+        now=now,
+        expected_completed_end=expected,
+    ) is False
 
 
 def test_strategy_e_rejects_counter_target_larger_than_trend_target():
@@ -138,12 +177,13 @@ def test_strategy_e_emits_trend_long_and_deduplicates_completed_bar():
         ),
     ]
     bars = [*_previous_session(), *current]
-    # The historical service intentionally allows up to 120 seconds for a
-    # just-closed bar to become authoritative. Strategy E must still accept
-    # that safely completed bar inside its 180-second window.
+    # Around the next 5-minute boundary, the provider-safe latest completed
+    # bar can be more than 180 seconds old in wall-clock terms. If it matches
+    # the expected completed boundary it must still be evaluated.
     decision = strategy.evaluate(
         bars,
-        as_of=current[-1].end_time + timedelta(seconds=150),
+        as_of=current[-1].end_time + timedelta(seconds=330),
+        expected_completed_end=current[-1].end_time,
     )
 
     assert decision.result == "TREND_LONG"
@@ -160,7 +200,8 @@ def test_strategy_e_emits_trend_long_and_deduplicates_completed_bar():
 
     duplicate = strategy.evaluate(
         bars,
-        as_of=current[-1].end_time + timedelta(seconds=151),
+        as_of=current[-1].end_time + timedelta(seconds=331),
+        expected_completed_end=current[-1].end_time,
     )
     assert duplicate.signal is None
     assert duplicate.reason == "NO_NEW_COMPLETED_5M_BAR"

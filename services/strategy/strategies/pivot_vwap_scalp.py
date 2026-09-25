@@ -255,6 +255,7 @@ class PivotVwapScalpStrategy:
         futures_5m: Sequence[Candle],
         *,
         as_of: datetime,
+        expected_completed_end: datetime | None = None,
     ) -> StrategyEDecision:
         candles = self._valid_completed(futures_5m, as_of)
         cfg = self.config
@@ -280,12 +281,30 @@ class PivotVwapScalpStrategy:
             0.0,
             (as_of - latest.end_time).total_seconds(),
         )
-        if signal_age_seconds > cfg.strategy_e_max_signal_age_seconds:
+        if expected_completed_end is not None:
+            expected_completed_end = expected_completed_end.astimezone(timezone.utc)
+            latest_end = latest.end_time.astimezone(timezone.utc)
+            if latest_end < expected_completed_end:
+                return self._no_trade(
+                    "STALE_COMPLETED_5M_BAR",
+                    {
+                        "signal_age_seconds": round(signal_age_seconds, 3),
+                        "latest_completed_end": latest_end.isoformat(),
+                        "expected_completed_end": expected_completed_end.isoformat(),
+                        "completed_bar_lag_seconds": round(
+                            (expected_completed_end - latest_end).total_seconds(),
+                            3,
+                        ),
+                        "freshness_basis": "EXPECTED_COMPLETED_BOUNDARY",
+                    },
+                )
+        elif signal_age_seconds > cfg.strategy_e_max_signal_age_seconds:
             return self._no_trade(
                 "STALE_COMPLETED_5M_BAR",
                 {
                     "signal_age_seconds": round(signal_age_seconds, 3),
                     "max_signal_age_seconds": cfg.strategy_e_max_signal_age_seconds,
+                    "freshness_basis": "ABSOLUTE_AGE_FALLBACK",
                 },
             )
 
