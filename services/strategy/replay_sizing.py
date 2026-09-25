@@ -70,6 +70,9 @@ def calculate_replay_sizing(
     session_config: SessionTimersConfig,
     strategy_config: StrategyTunablesConfig,
     account_equity: float,
+    option_delta: float | None = None,
+    option_delta_source: str | None = None,
+    price_basis: str | None = None,
 ) -> ReplaySizingDecision:
     """Calculate replay lots using the same production sizing implementations.
 
@@ -87,7 +90,10 @@ def calculate_replay_sizing(
     )
     expiry = str(getattr(contract, "expiry", "") or "")
     strike = float(getattr(contract, "strike", 0.0) or 0.0)
-    price_basis = "HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARK"
+    price_basis = (
+        price_basis
+        or "HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARK"
+    )
     budget = account_equity * risk_config.risk_per_trade_pct_of_account / 100.0
 
     if lot_size <= 0 or entry_mark <= 0:
@@ -136,13 +142,21 @@ def calculate_replay_sizing(
                 entry_mark=entry_mark,
             )
 
-        delta_proxy = round(
-            (
-                option_selection.preferred_delta_min
-                + option_selection.preferred_delta_max
+        use_actual_delta = (
+            option_delta is not None
+            and 0 < abs(float(option_delta)) <= 1
+        )
+        delta_proxy = (
+            float(option_delta)
+            if use_actual_delta
+            else round(
+                (
+                    option_selection.preferred_delta_min
+                    + option_selection.preferred_delta_max
+                )
+                / 2.0,
+                4,
             )
-            / 2.0,
-            4,
         )
         sizing = UnderlyingRiskSizer(risk_config).size(
             underlying_entry=float(underlying_entry),
@@ -155,14 +169,22 @@ def calculate_replay_sizing(
         status = "APPLIED" if sizing.lots >= 1 else "REJECTED"
         return ReplaySizingDecision(
             status=status,
-            method="UNDERLYING_R_WITH_CONFIGURED_DELTA_PROXY",
+            method=(
+                "UNDERLYING_R_WITH_POINT_IN_TIME_DELTA"
+                if use_actual_delta
+                else "UNDERLYING_R_WITH_CONFIGURED_DELTA_PROXY"
+            ),
             price_basis=price_basis,
             account_equity=account_equity,
             risk_per_trade_pct=risk_config.risk_per_trade_pct_of_account,
             risk_budget=sizing.risk_budget,
             option_loss_per_lot=sizing.option_loss_per_lot,
             delta_proxy=delta_proxy,
-            delta_source="CONFIGURED_PREFERRED_DELTA_MIDPOINT",
+            delta_source=(
+                str(option_delta_source or "POINT_IN_TIME_CHAIN_SNAPSHOT")
+                if use_actual_delta
+                else "CONFIGURED_PREFERRED_DELTA_MIDPOINT"
+            ),
             lots=sizing.lots,
             quantity=sizing.quantity,
             rejection_reason=sizing.rejection_reason,
