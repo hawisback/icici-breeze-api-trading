@@ -568,7 +568,10 @@ class StrategyService:
         # silently restore authority to create new LIVE exposure.
         if self.config.system_armed:
             self.config.system_armed = False
-            await self.repo.save_auto_config(self.config)
+            await self.repo.save_auto_config(
+                self.config,
+                persist_file=False,
+            )
         self._sync_subcomponents()
         try:
             await self.strategy_c_shadow.initialize()
@@ -988,7 +991,10 @@ class StrategyService:
 
     async def arm_system(self, armed: bool) -> AutoTradingConfig:
         self.config.system_armed = armed
-        await self.repo.save_auto_config(self.config)
+        await self.repo.save_auto_config(
+            self.config,
+            persist_file=False,
+        )
         await self._log_decision(
             category="SECURITY",
             strategy="SYSTEM",
@@ -1133,7 +1139,10 @@ class StrategyService:
             )
         ):
             self.config.system_armed = False
-            await self.repo.save_auto_config(self.config)
+            await self.repo.save_auto_config(
+                self.config,
+                persist_file=False,
+            )
             self._reset_setups(now)
             await self._save_runtime()
             reasons = list(
@@ -1943,7 +1952,10 @@ class StrategyService:
                 )
             if self.config.system_armed:
                 self.config.system_armed = False
-                await self.repo.save_auto_config(self.config)
+                await self.repo.save_auto_config(
+                    self.config,
+                    persist_file=False,
+                )
             await self._log_decision(
                 "SECURITY",
                 trade.strategy.value,
