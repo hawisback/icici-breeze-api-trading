@@ -219,7 +219,7 @@ class StrategyTunablesConfig(BaseModel):
         description="Enable Strategy D S&R Momentum signal evaluation and execution",
     )
     pivot_vwap_scalp_enabled: bool = Field(
-        default=True,
+        default=False,
         description="Enable Strategy E Pivot/VWAP 5-minute scalp evaluation and execution",
     )
     strategy_e_countertrend_enabled: bool = Field(default=True)
