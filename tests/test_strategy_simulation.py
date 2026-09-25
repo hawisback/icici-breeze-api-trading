@@ -21,6 +21,7 @@ from services.strategy.models import (
 from services.strategy.replay_lifecycle import (
     _historical_close_at,
     attach_historical_option_prices,
+    build_lifecycle_report,
     build_simulated_trade_records,
     summarize_simulated_pnl,
 )
@@ -112,11 +113,36 @@ def test_simulation_result_trades_are_the_canonical_summary_rows():
         total_pnl=0.0,
         net_pnl=0.0,
         total_realized_r=0.0,
-        max_drawdown_pnl=0.0,
-        profit_factor=0.0,
+        max_drawdown_pnl=None,
+        profit_factor=None,
+        max_drawdown_r=0.0,
         trades=build_simulated_trade_records([]),
     )
     assert empty_result.total_trades == 0 == len(empty_result.trades)
+
+
+def test_lifecycle_report_exposes_realized_r_profit_factor_and_drawdown():
+    records = [
+        _resolved_manifest(1, 1.0),
+        _resolved_manifest(2, -0.5),
+        _resolved_manifest(3, -0.75),
+        _resolved_manifest(4, 0.5),
+    ]
+
+    report = build_lifecycle_report(records, {"resolver": {}})
+
+    assert report["total_r"] == 0.25
+    assert report["profit_factor"] == 1.2
+    assert report["max_drawdown_r"] == -1.25
+
+
+def test_lifecycle_profit_factor_is_not_fabricated_without_losses():
+    records = [_resolved_manifest(1, 0.5), _resolved_manifest(2, 1.0)]
+
+    report = build_lifecycle_report(records, {"resolver": {}})
+
+    assert report["profit_factor"] is None
+    assert report["max_drawdown_r"] == 0.0
 
 
 def test_historical_option_candles_populate_net_pnl():
