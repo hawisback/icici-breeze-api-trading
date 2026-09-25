@@ -3989,7 +3989,8 @@ class StrategyService:
             ),
             "strategy_e_signal_data_fresh": bool(
                 futures_5m_age is not None
-                and futures_5m_age <= 600.0
+                and futures_5m_age
+                <= self.config.tunables.strategy_e_max_signal_age_seconds
             ),
         })
 
