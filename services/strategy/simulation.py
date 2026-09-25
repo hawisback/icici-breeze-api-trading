@@ -12,7 +12,6 @@ from typing import Any, Optional
 
 from libs.contracts.models import Candle, utc_now
 from libs.market_time import IST
-from services.strategy.contract_selector import ContractSelector
 from services.strategy.features import FeatureEngine
 from services.strategy.futures_signal import (
     FuturesContractResolver,
@@ -51,7 +50,6 @@ from services.strategy.replay_metadata import (
     build_data_fingerprint,
     configuration_fingerprint,
 )
-from services.strategy.position_manager import PositionManager
 from services.strategy.replay_contract_selection import (
     HistoricalContractSelectionProvider,
     ReplayContractSelectionDecision,
