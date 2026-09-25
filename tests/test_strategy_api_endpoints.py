@@ -93,7 +93,11 @@ async def test_strategy_api_endpoints():
         assert "gates" in diag
         assert "strategies" in diag
         assert "active_overrides" in diag
-        assert len(diag["strategies"]) == 8  # CALL/PUT diagnostics for Strategies A, B, C and D
+        assert len(diag["strategies"]) == 9  # A-D CALL/PUT plus Strategy E latest setup
+        assert any(
+            row["strategy"] == "PIVOT_VWAP_SCALP"
+            for row in diag["strategies"]
+        )
 
         # 10. GET & POST /api/v1/strategies/overrides
         res = await client.get("/api/v1/strategies/overrides")
