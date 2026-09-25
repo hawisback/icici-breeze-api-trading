@@ -30,6 +30,11 @@ from services.strategy.models import (
     OptionSelectionConfig,
     OptionType,
     RiskConfig,
+    ReplayDataQuality,
+    ReplayOptionMarkMetrics,
+    ReplayPortfolioMetrics,
+    ReplaySignalMetrics,
+    ReplayUnderlyingLifecycleMetrics,
     SessionTimersConfig,
     SimulatedTradeRecord,
     SimulationBarSnapshot,
@@ -1052,7 +1057,7 @@ class SimulationEngine:
             attach_historical_option_prices,
             build_lifecycle_report,
             build_simulated_trade_records,
-            summarize_simulated_pnl,
+            summarize_historical_option_marks,
         )
         lifecycle_replayer = HistoricalPositionManagerReplayer(
             risk_config=self.risk_config,
@@ -1085,13 +1090,15 @@ class SimulationEngine:
         )
         replay_metadata["historical_option_data"] = option_data
         trades = build_simulated_trade_records(replay_manifest_recorder.records())
-        total_pnl, net_pnl = summarize_simulated_pnl(trades)
+        option_mark_summary = summarize_historical_option_marks(
+            replay_manifest_recorder.records()
+        )
         resolved_records = [
             record for record in replay_manifest_recorder.records()
             if record.lifecycle_status == "RESOLVED" and record.realized_r is not None
         ]
-        option_complete = bool(resolved_records) and all(
-            record.option_data_status == "AVAILABLE" for record in resolved_records
+        option_complete = bool(resolved_records) and bool(
+            option_mark_summary["all_resolved_trades_priced"]
         )
         data_quality_reasons = {"STALE_FUTURES_DATA", "FUTURES_DATA_UNAVAILABLE", "INCOMPLETE_FUTURES_DATA"}
         blocker_counts = Counter(
@@ -1212,16 +1219,55 @@ class SimulationEngine:
             )
         lifecycle_report["manifest_validation"] = replay_manifest_recorder.validate_complete(expected_count=len(replay_manifest_recorder.records()))
         replay_lifecycle = lifecycle_report
+
+        signal_metrics = ReplaySignalMetrics(
+            total_bars_evaluated=len(session),
+            qualified_signals=lifecycle_report["total_signals"],
+            ambiguous_signals=lifecycle_report["ambiguous"],
+            unresolved_signals=lifecycle_report["unresolved"],
+        )
+        underlying_lifecycle_metrics = ReplayUnderlyingLifecycleMetrics(
+            resolved_trades=lifecycle_report["resolved"],
+            winning_trades=lifecycle_report["winners"],
+            losing_trades=lifecycle_report["losers"],
+            breakeven_trades=lifecycle_report["breakeven"],
+            win_rate_pct=lifecycle_report["win_rate_pct"],
+            total_realized_r=lifecycle_report["total_r"],
+            average_realized_r=lifecycle_report["average_r"],
+            median_realized_r=lifecycle_report["median_r"],
+            average_winner_r=lifecycle_report["average_winner_r"],
+            average_loser_r=lifecycle_report["average_loser_r"],
+            profit_factor_r=lifecycle_report["profit_factor"],
+            max_drawdown_r=lifecycle_report["max_drawdown_r"],
+            max_consecutive_losses=lifecycle_report["max_consecutive_losses"],
+        )
+        option_mark_metrics = ReplayOptionMarkMetrics(
+            priced_trades=option_mark_summary["priced_trades"],
+            unpriced_trades=option_mark_summary["unpriced_trades"],
+            all_resolved_trades_priced=option_mark_summary["all_resolved_trades_priced"],
+            gross_mark_pnl=option_mark_summary["gross_mark_pnl"],
+            estimated_transaction_costs=option_mark_summary["estimated_transaction_costs"],
+            net_mark_pnl=option_mark_summary["net_mark_pnl"],
+        )
+        portfolio_metrics = ReplayPortfolioMetrics()
+        data_quality = ReplayDataQuality(
+            historical_source=historical_source.value,
+            missing_data=sorted(set(missing_data)),
+            underlying_issue_counts=dict(data_quality_counts.most_common()),
+            option_mark_available_trades=option_mark_summary["priced_trades"],
+            option_mark_unavailable_trades=option_mark_summary["unpriced_trades"],
+            option_mark_quality_reasons=option_mark_summary["quality_reasons"],
+        )
+
         return SimulationResult(
             replay_mode="POSITION_MANAGER_REPLAY",
             limitation=limitation,
-            session_date=date_str, total_bars_evaluated=len(session), total_trades=lifecycle_report["resolved"],
-            winning_trades=lifecycle_report["winners"], losing_trades=lifecycle_report["losers"],
-            win_rate_pct=lifecycle_report["win_rate_pct"], total_pnl=total_pnl, net_pnl=net_pnl,
-            total_realized_r=lifecycle_report["total_r"],
-            max_drawdown_pnl=None,
-            profit_factor=lifecycle_report["profit_factor"],
-            max_drawdown_r=lifecycle_report["max_drawdown_r"],
+            session_date=date_str,
+            signal_metrics=signal_metrics,
+            underlying_lifecycle_metrics=underlying_lifecycle_metrics,
+            option_mark_metrics=option_mark_metrics,
+            portfolio_metrics=portfolio_metrics,
+            data_quality=data_quality,
             trades=trades, timeline=timeline, decision_logs=logs,
             replay_trigger_diagnostics=replay_trigger_diagnostics,
             replay_manifests=[record.model_dump(mode="json") for record in replay_manifest_recorder.records()],
