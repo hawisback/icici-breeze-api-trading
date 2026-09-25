@@ -142,6 +142,22 @@ class ReplayManifestRecord(BaseModel):
     mfe_r: float | None = None
     mae_r: float | None = None
     ambiguous: bool = False
+
+    # Execution-parity sizing. These fields describe the quantity decision
+    # made from historical evidence; they never imply an executable fill.
+    sizing_status: str = "NOT_APPLIED"
+    sizing_method: str | None = None
+    sizing_price_basis: str | None = None
+    sizing_account_equity: float | None = None
+    sizing_risk_per_trade_pct: float | None = None
+    sizing_risk_budget: float | None = None
+    sizing_option_loss_per_lot: float | None = None
+    sizing_delta_proxy: float | None = None
+    sizing_delta_source: str | None = None
+    replay_lots: int | None = None
+    replay_quantity: int | None = None
+    sizing_rejection_reason: str | None = None
+
     option_data_status: str = "UNAVAILABLE"
     option_contract_instrument_id: str | None = None
     option_contract_symbol: str | None = None
@@ -276,6 +292,38 @@ class ReplayManifestRecorder:
             )
         )
         self._records[signal.signal_id] = record
+        return record
+
+    def set_sizing_result(
+        self,
+        signal_id: str,
+        *,
+        status: str,
+        method: str | None,
+        price_basis: str | None,
+        account_equity: float | None,
+        risk_per_trade_pct: float | None,
+        risk_budget: float | None,
+        option_loss_per_lot: float | None,
+        delta_proxy: float | None,
+        delta_source: str | None,
+        lots: int | None,
+        quantity: int | None,
+        rejection_reason: str | None = None,
+    ) -> ReplayManifestRecord:
+        record = self._records[signal_id]
+        record.sizing_status = status
+        record.sizing_method = method
+        record.sizing_price_basis = price_basis
+        record.sizing_account_equity = account_equity
+        record.sizing_risk_per_trade_pct = risk_per_trade_pct
+        record.sizing_risk_budget = risk_budget
+        record.sizing_option_loss_per_lot = option_loss_per_lot
+        record.sizing_delta_proxy = delta_proxy
+        record.sizing_delta_source = delta_source
+        record.replay_lots = lots
+        record.replay_quantity = quantity
+        record.sizing_rejection_reason = rejection_reason
         return record
 
     def set_lifecycle_result(
