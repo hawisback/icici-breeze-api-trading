@@ -52,6 +52,14 @@ from services.strategy.replay_metadata import (
     configuration_fingerprint,
 )
 from services.strategy.position_manager import PositionManager
+from services.strategy.replay_execution import ChronologicalReplayExecutor
+from services.strategy.replay_lifecycle import (
+    HistoricalPositionManagerReplayer,
+    attach_historical_option_prices,
+    build_lifecycle_report,
+    build_simulated_trade_records,
+    summarize_historical_option_marks,
+)
 from services.strategy.replay_manifest import ReplayManifestRecorder
 from services.strategy.replay_registry import (
     ReplayBarContext,
@@ -806,6 +814,7 @@ class SimulationEngine:
             "configuration_fingerprint": config_hash,
             "data_fingerprint": data_snapshot.model_dump(mode="json"),
             "historical_source": historical_source.value,
+            "requested_replay_mode": request.replay_mode.value,
             "bypass_entry_window": bypass_entry_window,
             "missing_data": sorted(set(missing_data)),
             "strategy_registry": strategy_registry.metadata_snapshot(),
@@ -830,6 +839,11 @@ class SimulationEngine:
                 },
             },
         }
+        one_minute_candles = await self._load_replay_one_minute_candles(
+            date_str,
+            request.instrument_id,
+            historical_source,
+        )
         timeline, logs = [], []
         replay_trigger_diagnostics: list[dict[str, Any]] = []
         replay_diagnostic_keys: set[tuple[str, str, str]] = set()
@@ -844,6 +858,26 @@ class SimulationEngine:
             recorder=replay_manifest_recorder,
         )
         strategy_registry.prepare_session(replay_session)
+        lifecycle_replayer = HistoricalPositionManagerReplayer(
+            risk_config=self.risk_config,
+            session_config=self.session_config,
+            strategy_config=self.tunables,
+            recorder=replay_manifest_recorder,
+            instrument_id=request.instrument_id,
+            warmup_candles=warmup,
+            session_candles=session,
+            futures_candles=futures_history,
+            one_minute_candles=one_minute_candles,
+        )
+        chronological_executor = (
+            ChronologicalReplayExecutor(
+                lifecycle_replayer=lifecycle_replayer,
+                registry=strategy_registry,
+                risk_config=self.risk_config,
+            )
+            if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+            else None
+        )
 
         running = list(warmup)
         for idx, bar in enumerate(session):
