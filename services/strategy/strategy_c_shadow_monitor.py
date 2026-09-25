@@ -18,7 +18,7 @@ import logging
 from typing import Any
 
 from libs.contracts.models import generate_id
-from services.historical.strategy_a_data_audit import IST
+from libs.market_time import IST
 from services.historical.strategy_c_candidate_manifest import (
     CANDIDATE_ID,
     _spec_fingerprint,

@@ -5,11 +5,12 @@ Uses Decimal for all price and strike measurements.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
+from libs.contracts.models import utc_now
 from services.broker_gateway.domain.enums import FeedInterval, OptionRight
 from services.broker_gateway.domain.models.instrument import BrokerInstrumentRef
 
@@ -30,7 +31,7 @@ class Quote:
     close: Optional[Decimal] = None
     volume: Optional[int] = None
     open_interest: Optional[int] = None
-    timestamp: datetime = datetime.now()
+    timestamp: datetime = field(default_factory=utc_now)
 
 
 @dataclass(frozen=True, slots=True)

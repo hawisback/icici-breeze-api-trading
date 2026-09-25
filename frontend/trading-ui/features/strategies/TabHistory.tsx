@@ -4,6 +4,7 @@ import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDownRight, ArrowUpRight, BarChart2, CheckCircle2, History, RefreshCw, TrendingUp } from "lucide-react";
 import { AutoTradeData, StrategyStatusData, fetchStrategyTrades } from "../../lib/api";
+import { formatISTTime } from "../../lib/time";
 
 interface TabHistoryProps {
   status?: StrategyStatusData | null;
@@ -189,10 +190,7 @@ export const TabHistory: React.FC<TabHistoryProps> = ({ status }) => {
                   return (
                     <tr key={trade.trade_id} className="hover:bg-slate-850/40 transition-colors">
                       <td className="py-2.5 px-4 text-slate-400">
-                        {new Date(trade.entry_time).toLocaleTimeString([], {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
+                        {formatISTTime(trade.entry_time)}
                       </td>
 
                       <td className="py-2.5 px-4 font-sans font-semibold text-slate-200">
@@ -296,7 +294,7 @@ export const TabHistory: React.FC<TabHistoryProps> = ({ status }) => {
               <tbody className="divide-y divide-slate-800/60">
                 {candidateRows.map((row) => (
                   <tr key={row.key} className="hover:bg-slate-850/40">
-                    <td className="py-2.5 px-4 text-slate-400 font-mono">{row.time ? new Date(row.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "--"}</td>
+                    <td className="py-2.5 px-4 text-slate-400 font-mono">{row.time ? formatISTTime(row.time) : "--"}</td>
                     <td className="py-2.5 px-4 font-bold text-violet-300">Strategy {row.strategy}</td>
                     <td className="py-2.5 px-4"><span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${row.optionType === "CALL" ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"}`}>{row.optionType}</span></td>
                     <td className="py-2.5 px-4 text-slate-200 font-mono">{row.contract}</td>

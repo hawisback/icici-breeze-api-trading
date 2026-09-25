@@ -8,6 +8,7 @@ import logging
 from typing import Optional
 
 from libs.contracts.models import Candle, Quote
+from libs.market_time import IST
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class CandleBuilder:
         if previous and quote.timestamp <= previous.timestamp:
             return None
         same_feed = previous is not None and previous.source == quote.source
-        same_day = previous is not None and previous.timestamp.astimezone(timezone(timedelta(hours=5, minutes=30))).date() == quote.timestamp.astimezone(timezone(timedelta(hours=5, minutes=30))).date()
+        same_day = previous is not None and previous.timestamp.astimezone(IST).date() == quote.timestamp.astimezone(IST).date()
         volume_delta = max(0, quote.volume - previous.volume) if same_feed and same_day else 0
         self._last_quotes[inst_id] = quote
         if active and active["source"] != quote.source:

@@ -15,6 +15,7 @@ from statistics import median
 from typing import Any
 
 from libs.contracts.models import Candle
+from libs.market_time import IST
 from services.strategy.features import FeatureEngine
 from services.strategy.models import (
     ActiveTrade,
@@ -38,8 +39,6 @@ from services.strategy.replay_manifest import (
     ReplayStateSnapshot,
 )
 from services.strategy.replay_stops import evaluate_replay_candle
-
-IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _direction(value: str) -> TradeDirection:

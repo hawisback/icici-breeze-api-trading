@@ -9,14 +9,13 @@ import logging
 import math
 import random
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from libs.contracts.models import Candle, Quote, utc_now
+from libs.market_time import IST
 from libs.events.bus import EventBus, EventEnvelope, Topics, get_event_bus
 from services.market_data.candle_builder import CandleBuilder
 
 logger = logging.getLogger(__name__)
-IST = ZoneInfo("Asia/Kolkata")
 
 
 def _parse_exchange_quote_timestamp(value: Any) -> Optional[datetime]:

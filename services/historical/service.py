@@ -10,6 +10,7 @@ from time import monotonic
 from typing import Any, Optional
 
 from libs.contracts.models import Candle, utc_now
+from libs.market_time import IST
 from services.historical.repository import HistoricalRepository
 
 logger = logging.getLogger(__name__)
@@ -84,8 +85,7 @@ class HistoricalService:
 
     @staticmethod
     def _expected_completed_end(interval: str, now: datetime) -> Optional[datetime]:
-        ist = timezone(timedelta(hours=5, minutes=30))
-        local = now.astimezone(ist)
+        local = now.astimezone(IST)
         step = 15 if interval == "15m" else 5 if interval == "5m" else 1
         session_open = local.replace(hour=9, minute=15, second=0, microsecond=0)
         session_close = local.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -93,7 +93,7 @@ class HistoricalService:
             day = local.date() - timedelta(days=1)
             while day.weekday() >= 5:
                 day -= timedelta(days=1)
-            return datetime.combine(day, datetime.min.time(), tzinfo=ist).replace(hour=15, minute=30).astimezone(timezone.utc)
+            return datetime.combine(day, datetime.min.time(), tzinfo=IST).replace(hour=15, minute=30).astimezone(timezone.utc)
         if local >= session_close:
             return session_close.astimezone(timezone.utc)
         elapsed = int((local - session_open).total_seconds() // 60)
@@ -290,8 +290,8 @@ class HistoricalService:
         # Breeze's historical API uses exchange (IST) wall-clock values in
         # ISO-shaped strings. Sending UTC dates/times shifts the requested
         # session and is especially visible on intraday charts.
-        ist_tz = timezone(timedelta(hours=5, minutes=30))
-        now_ist = now.astimezone(ist_tz)
+        ist_tz = IST
+        now_ist = now.astimezone(IST)
         from_day = (now_ist - timedelta(days=days_back)).date()
         from_dt = datetime.combine(from_day, datetime.min.time(), tzinfo=ist_tz).replace(
             hour=9, minute=15
@@ -415,7 +415,7 @@ class HistoricalService:
 
         stock_code, exchange, product_type = self._map_instrument_to_breeze(instrument_id)
         breeze_interval, step_min = self._map_interval_to_breeze(interval)
-        ist_tz = timezone(timedelta(hours=5, minutes=30))
+        ist_tz = IST
 
         start_ist = start_time.astimezone(ist_tz)
         end_ist = end_time.astimezone(ist_tz)

@@ -11,6 +11,7 @@ import math
 from typing import Any, Optional
 
 from libs.contracts.models import Candle, utc_now
+from libs.market_time import IST
 from services.strategy.contract_selector import ContractSelector
 from services.strategy.features import FeatureEngine
 from services.strategy.futures_signal import (
@@ -50,8 +51,6 @@ from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 
 logger = logging.getLogger(__name__)
-IST = timezone(timedelta(hours=5, minutes=30))
-
 
 def _record_strategy_b_manifest(
     recorder: ReplayManifestRecorder,

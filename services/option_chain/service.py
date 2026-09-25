@@ -11,6 +11,7 @@ from typing import Any, Optional
 import asyncio
 
 from libs.contracts.models import OptionRight
+from libs.market_time import ist_today
 from services.instrument.service import InstrumentService
 from services.market_data.service import MarketDataService
 
@@ -55,7 +56,7 @@ class OptionChainService:
             default_expiries = ["2026-09-22", "2026-09-29", "2026-10-06", "2026-10-13", "2026-10-27", "2026-11-23"]
 
         expiries = await self.inst_svc.get_expiries(clean_underlying)
-        all_expiries = sorted(e for e in (expiries or []) if e >= date.today().isoformat())
+        all_expiries = sorted(e for e in (expiries or []) if e >= ist_today().isoformat())
         reference_provider = (
             str(
                 getattr(
