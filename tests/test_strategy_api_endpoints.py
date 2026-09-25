@@ -154,7 +154,11 @@ async def test_strategy_api_endpoints():
         res = await client.get("/api/v1/strategies/triggers/diagnostics")
         assert res.status_code == 200
         diag = res.json()
-        assert len(diag["strategies"]) == 8
+        assert len(diag["strategies"]) == 9
+        assert any(
+            row["strategy"] == "PIVOT_VWAP_SCALP"
+            for row in diag["strategies"]
+        )
         for s in diag["strategies"]:
             assert len(s["conditions"]) >= 0
             for c in s["conditions"]:
