@@ -30,6 +30,9 @@ from services.strategy.risk_gates import (
     check_position_capacity,
     check_strategy_trade_limits,
 )
+from services.strategy.replay_contract_selection import (
+    ReplayContractSelectionDecision,
+)
 from services.strategy.replay_sizing import ReplaySizingDecision
 
 
@@ -43,6 +46,8 @@ class ChronologicalExecutionState:
     failed_entries_by_strategy: dict[str, int] = field(default_factory=dict)
     completed_positions: int = 0
     realized_r_total: float = 0.0
+    realized_net_pnl_total: float = 0.0
+    realized_net_pnl_complete: bool = True
     entry_evaluation_suppressed_cycles: int = 0
     entry_gate_block_counts: dict[str, int] = field(default_factory=dict)
     last_loss_exit_time: datetime | None = None
@@ -161,7 +166,11 @@ class ChronologicalReplayExecutor:
             check_daily_loss_limits(
                 self.risk_config,
                 realized_r_total=self.state.realized_r_total,
-                net_pnl_total=None,
+                net_pnl_total=(
+                    self.state.realized_net_pnl_total
+                    if self.state.realized_net_pnl_complete
+                    else None
+                ),
                 account_equity=self.risk_config.account_equity,
             ),
             check_daily_trade_limit(
@@ -232,6 +241,7 @@ class ChronologicalReplayExecutor:
         context: ReplayBarContext,
         *,
         sizing: ReplaySizingDecision,
+        selection: ReplayContractSelectionDecision | None = None,
     ) -> ReplayManifestRecord:
         """Confirm one production-priority signal and make it active."""
         global_gate = self.global_entry_gate(context.bar.end_time)
@@ -250,6 +260,24 @@ class ChronologicalReplayExecutor:
             )
 
         record = self.registry.confirm_entry(signal, context)
+        if selection is not None:
+            selection_meta = selection.to_manifest_metadata()
+            context.session.recorder.set_contract_selection_result(
+                record.replay_signal_id,
+                desired_method=selection_meta["desired_method"],
+                actual_method=selection_meta["actual_method"],
+                evidence_status=selection_meta["evidence_status"],
+                production_rules_applied=selection_meta[
+                    "production_rules_applied"
+                ],
+                snapshot_id=selection_meta["snapshot_id"],
+                snapshot_timestamp=selection.snapshot_timestamp,
+                unsupported_evidence=selection_meta[
+                    "unsupported_evidence"
+                ],
+                rejection_reason=selection_meta["rejection_reason"],
+                provenance=selection_meta["provenance"],
+            )
         context.session.recorder.set_sizing_result(
             record.replay_signal_id,
             **sizing.to_manifest_kwargs(),
@@ -298,6 +326,17 @@ class ChronologicalReplayExecutor:
                 )
         return record
 
+    def apply_execution_economics(
+        self,
+        record: ReplayManifestRecord,
+    ) -> None:
+        if record.lifecycle_status != "RESOLVED":
+            return
+        if record.simulated_net_pnl is None:
+            self.state.realized_net_pnl_complete = False
+            return
+        self.state.realized_net_pnl_total += float(record.simulated_net_pnl)
+
     def finalize_session(self) -> None:
         self.state.positions_open_at_session_end = len(
             self.state.active_positions
@@ -319,6 +358,14 @@ class ChronologicalReplayExecutor:
             ),
             "completed_positions": self.state.completed_positions,
             "realized_r_total": round(self.state.realized_r_total, 4),
+            "realized_net_pnl_total": (
+                round(self.state.realized_net_pnl_total, 2)
+                if self.state.realized_net_pnl_complete
+                else None
+            ),
+            "realized_net_pnl_complete": (
+                self.state.realized_net_pnl_complete
+            ),
             "active_positions_at_end": self.state.positions_open_at_session_end,
             "entry_evaluation_suppressed_cycles": (
                 self.state.entry_evaluation_suppressed_cycles
@@ -340,7 +387,9 @@ class ChronologicalReplayExecutor:
             "chronology_block_reason": self.state.chronology_block_reason,
             "max_concurrent_positions": self.risk_config.max_concurrent_positions,
             "risk_gate_basis": {
-                "daily_loss": "UNDERLYING_REALIZED_R",
+                "daily_loss": (
+                    "UNDERLYING_REALIZED_R_AND_ESTIMATED_EXECUTABLE_NET_PNL"
+                ),
                 "loss_cooldown": "UNDERLYING_REALIZED_R_NEGATIVE_EXIT",
                 "daily_trade_count": "ACCEPTED_REPLAY_ENTRIES",
                 "strategy_failure_count": "UNDERLYING_REALIZED_R_NEGATIVE_EXIT",
