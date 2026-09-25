@@ -4863,6 +4863,13 @@ class StrategyService:
             ),
             None,
         )
+        strategy_e_trade = next(
+            (
+                trade for trade in active_trades
+                if trade.strategy == StrategyName.PIVOT_VWAP_SCALP
+            ),
+            None,
+        )
         c_candidate = (
             self._last_strategy_c_shadow_status.get("active_candidate_trade")
             or {}
@@ -4888,6 +4895,9 @@ class StrategyService:
         )
         policy_d = self._execution_policy_for_strategy(
             StrategyName.SR_MOMENTUM_BREAKOUT
+        )
+        policy_e = self._execution_policy_for_strategy(
+            StrategyName.PIVOT_VWAP_SCALP
         )
 
         gateway = (
@@ -4934,6 +4944,7 @@ class StrategyService:
             "strategy_c_shadow": self._last_strategy_c_shadow_status,
             "strategy_c_paper": self._last_strategy_c_shadow_status,
             "strategy_d_paper": self._last_strategy_d_paper_status,
+            "strategy_e_decision": self.strategy_e.last_decision.to_dict(),
             "startup_reconciliation": self._startup_reconciliation,
             "live_reconciliation": self._last_live_reconciliation,
             "features": features.model_dump(mode="json"),
@@ -5166,6 +5177,67 @@ class StrategyService:
                         else d_paper.get("signal_id")
                     ),
                 },
+                "pivot_vwap_scalp": {
+                    "enabled": self.config.tunables.pivot_vwap_scalp_enabled,
+                    "label": "Strategy E · Pivot/VWAP Scalp",
+                    "state": (
+                        strategy_e_trade.state.value
+                        if strategy_e_trade is not None
+                        else self.strategy_e.last_decision.result
+                    ),
+                    "execution_mode": (
+                        strategy_e_trade.mode.value
+                        if strategy_e_trade is not None
+                        else policy_e.call_mode.value
+                    ),
+                    "effective_call_mode": policy_e.call_mode.value,
+                    "effective_put_mode": policy_e.put_mode.value,
+                    "promotion_state": policy_e.promotion_state,
+                    "live_block_reason": policy_e.live_block_reason,
+                    "force_entry_allowed": policy_e.force_entry_allowed,
+                    "live_trading_allowed": policy_e.live_trading_allowed,
+                    "current_r": (
+                        strategy_e_trade.current_r
+                        if strategy_e_trade is not None
+                        else None
+                    ),
+                    "current_trailing_stop": (
+                        strategy_e_trade.current_trailing_stop
+                        if strategy_e_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_status": (
+                        strategy_e_trade.protective_stop_status
+                        if strategy_e_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_trigger": (
+                        strategy_e_trade.protective_stop_trigger_price
+                        if strategy_e_trade is not None
+                        else None
+                    ),
+                    "broker_protective_stop_limit": (
+                        strategy_e_trade.protective_stop_limit_price
+                        if strategy_e_trade is not None
+                        else None
+                    ),
+                    "active_trade_id": (
+                        strategy_e_trade.trade_id
+                        if strategy_e_trade is not None
+                        else None
+                    ),
+                    "signal_type": (
+                        strategy_e_trade.strategy_signal_type
+                        if strategy_e_trade is not None
+                        else self.strategy_e.last_decision.result
+                    ),
+                    "target_price": (
+                        strategy_e_trade.strategy_target_price
+                        if strategy_e_trade is not None
+                        else self.strategy_e.last_decision.metrics.get("target")
+                    ),
+                    "last_reason": self.strategy_e.last_decision.reason,
+                },
             },
             "trigger_diagnostics": diagnostics.model_dump(mode="json"),
             "active_overrides": self._active_overrides.model_dump(mode="json"),
@@ -5290,6 +5362,8 @@ class StrategyService:
             "STRATEGY_C": StrategyName.DI_CONTINUATION,
             StrategyName.SR_MOMENTUM_BREAKOUT.value: StrategyName.SR_MOMENTUM_BREAKOUT,
             "STRATEGY_D": StrategyName.SR_MOMENTUM_BREAKOUT,
+            StrategyName.PIVOT_VWAP_SCALP.value: StrategyName.PIVOT_VWAP_SCALP,
+            "STRATEGY_E": StrategyName.PIVOT_VWAP_SCALP,
         }
         policy_strategy = strategy_aliases.get(strategy_tag)
         if trading_mode == TradingMode.SHADOW:
@@ -5312,6 +5386,7 @@ class StrategyService:
                 StrategyName.VOLATILITY_BREAKOUT,
                 StrategyName.DI_CONTINUATION,
                 StrategyName.SR_MOMENTUM_BREAKOUT,
+                StrategyName.PIVOT_VWAP_SCALP,
             }:
                 return signal
         if trading_mode == TradingMode.LIVE and not self._live_orders_enabled():
