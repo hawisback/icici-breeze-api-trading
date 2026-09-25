@@ -465,10 +465,20 @@ def test_simulation_engine_missing_data():
     assert result.timeline == []
     assert result.replay_mode == "POSITION_MANAGER_REPLAY"
 
-    # Summary performance metrics
+    # Canonical sections remain explicit even when no market data is available.
+    assert result.signal_metrics.total_bars_evaluated == 0
+    assert result.signal_metrics.price_basis == "COMPLETED_UNDERLYING_SPOT_FUTURES_CANDLES"
+    assert result.underlying_lifecycle_metrics.resolved_trades == 0
+    assert result.option_mark_metrics.gross_mark_pnl == 0.0
+    assert result.portfolio_metrics.available is False
+    assert result.data_quality.missing_data == ["futures", "spot"]
+
+    # Compatibility fields are projections of canonical metrics.
     assert result.win_rate_pct >= 0.0
     assert result.total_trades == len(result.trades)
-    assert result.winning_trades + result.losing_trades == result.total_trades
+    assert result.total_trades == result.underlying_lifecycle_metrics.resolved_trades
+    assert result.total_pnl == result.option_mark_metrics.gross_mark_pnl
+    assert result.net_pnl == result.option_mark_metrics.net_mark_pnl
 
 
 def test_simulation_overrides_cannot_bypass_missing_real_data():
@@ -580,12 +590,35 @@ async def test_simulation_rest_endpoints():
         assert res_sim.status_code == 200
         sim_json = res_sim.json()
 
+        assert "signal_metrics" in sim_json
+        assert "underlying_lifecycle_metrics" in sim_json
+        assert "option_mark_metrics" in sim_json
+        assert "portfolio_metrics" in sim_json
+        assert "data_quality" in sim_json
+        assert sim_json["signal_metrics"]["price_basis"]
+        assert sim_json["signal_metrics"]["calculation_basis"]
+        assert sim_json["underlying_lifecycle_metrics"]["price_basis"]
+        assert sim_json["underlying_lifecycle_metrics"]["calculation_basis"]
+        assert sim_json["option_mark_metrics"]["price_basis"]
+        assert sim_json["option_mark_metrics"]["calculation_basis"]
+        assert sim_json["portfolio_metrics"]["price_basis"]
+        assert sim_json["portfolio_metrics"]["calculation_basis"]
+        assert sim_json["data_quality"]["price_basis"]
+        assert sim_json["data_quality"]["calculation_basis"]
+
+        # Legacy fields remain available and are derived from canonical sections.
         assert "total_bars_evaluated" in sim_json
         assert "total_trades" in sim_json
         assert "win_rate_pct" in sim_json
         assert "timeline" in sim_json
         assert "trades" in sim_json
         assert sim_json["replay_mode"] in {"SIGNALS_ONLY", "POSITION_MANAGER_REPLAY"}
+        assert sim_json["total_bars_evaluated"] == sim_json["signal_metrics"]["total_bars_evaluated"]
+        assert sim_json["total_trades"] == sim_json["underlying_lifecycle_metrics"]["resolved_trades"]
+        assert sim_json["win_rate_pct"] == sim_json["underlying_lifecycle_metrics"]["win_rate_pct"]
+        assert sim_json["total_pnl"] == sim_json["option_mark_metrics"]["gross_mark_pnl"]
+        assert sim_json["net_pnl"] == sim_json["option_mark_metrics"]["net_mark_pnl"]
+        assert sim_json["max_drawdown_pnl"] == sim_json["portfolio_metrics"]["max_drawdown_pnl"]
         assert sim_json["total_trades"] == len(sim_json["trades"])
 
     await container.strategy_svc.stop()
