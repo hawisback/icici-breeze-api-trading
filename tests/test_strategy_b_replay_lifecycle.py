@@ -243,6 +243,12 @@ def test_chronological_executor_does_not_scan_future_and_blocks_capacity():
     )
     assert record.lifecycle_status == "RESOLVED"
     assert executor.state.completed_positions == 1
+    assert executor.state.daily_entries_by_strategy == {
+        StrategyName.VOLATILITY_BREAKOUT.value: 1
+    }
+    assert executor.state.realized_r_total < 0
+    assert executor.state.last_loss_exit_time == record.exit_timestamp
+    assert executor.state.loss_cooldown_until is not None
     assert executor.can_accept_entry() is True
 
 
