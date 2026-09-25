@@ -9,6 +9,7 @@ import logging
 from typing import Optional
 
 from libs.contracts.models import Instrument, OptionRight
+from libs.market_time import ist_today
 from services.instrument.repository import InstrumentRepository
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class InstrumentService:
             return
 
         logger.info("Seeding default NIFTY & BANKNIFTY option contracts into instruments.db")
-        today = date.today()
+        today = ist_today()
         expiry_date = self._monthly_expiry(today.year, today.month)
         if expiry_date < today:
             year = today.year + (1 if today.month == 12 else 0)
@@ -123,7 +124,7 @@ class InstrumentService:
 
     async def ensure_current_nifty_futures(self, today: Optional[date] = None) -> list[Instrument]:
         """Ensure near and next NIFTY monthly futures exist in persistent metadata."""
-        today = today or date.today()
+        today = today or ist_today()
         near = self._monthly_expiry(today.year, today.month)
         if near < today:
             year = today.year + (1 if today.month == 12 else 0)
