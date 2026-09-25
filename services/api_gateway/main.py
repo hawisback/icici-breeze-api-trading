@@ -1330,6 +1330,21 @@ async def get_live_preflight(
             "latest_futures_15m_candle_age_seconds": market.get(
                 "latest_futures_15m_candle_age_seconds"
             ),
+            "latest_futures_5m_candle_age_seconds": market.get(
+                "latest_futures_5m_candle_age_seconds"
+            ),
+            "latest_futures_5m_candle": market.get(
+                "latest_futures_5m_candle"
+            ),
+            "expected_futures_5m_candle_end": market.get(
+                "expected_futures_5m_candle_end"
+            ),
+            "futures_5m_completed_lag_seconds": market.get(
+                "futures_5m_completed_lag_seconds"
+            ),
+            "strategy_e_signal_data_fresh": bool(
+                market.get("strategy_e_signal_data_fresh")
+            ),
             "strategy_a_signal_data_fresh": bool(
                 market.get("strategy_a_signal_data_fresh")
             ),
