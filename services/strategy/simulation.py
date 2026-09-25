@@ -1462,7 +1462,7 @@ class SimulationEngine:
             replay_manifest_recorder.records(),
             option_contracts,
             option_candles,
-            self.risk_config,
+            effective_risk_config,
         )
         replay_metadata["historical_option_data"] = option_data
         trades = build_simulated_trade_records(replay_manifest_recorder.records())
