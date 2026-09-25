@@ -172,6 +172,8 @@ def test_strategy_a_replay_sizing_changes_with_capital_and_risk_budget():
     assert high.status == "APPLIED"
     assert high.delta_proxy == 0.625
     assert high.delta_source == "CONFIGURED_PREFERRED_DELTA_MIDPOINT"
+    assert high.entry_reference_price == 100.0
+    assert high.to_manifest_kwargs()["entry_mark"] == 100.0
     assert high.lots == 8
     assert high.quantity == 400
     assert low.lots == 1
@@ -198,6 +200,8 @@ def test_strategy_a_replay_sizing_changes_with_capital_and_risk_budget():
     assert exact.delta_proxy == 0.55
     assert exact.delta_source == "BROKER"
     assert exact.price_basis == "POINT_IN_TIME_ASK"
+    assert exact.entry_reference_price == 100.0
+    assert exact.to_manifest_kwargs()["entry_mark"] is None
     assert exact.lots == 9
 
 
