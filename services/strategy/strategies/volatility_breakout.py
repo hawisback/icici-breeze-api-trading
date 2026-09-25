@@ -5,13 +5,12 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from libs.market_time import IST
 from services.strategy.features import FeatureEngine
 from services.strategy.models import (
     CompressionBox, OptionType, StrategyName, StrategySignal,
     StrategyTriggerDiagnostics, TradeDirection, TriggerCondition,
 )
-
-IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class VolatilityBreakoutStrategy:
