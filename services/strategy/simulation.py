@@ -832,8 +832,8 @@ class SimulationEngine:
                     "max_trades_per_day": {
                         "value": request.max_trades_per_day,
                         "reason": (
-                            "Signal-first Day Replay does not enforce chronological "
-                            "portfolio/day trade gates yet."
+                            "Daily trade-count gating is deferred to the risk-gate "
+                            "parity increment, including in EXECUTION_PARITY mode."
                         ),
                     },
                 },
@@ -1273,10 +1273,24 @@ class SimulationEngine:
                 "Real completed spot/futures candles used. Historical completed option candles were "
                 "unavailable for one or more resolved trades."
             )
+        if (
+            chronological_executor is not None
+            and chronological_executor.state.chronology_indeterminate
+        ):
+            limitation = (
+                limitation
+                + " Execution-parity entry evaluation was halted after chronology "
+                "became indeterminate; no optimistic later entries were assumed."
+            )
         lifecycle_report["manifest_validation"] = replay_manifest_recorder.validate_complete(expected_count=len(replay_manifest_recorder.records()))
         replay_lifecycle = lifecycle_report
 
         signal_metrics = ReplaySignalMetrics(
+            calculation_basis=(
+                "PRODUCTION_PRIORITY_SIGNAL_DISCOVERY_WITH_ACTIVE_POSITION_SUPPRESSION"
+                if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+                else "STRATEGY_SIGNAL_DISCOVERY_ON_COMPLETED_HISTORICAL_BARS"
+            ),
             total_bars_evaluated=len(session),
             qualified_signals=lifecycle_report["total_signals"],
             ambiguous_signals=lifecycle_report["ambiguous"],
@@ -1305,7 +1319,20 @@ class SimulationEngine:
             estimated_transaction_costs=option_mark_summary["estimated_transaction_costs"],
             net_mark_pnl=option_mark_summary["net_mark_pnl"],
         )
-        portfolio_metrics = ReplayPortfolioMetrics()
+        portfolio_metrics = (
+            ReplayPortfolioMetrics(
+                calculation_basis=(
+                    "CHRONOLOGICAL_EXECUTION_AVAILABLE_PORTFOLIO_ANALYTICS_NOT_IMPLEMENTED"
+                ),
+                limitation=(
+                    "Execution-parity replay is chronological, but portfolio equity, "
+                    "capital utilisation and portfolio drawdown reporting are deferred "
+                    "to the portfolio-analytics increment."
+                ),
+            )
+            if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+            else ReplayPortfolioMetrics()
+        )
         data_quality = ReplayDataQuality(
             historical_source=historical_source.value,
             missing_data=sorted(set(missing_data)),
@@ -1316,7 +1343,11 @@ class SimulationEngine:
         )
 
         return SimulationResult(
-            replay_mode="POSITION_MANAGER_REPLAY",
+            replay_mode=(
+                "EXECUTION_PARITY"
+                if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+                else "POSITION_MANAGER_REPLAY"
+            ),
             limitation=limitation,
             session_date=date_str,
             signal_metrics=signal_metrics,
