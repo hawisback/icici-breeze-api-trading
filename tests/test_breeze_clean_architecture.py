@@ -755,3 +755,19 @@ async def test_breeze_resolve_nearest_future_prefers_security_master() -> None:
     assert resolved["expiry"] == "2026-09-29"
     assert resolved["broker_token"] == "50123"
     sdk.get_quotes.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_breeze_no_positions_response_is_empty_portfolio() -> None:
+    sdk = MagicMock()
+    sdk.get_portfolio_positions.return_value = {
+        "Status": 500,
+        "Success": None,
+        "Error": "No Positions available.",
+    }
+    client = BreezeClientManager(custom_sdk_instance=sdk)
+    adapter = BreezeTradingAdapter(client_manager=client)
+
+    positions = await adapter.get_positions()
+
+    assert positions == []
