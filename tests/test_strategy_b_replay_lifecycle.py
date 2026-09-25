@@ -139,6 +139,38 @@ def test_strategy_b_manifest_entry_preserves_completed_bar_state_and_deduplicate
         adapter.on_entry_confirmed(_signal(candle.end_time), context)
 
 
+def test_strategy_b_adapter_rejects_wrong_strategy_and_noncompleted_timestamp():
+    recorder = ReplayManifestRecorder()
+    candle = _breakout_candle(datetime(2026, 7, 1, 4, 0, tzinfo=UTC))
+    adapter = VolatilityBreakoutReplayAdapter(
+        StrategyTunablesConfig(),
+        SessionTimersConfig(),
+    )
+    context = ReplayBarContext(
+        session=ReplaySessionContext(
+            trading_date="2026-07-01",
+            instrument_id="INDEX",
+            overrides=ThresholdOverrides(),
+            recorder=recorder,
+        ),
+        bar=candle,
+        features=MarketFeatures(spot_price=101.0),
+        spot_candles_5m=[candle],
+        spot_candles_15m=[],
+        futures_candles=[],
+    )
+
+    wrong_strategy = _signal(candle.end_time).model_copy(
+        update={"strategy": StrategyName.TREND_PULLBACK}
+    )
+    with pytest.raises(ValueError, match="non-Strategy-B"):
+        adapter.on_entry_confirmed(wrong_strategy, context)
+
+    wrong_time = _signal(candle.end_time - timedelta(seconds=1))
+    with pytest.raises(ValueError, match="completed breakout candle end time"):
+        adapter.on_entry_confirmed(wrong_time, context)
+
+
 def test_strategy_b_manifest_hydrates_strategy_specific_active_trade():
     _, record, _ = _recorded_b_record()
 
