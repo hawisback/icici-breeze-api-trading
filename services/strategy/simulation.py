@@ -1850,6 +1850,28 @@ class SimulationEngine:
 
         if chronological_executor is not None:
             chronological_executor.finalize_session()
+            if contract_provider is not None:
+                for record in replay_manifest_recorder.records():
+                    if (
+                        record.lifecycle_status == "RESOLVED"
+                        and record.replay_signal_id
+                        not in execution_economics_applied
+                    ):
+                        await self._attach_execution_parity_economics(
+                            record=record,
+                            provider=contract_provider,
+                            risk_config=effective_risk_config,
+                            selection=replay_selection_decisions.get(
+                                record.replay_signal_id
+                            ),
+                            recorder=replay_manifest_recorder,
+                        )
+                        chronological_executor.apply_execution_economics(
+                            record
+                        )
+                        execution_economics_applied.add(
+                            record.replay_signal_id
+                        )
             replay_metadata["execution_parity"] = (
                 chronological_executor.metadata()
             )
@@ -1862,22 +1884,60 @@ class SimulationEngine:
                 replay_manifest_recorder.records()
             )
         lifecycle_report = build_lifecycle_report(replay_manifest_recorder.records(), lifecycle_resolver)
-        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        option_session_start = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST).astimezone(timezone.utc)
-        option_session_end = datetime(target_date.year, target_date.month, target_date.day, 15, 30, tzinfo=IST).astimezone(timezone.utc)
-        option_contracts, option_candles, option_data = await self._fetch_replay_option_candles(
-            replay_manifest_recorder.records(),
-            date_str,
-            option_session_start,
-            option_session_end,
-            historical_source,
-        )
-        attach_historical_option_prices(
-            replay_manifest_recorder.records(),
-            option_contracts,
-            option_candles,
-            effective_risk_config,
-        )
+        if contract_provider is not None:
+            option_data = {
+                "status": "EVIDENCE_AWARE_EXECUTION_PARITY",
+                "desired_selection_method": "PRODUCTION_CONTRACT_SELECTOR",
+                "point_in_time_chain_snapshots": len(
+                    contract_provider.snapshots
+                ),
+                "point_in_time_option_quotes": len(
+                    contract_provider.quotes
+                ),
+                "option_contract_metadata_count": len(
+                    contract_provider.option_universe
+                ),
+                "contract_selection_fallback": "APPROXIMATED_SELECTION",
+                "mark_policy": "latest_completed_candle_close_at_event",
+                "fill_policy": (
+                    "point_in_time_bid_ask_plus_slippage_when_available_"
+                    "else_completed_mark_plus_slippage_estimate"
+                ),
+                "partial_option_exits_modeled": False,
+            }
+        else:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            option_session_start = datetime(
+                target_date.year,
+                target_date.month,
+                target_date.day,
+                9,
+                15,
+                tzinfo=IST,
+            ).astimezone(timezone.utc)
+            option_session_end = datetime(
+                target_date.year,
+                target_date.month,
+                target_date.day,
+                15,
+                30,
+                tzinfo=IST,
+            ).astimezone(timezone.utc)
+            option_contracts, option_candles, option_data = (
+                await self._fetch_replay_option_candles(
+                    replay_manifest_recorder.records(),
+                    date_str,
+                    option_session_start,
+                    option_session_end,
+                    historical_source,
+                )
+            )
+            attach_historical_option_prices(
+                replay_manifest_recorder.records(),
+                option_contracts,
+                option_candles,
+                effective_risk_config,
+            )
         replay_metadata["historical_option_data"] = option_data
         trades = build_simulated_trade_records(replay_manifest_recorder.records())
         option_mark_summary = summarize_historical_option_marks(
