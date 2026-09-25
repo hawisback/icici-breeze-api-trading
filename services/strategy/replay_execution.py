@@ -48,6 +48,9 @@ class ChronologicalExecutionState:
     realized_r_total: float = 0.0
     realized_net_pnl_total: float = 0.0
     realized_net_pnl_complete: bool = True
+    execution_economics_applied_signal_ids: set[str] = field(
+        default_factory=set
+    )
     entry_evaluation_suppressed_cycles: int = 0
     entry_gate_block_counts: dict[str, int] = field(default_factory=dict)
     last_loss_exit_time: datetime | None = None
@@ -124,21 +127,6 @@ class ChronologicalReplayExecutor:
                 )
                 if record.realized_r is not None:
                     self.state.realized_r_total += float(record.realized_r)
-                if (
-                    record.realized_r is not None
-                    and float(record.realized_r) < 0
-                ):
-                    self.state.last_loss_exit_time = exit_time
-                    self.state.loss_cooldown_until = exit_time + timedelta(
-                        minutes=self.risk_config.cooldown_after_loss_min
-                    )
-                    self.state.failed_entries_by_strategy[record.strategy_id] = (
-                        self.state.failed_entries_by_strategy.get(
-                            record.strategy_id,
-                            0,
-                        )
-                        + 1
-                    )
             elif record.lifecycle_status in {"AMBIGUOUS", "UNRESOLVED"}:
                 # Once we cannot know whether exposure remains, taking another
                 # trade would be optimistic. Block new entries for the session.
@@ -310,21 +298,6 @@ class ChronologicalReplayExecutor:
             )
             if record.realized_r is not None:
                 self.state.realized_r_total += float(record.realized_r)
-            if (
-                record.realized_r is not None
-                and float(record.realized_r) < 0
-            ):
-                self.state.last_loss_exit_time = exit_time
-                self.state.loss_cooldown_until = exit_time + timedelta(
-                    minutes=self.risk_config.cooldown_after_loss_min
-                )
-                self.state.failed_entries_by_strategy[record.strategy_id] = (
-                    self.state.failed_entries_by_strategy.get(
-                        record.strategy_id,
-                        0,
-                    )
-                    + 1
-                )
         return record
 
     def apply_execution_economics(
@@ -333,10 +306,60 @@ class ChronologicalReplayExecutor:
     ) -> None:
         if record.lifecycle_status != "RESOLVED":
             return
+        if (
+            record.replay_signal_id
+            in self.state.execution_economics_applied_signal_ids
+        ):
+            return
+        self.state.execution_economics_applied_signal_ids.add(
+            record.replay_signal_id
+        )
+
         if record.simulated_net_pnl is None:
             self.state.realized_net_pnl_complete = False
-            return
-        self.state.realized_net_pnl_total += float(record.simulated_net_pnl)
+        else:
+            self.state.realized_net_pnl_total += float(
+                record.simulated_net_pnl
+            )
+
+        # Production's immediate in-session cooldown is based on negative
+        # gross option P&L.  When executable evidence is unavailable, retain
+        # the conservative underlying-R fallback rather than inventing option
+        # economics.
+        gross_loss = (
+            float(record.simulated_gross_pnl) < 0
+            if record.simulated_gross_pnl is not None
+            else (
+                record.realized_r is not None
+                and float(record.realized_r) < 0
+            )
+        )
+        if gross_loss:
+            exit_time = record.exit_timestamp
+            if exit_time is not None:
+                self.state.last_loss_exit_time = exit_time
+                self.state.loss_cooldown_until = exit_time + timedelta(
+                    minutes=self.risk_config.cooldown_after_loss_min
+                )
+
+        # Production per-strategy failure limits use closed trade net P&L.
+        # Fall back to realized R only when execution P&L cannot be estimated.
+        net_loss = (
+            float(record.simulated_net_pnl) < 0
+            if record.simulated_net_pnl is not None
+            else (
+                record.realized_r is not None
+                and float(record.realized_r) < 0
+            )
+        )
+        if net_loss:
+            self.state.failed_entries_by_strategy[record.strategy_id] = (
+                self.state.failed_entries_by_strategy.get(
+                    record.strategy_id,
+                    0,
+                )
+                + 1
+            )
 
     def finalize_session(self) -> None:
         self.state.positions_open_at_session_end = len(
@@ -367,6 +390,9 @@ class ChronologicalReplayExecutor:
             "realized_net_pnl_complete": (
                 self.state.realized_net_pnl_complete
             ),
+            "execution_economics_applied_count": len(
+                self.state.execution_economics_applied_signal_ids
+            ),
             "active_positions_at_end": self.state.positions_open_at_session_end,
             "entry_evaluation_suppressed_cycles": (
                 self.state.entry_evaluation_suppressed_cycles
@@ -391,9 +417,15 @@ class ChronologicalReplayExecutor:
                 "daily_loss": (
                     "UNDERLYING_REALIZED_R_AND_ESTIMATED_EXECUTABLE_NET_PNL"
                 ),
-                "loss_cooldown": "UNDERLYING_REALIZED_R_NEGATIVE_EXIT",
+                "loss_cooldown": (
+                    "ESTIMATED_EXECUTABLE_GROSS_PNL_NEGATIVE_"
+                    "ELSE_UNDERLYING_R_FALLBACK"
+                ),
                 "daily_trade_count": "ACCEPTED_REPLAY_ENTRIES",
-                "strategy_failure_count": "UNDERLYING_REALIZED_R_NEGATIVE_EXIT",
+                "strategy_failure_count": (
+                    "ESTIMATED_EXECUTABLE_NET_PNL_NEGATIVE_"
+                    "ELSE_UNDERLYING_R_FALLBACK"
+                ),
             },
             "rejected_opportunities": list(self.state.rejected_opportunities),
         }
