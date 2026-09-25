@@ -14,8 +14,7 @@ from typing import Iterable, Sequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from libs.contracts.models import Candle
-
-IST = timezone(timedelta(hours=5, minutes=30))
+from libs.market_time import IST
 _EXPIRY_RE = re.compile(r"FUT-(\d{4}-\d{2}-\d{2})", re.IGNORECASE)
 
 
