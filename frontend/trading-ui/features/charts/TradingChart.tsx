@@ -5,38 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createChart, ColorType, IChartApi, ISeriesApi } from "lightweight-charts";
 import { fetchCandles, fetchQuotes } from "@/lib/api";
 import { useTradingStore } from "@/stores/useTradingStore";
-
-function formatIST(isoOrUnix: string | number | undefined): string {
-  if (!isoOrUnix) return "--";
-  const date = typeof isoOrUnix === "number" ? new Date(isoOrUnix * 1000) : new Date(isoOrUnix);
-  return date.toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }) + " IST";
-}
-
-function getMarketSessionInfo() {
-  const now = new Date();
-  const istString = now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
-  const istDate = new Date(istString);
-  const day = istDate.getDay();
-  const hours = istDate.getHours();
-  const minutes = istDate.getMinutes();
-  const timeInMinutes = hours * 60 + minutes;
-
-  const isWeekday = day >= 1 && day <= 5;
-  const isMarketHours = timeInMinutes >= 9 * 60 + 15 && timeInMinutes <= 15 * 60 + 30;
-  const isOpen = isWeekday && isMarketHours;
-
-  return {
-    isOpen,
-    statusText: isOpen ? "MARKET OPEN (09:15-15:30 IST)" : "MARKET CLOSED",
-  };
-}
+import { formatISTDateTime, getISTMarketSessionInfo } from "@/lib/time";
 
 interface TradingChartProps {
   instrumentId?: string | null;
@@ -88,10 +57,10 @@ export function TradingChart({
     return candles && candles.length > 0 ? candles[candles.length - 1] : null;
   }, [candles]);
 
-  const [sessionInfo, setSessionInfo] = useState(getMarketSessionInfo);
+  const [sessionInfo, setSessionInfo] = useState(getISTMarketSessionInfo);
   useEffect(() => {
     const timer = window.setInterval(
-      () => setSessionInfo(getMarketSessionInfo()),
+      () => setSessionInfo(getISTMarketSessionInfo()),
       30000,
     );
     return () => window.clearInterval(timer);
@@ -99,7 +68,10 @@ export function TradingChart({
   const liveSource = lastCandle?.source;
   const isLive = liveSource === "BREEZE" || liveSource === "KITE" || liveSource === "LIVE";
   const liveLabel = liveSource === "KITE" ? "KITE" : "BREEZE";
-  const formattedLastTime = lastCandle ? formatIST(lastCandle.isoTime || lastCandle.time) : "--";
+  const lastTimeValue = lastCandle?.isoTime || lastCandle?.time;
+  const formattedLastTime = lastCandle
+    ? formatISTDateTime(lastTimeValue, {}, typeof lastTimeValue === "number")
+    : "--";
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
