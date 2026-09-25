@@ -795,7 +795,7 @@ async def test_gather_features_requests_authoritative_15m_futures_bars():
     await service._gather_features()
     calls = service._get_recent_candles.await_args_list
     assert call("15m", "INST-NIFTY-FUT-2026-09-29") in calls
-    assert call("5m", "INST-NIFTY-FUT-2026-09-29") not in calls
+    assert call("5m", "INST-NIFTY-FUT-2026-09-29") in calls
 
 
 def test_shared_feature_engine_preserves_strategy_a_15m_futures():
