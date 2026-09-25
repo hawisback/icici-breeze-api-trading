@@ -402,8 +402,34 @@ class StrategyRepository:
     def _write_config_file(self, config: AutoTradingConfig) -> None:
         if self.config_path is None:
             return
+
+        # Standard JSON has no comment syntax. Preserve the optional _meta
+        # annotation block so operator-facing explanations survive UI/API
+        # config saves. The legacy one-time bootstrap marker is intentionally
+        # consumed and never re-written.
+        metadata: dict[str, Any] = {}
+        if self.config_path.exists():
+            try:
+                current = json.loads(
+                    self.config_path.read_text(encoding="utf-8")
+                )
+                if isinstance(current, dict) and isinstance(
+                    current.get("_meta"),
+                    dict,
+                ):
+                    metadata = dict(current["_meta"])
+                    metadata.pop(
+                        "bootstrap_from_database_if_present",
+                        None,
+                    )
+            except (OSError, json.JSONDecodeError):
+                metadata = {}
+
         payload = config.model_dump(mode="json")
         payload["system_armed"] = False
+        if metadata:
+            payload = {"_meta": metadata, **payload}
+
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.config_path.with_suffix(
             self.config_path.suffix + ".tmp"
@@ -450,8 +476,8 @@ class StrategyRepository:
         if file_payload is not None:
             file_config, normalized = self._validate_file_payload(file_payload)
             await self.save_auto_config(file_config, persist_file=False)
-            # Consume bootstrap metadata, schema migrations, and any attempted
-            # file-based arming by rewriting the canonical safe representation.
+            # Consume bootstrap control metadata, schema migrations, and any
+            # attempted file-based arming while preserving descriptive _meta.
             if bootstrap_from_db or normalized:
                 self._write_config_file(file_config)
             return file_config
