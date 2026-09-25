@@ -854,6 +854,11 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                                   : "mark fallback"}
                               </div>
                             )}
+                            {hasExecutionTradePnl && (
+                              <div className="mt-0.5 text-[9px] font-sans font-normal text-slate-500">
+                                Slip: {formatAmount(t.estimated_slippage_cost)} · Fees: {formatAmount(t.estimated_transaction_costs)}
+                              </div>
+                            )}
                           </td>
                         </tr>
                       );
