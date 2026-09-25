@@ -1305,13 +1305,15 @@ export interface SimulationRequestData {
   date?: string | null;
   instrument_id?: string;
   overrides?: Partial<ThresholdOverridesData>;
-  /** Accepted for API compatibility; current Day Replay does not apply historical sizing parity. */
+  /** Applied as account equity for historical sizing in EXECUTION_PARITY. */
   capital?: number;
+  /** Optional EXECUTION_PARITY risk-budget override. */
+  risk_per_trade_pct?: number;
   bypass_window?: boolean;
   bypass_entry_window?: boolean;
   historical_source?: "BREEZE" | "KITE" | "LIVE" | "MIXED";
   replay_mode?: "RESEARCH" | "EXECUTION_PARITY";
-  /** Accepted for API compatibility; daily trade-count risk gating is not applied yet. */
+  /** Applied as the chronological daily-entry limit in EXECUTION_PARITY. */
   max_trades_per_day?: number;
 }
 
