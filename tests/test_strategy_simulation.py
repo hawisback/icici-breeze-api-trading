@@ -109,7 +109,7 @@ def _canonical_sections(
         "option_mark_metrics": ReplayOptionMarkMetrics(
             priced_trades=0 if gross_mark_pnl is None else resolved,
             unpriced_trades=resolved if gross_mark_pnl is None else 0,
-            all_resolved_trades_priced=gross_mark_pnl is not None,
+            all_resolved_trades_priced=resolved > 0 and gross_mark_pnl is not None,
             gross_mark_pnl=gross_mark_pnl,
             estimated_transaction_costs=(
                 None
