@@ -298,17 +298,48 @@ class SimulationEngine:
             and getattr(instrument, "option_right", None)
         ]
         selected: dict[str, Any] = {}
+        option_by_id = {
+            str(instrument.instrument_id): instrument
+            for instrument in option_instruments
+        }
+        sizing_locked_contracts = 0
         for record in records:
+            sizing_contract_id = str(
+                getattr(record, "sizing_contract_instrument_id", "") or ""
+            )
+            if sizing_contract_id:
+                locked = option_by_id.get(sizing_contract_id)
+                if locked is not None:
+                    selected[sizing_contract_id] = locked
+                    sizing_locked_contracts += 1
+                    continue
+
             direction = "CALL" if record.direction == "CALL" else "PUT"
             candidates = [
                 instrument for instrument in option_instruments
-                if str(getattr(getattr(instrument, "option_right", None), "value", "")).upper() in {direction, "CE" if direction == "CALL" else "PE"}
+                if str(
+                    getattr(
+                        getattr(instrument, "option_right", None),
+                        "value",
+                        "",
+                    )
+                ).upper()
+                in {direction, "CE" if direction == "CALL" else "PE"}
             ]
             if not candidates:
                 continue
             expiry = min(str(instrument.expiry) for instrument in candidates)
-            same_expiry = [instrument for instrument in candidates if str(instrument.expiry) == expiry]
-            contract = min(same_expiry, key=lambda instrument: abs(float(instrument.strike) - record.simulated_entry_price))
+            same_expiry = [
+                instrument
+                for instrument in candidates
+                if str(instrument.expiry) == expiry
+            ]
+            contract = min(
+                same_expiry,
+                key=lambda instrument: abs(
+                    float(instrument.strike) - record.simulated_entry_price
+                ),
+            )
             selected[contract.instrument_id] = contract
 
         candles_by_instrument: dict[str, list[Candle]] = {}
@@ -353,7 +384,11 @@ class SimulationEngine:
             "pricing_field": "completed_candle_close",
             "bid_ask_available": False,
             "executable_fill_equivalent": False,
-            "selection": "nearest_strike_first_expiry_on_or_after_replay_date",
+            "selection": (
+                "sizing_locked_contract_when_available_else_"
+                "nearest_strike_first_expiry_on_or_after_replay_date"
+            ),
+            "sizing_locked_contracts": sizing_locked_contracts,
         }
 
     @staticmethod
