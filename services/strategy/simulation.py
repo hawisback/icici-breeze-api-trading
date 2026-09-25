@@ -1016,7 +1016,7 @@ class SimulationEngine:
                         "total_count": diag.total_count,
                         "ready_pct": diag.ready_pct,
                         "conditions": [item.model_dump(mode="json") for item in diag.conditions],
-                        "strategy_a_v2": (diag.phase_summary or {}).get("strategy_a_v2", {}),
+                        "strategy_a_contract": (diag.phase_summary or {}).get("strategy_a_contract", {}),
                     })
             timeline.append(SimulationBarSnapshot(
                 bar_index=idx, timestamp=bar.end_time.isoformat(), ist_time=clock.strftime("%H:%M"),
@@ -1131,7 +1131,7 @@ class SimulationEngine:
 
         component_funnel: dict[str, dict[str, float | int]] = {}
         for item in replay_trigger_diagnostics:
-            payload = item.get("strategy_a_v2") or {}
+            payload = item.get("strategy_a_contract") or {}
             for section in ("trend", "confirmation", "confluence"):
                 for name, value in (payload.get(section, {}).get("components") or {}).items():
                     key = f"{section}.{name}"
