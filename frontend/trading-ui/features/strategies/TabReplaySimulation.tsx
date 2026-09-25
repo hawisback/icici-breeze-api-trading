@@ -60,6 +60,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const [stratBMinConf, setStratBMinConf] = useState<number>(3);
   const [boxMaxHeightAtr, setBoxMaxHeightAtr] = useState<number>(1.30);
   const [bypassWindow, setBypassWindow] = useState<boolean>(false);
+  const [replayMode, setReplayMode] = useState<"RESEARCH" | "EXECUTION_PARITY">("RESEARCH");
 
   useEffect(() => {
     setResult(null);
@@ -94,6 +95,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
         },
         bypass_window: bypassWindow,
         historical_source: historicalSource,
+        replay_mode: replayMode,
       });
       setResult(res);
       setSelectedBarIndex(0);
@@ -179,8 +181,13 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
           ? " Missing market history can suppress signals."
           : ""}
       </p>
-      <div className="text-[11px] text-slate-400">
-        Historical source: <span className="font-mono font-bold text-cyan-300">{historicalSource}</span>
+      <div className="text-[11px] text-slate-400 flex flex-wrap gap-x-4 gap-y-1">
+        <span>
+          Historical source: <span className="font-mono font-bold text-cyan-300">{historicalSource}</span>
+        </span>
+        <span>
+          Replay mode: <span className="font-mono font-bold text-indigo-300">{result?.replay_mode || replayMode}</span>
+        </span>
       </div>
       {/* 1. Simulation Control & Session Selector */}
       <div className="bg-slate-900/95 border border-slate-800 rounded-xl p-5 shadow-xl">
@@ -266,6 +273,33 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
             onChange={(e) => setSelectedDate(e.target.value)}
             className="bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded-md px-2 py-1 font-mono focus:outline-none focus:border-indigo-500"
           />
+        </div>
+
+        <div className="mt-3 flex flex-col gap-2 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-slate-300 mr-1">Replay semantics:</span>
+            {(["RESEARCH", "EXECUTION_PARITY"] as const).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => {
+                  setReplayMode(mode);
+                  setResult(null);
+                }}
+                className={`px-3 py-1.5 rounded-md border text-xs font-semibold transition ${
+                  replayMode === mode
+                    ? "bg-indigo-500/20 border-indigo-500/50 text-indigo-300"
+                    : "bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {mode === "RESEARCH" ? "Research / Signal Replay" : "Execution Parity"}
+              </button>
+            ))}
+          </div>
+          <div className="text-[10px] leading-relaxed text-slate-400">
+            {replayMode === "RESEARCH"
+              ? "Discovers qualified strategy signals independently, then resolves each lifecycle afterward. Useful for hypothesis analysis."
+              : "Walks forward chronologically: active positions are managed before new entries, A→B priority is enforced, and position capacity can suppress later entries. Full risk gates and historical sizing remain deferred to the next increment."}
+          </div>
         </div>
 
         {/* Expandable What-If Overrides Panel */}
