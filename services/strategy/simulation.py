@@ -897,10 +897,10 @@ class SimulationEngine:
                 features,
                 running,
                 macro,
-                overrides=overrides,
+                overrides=effective_overrides,
                 futures_candles=strategy_a_futures,
             )
-            diags_b = strat_b.diagnose(features, running, overrides=overrides)
+            diags_b = strat_b.diagnose(features, running, overrides=effective_overrides)
             clock = bar.end_time.astimezone(IST)
             minutes = clock.hour*60+clock.minute
             a_start_h, a_start_m = map(int, self.tunables.entry_session_start.split(":"))
@@ -927,14 +927,14 @@ class SimulationEngine:
                         running,
                         macro,
                         strategy_a_futures,
-                        overrides,
+                        effective_overrides,
                     )
                     strategy_a_event = strat_a.last_event
                     effective_diags_a = strat_a.diagnose(
                         features,
                         running,
                         macro,
-                        overrides=overrides,
+                        overrides=effective_overrides,
                         futures_candles=strategy_a_futures,
                     )
                     if sig_a is not None:
@@ -967,10 +967,10 @@ class SimulationEngine:
                             features,
                             running,
                             macro,
-                            overrides=overrides,
+                            overrides=effective_overrides,
                             futures_candles=strategy_a_futures,
                         )
-                sig_b = strat_b.evaluate(features, running, overrides=overrides) if cfg.volatility_breakout_enabled else None
+                sig_b = strat_b.evaluate(features, running, overrides=effective_overrides) if cfg.volatility_breakout_enabled else None
                 if sig_b is not None:
                     _record_strategy_b_manifest(
                         replay_manifest_recorder,
