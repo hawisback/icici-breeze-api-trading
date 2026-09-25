@@ -158,6 +158,7 @@ class StrategyService:
             risk_config=self.config.risk,
             session_config=self.config.session,
             tunables=self.config.tunables,
+            option_selection_config=self.config.option_selection,
         )
 
         self._loop_task: Optional[asyncio.Task] = None
