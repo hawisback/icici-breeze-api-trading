@@ -801,8 +801,9 @@ class SimulationEngine:
             if name not in strategy_b_replay_overrides
             and name != "bypass_entry_window"
         }
+        effective_overrides = ThresholdOverrides.model_validate(applied_overrides)
         cfg = self.tunables
-        strategy_a_cfg = self._strategy_a_config_for_replay(overrides)
+        strategy_a_cfg = self._strategy_a_config_for_replay(effective_overrides)
         strat_a = TrendPullbackStrategy(config=strategy_a_cfg, allow_session_bypass=True)
         strat_b = VolatilityBreakoutStrategy(rvol_threshold=cfg.rvol_threshold, adx_threshold=cfg.strategy_b_adx_threshold,
                                              min_confirmation_score=cfg.strat_b_min_confirmation,
@@ -832,7 +833,7 @@ class SimulationEngine:
             historical_source=historical_source,
             bypass_entry_window=bypass_entry_window,
             strategy_a_enabled=cfg.trend_pullback_enabled,
-            overrides=overrides,
+            overrides=effective_overrides,
             tunables=cfg,
             session=self.session_config,
         )
