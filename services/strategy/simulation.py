@@ -899,7 +899,7 @@ class SimulationEngine:
                 bar.end_time,
                 bypass_entry_window=bypass_entry_window,
             )
-            allow_evaluation = bool(
+            base_allow_evaluation = bool(
                 in_window
                 and (
                     strategy_futures
@@ -915,35 +915,120 @@ class SimulationEngine:
                 spot_candles_15m=macro,
                 futures_candles=strategy_futures,
             )
-            evaluations = strategy_registry.evaluate_completed_bar(
-                bar_context,
-                allow_evaluation=allow_evaluation,
-            )
 
             event, details = None, None
-            signal = strategy_registry.first_signal(evaluations)
-            if signal is not None:
-                event = "SIGNAL_ONLY"
-                details = (
-                    "Qualified signal; historical executable option quotes unavailable"
-                )
-                logs.append(
-                    DecisionLogEntry(
-                        id=f"SIM-{idx}",
-                        timestamp=bar.end_time,
-                        category="SETUP",
-                        strategy=signal.strategy.value,
-                        message=details,
-                        details=signal.model_dump(mode="json"),
+            evaluations = []
+            signal = None
+
+            if chronological_executor is not None:
+                chronological_executor.manage_completed_bar(bar, running)
+                if not chronological_executor.can_accept_entry():
+                    strategy_registry.reset_all(bar.end_time)
+                    chronological_executor.note_entry_evaluation_suppressed()
+                    evaluations = strategy_registry.evaluate_completed_bar(
+                        bar_context,
+                        allow_evaluation=False,
                     )
+                    if (
+                        chronological_executor.state.chronology_indeterminate
+                    ):
+                        event = "CHRONOLOGY_INDETERMINATE"
+                        details = (
+                            "New entries blocked because historical ordering "
+                            "could not establish whether exposure remained open."
+                        )
+                    else:
+                        event = "POSITION_CAPACITY_BLOCK"
+                        details = (
+                            "New entry evaluation suppressed while replay "
+                            "position capacity is full."
+                        )
+                else:
+                    evaluations = strategy_registry.evaluate_completed_bar(
+                        bar_context,
+                        allow_evaluation=base_allow_evaluation,
+                        stop_after_signal=True,
+                    )
+                    signal = strategy_registry.first_signal(evaluations)
+                    if signal is not None:
+                        record = chronological_executor.accept_signal(
+                            signal,
+                            bar_context,
+                        )
+                        evaluations = strategy_registry.refresh_diagnostics(
+                            evaluations,
+                            bar_context,
+                        )
+                        event = "ENTRY_ACCEPTED"
+                        details = (
+                            "Qualified signal accepted into chronological "
+                            "execution-parity replay."
+                        )
+                        if record.lifecycle_status != "PENDING":
+                            event = "ENTRY_RESOLUTION"
+                            details = (
+                                "Signal entry was resolved on its entry candle: "
+                                f"{record.lifecycle_status}."
+                            )
+                        logs.append(
+                            DecisionLogEntry(
+                                id=f"SIM-{idx}",
+                                timestamp=bar.end_time,
+                                category="SETUP",
+                                strategy=signal.strategy.value,
+                                message=details,
+                                details=signal.model_dump(mode="json"),
+                            )
+                        )
+                    elif not base_allow_evaluation:
+                        strategy_registry.reset_all(bar.end_time)
+                        details = (
+                            features.data_reason
+                            if not features.data_ready
+                            else "Outside entry window"
+                        )
+            else:
+                evaluations = strategy_registry.evaluate_completed_bar(
+                    bar_context,
+                    allow_evaluation=base_allow_evaluation,
                 )
-            elif not allow_evaluation:
-                strategy_registry.reset_all(bar.end_time)
-                details = (
-                    features.data_reason
-                    if not features.data_ready
-                    else "Outside entry window"
-                )
+                qualified_signals = [
+                    item.signal
+                    for item in evaluations
+                    if item.signal is not None
+                ]
+                for qualified_signal in qualified_signals:
+                    strategy_registry.confirm_entry(
+                        qualified_signal,
+                        bar_context,
+                    )
+                if qualified_signals:
+                    evaluations = strategy_registry.refresh_diagnostics(
+                        evaluations,
+                        bar_context,
+                    )
+                    signal = qualified_signals[0]
+                    event = "SIGNAL_ONLY"
+                    details = (
+                        "Qualified signal; historical executable option quotes unavailable"
+                    )
+                    logs.append(
+                        DecisionLogEntry(
+                            id=f"SIM-{idx}",
+                            timestamp=bar.end_time,
+                            category="SETUP",
+                            strategy=signal.strategy.value,
+                            message=details,
+                            details=signal.model_dump(mode="json"),
+                        )
+                    )
+                elif not base_allow_evaluation:
+                    strategy_registry.reset_all(bar.end_time)
+                    details = (
+                        features.data_reason
+                        if not features.data_ready
+                        else "Outside entry window"
+                    )
 
             for evaluation in evaluations:
                 metadata = evaluation.metadata
@@ -990,6 +1075,15 @@ class SimulationEngine:
                         replay_trigger_diagnostics.append(row)
 
             phases = strategy_registry.timeline_phases(evaluations)
+            active_trade_id = None
+            if (
+                chronological_executor is not None
+                and chronological_executor.state.active_positions
+            ):
+                active_trade_id = (
+                    chronological_executor.state.active_positions[0]
+                    .trade.trade_id
+                )
             timeline.append(
                 SimulationBarSnapshot(
                     bar_index=idx,
@@ -1009,9 +1103,12 @@ class SimulationEngine:
                     bb_width_percentile=features.bb_width_percentile,
                     strategy_a_phase=phases.get("strategy_a_phase", "FLAT"),
                     strategy_b_phase=phases.get("strategy_b_phase", "RESET"),
+                    active_trade_id=active_trade_id,
                     event=event,
                     event_details=details,
                 )
+            )
+
             )
 
         strategy_a_event_counts = replay_event_counts.get(
