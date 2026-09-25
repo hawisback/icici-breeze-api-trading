@@ -310,17 +310,31 @@ class HistoricalContractSelectionProvider:
         }
 
     def _exact_snapshot(self, signal: StrategySignal) -> dict[str, Any] | None:
-        exact = [
-            row
-            for row in self.snapshots
-            if str(row.get("strategy_signal_id") or "") == signal.signal_id
-        ]
+        exact: list[dict[str, Any]] = []
+        for row in self.snapshots:
+            if str(row.get("strategy_signal_id") or "") != signal.signal_id:
+                continue
+            stored_signal_time = _aware_timestamp(row.get("signal_timestamp"))
+            if (
+                stored_signal_time is None
+                or abs(
+                    (stored_signal_time - signal.timestamp).total_seconds()
+                )
+                > 1.0
+            ):
+                continue
+            stored_strategy = str(row.get("strategy") or "")
+            if stored_strategy and stored_strategy != signal.strategy.value:
+                continue
+            stored_direction = str(row.get("direction") or "")
+            if stored_direction and stored_direction != signal.direction.value:
+                continue
+            exact.append(row)
         if not exact:
             return None
         exact.sort(
             key=lambda row: (
-                _aware_timestamp(row.get("selector_timestamp"))
-                or _aware_timestamp(row.get("captured_at"))
+                _aware_timestamp(row.get("captured_at"))
                 or signal.timestamp
             )
         )
@@ -340,10 +354,12 @@ class HistoricalContractSelectionProvider:
 
         if snapshot is not None:
             chain = self._snapshot_chain(snapshot, signal)
+            # Production invokes ContractSelector at signal.timestamp.
+            # Snapshot capture may occur milliseconds/seconds later and must
+            # not alter quote-freshness semantics during replay.
             as_of = (
-                _aware_timestamp(snapshot.get("selector_timestamp"))
-                or _aware_timestamp(snapshot.get("chain_snapshot_timestamp"))
-                or _aware_timestamp(snapshot.get("captured_at"))
+                _aware_timestamp(snapshot.get("signal_timestamp"))
+                or signal.timestamp
             )
             selected, inspected, reason = self.selector.select_contract(
                 direction=signal.direction,
@@ -372,7 +388,15 @@ class HistoricalContractSelectionProvider:
                 unsupported_evidence=(),
                 provenance={
                     "source": snapshot.get("source"),
-                    "matched_by": "EXACT_STRATEGY_SIGNAL_ID",
+                    "matched_by": (
+                        "EXACT_SIGNAL_ID_TIMESTAMP_STRATEGY_DIRECTION"
+                    ),
+                    "captured_at": snapshot.get("captured_at"),
+                    "selector_timestamp": snapshot.get("selector_timestamp"),
+                    "chain_snapshot_timestamp": snapshot.get(
+                        "chain_snapshot_timestamp"
+                    ),
+                    "signal_timestamp": snapshot.get("signal_timestamp"),
                     "stored_selector_result": snapshot.get("selector_result"),
                     "stored_rejection_reason": snapshot.get("rejection_reason"),
                 },
