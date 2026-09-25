@@ -6,15 +6,13 @@ Converts between UTC timezone-aware datetimes and Indian market exchange ISO str
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from zoneinfo import ZoneInfo
-
-IST = ZoneInfo("Asia/Kolkata")
+from libs.market_time import IST, exchange_datetime_to_utc
 
 
 def to_breeze_iso(dt: datetime) -> str:
     """Format datetime to Breeze-compliant ISO format (YYYY-MM-DDTHH:MM:SS.000Z)."""
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=IST)
     utc_dt = dt.astimezone(timezone.utc)
     return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -23,7 +21,7 @@ def to_breeze_date_str(d: date | datetime) -> str:
     """Format date to Breeze-compliant date format (YYYY-MM-DD)."""
     if isinstance(d, datetime):
         if d.tzinfo is None:
-            d = d.replace(tzinfo=timezone.utc)
+            d = d.replace(tzinfo=IST)
         ist_dt = d.astimezone(IST)
         return ist_dt.strftime("%Y-%m-%d")
     return d.strftime("%Y-%m-%d")
@@ -39,8 +37,7 @@ def parse_breeze_datetime(dt_str: str) -> datetime:
             return dt.astimezone(timezone.utc)
         # Assumed IST exchange time
         parsed = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-        ist_dt = parsed.replace(tzinfo=IST)
-        return ist_dt.astimezone(timezone.utc)
+        return exchange_datetime_to_utc(parsed)
     except Exception:
         # Fallback to current UTC if unparseable
         return datetime.now(timezone.utc)
