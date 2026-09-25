@@ -277,6 +277,59 @@ def test_chronological_executor_does_not_scan_future_and_blocks_capacity():
     assert executor.can_accept_entry() is True
 
 
+def test_chronological_executor_enforces_daily_and_strategy_risk_gates():
+    recorder = ReplayManifestRecorder()
+    session = SessionTimersConfig()
+    risk = RiskConfig(
+        max_trades_per_day=2,
+        max_trades_per_strategy_per_day=1,
+        max_failed_trades_per_strategy=1,
+        max_daily_loss_r=2.0,
+        cooldown_after_loss_min=10,
+    )
+    registry = ReplayStrategyRegistry.default(StrategyTunablesConfig(), session)
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=risk,
+        session_config=session,
+        recorder=recorder,
+        instrument_id="INDEX",
+        warmup_candles=[],
+        session_candles=[],
+        futures_candles=[],
+    )
+    executor = ChronologicalReplayExecutor(
+        lifecycle_replayer=replayer,
+        registry=registry,
+        risk_config=risk,
+    )
+    now = datetime(2026, 7, 1, 6, 0, tzinfo=UTC)
+
+    executor.state.daily_entries = 2
+    assert executor.global_entry_gate(now).status == "DAILY_TRADE_LIMIT_REACHED"
+
+    executor.state.daily_entries = 0
+    executor.state.realized_r_total = -2.0
+    assert executor.global_entry_gate(now).status == "DAILY_LOSS_LIMIT_REACHED"
+
+    executor.state.realized_r_total = 0.0
+    executor.state.last_loss_exit_time = now - timedelta(minutes=5)
+    assert executor.global_entry_gate(now).status == "IN_LOSS_COOLDOWN"
+
+    executor.state.last_loss_exit_time = None
+    executor.state.daily_entries_by_strategy[
+        StrategyName.VOLATILITY_BREAKOUT.value
+    ] = 1
+    gate = executor.strategy_entry_gate(_signal(now))
+    assert gate.status == "STRATEGY_DAILY_TRADE_LIMIT_REACHED"
+
+    executor.state.daily_entries_by_strategy.clear()
+    executor.state.failed_entries_by_strategy[
+        StrategyName.VOLATILITY_BREAKOUT.value
+    ] = 1
+    gate = executor.strategy_entry_gate(_signal(now))
+    assert gate.status == "STRATEGY_FAILURE_LIMIT_REACHED"
+
+
 def test_strategy_b_manifest_hydrates_strategy_specific_active_trade():
     _, record, _ = _recorded_b_record()
 
