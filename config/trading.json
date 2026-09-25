@@ -1,8 +1,5 @@
 {
-  "_meta": {
-    "bootstrap_from_database_if_present": true
-  },
-  "mode": "PAPER",
+  "mode": "LIVE",
   "auto_trade_enabled": true,
   "system_armed": false,
   "kill_switch": false,
@@ -68,7 +65,7 @@
     "volatility_breakout_enabled": true,
     "di_continuation_enabled": true,
     "sr_momentum_breakout_enabled": true,
-    "pivot_vwap_scalp_enabled": false,
+    "pivot_vwap_scalp_enabled": true,
     "strategy_e_countertrend_enabled": true,
     "strategy_e_swing_lookback": 2,
     "strategy_e_volume_lookback": 20,
