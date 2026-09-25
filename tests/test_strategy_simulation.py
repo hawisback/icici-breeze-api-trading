@@ -618,6 +618,20 @@ def test_replay_metadata_discloses_applied_and_ignored_controls():
     assert effective_risk["account_equity"] == 750000.0
     assert effective_risk["risk_per_trade_pct_of_account"] == 0.75
     assert effective_risk["max_trades_per_day"] == 2
+    assert (
+        parity_result.replay_metadata["configuration_fingerprint"]
+        != result.replay_metadata["configuration_fingerprint"]
+    )
+
+    lower_capital = asyncio.run(
+        engine.run_day_simulation(
+            parity_request.model_copy(update={"capital": 250000.0})
+        )
+    )
+    assert (
+        lower_capital.replay_metadata["configuration_fingerprint"]
+        != parity_result.replay_metadata["configuration_fingerprint"]
+    )
 
     snapshot_overrides = result.replay_metadata["configuration_snapshot"]["threshold_overrides"]
     assert snapshot_overrides["rvol_threshold"] == 1.4
