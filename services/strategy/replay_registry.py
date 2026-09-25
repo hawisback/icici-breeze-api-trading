@@ -366,6 +366,14 @@ class VolatilityBreakoutReplayAdapter:
         signal: StrategySignal,
         context: ReplayBarContext,
     ) -> None:
+        if signal.strategy != StrategyName.VOLATILITY_BREAKOUT:
+            raise ValueError(
+                "Strategy B replay adapter received a non-Strategy-B signal"
+            )
+        if signal.timestamp != context.bar.end_time:
+            raise ValueError(
+                "Strategy B replay entry must use the completed breakout candle end time"
+            )
         snapshot = signal.features_snapshot
         required = ("box_high", "box_low", "atr_at_lock", "breakout_trigger_price")
         missing = [key for key in required if snapshot.get(key) is None]
