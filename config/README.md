@@ -28,10 +28,12 @@ When an operator saves strategy configuration through the UI/API, the validated
 configuration is written to both the JSON file and SQLite. The JSON file is
 therefore the visible durable source for normal operator settings.
 
-For an older installation where the JSON file does not exist yet, the service
-loads the existing SQLite configuration and writes it to the configured JSON
-path on first startup. If neither exists, model defaults are created and saved
-to both.
+For rollout compatibility, the checked-in seed file carries a one-time
+`bootstrap_from_database_if_present` marker. If an existing SQLite
+configuration is present, that existing operator state wins on the first
+startup and is exported into the JSON file; the marker is then consumed. Fresh
+installations use the checked-in JSON defaults. If neither file nor database
+state exists, model defaults are created and saved to both.
 
 An invalid JSON file is a startup error; the service does not silently ignore a
 malformed operator configuration.
