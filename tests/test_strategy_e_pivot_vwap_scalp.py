@@ -12,6 +12,7 @@ from services.strategy.execution_policy import resolve_strategy_execution_policy
 from services.historical.service import HistoricalService
 from services.strategy.models import (
     ActiveTrade,
+    AutoTradingConfig,
     AutoTradingMode,
     MarketFeatures,
     OptionType,
@@ -20,7 +21,10 @@ from services.strategy.models import (
     TradeDirection,
 )
 from services.strategy.service import StrategyService
-from services.strategy.strategies.pivot_vwap_scalp import PivotVwapScalpStrategy
+from services.strategy.strategies.pivot_vwap_scalp import (
+    PivotVwapScalpStrategy,
+    StrategyEDecision,
+)
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -457,3 +461,127 @@ async def test_strategy_e_paper_ambiguous_bar_uses_stop_before_target():
     assert trade.underlying_exit_price == 98.0
     service._close_trade.assert_awaited_once()
     assert service._close_trade.await_args.args[3] == "STRATEGY_E_STOP_LOSS"
+
+
+def test_strategy_e_restore_state_restores_last_decision_without_resurrecting_signal():
+    strategy = _strategy()
+    strategy.last_processed_candle = datetime(2026, 9, 24, 10, 30, tzinfo=IST)
+    strategy.last_decision = StrategyEDecision(
+        "NO_TRADE",
+        "NO_SETUP",
+        {"price": 101.25, "pivot": 100.0},
+    )
+
+    restored = _strategy()
+    restored.restore_state(strategy.export_state())
+
+    assert restored.last_processed_candle == strategy.last_processed_candle
+    assert restored.last_decision.result == "NO_TRADE"
+    assert restored.last_decision.reason == "NO_SETUP"
+    assert restored.last_decision.metrics["price"] == 101.25
+    assert restored.last_decision.signal is None
+
+
+def test_strategy_e_snapshot_analysis_does_not_consume_execution_candle():
+    strategy = _strategy()
+    current = [
+        _candle(24, 0, open_=100.2, high=101.0, low=100.0, close=100.6),
+        _candle(24, 1, open_=100.6, high=103.0, low=100.5, close=102.0),
+        _candle(24, 2, open_=102.0, high=102.2, low=100.2, close=100.8),
+        _candle(24, 3, open_=100.8, high=101.2, low=99.8, close=100.5),
+        _candle(24, 4, open_=100.5, high=102.0, low=100.4, close=101.6),
+        _candle(
+            24,
+            5,
+            open_=101.6,
+            high=104.0,
+            low=101.3,
+            close=103.5,
+            volume=1400,
+        ),
+    ]
+    bars = [*_previous_session(), *current]
+
+    decision = strategy.analyze_snapshot(
+        bars,
+        as_of=current[-1].end_time,
+        expected_completed_end=current[-1].end_time,
+    )
+
+    assert decision.result == "TREND_LONG"
+    assert decision.signal is not None
+    assert strategy.last_processed_candle is None
+    assert strategy.last_decision.reason == "NOT_EVALUATED"
+
+
+def test_strategy_e_passive_analysis_runs_outside_entry_window():
+    strategy = _strategy()
+    current = [
+        _candle(24, 0, open_=100.2, high=101.0, low=100.0, close=100.6),
+        _candle(24, 1, open_=100.6, high=103.0, low=100.5, close=102.0),
+        _candle(24, 2, open_=102.0, high=102.2, low=100.2, close=100.8),
+        _candle(24, 3, open_=100.8, high=101.2, low=99.8, close=100.5),
+        _candle(24, 4, open_=100.5, high=102.0, low=100.4, close=101.6),
+        _candle(
+            24,
+            5,
+            open_=101.6,
+            high=104.0,
+            low=101.3,
+            close=103.5,
+            volume=1400,
+        ),
+    ]
+    bars = [*_previous_session(), *current]
+    after_hours = datetime(2026, 9, 24, 15, 20, tzinfo=IST)
+
+    hist = SimpleNamespace(
+        expected_completed_end=Mock(return_value=current[-1].end_time),
+    )
+    service = StrategyService(
+        oms_service=Mock(),
+        repository=Mock(),
+        historical_service=hist,
+    )
+    service.config = AutoTradingConfig(
+        tunables=strategy.config,
+        mode=AutoTradingMode.PAPER,
+    )
+    service.strategy_e = strategy
+    service._strategy_e_futures_5m = bars
+
+    assert service._strategy_e_entry_window_open(after_hours) is False
+
+    decision = service._refresh_strategy_e_analysis(after_hours)
+
+    assert decision.result == "TREND_LONG"
+    assert decision.signal is not None
+    assert service._strategy_e_analysis.reason == "SIGNAL_READY"
+    # Passive diagnostics must not consume the execution evaluator's bar.
+    assert service.strategy_e.last_processed_candle is None
+
+
+def test_strategy_e_diagnostics_separate_analysis_from_closed_entry_window():
+    service = StrategyService(oms_service=Mock(), repository=Mock())
+    service.config.mode = AutoTradingMode.PAPER
+    service.config.tunables.pivot_vwap_scalp_enabled = True
+    service._strategy_e_futures_5m = [
+        _candle(24, 5, open_=101.0, high=102.0, low=100.5, close=101.5)
+    ]
+    service._market_data_status["strategy_e_signal_data_fresh"] = True
+    service._strategy_e_analysis = StrategyEDecision(
+        "NO_TRADE",
+        "NO_SETUP",
+        {"price": 101.5, "pivot": 100.0},
+    )
+    service._strategy_e_entry_window_open = Mock(return_value=False)
+
+    [diag] = service._strategy_e_trigger_diagnostics()
+    conditions = {condition.id: condition for condition in diag.conditions}
+
+    assert conditions["entry_window"].current_value == "CLOSED"
+    assert conditions["entry_window"].status == "PENDING"
+    assert conditions["latest_setup"].current_value == "NO_TRADE"
+    assert conditions["latest_setup"].gap_description == "NO_SETUP"
+    assert diag.key_blocker == "NO_SETUP"
+    assert diag.overall_status == "WAITING"
