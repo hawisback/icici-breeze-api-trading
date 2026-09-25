@@ -704,7 +704,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 Resolved Replay Lifecycles ({trades.length})
               </h3>
               <span className="text-[11px] text-slate-400">
-                Underlying lifecycle replay; option ₹ figures are historical close marks with one-lot reconstruction when available.
+                Underlying lifecycle replay with historical marks and separately estimated execution fills when evidence is available.
               </span>
             </div>
 
@@ -732,7 +732,8 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                       <th className="py-2.5 px-3 font-medium">Exit</th>
                       <th className="py-2.5 px-3 font-medium">Exit Reason</th>
                       <th className="py-2.5 px-3 font-medium text-right">Realized R</th>
-                      <th className="py-2.5 px-4 font-medium text-right">Net Mark P&L</th>
+                      <th className="py-2.5 px-3 font-medium text-right">Net Mark P&L</th>
+                      <th className="py-2.5 px-4 font-medium text-right">Est. Exec P&L</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/50 font-mono">
@@ -740,6 +741,8 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                       const tradeNetPnl = t.net_pnl;
                       const hasTradeNetPnl = tradeNetPnl !== null && tradeNetPnl !== undefined;
                       const isWin = hasTradeNetPnl && tradeNetPnl > 0;
+                      const executionTradePnl = t.estimated_executable_net_pnl;
+                      const hasExecutionTradePnl = executionTradePnl !== null && executionTradePnl !== undefined;
                       return (
                         <tr key={t.trade_id} className="hover:bg-slate-800/30 transition">
                           <td className="py-3 px-4 text-slate-400 text-[11px]">
@@ -772,24 +775,33 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                             <div className="text-[10px] text-slate-400 font-sans">
                               {t.lots} lots ({t.quantity} qty)
                             </div>
+                            {t.contract_selection_evidence_status && (
+                              <div className="text-[10px] text-cyan-300 font-sans mt-0.5">
+                                {t.contract_selection_evidence_status}
+                              </div>
+                            )}
                           </td>
                           <td className="py-3 px-3 text-slate-300">
                             <div>{t.entry_time}</div>
                             <div className="text-[10px] text-slate-400">
-                              Option mark: {formatAmount(t.entry_premium)} (Spot: {formatAmount(t.entry_spot)})
+                              Option mark: {formatAmount(t.entry_mark ?? t.entry_premium)} (Spot: {formatAmount(t.entry_spot)})
                             </div>
-                            <div className="hidden">
-                              ₹{t.entry_premium} (Spot ₹{t.entry_spot})
-                            </div>
+                            {t.simulated_entry_fill !== null && t.simulated_entry_fill !== undefined && (
+                              <div className="text-[10px] text-cyan-300">
+                                Est. fill: {formatAmount(t.simulated_entry_fill)}
+                              </div>
+                            )}
                           </td>
                           <td className="py-3 px-3 text-slate-300">
                             <div>{t.exit_time || "-"}</div>
                             <div className="text-[10px] text-slate-400">
-                              Option mark: {formatAmount(t.exit_premium)} (Spot: {formatAmount(t.exit_spot)})
+                              Option mark: {formatAmount(t.exit_mark ?? t.exit_premium)} (Spot: {formatAmount(t.exit_spot)})
                             </div>
-                            <div className="hidden">
-                              ₹{t.exit_premium ?? "-"} (Spot ₹{t.exit_spot ?? "-"})
-                            </div>
+                            {t.simulated_exit_fill !== null && t.simulated_exit_fill !== undefined && (
+                              <div className="text-[10px] text-cyan-300">
+                                Est. fill: {formatAmount(t.simulated_exit_fill)}
+                              </div>
+                            )}
                           </td>
                           <td className="py-3 px-3 font-sans text-slate-300 text-[11px]">
                             <span
@@ -816,29 +828,33 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                             {t.realized_r}R
                           </td>
                           <td
-                            className={`py-3 px-4 text-right font-bold text-sm ${
+                            className={`py-3 px-3 text-right font-bold text-sm ${
                               !hasTradeNetPnl ? "text-slate-300" : isWin ? "text-emerald-400" : "text-rose-400"
                             }`}
                           >
                             {hasTradeNetPnl ? formatPnl(tradeNetPnl) : "N/A"}
                           </td>
-                          {/*
-                          <td
-                            className={`py-3 px-3 text-right font-bold ${
-                              t.realized_r >= 0 ? "text-cyan-400" : "text-rose-400"
-                            }`}
-                          >
-                            {t.realized_r >= 0 ? "+" : ""}
-                            {t.realized_r}R
-                          </td>
                           <td
                             className={`py-3 px-4 text-right font-bold text-sm ${
-                              isWin ? "text-emerald-400" : "text-rose-400"
+                              !hasExecutionTradePnl
+                                ? "text-slate-300"
+                                : (executionTradePnl ?? 0) >= 0
+                                ? "text-emerald-400"
+                                : "text-rose-400"
                             }`}
                           >
-                            {isWin ? "+" : ""}₹{t.net_pnl.toLocaleString()}
+                            {hasExecutionTradePnl
+                              ? formatPnl(executionTradePnl)
+                              : "N/A"}
+                            {t.simulated_entry_fill_method && (
+                              <div className="mt-0.5 text-[9px] font-sans font-normal text-slate-500">
+                                {t.simulated_entry_fill_method.includes("BID_ASK")
+                                  && t.simulated_exit_fill_method?.includes("BID_ASK")
+                                  ? "bid/ask evidence"
+                                  : "mark fallback"}
+                              </div>
+                            )}
                           </td>
-                          */}
                         </tr>
                       );
                     })}
