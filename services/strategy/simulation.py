@@ -57,6 +57,7 @@ from services.strategy.replay_lifecycle import (
     HistoricalPositionManagerReplayer,
     attach_historical_option_prices,
     build_lifecycle_report,
+    _historical_close_at,
     build_simulated_trade_records,
     summarize_historical_option_marks,
 )
@@ -65,6 +66,10 @@ from services.strategy.replay_registry import (
     ReplayBarContext,
     ReplaySessionContext,
     ReplayStrategyRegistry,
+)
+from services.strategy.replay_sizing import (
+    ReplaySizingDecision,
+    calculate_replay_sizing,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,11 +83,15 @@ class SimulationEngine:
         risk_config: Optional[RiskConfig] = None,
         session_config: Optional[SessionTimersConfig] = None,
         tunables=None,
+        option_selection_config: Optional[OptionSelectionConfig] = None,
         replay_manifest_recorder: Optional[ReplayManifestRecorder] = None,
     ) -> None:
         self.hist_svc = historical_service
         self.risk_config = risk_config or RiskConfig()
         self.session_config = session_config or SessionTimersConfig()
+        self.option_selection_config = (
+            option_selection_config or OptionSelectionConfig()
+        )
         from services.strategy.models import StrategyTunablesConfig
         self.tunables = tunables or StrategyTunablesConfig()
         self.replay_manifest_recorder = replay_manifest_recorder
