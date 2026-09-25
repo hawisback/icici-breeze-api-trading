@@ -1274,6 +1274,7 @@ export interface ReplayDataQualityData {
 }
 
 export interface SimulationResultData {
+  replay_mode: "POSITION_MANAGER_REPLAY" | "EXECUTION_PARITY" | string;
   limitation?: string;
   session_date: string;
   signal_metrics: ReplaySignalMetricsData;
@@ -1309,7 +1310,8 @@ export interface SimulationRequestData {
   bypass_window?: boolean;
   bypass_entry_window?: boolean;
   historical_source?: "BREEZE" | "KITE" | "LIVE" | "MIXED";
-  /** Accepted for API compatibility; current Day Replay does not enforce chronological daily trade gates. */
+  replay_mode?: "RESEARCH" | "EXECUTION_PARITY";
+  /** Accepted for API compatibility; daily trade-count risk gating is not applied yet. */
   max_trades_per_day?: number;
 }
 
