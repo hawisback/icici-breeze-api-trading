@@ -187,9 +187,8 @@ class SimulationEngine:
         candles = option_candle_cache.get(instrument_id)
         if candles is None:
             candles = []
-            if self.hist_svc and hasattr(self.hist_svc, "repo"):
-                target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-                start = datetime(
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            start = datetime(
                     target_date.year,
                     target_date.month,
                     target_date.day,
@@ -197,7 +196,7 @@ class SimulationEngine:
                     15,
                     tzinfo=IST,
                 ).astimezone(timezone.utc)
-                end = datetime(
+            end = datetime(
                     target_date.year,
                     target_date.month,
                     target_date.day,
@@ -205,6 +204,7 @@ class SimulationEngine:
                     30,
                     tzinfo=IST,
                 ).astimezone(timezone.utc)
+            if self.hist_svc and hasattr(self.hist_svc, "repo"):
                 try:
                     candles = await self.hist_svc.repo.get_candles(
                         instrument_id,
