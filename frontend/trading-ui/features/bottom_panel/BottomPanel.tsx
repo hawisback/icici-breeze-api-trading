@@ -9,6 +9,7 @@ import {
   fetchSystemHealth,
 } from "@/lib/api";
 import { useTradingStore } from "@/stores/useTradingStore";
+import { formatISTTime } from "@/lib/time";
 
 export function BottomPanel() {
   const { activeTab, setActiveTab } = useTradingStore();
@@ -136,7 +137,7 @@ export function BottomPanel() {
                 orders.map((o) => (
                   <tr key={o.order_id} className="hover:bg-slate-900/40">
                     <td className="py-1.5 text-slate-500">
-                      {new Date(o.created_at).toLocaleTimeString()}
+                      {formatISTTime(o.created_at, { second: "2-digit" })}
                     </td>
                     <td className="py-1.5 text-slate-400">{o.client_order_id}</td>
                     <td className="py-1.5 font-bold text-slate-200">{o.symbol}</td>
@@ -179,7 +180,7 @@ export function BottomPanel() {
               auditLogs.map((log) => (
                 <div key={log.event_id} className="pt-1.5 flex items-center justify-between text-[10px]">
                   <div className="flex items-center space-x-2">
-                    <span className="text-slate-500">{new Date(log.occurred_at).toLocaleTimeString()}</span>
+                    <span className="text-slate-500">{formatISTTime(log.occurred_at, { second: "2-digit" })}</span>
                     <span className="font-bold text-blue-400">{log.event_type}</span>
                     <span className="text-slate-500">[{log.source}]</span>
                   </div>
