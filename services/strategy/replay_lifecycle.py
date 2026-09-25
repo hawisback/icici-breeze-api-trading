@@ -779,6 +779,50 @@ def summarize_simulated_pnl(
     )
 
 
+def summarize_historical_option_marks(
+    records: Iterable[ReplayManifestRecord],
+) -> dict[str, Any]:
+    """Summarize historical option marks without implying fill availability."""
+    rows = _trade_rows(records)
+    available = [
+        row for row in rows
+        if row.option_data_status == "AVAILABLE"
+        and row.option_gross_pnl is not None
+        and row.option_net_pnl is not None
+        and row.option_transaction_costs is not None
+    ]
+    unavailable = [row for row in rows if row not in available]
+    reasons = Counter(
+        row.option_data_quality_reason or row.option_data_status or "UNKNOWN"
+        for row in unavailable
+    )
+    complete = len(available) == len(rows)
+    if not rows:
+        gross_mark_pnl: float | None = 0.0
+        transaction_costs: float | None = 0.0
+        net_mark_pnl: float | None = 0.0
+    elif complete:
+        gross_mark_pnl = round(sum(float(row.option_gross_pnl or 0.0) for row in available), 2)
+        transaction_costs = round(
+            sum(float(row.option_transaction_costs or 0.0) for row in available),
+            2,
+        )
+        net_mark_pnl = round(sum(float(row.option_net_pnl or 0.0) for row in available), 2)
+    else:
+        gross_mark_pnl = None
+        transaction_costs = None
+        net_mark_pnl = None
+    return {
+        "priced_trades": len(available),
+        "unpriced_trades": len(unavailable),
+        "all_resolved_trades_priced": complete,
+        "gross_mark_pnl": gross_mark_pnl,
+        "estimated_transaction_costs": transaction_costs,
+        "net_mark_pnl": net_mark_pnl,
+        "quality_reasons": dict(reasons.most_common()),
+    }
+
+
 def _max_drawdown_r(rs: list[float]) -> float:
     """Return peak-to-trough drawdown for a realized-R sequence."""
     equity = 0.0
