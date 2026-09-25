@@ -255,6 +255,12 @@ def test_chronological_executor_does_not_scan_future_and_blocks_capacity():
     # Future stop data already exists in the replay dataset, but accepting the
     # signal must not resolve it ahead of chronological time.
     assert record.lifecycle_status == "PENDING"
+    assert record.sizing_status == "APPLIED"
+    assert record.sizing_contract_instrument_id == "OPT-TEST"
+    assert record.sizing_contract_lot_size == 50
+    assert record.sizing_entry_mark == 100.0
+    assert record.replay_lots == 2
+    assert record.replay_quantity == 100
     assert executor.state.daily_entries == 1
     assert executor.can_accept_entry() is False
 
