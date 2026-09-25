@@ -269,6 +269,18 @@ class PivotVwapScalpStrategy:
             )
 
         latest = candles[-1]
+        signal_age_seconds = max(
+            0.0,
+            (as_of - latest.end_time).total_seconds(),
+        )
+        if signal_age_seconds > cfg.strategy_e_max_signal_age_seconds:
+            return self._no_trade(
+                "STALE_COMPLETED_5M_BAR",
+                {
+                    "signal_age_seconds": round(signal_age_seconds, 3),
+                    "max_signal_age_seconds": cfg.strategy_e_max_signal_age_seconds,
+                },
+            )
         if self.last_processed_candle == latest.end_time:
             return StrategyEDecision(
                 "NO_TRADE",
@@ -296,6 +308,8 @@ class PivotVwapScalpStrategy:
         previous_close = previous_session[-1].close
         pivot = (previous_high + previous_low + previous_close) / 3.0
 
+        if sum(max(0, int(c.volume)) for c in session) <= 0:
+            return self._no_trade("SESSION_VOLUME_UNAVAILABLE", {})
         vwap_series = self._vwap_series(session)
         vwap = vwap_series[-1]
         price = float(latest.close)
