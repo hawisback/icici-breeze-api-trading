@@ -185,6 +185,32 @@ def test_strategy_e_emits_trend_short():
 
 
 
+def test_strategy_e_rejects_stale_completed_bar_and_marks_it_consumed():
+    strategy = _strategy(strategy_e_max_signal_age_seconds=30.0)
+    current = [
+        _candle(24, 0, open_=100.2, high=101.0, low=100.0, close=100.6),
+        _candle(24, 1, open_=100.6, high=103.0, low=100.5, close=102.0),
+        _candle(24, 2, open_=102.0, high=102.2, low=100.2, close=100.8),
+        _candle(24, 3, open_=100.8, high=101.2, low=99.8, close=100.5),
+        _candle(24, 4, open_=100.5, high=102.0, low=100.4, close=101.6),
+        _candle(24, 5, open_=101.6, high=104.0, low=101.3, close=103.5),
+    ]
+    bars = [*_previous_session(), *current]
+    stale = strategy.evaluate(
+        bars,
+        as_of=current[-1].end_time + timedelta(seconds=31),
+    )
+    assert stale.signal is None
+    assert stale.reason == "STALE_COMPLETED_5M_BAR"
+
+    duplicate = strategy.evaluate(
+        bars,
+        as_of=current[-1].end_time + timedelta(seconds=32),
+    )
+    assert duplicate.signal is None
+    assert duplicate.reason == "NO_NEW_COMPLETED_5M_BAR"
+
+
 def test_strategy_e_volume_is_confirmation_not_a_hard_gate():
     strategy = _strategy()
     current = [
