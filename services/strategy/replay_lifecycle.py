@@ -865,6 +865,32 @@ def build_simulated_trade_records(records: Iterable[ReplayManifestRecord]) -> li
                 lots=int(record.replay_lots or 1),
                 gross_pnl=record.option_gross_pnl,
                 net_pnl=record.option_net_pnl,
+                entry_mark=record.option_entry_price,
+                exit_mark=record.option_exit_price,
+                simulated_entry_fill=record.simulated_entry_fill_price,
+                simulated_exit_fill=record.simulated_exit_fill_price,
+                simulated_entry_fill_method=(
+                    record.simulated_entry_fill_method
+                ),
+                simulated_exit_fill_method=(
+                    record.simulated_exit_fill_method
+                ),
+                estimated_executable_gross_pnl=(
+                    record.simulated_gross_pnl
+                ),
+                estimated_slippage_cost=record.simulated_slippage_cost,
+                estimated_transaction_costs=(
+                    record.simulated_transaction_costs
+                ),
+                estimated_executable_net_pnl=(
+                    record.simulated_net_pnl
+                ),
+                contract_selection_evidence_status=(
+                    record.contract_selection_evidence_status
+                ),
+                contract_selection_method=(
+                    record.contract_selection_actual_method
+                ),
                 hold_duration_mins=hold_duration_mins,
             )
         )
@@ -919,6 +945,70 @@ def summarize_historical_option_marks(
         gross_mark_pnl = None
         transaction_costs = None
         net_mark_pnl = None
+    execution_available = [
+        row
+        for row in rows
+        if row.simulated_gross_pnl is not None
+        and row.simulated_transaction_costs is not None
+        and row.simulated_net_pnl is not None
+    ]
+    execution_unavailable = [
+        row for row in rows if row not in execution_available
+    ]
+    execution_complete = (
+        bool(rows) and len(execution_available) == len(rows)
+    )
+    if not rows:
+        gross_execution_pnl: float | None = 0.0
+        execution_transaction_costs: float | None = 0.0
+        slippage_costs: float | None = 0.0
+        net_execution_pnl: float | None = 0.0
+    elif execution_complete:
+        gross_execution_pnl = round(
+            sum(
+                float(row.simulated_gross_pnl or 0.0)
+                for row in execution_available
+            ),
+            2,
+        )
+        execution_transaction_costs = round(
+            sum(
+                float(row.simulated_transaction_costs or 0.0)
+                for row in execution_available
+            ),
+            2,
+        )
+        slippage_costs = round(
+            sum(
+                float(row.simulated_slippage_cost or 0.0)
+                for row in execution_available
+            ),
+            2,
+        )
+        net_execution_pnl = round(
+            sum(
+                float(row.simulated_net_pnl or 0.0)
+                for row in execution_available
+            ),
+            2,
+        )
+    else:
+        gross_execution_pnl = None
+        execution_transaction_costs = None
+        slippage_costs = None
+        net_execution_pnl = None
+
+    bid_ask_supported = sum(
+        1
+        for row in execution_available
+        if row.simulated_fill_quote_equivalent
+    )
+    mark_fallback = sum(
+        1
+        for row in execution_available
+        if not row.simulated_fill_quote_equivalent
+    )
+
     return {
         "priced_trades": len(available),
         "unpriced_trades": len(unavailable),
@@ -926,6 +1016,16 @@ def summarize_historical_option_marks(
         "gross_mark_pnl": gross_mark_pnl,
         "estimated_transaction_costs": transaction_costs,
         "net_mark_pnl": net_mark_pnl,
+        "execution_estimated_trades": len(execution_available),
+        "execution_unavailable_trades": len(execution_unavailable),
+        "bid_ask_supported_trades": bid_ask_supported,
+        "mark_fallback_fill_trades": mark_fallback,
+        "gross_estimated_executable_pnl": gross_execution_pnl,
+        "estimated_slippage_costs": slippage_costs,
+        "estimated_execution_transaction_costs": (
+            execution_transaction_costs
+        ),
+        "net_estimated_executable_pnl": net_execution_pnl,
         "quality_reasons": dict(reasons.most_common()),
     }
 
