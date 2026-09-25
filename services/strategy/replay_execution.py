@@ -55,9 +55,9 @@ class ChronologicalExecutionState:
 class ChronologicalReplayExecutor:
     """Advance accepted replay positions in the same time direction as signals.
 
-    This class intentionally enforces only the active-position capacity needed
-    for chronological execution parity. Daily loss/trade limits, cooldown
-    gates, sizing, and capital/risk budgets are wired in the next increment.
+    Numeric production risk gates are evaluated from the same shared helpers
+    as the live service. Historical loss/cooldown gates use underlying realized
+    R until executable option-outcome parity is available.
     """
 
     def __init__(
