@@ -353,6 +353,15 @@ class StrategyRepository:
             tunables.setdefault("momentum_ema20_slope_max_atr", 0.15)
             data["strategy_a_revision"] = 5
             changed = True
+        if data.get("strategy_e_revision", 1) < 2:
+            # Strategy E originally allowed only 90 seconds, shorter than the
+            # historical service's 120-second completed-candle grace period.
+            # Upgrade only the old shipped default; preserve operator-custom
+            # non-default values.
+            if tunables.get("strategy_e_max_signal_age_seconds", 90.0) == 90.0:
+                tunables["strategy_e_max_signal_age_seconds"] = 180.0
+            data["strategy_e_revision"] = 2
+            changed = True
         return data, changed
 
     def _read_config_file_payload(self) -> dict[str, Any] | None:
