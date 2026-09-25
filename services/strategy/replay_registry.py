@@ -95,6 +95,12 @@ class ReplayStrategyAdapter(Protocol):
 
     def on_exit(self, direction: TradeDirection, at: datetime) -> None: ...
 
+    def on_execution_rejected(
+        self,
+        signal: StrategySignal,
+        reason: str,
+    ) -> None: ...
+
     def reset(self, at: datetime) -> None: ...
 
 
@@ -270,6 +276,13 @@ class TrendPullbackReplayAdapter:
     def on_exit(self, direction: TradeDirection, at: datetime) -> None:
         self.strategy.on_exit(direction, at)
 
+    def on_execution_rejected(
+        self,
+        signal: StrategySignal,
+        reason: str,
+    ) -> None:
+        self.strategy.on_execution_rejected(signal.timestamp, reason)
+
     def reset(self, at: datetime) -> None:
         self.strategy.reset(at)
 
@@ -434,6 +447,13 @@ class VolatilityBreakoutReplayAdapter:
     def on_exit(self, direction: TradeDirection, at: datetime) -> None:
         return None
 
+    def on_execution_rejected(
+        self,
+        signal: StrategySignal,
+        reason: str,
+    ) -> None:
+        return None
+
     def reset(self, at: datetime) -> None:
         self.strategy.reset(at)
 
@@ -583,6 +603,16 @@ class ReplayStrategyRegistry:
             if adapter.strategy_metadata().strategy == signal.strategy:
                 return adapter.on_entry_confirmed(signal, context)
         raise ValueError(f"Replay registry has no adapter for {signal.strategy.value}")
+
+    def notify_execution_rejected(
+        self,
+        signal: StrategySignal,
+        reason: str,
+    ) -> None:
+        for adapter in self.adapters:
+            if adapter.strategy_metadata().strategy == signal.strategy:
+                adapter.on_execution_rejected(signal, reason)
+                return
 
     def notify_exit(
         self,
