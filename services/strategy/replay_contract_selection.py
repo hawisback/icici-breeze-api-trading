@@ -496,6 +496,33 @@ class HistoricalContractSelectionProvider:
             ),
         )
 
+    async def completed_mark_evidence(
+        self,
+        *,
+        instrument_id: str,
+        event_time: datetime,
+    ) -> ReplayPriceEvidence:
+        candles = await self._load_option_candles(instrument_id)
+        candle = _completed_candle_at(candles, event_time)
+        if candle is None:
+            return ReplayPriceEvidence(
+                status="UNAVAILABLE",
+                basis="NO_COMPLETED_MARK",
+                source="UNAVAILABLE",
+                event_timestamp=event_time,
+                evidence_timestamp=None,
+                reason="HISTORICAL_COMPLETED_OPTION_MARK_UNAVAILABLE",
+            )
+        return ReplayPriceEvidence(
+            status="AVAILABLE",
+            basis="HISTORICAL_COMPLETED_CANDLE_CLOSE_MARK",
+            source=candle.source,
+            event_timestamp=event_time,
+            evidence_timestamp=candle.end_time,
+            mark_price=float(candle.close),
+            freshness_seconds=(event_time - candle.end_time).total_seconds(),
+        )
+
     async def price_evidence(
         self,
         *,
