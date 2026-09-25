@@ -918,7 +918,20 @@ class SimulationRequest(BaseModel):
     overrides: Optional[ThresholdOverrides] = None
     capital: float = Field(
         default=500000.0,
-        description="Compatibility-only in current Day Replay; historical sizing parity is not applied yet.",
+        gt=0,
+        description=(
+            "Replay account equity. Applied to historical sizing in "
+            "EXECUTION_PARITY when explicitly supplied; otherwise RiskConfig "
+            "account_equity is used."
+        ),
+    )
+    risk_per_trade_pct: float | None = Field(
+        default=None,
+        ge=0.1,
+        le=5.0,
+        description=(
+            "Optional replay-only risk percentage override for EXECUTION_PARITY."
+        ),
     )
     bypass_window: bool = False
     # Kept separate from ``bypass_window`` so replay metadata uses the
@@ -928,7 +941,12 @@ class SimulationRequest(BaseModel):
     replay_mode: HistoricalReplayMode = HistoricalReplayMode.RESEARCH
     max_trades_per_day: int = Field(
         default=5,
-        description="Compatibility-only in current Day Replay; chronological daily trade gating is not applied yet.",
+        ge=1,
+        le=20,
+        description=(
+            "Replay daily trade limit. Applied in EXECUTION_PARITY when "
+            "explicitly supplied; otherwise RiskConfig max_trades_per_day is used."
+        ),
     )
 
 
