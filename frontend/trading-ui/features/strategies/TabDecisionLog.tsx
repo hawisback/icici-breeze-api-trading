@@ -4,6 +4,7 @@ import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, FileText, Filter, RefreshCw, Search } from "lucide-react";
 import { DecisionLogData, fetchStrategyDecisionLog } from "../../lib/api";
+import { formatISTTime } from "../../lib/time";
 
 export const TabDecisionLog: React.FC = () => {
   const [filterCategory, setFilterCategory] = useState<string>("ALL");
@@ -125,11 +126,7 @@ export const TabDecisionLog: React.FC = () => {
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-start gap-2.5 flex-1">
                       <span className="text-slate-500 whitespace-nowrap mt-0.5">
-                        {new Date(log.timestamp).toLocaleTimeString([], {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                          second: "2-digit",
-                        })}
+                        {formatISTTime(log.timestamp, { second: "2-digit" })}
                       </span>
 
                       <span
