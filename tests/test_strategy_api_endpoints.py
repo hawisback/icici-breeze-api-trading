@@ -58,9 +58,10 @@ async def test_strategy_api_endpoints():
         assert res.json()["config"]["option_selection"]["max_option_premium"] == 65.0
 
         # 4. POST /api/v1/strategies/arm
+        # Canonical strategy mode is LIVE, while this test platform intentionally
+        # keeps LIVE_TRADING_ENABLED=false. Arming must therefore fail closed.
         res = await client.post("/api/v1/strategies/arm", json={"armed": True})
-        assert res.status_code == 200
-        assert res.json()["config"]["system_armed"] is True
+        assert res.status_code == 409
 
         res = await client.post("/api/v1/strategies/arm", json={"armed": False})
         assert res.status_code == 200
