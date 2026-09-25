@@ -32,6 +32,10 @@ from services.strategy.replay_lifecycle import (
     summarize_simulated_pnl,
 )
 from services.strategy.replay_manifest import ReplayManifestRecord
+from services.strategy.replay_registry import (
+    ReplayStrategyRegistry,
+    TrendPullbackReplayAdapter,
+)
 from services.strategy.simulation import SimulationEngine
 
 
@@ -728,12 +732,32 @@ def test_nifty_monthly_expiry_fallback_respects_2025_weekday_transition():
     assert InstrumentService._monthly_expiry(2025, 9) == date(2025, 9, 30)
 
 
-def test_strategy_a_replay_ignores_legacy_hard_adx_override():
+def test_strategy_a_replay_adapter_keeps_legacy_hard_adx_override_inactive():
     engine = SimulationEngine()
+    adapter = TrendPullbackReplayAdapter(engine.tunables)
     overrides = ThresholdOverrides(adx_threshold=17.0)
-    config = engine._strategy_a_config_for_replay(overrides)
-    assert config.adx_threshold == engine.tunables.adx_threshold
-    assert config.confirmation_min_body_ratio == engine.tunables.confirmation_min_body_ratio
+
+    assert "adx_threshold" not in adapter.strategy_metadata().supported_override_fields
+    assert adapter.strategy.config.adx_threshold == engine.tunables.adx_threshold
+    assert (
+        adapter.strategy.config.confirmation_min_body_ratio
+        == engine.tunables.confirmation_min_body_ratio
+    )
+
+
+def test_default_replay_registry_orders_a_before_b_and_owns_supported_overrides():
+    engine = SimulationEngine()
+    registry = ReplayStrategyRegistry.default(engine.tunables, engine.session_config)
+    metadata = registry.strategy_metadata()
+
+    assert [item.strategy.value for item in metadata] == [
+        "TREND_PULLBACK",
+        "VOLATILITY_BREAKOUT",
+    ]
+    assert metadata[0].priority < metadata[1].priority
+    assert "adx_threshold" not in registry.supported_override_fields()
+    assert "rvol_threshold" in registry.supported_override_fields()
+    assert "strat_b_min_confirmation" in registry.supported_override_fields()
 
 
 def test_strategy_a_futures_coverage_reports_missing_entry_window_bar():
