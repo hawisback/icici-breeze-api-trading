@@ -1376,6 +1376,21 @@ class StrategyService:
                 as_of=now,
             )
 
+        candidate_signal_already_persisted = False
+        if signal and self._is_candidate_execution_strategy(signal.strategy):
+            prior_signals = await self.repo.list_strategy_signals(limit=1000)
+            prior_ids = {
+                str(item.get("signal_id"))
+                for item in prior_signals
+                if isinstance(item, dict) and item.get("signal_id")
+            }
+            candidate_signal_already_persisted = signal.signal_id in prior_ids
+            if candidate_signal_already_persisted and any(
+                str(trade.signal_id or "") == signal.signal_id
+                for trade in today_trades
+            ):
+                signal = None
+
         if not signal and self.config.tunables.pivot_vwap_scalp_enabled:
             if strategy_e_entry_data_ready:
                 decision_e = self.strategy_e.evaluate(
@@ -1409,21 +1424,6 @@ class StrategyService:
                 entry_data_blockers["PIVOT_VWAP_SCALP"] = list(
                     dict.fromkeys(reasons)
                 )
-
-        candidate_signal_already_persisted = False
-        if signal and self._is_candidate_execution_strategy(signal.strategy):
-            prior_signals = await self.repo.list_strategy_signals(limit=1000)
-            prior_ids = {
-                str(item.get("signal_id"))
-                for item in prior_signals
-                if isinstance(item, dict) and item.get("signal_id")
-            }
-            candidate_signal_already_persisted = signal.signal_id in prior_ids
-            if candidate_signal_already_persisted and any(
-                str(trade.signal_id or "") == signal.signal_id
-                for trade in today_trades
-            ):
-                signal = None
 
         if not signal:
             enabled_blocked = (
