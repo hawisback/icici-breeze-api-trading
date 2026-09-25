@@ -19,6 +19,8 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
   const strategyD = status.strategy_d_paper;
   const strategyCExecution = status.strategies.di_continuation;
   const strategyDExecution = status.strategies.sr_momentum_breakout;
+  const strategyEExecution = status.strategies.pivot_vwap_scalp;
+  const strategyEDecision = status.strategy_e_decision;
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -78,6 +80,23 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
             <div className="bg-slate-950 rounded p-2 col-span-2"><div className="text-slate-500">Candidate</div><div className="font-mono text-fuchsia-300 truncate">{strategyD?.candidate_id || "--"}</div></div>
           </div>
           {strategyD?.candidate_spec_fingerprint && <div className="text-[9px] text-slate-600 font-mono break-all">spec {strategyD.candidate_spec_fingerprint}</div>}
+        </div>
+        <div className="lg:col-span-2 bg-slate-900/90 border border-emerald-900/60 rounded-xl p-5 shadow-lg space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wider text-emerald-300">Strategy E · Live Strategy</div>
+              <div className="text-sm font-bold text-slate-100">Pivot / VWAP 5m Intraday Scalp</div>
+            </div>
+            <span className="px-2 py-1 rounded text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/30">{strategyEExecution.execution_mode || form.mode}</span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[10px]">
+            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">State</div><div className="font-bold text-slate-200">{strategyEExecution.state || "NO_TRADE"}</div></div>
+            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Promotion</div><div className="font-bold text-emerald-300">{strategyEExecution.promotion_state || "LIVE_PROMOTED"}</div></div>
+            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Last signal</div><div className="font-bold text-emerald-200">{strategyEExecution.signal_type || strategyEDecision?.result || "--"}</div></div>
+            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Target</div><div className="font-bold text-emerald-200">{strategyEExecution.target_price ?? strategyEDecision?.target ?? "--"}</div></div>
+            <div className="bg-slate-950 rounded p-2"><div className="text-slate-500">Reason</div><div className="font-bold text-slate-300 truncate">{strategyEExecution.last_reason || strategyEDecision?.reason || "--"}</div></div>
+          </div>
+          <div className="text-[10px] text-slate-500">Completed 5m NIFTY futures: previous-session pivot + session VWAP + confirmed swings + optional RVOL. Trend and countertrend entries execute options through the shared OMS; LIVE uses broker-held catastrophe protection and reduce-only exits.</div>
         </div>
       </div>
       <fieldset className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
@@ -527,6 +546,53 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
           <div className="text-[10px] text-amber-300 bg-amber-500/5 border border-amber-500/20 rounded p-2">Production Strategy A cannot bypass its entry session and cannot be force-entered. Triggered setups remain ARMED until option execution is persisted and confirmed.</div>
         </div>
 
+        <div className="bg-slate-900/90 border border-emerald-900/50 rounded-xl p-5 shadow-lg space-y-4">
+          <div className="flex items-center gap-2 pb-2 border-b border-slate-800 text-emerald-400 text-sm font-bold uppercase tracking-wider"><TrendingUp className="w-4 h-4" />Strategy E — Pivot / VWAP Scalp</div>
+          <p className="text-[11px] text-slate-400">Lightweight 5-minute futures scalp. Volume is confirmation, not a mandatory entry gate. Stops and targets are underlying-price decisions; option execution remains protected by the shared OMS safety layer.</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {([
+              ["strategy_e_swing_lookback","Swing wing (bars)",1,5,1],
+              ["strategy_e_volume_lookback","Volume lookback",5,100,1],
+              ["strategy_e_rvol_confirmation","RVOL confirmation",0.5,5,0.05],
+              ["strategy_e_sr_lookback_bars","S/R lookback bars",10,100,1],
+              ["strategy_e_sr_buffer_points","S/R buffer (pts)",0,25,0.5],
+              ["strategy_e_counter_zone_points","Counter zone (pts)",0,50,0.5],
+              ["strategy_e_stop_buffer_points","Stop buffer (pts)",0,25,0.5],
+              ["strategy_e_max_stop_points","Maximum stop (pts)",1,200,1],
+              ["strategy_e_trend_target_points","Trend target (pts)",1,200,1],
+              ["strategy_e_counter_target_points","Counter target (pts)",1,100,1],
+              ["strategy_e_min_reward_risk","Minimum reward/risk",0.1,5,0.1],
+              ["strategy_e_min_room_to_level_points","Minimum room (pts)",0,100,1],
+              ["strategy_e_chop_lookback_bars","Chop lookback",4,20,1],
+              ["strategy_e_chop_cross_threshold","Cross threshold",1,10,1],
+              ["strategy_e_flat_vwap_lookback_bars","Flat VWAP lookback",1,10,1],
+              ["strategy_e_flat_vwap_threshold_points","Flat VWAP threshold (pts)",0,50,0.5],
+              ["strategy_e_lots","Maximum Strategy E lots",1,20,1],
+            ] as const).map(([key,label,min,max,step]) => (
+              <label key={key} className="text-xs text-slate-400">{label}
+                <input type="number" min={min} max={max} step={step} value={form.tunables[key]}
+                  onChange={e => setForm({...form, tunables: {...form.tunables, [key]: Number(e.target.value)}})}
+                  className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-100" />
+              </label>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {([["strategy_e_entry_start","Entry start (IST)"],["strategy_e_entry_end","Entry end (IST)"],["strategy_e_forced_exit_time","Forced exit (IST)"]] as const).map(([key,label]) => (
+              <label key={key} className="text-xs text-slate-400">{label}
+                <input type="time" value={form.tunables[key]}
+                  onChange={e => setForm({...form, tunables: {...form.tunables, [key]: e.target.value}})}
+                  className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-100" />
+              </label>
+            ))}
+            <label className="flex items-center gap-2 text-xs text-slate-300 mt-5">
+              <input type="checkbox" checked={form.tunables.strategy_e_countertrend_enabled}
+                onChange={e => setForm({...form, tunables: {...form.tunables, strategy_e_countertrend_enabled: e.target.checked}})}
+                className="rounded accent-emerald-500" />
+              Enable countertrend scalps
+            </label>
+          </div>
+        </div>
+
         <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
           <div className="flex items-center gap-2 pb-2 border-b border-slate-800 text-amber-400 text-sm font-bold uppercase tracking-wider">
             <ShieldAlert className="w-4 h-4" />
@@ -539,6 +605,7 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
               ["volatility_breakout_enabled", "Enable Strategy B (Volatility Breakout)"],
               ["di_continuation_enabled", "Enable Strategy C (DI Continuation)"],
               ["sr_momentum_breakout_enabled", "Enable Strategy D (S&R Momentum)"],
+              ["pivot_vwap_scalp_enabled", "Enable Strategy E (Pivot/VWAP Scalp)"],
             ] as const).map(([key, label]) => (
               <label key={key} className="flex items-center gap-2 cursor-pointer text-xs text-slate-200">
                 <input
@@ -560,7 +627,7 @@ export const TabParameters: React.FC<TabParametersProps> = ({ status, onRefresh 
             ))}
           </div>
           <div className="text-[10px] text-slate-500">
-            C/D retain their frozen signal rules. In global LIVE mode they use the same system arming, platform live permission, OMS, broker-held catastrophe stop, and reconciliation gates as A/B. Manual force-entry remains disabled for C/D.
+            C/D retain their frozen signal rules. Strategy E uses completed 5m futures structure and is LIVE-promoted through the same system arming, platform live permission, OMS, broker-held catastrophe stop, and reconciliation gates. Manual force-entry remains disabled for C/D/E.
           </div>
 
           <div className="grid grid-cols-3 gap-3">
