@@ -355,7 +355,7 @@ class StrategyRepository:
             changed = True
         return data, changed
 
-    def _read_config_file(self) -> AutoTradingConfig | None:
+    def _read_config_file_payload(self) -> dict[str, Any] | None:
         if self.config_path is None or not self.config_path.exists():
             return None
         try:
@@ -368,6 +368,11 @@ class StrategyRepository:
             raise RuntimeError(
                 f"Trading config file {self.config_path} must contain a JSON object"
             )
+        return payload
+
+    def _validate_file_payload(self, payload: dict[str, Any]) -> AutoTradingConfig:
+        payload = dict(payload)
+        payload.pop("_meta", None)
         payload, _ = self._migrate_auto_config_data(payload)
         # Arming is intentionally process-local. A file can choose mode but
         # can never grant live order authority after restart.
@@ -396,11 +401,9 @@ class StrategyRepository:
 
     async def get_auto_config(self) -> AutoTradingConfig:
         # The JSON file is the canonical non-secret operator configuration
-        # whenever configured. SQLite remains the runtime/audit copy.
-        file_config = self._read_config_file()
-        if file_config is not None:
-            await self.save_auto_config(file_config, persist_file=False)
-            return file_config
+        # after one migration-safe bootstrap. SQLite remains the runtime/audit
+        # copy and preserves pre-file installations during first rollout.
+        file_payload = self._read_config_file_payload()
 
         async with self.engine.connect() as conn:
             cursor = await conn.execute(
@@ -408,17 +411,34 @@ class StrategyRepository:
             )
             row = await cursor.fetchone()
 
-        if row:
+        bootstrap_from_db = bool(
+            file_payload
+            and isinstance(file_payload.get("_meta"), dict)
+            and file_payload["_meta"].get(
+                "bootstrap_from_database_if_present",
+                False,
+            )
+        )
+
+        if row and (file_payload is None or bootstrap_from_db):
             data = json.loads(row["config_json"])
             data, changed = self._migrate_auto_config_data(data)
             config = AutoTradingConfig.model_validate(data)
-            # Existing SQLite installations are migrated into the visible
-            # file on first startup after this feature is deployed.
             if self.config_path is not None:
+                # Export the existing durable operator state and consume the
+                # bootstrap marker by writing the canonical schema.
                 self._write_config_file(config)
             if changed:
                 await self.save_auto_config(config, persist_file=False)
             return config
+
+        if file_payload is not None:
+            file_config = self._validate_file_payload(file_payload)
+            await self.save_auto_config(file_config, persist_file=False)
+            # Consume the bootstrap marker on a fresh installation too.
+            if bootstrap_from_db:
+                self._write_config_file(file_config)
+            return file_config
 
         default_cfg = AutoTradingConfig()
         await self.save_auto_config(default_cfg)
