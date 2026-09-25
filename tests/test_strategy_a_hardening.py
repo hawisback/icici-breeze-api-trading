@@ -930,7 +930,7 @@ async def test_strategy_a_does_not_use_calendar_futures_when_breeze_session_is_i
 
 
 
-def _passing_v3_trend_components() -> dict:
+def _passing_r5_trend_components() -> dict:
     return {
         "ema_order": True,
         "di_direction": True,
@@ -946,7 +946,7 @@ def _passing_v3_trend_components() -> dict:
 def test_strategy_a_diagnostics_keep_passed_trend_when_confirmation_is_blocker():
     at = datetime(2026, 9, 21, 12, 0, tzinfo=IST)
     strategy = TrendPullbackStrategy()
-    strategy._trend_components = lambda *_args, **_kwargs: _passing_v3_trend_components()
+    strategy._trend_components = lambda *_args, **_kwargs: _passing_r5_trend_components()
     feature = __import__("services.strategy.futures_signal", fromlist=["FuturesFeatureSnapshot"]).FuturesFeatureSnapshot(
         contract_id="INST-NIFTY-FUT-2026-09-29",
         candle_timestamp=at,
@@ -961,13 +961,13 @@ def test_strategy_a_diagnostics_keep_passed_trend_when_confirmation_is_blocker()
     assert by_id["trend"].gap_description == "TREND_CONFIRMED"
     assert by_id["confirmation"].status == "PENDING"
     assert by_id["confirmation"].gap_description == "CONFIRMATION_BODY_TOO_WEAK"
-    assert diag.phase_summary["strategy_a_v2"]["trend"]["passed"] is True
+    assert diag.phase_summary["strategy_a_contract"]["trend"]["passed"] is True
 
 
 def test_strategy_a_diagnostics_surface_structural_risk_rejection():
     at = datetime(2026, 9, 21, 12, 0, tzinfo=IST)
     strategy = TrendPullbackStrategy()
-    strategy._trend_components = lambda *_args, **_kwargs: _passing_v3_trend_components()
+    strategy._trend_components = lambda *_args, **_kwargs: _passing_r5_trend_components()
     feature_cls = __import__("services.strategy.futures_signal", fromlist=["FuturesFeatureSnapshot"]).FuturesFeatureSnapshot
     direction_cls = __import__("services.strategy.strategies.trend_pullback", fromlist=["StrategyDirection"]).StrategyDirection
     # Trend, confirmation, and confluence pass, but the structural stop is
