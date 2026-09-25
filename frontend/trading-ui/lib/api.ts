@@ -1213,6 +1213,18 @@ export interface SimulatedTradeRecordData {
   lots: number;
   gross_pnl?: number | null;
   net_pnl?: number | null;
+  entry_mark?: number | null;
+  exit_mark?: number | null;
+  simulated_entry_fill?: number | null;
+  simulated_exit_fill?: number | null;
+  simulated_entry_fill_method?: string | null;
+  simulated_exit_fill_method?: string | null;
+  estimated_executable_gross_pnl?: number | null;
+  estimated_slippage_cost?: number | null;
+  estimated_transaction_costs?: number | null;
+  estimated_executable_net_pnl?: number | null;
+  contract_selection_evidence_status?: string | null;
+  contract_selection_method?: string | null;
   hold_duration_mins: number;
 }
 
@@ -1252,6 +1264,15 @@ export interface ReplayOptionMarkMetricsData {
   gross_mark_pnl: number | null;
   estimated_transaction_costs: number | null;
   net_mark_pnl: number | null;
+  execution_price_basis: string;
+  execution_estimated_trades: number;
+  execution_unavailable_trades: number;
+  bid_ask_supported_trades: number;
+  mark_fallback_fill_trades: number;
+  gross_estimated_executable_pnl: number | null;
+  estimated_slippage_costs: number | null;
+  estimated_execution_transaction_costs: number | null;
+  net_estimated_executable_pnl: number | null;
 }
 
 export interface ReplayPortfolioMetricsData {
@@ -1271,6 +1292,8 @@ export interface ReplayDataQualityData {
   option_mark_available_trades: number;
   option_mark_unavailable_trades: number;
   option_mark_quality_reasons: Record<string, number>;
+  contract_selection_evidence_counts: Record<string, number>;
+  execution_fill_method_counts: Record<string, number>;
 }
 
 export interface SimulationResultData {
