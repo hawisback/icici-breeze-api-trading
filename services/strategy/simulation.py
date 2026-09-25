@@ -1433,7 +1433,7 @@ class SimulationEngine:
                                 sizing = calculate_replay_sizing(
                                     signal=signal,
                                     contract=contract,
-                                    entry_mark=float(
+                                    entry_reference_price=float(
                                         selection.entry_reference_price
                                     ),
                                     risk_config=effective_risk_config,
