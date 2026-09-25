@@ -231,16 +231,7 @@ class BreezeTradingAdapter(BrokerTradingPort):
             ),
             timeout_sec=12.0,
         )
-        try:
-            data = BreezeResponseValidator.validate_and_extract(
-                raw_resp,
-                operation="get_positions",
-            )
-        except BrokerUnknownError as exc:
-            if "no positions available" in str(exc).lower():
-                logger.info("Breeze reports no portfolio positions; treating as empty.")
-                return []
-            raise
+        data = BreezeResponseValidator.unwrap_success(raw_resp)
         rows: list[dict[str, Any]] = data if isinstance(data, list) else []
 
         orders: list[BrokerOrderDetail] = []
@@ -338,7 +329,18 @@ class BreezeTradingAdapter(BrokerTradingPort):
             lambda: sdk.get_portfolio_positions(),
             timeout_sec=12.0,
         )
-        data = BreezeResponseValidator.unwrap_success(raw_resp)
+        try:
+            data = BreezeResponseValidator.validate_and_extract(
+                raw_resp,
+                operation="get_positions",
+            )
+        except BrokerUnknownError as exc:
+            if "no positions available" in str(exc).lower():
+                logger.info(
+                    "Breeze reports no portfolio positions; treating as empty."
+                )
+                return []
+            raise
         rows: list[dict[str, Any]] = data if isinstance(data, list) else []
 
         positions: list[BrokerPositionDetail] = []
