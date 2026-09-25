@@ -159,6 +159,7 @@ class ReplayManifestRecord(BaseModel):
     sizing_contract_expiry: str | None = None
     sizing_contract_strike: float | None = None
     sizing_contract_lot_size: int | None = None
+    sizing_entry_reference_price: float | None = None
     sizing_entry_mark: float | None = None
     replay_lots: int | None = None
     replay_quantity: int | None = None
@@ -409,6 +410,7 @@ class ReplayManifestRecorder:
         contract_expiry: str | None,
         contract_strike: float | None,
         contract_lot_size: int | None,
+        entry_reference_price: float | None,
         entry_mark: float | None,
         lots: int | None,
         quantity: int | None,
@@ -429,6 +431,7 @@ class ReplayManifestRecorder:
         record.sizing_contract_expiry = contract_expiry
         record.sizing_contract_strike = contract_strike
         record.sizing_contract_lot_size = contract_lot_size
+        record.sizing_entry_reference_price = entry_reference_price
         record.sizing_entry_mark = entry_mark
         record.replay_lots = lots
         record.replay_quantity = quantity
