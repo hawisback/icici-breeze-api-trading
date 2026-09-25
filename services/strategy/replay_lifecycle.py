@@ -796,7 +796,7 @@ def summarize_historical_option_marks(
         row.option_data_quality_reason or row.option_data_status or "UNKNOWN"
         for row in unavailable
     )
-    complete = len(available) == len(rows)
+    complete = bool(rows) and len(available) == len(rows)
     if not rows:
         gross_mark_pnl: float | None = 0.0
         transaction_costs: float | None = 0.0
