@@ -363,6 +363,37 @@ def test_simulation_overrides_cannot_bypass_missing_real_data():
     assert res_relaxed.total_bars_evaluated == res_strict.total_bars_evaluated == 0
 
 
+def test_replay_metadata_discloses_applied_and_ignored_controls():
+    engine = SimulationEngine()
+
+    request = SimulationRequest(
+        date="2026-09-17",
+        capital=750000.0,
+        max_trades_per_day=2,
+        bypass_window=True,
+        overrides=ThresholdOverrides(
+            adx_threshold=30.0,
+            rvol_threshold=1.4,
+            strat_b_min_confirmation=4,
+            box_max_height_atr=1.5,
+            max_option_premium_cap=85.0,
+        ),
+    )
+
+    import asyncio
+    result = asyncio.run(engine.run_day_simulation(request))
+    controls = result.replay_metadata["control_application"]
+
+    assert controls["applied_overrides"]["rvol_threshold"] == 1.4
+    assert controls["applied_overrides"]["strat_b_min_confirmation"] == 4
+    assert controls["applied_overrides"]["box_max_height_atr"] == 1.5
+    assert controls["applied_overrides"]["bypass_entry_window"] is True
+    assert "adx_threshold" in controls["not_applied_overrides"]
+    assert "max_option_premium_cap" in controls["not_applied_overrides"]
+    assert controls["not_applied_request_controls"]["capital"]["value"] == 750000.0
+    assert controls["not_applied_request_controls"]["max_trades_per_day"]["value"] == 2
+
+
 def test_simulation_available_dates():
     """Validates discovery of available trading session dates."""
     engine = SimulationEngine()
