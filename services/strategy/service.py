@@ -24,6 +24,7 @@ from libs.contracts.models import (
     utc_now,
 )
 from libs.events.bus import EventBus, EventEnvelope, Topics, get_event_bus
+from libs.market_time import IST
 from libs.config.settings import get_platform_settings
 from services.oms.service import OMSService
 from services.strategy.contract_selector import ContractSelector
@@ -1083,7 +1084,7 @@ class StrategyService:
                         self._market_data_status.get("futures_instrument"),
                         self._market_data_status.get("latest_futures_candle"),
                     )
-                ist_now = heartbeat_now.astimezone(timezone(timedelta(hours=5, minutes=30)))
+                ist_now = heartbeat_now.astimezone(IST)
                 force_exit = datetime.strptime(self.config.session.force_exit_time, "%H:%M").time()
                 session_date = ist_now.date().isoformat()
                 if ist_now.time() >= force_exit and self._last_eod_report_date != session_date:
@@ -1267,7 +1268,7 @@ class StrategyService:
         strategy_a_window = self.position_manager.is_within_strategy_a_entry_window(now)
         strategy_b_window = self.position_manager.is_within_entry_window()
         now_ist_hhmm = now.astimezone(
-            timezone(timedelta(hours=5, minutes=30))
+            IST
         ).strftime("%H:%M")
         strategy_e_window = (
             self.config.tunables.strategy_e_entry_start
@@ -1305,7 +1306,7 @@ class StrategyService:
 
         # 8. Check Daily Trade Count Limit
         today_trades = await self.repo.list_trades(limit=1000)
-        ist = timezone(timedelta(hours=5, minutes=30))
+        ist = IST
         today_str = now.astimezone(ist).date()
         today_trades = [t for t in today_trades if t.entry_time.astimezone(ist).date() == today_str]
         today_count = len(today_trades)
@@ -3081,7 +3082,7 @@ class StrategyService:
         )
 
         now_ist = (tick_timestamp or utc_now()).astimezone(
-            timezone(timedelta(hours=5, minutes=30))
+            IST
         )
         force_exit = (
             now_ist.strftime("%H:%M")
@@ -5551,7 +5552,7 @@ class StrategyService:
 
     async def generate_eod_report(self, session_date: Optional[str] = None) -> dict[str, Any]:
         """Build and persist the forward option-validation session report."""
-        ist = timezone(timedelta(hours=5, minutes=30))
+        ist = IST
         day = session_date or utc_now().astimezone(ist).date().isoformat()
         signals = await self.repo.list_strategy_signals(limit=10000)
         signals = [s for s in signals if s["strategy"] == StrategyName.TREND_PULLBACK.value and s["timestamp"][:10] == day]
