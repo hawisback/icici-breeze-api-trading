@@ -159,6 +159,7 @@ class StrategyService:
             session_config=self.config.session,
             tunables=self.config.tunables,
             option_selection_config=self.config.option_selection,
+            strategy_repository=self.repo,
         )
 
         self._loop_task: Optional[asyncio.Task] = None
