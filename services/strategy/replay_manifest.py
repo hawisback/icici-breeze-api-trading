@@ -164,6 +164,33 @@ class ReplayManifestRecord(BaseModel):
     replay_quantity: int | None = None
     sizing_rejection_reason: str | None = None
 
+    # Contract selection evidence. Exact production-rule parity is claimed only
+    # when an exact point-in-time chain snapshot supported the decision.
+    contract_selection_desired_method: str | None = None
+    contract_selection_actual_method: str | None = None
+    contract_selection_evidence_status: str | None = None
+    contract_selection_production_rules_applied: bool = False
+    contract_selection_snapshot_id: str | None = None
+    contract_selection_snapshot_timestamp: datetime | None = None
+    contract_selection_unsupported_evidence: list[str] = Field(default_factory=list)
+    contract_selection_rejection_reason: str | None = None
+    contract_selection_provenance: dict[str, Any] = Field(default_factory=dict)
+
+    # Historical marks remain separate from estimated executable fills.
+    simulated_entry_fill_price: float | None = None
+    simulated_exit_fill_price: float | None = None
+    simulated_entry_fill_method: str | None = None
+    simulated_exit_fill_method: str | None = None
+    simulated_entry_fill_basis: str | None = None
+    simulated_exit_fill_basis: str | None = None
+    simulated_fill_quote_equivalent: bool = False
+    simulated_gross_pnl: float | None = None
+    simulated_slippage_cost: float | None = None
+    simulated_transaction_costs: float | None = None
+    simulated_net_pnl: float | None = None
+    simulated_cost_breakdown: dict[str, Any] = Field(default_factory=dict)
+    simulated_execution_provenance: dict[str, Any] = Field(default_factory=dict)
+
     option_data_status: str = "UNAVAILABLE"
     option_contract_instrument_id: str | None = None
     option_contract_symbol: str | None = None
@@ -298,6 +325,70 @@ class ReplayManifestRecorder:
             )
         )
         self._records[signal.signal_id] = record
+        return record
+
+    def set_contract_selection_result(
+        self,
+        signal_id: str,
+        *,
+        desired_method: str,
+        actual_method: str,
+        evidence_status: str,
+        production_rules_applied: bool,
+        snapshot_id: str | None,
+        snapshot_timestamp: datetime | None,
+        unsupported_evidence: list[str],
+        rejection_reason: str | None,
+        provenance: dict[str, Any],
+    ) -> ReplayManifestRecord:
+        record = self._records[signal_id]
+        record.contract_selection_desired_method = desired_method
+        record.contract_selection_actual_method = actual_method
+        record.contract_selection_evidence_status = evidence_status
+        record.contract_selection_production_rules_applied = (
+            production_rules_applied
+        )
+        record.contract_selection_snapshot_id = snapshot_id
+        record.contract_selection_snapshot_timestamp = snapshot_timestamp
+        record.contract_selection_unsupported_evidence = list(
+            unsupported_evidence
+        )
+        record.contract_selection_rejection_reason = rejection_reason
+        record.contract_selection_provenance = dict(provenance)
+        return record
+
+    def set_execution_estimate(
+        self,
+        signal_id: str,
+        *,
+        entry_fill_price: float | None,
+        exit_fill_price: float | None,
+        entry_method: str | None,
+        exit_method: str | None,
+        entry_basis: str | None,
+        exit_basis: str | None,
+        quote_equivalent: bool,
+        gross_pnl: float | None,
+        slippage_cost: float | None,
+        transaction_costs: float | None,
+        net_pnl: float | None,
+        cost_breakdown: dict[str, Any],
+        provenance: dict[str, Any],
+    ) -> ReplayManifestRecord:
+        record = self._records[signal_id]
+        record.simulated_entry_fill_price = entry_fill_price
+        record.simulated_exit_fill_price = exit_fill_price
+        record.simulated_entry_fill_method = entry_method
+        record.simulated_exit_fill_method = exit_method
+        record.simulated_entry_fill_basis = entry_basis
+        record.simulated_exit_fill_basis = exit_basis
+        record.simulated_fill_quote_equivalent = quote_equivalent
+        record.simulated_gross_pnl = gross_pnl
+        record.simulated_slippage_cost = slippage_cost
+        record.simulated_transaction_costs = transaction_costs
+        record.simulated_net_pnl = net_pnl
+        record.simulated_cost_breakdown = dict(cost_breakdown)
+        record.simulated_execution_provenance = dict(provenance)
         return record
 
     def set_sizing_result(
