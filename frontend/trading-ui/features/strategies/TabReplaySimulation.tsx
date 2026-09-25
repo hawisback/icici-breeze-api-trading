@@ -61,6 +61,9 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const [boxMaxHeightAtr, setBoxMaxHeightAtr] = useState<number>(1.30);
   const [bypassWindow, setBypassWindow] = useState<boolean>(false);
   const [replayMode, setReplayMode] = useState<"RESEARCH" | "EXECUTION_PARITY">("RESEARCH");
+  const [replayCapital, setReplayCapital] = useState<number>(500000);
+  const [replayRiskPct, setReplayRiskPct] = useState<number>(0.5);
+  const [replayMaxTrades, setReplayMaxTrades] = useState<number>(5);
 
   useEffect(() => {
     setResult(null);
@@ -96,6 +99,13 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
         bypass_window: bypassWindow,
         historical_source: historicalSource,
         replay_mode: replayMode,
+        ...(replayMode === "EXECUTION_PARITY"
+          ? {
+              capital: Number(replayCapital),
+              risk_per_trade_pct: Number(replayRiskPct),
+              max_trades_per_day: Number(replayMaxTrades),
+            }
+          : {}),
       });
       setResult(res);
       setSelectedBarIndex(0);
@@ -148,6 +158,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const controlApplication = result?.replay_metadata?.control_application as
     | {
         applied_overrides?: Record<string, unknown>;
+        applied_request_controls?: Record<string, unknown>;
         not_applied_overrides?: Record<string, { value?: unknown; reason?: string }>;
         not_applied_request_controls?: Record<string, { value?: unknown; reason?: string }>;
       }
@@ -298,7 +309,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
           <div className="text-[10px] leading-relaxed text-slate-400">
             {replayMode === "RESEARCH"
               ? "Discovers qualified strategy signals independently, then resolves each lifecycle afterward. Useful for hypothesis analysis."
-              : "Walks forward chronologically: active positions are managed before new entries, A→B priority is enforced, and position capacity can suppress later entries. Full risk gates and historical sizing remain deferred to the next increment."}
+              : "Walks forward chronologically: active positions are managed before new entries, A→B priority is enforced, production numeric risk gates are applied, and accepted quantity is sized from replay capital/risk. Contract selection still uses the historical approximation until the next increment."}
           </div>
         </div>
 
@@ -306,10 +317,54 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
         {showOverrides && (
           <div className="mt-4 pt-4 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 bg-slate-950/60 p-4 rounded-lg border border-slate-800/80">
             <div className="sm:col-span-2 lg:col-span-3 rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-3 py-2 text-[11px] text-slate-300">
-              Only the Strategy B controls shown below are applied by the current Day Replay.
-              Strategy A uses its canonical configured momentum/confirmation contract. Capital sizing,
-              max-trades/day, premium-cap selection, and the legacy hard-ADX control are not applied yet.
+              Strategy B signal overrides apply in both modes. In Execution Parity, replay capital,
+              risk-per-trade %, daily trade limits, concurrent-position limits, cooldown, daily-R loss
+              limits, and per-strategy limits are applied. Strategy A keeps its canonical signal contract.
+              Premium-cap selection and the legacy hard-ADX control remain unapplied.
             </div>
+
+            {replayMode === "EXECUTION_PARITY" && (
+              <>
+                <div>
+                  <div className="text-xs text-slate-300 font-medium mb-1">Replay Capital</div>
+                  <input
+                    type="number"
+                    min="50000"
+                    step="50000"
+                    value={replayCapital}
+                    onChange={(e) => setReplayCapital(Number(e.target.value))}
+                    className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
+                  />
+                  <div className="mt-1 text-[10px] text-slate-500">Account equity used by production sizing math.</div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-300 font-medium mb-1">Risk / Trade (%)</div>
+                  <input
+                    type="number"
+                    min="0.1"
+                    max="5"
+                    step="0.1"
+                    value={replayRiskPct}
+                    onChange={(e) => setReplayRiskPct(Number(e.target.value))}
+                    className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
+                  />
+                  <div className="mt-1 text-[10px] text-slate-500">Overrides the replay risk budget only.</div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-300 font-medium mb-1">Max Trades / Day</div>
+                  <input
+                    type="number"
+                    min="1"
+                    max="20"
+                    step="1"
+                    value={replayMaxTrades}
+                    onChange={(e) => setReplayMaxTrades(Number(e.target.value))}
+                    className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
+                  />
+                  <div className="mt-1 text-[10px] text-slate-500">Chronological accepted-entry limit.</div>
+                </div>
+              </>
+            )}
 
             {/* RVOL Threshold */}
             <div>
