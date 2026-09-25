@@ -67,6 +67,7 @@ from services.strategy.strategies.candidate_runtime import (
     strategy_c_signal_from_status,
     strategy_d_signal_from_status,
 )
+from services.strategy.strategies.pivot_vwap_scalp import PivotVwapScalpStrategy
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 from services.strategy.strategy_c_shadow_monitor import StrategyCShadowMonitor
@@ -121,6 +122,7 @@ class StrategyService:
         self._last_strategy_d_paper_status: dict[str, Any] = {"status": "NOT_INITIALIZED"}
 
         self.strategy_a = TrendPullbackStrategy(config=self.config.tunables)
+        self.strategy_e = PivotVwapScalpStrategy(self.config.tunables)
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
             adx_threshold=self.config.tunables.strategy_b_adx_threshold,
@@ -148,6 +150,7 @@ class StrategyService:
         self._last_loss_exit_time: Optional[datetime] = None
         self._active_overrides: ThresholdOverrides = ThresholdOverrides()
         self._market_snapshot = ([], [], [])
+        self._strategy_e_futures_5m: list[Candle] = []
         self._evaluation_lock = asyncio.Lock()
         self._last_eval_time: datetime = datetime.min.replace(tzinfo=timezone.utc)  # epoch → forces first-call refresh
         self._last_cycle_status: str | None = None
@@ -556,6 +559,7 @@ class StrategyService:
     async def _save_runtime(self):
         await self.repo.save_runtime(self.strategy_a.export_state())
         await self.repo.save_runtime(self.strategy_b.export_state(), "volatility_breakout")
+        await self.repo.save_runtime(self.strategy_e.export_state(), "pivot_vwap_scalp")
 
     async def initialize(self) -> None:
         await self.repo.initialize()
@@ -592,6 +596,7 @@ class StrategyService:
             logger.exception("Unable to restore persisted Strategy A telemetry")
         self.strategy_a.restore_state(await self.repo.get_runtime())
         self.strategy_b.restore_state(await self.repo.get_runtime("volatility_breakout"))
+        self.strategy_e.restore_state(await self.repo.get_runtime("pivot_vwap_scalp"))
         self._active_trades_cache = await self.repo.get_active_trades()
 
         # Repair the only two crash-consistency mismatches permitted by older
@@ -636,6 +641,7 @@ class StrategyService:
             session_config=self.config.session,
         )
         self.strategy_a = TrendPullbackStrategy(config=self.config.tunables)
+        self.strategy_e = PivotVwapScalpStrategy(self.config.tunables)
         self.strategy_b = VolatilityBreakoutStrategy(
             rvol_threshold=self.config.tunables.rvol_threshold,
             adx_threshold=self.config.tunables.strategy_b_adx_threshold,
@@ -661,6 +667,10 @@ class StrategyService:
         return strategy == StrategyName.TREND_PULLBACK
 
     @staticmethod
+    def _is_strategy_e(strategy: StrategyName) -> bool:
+        return strategy == StrategyName.PIVOT_VWAP_SCALP
+
+    @staticmethod
     def _is_candidate_execution_strategy(strategy: StrategyName) -> bool:
         return strategy in {
             StrategyName.DI_CONTINUATION,
@@ -682,7 +692,7 @@ class StrategyService:
         }
 
     def _execution_policy_for_strategy(self, strategy: StrategyName):
-        """Return the single authoritative A/B/C/D execution policy."""
+        """Return the single authoritative A/B/C/D/E execution policy."""
         return resolve_strategy_execution_policy(
             strategy,
             self.config.mode,
@@ -3516,11 +3526,15 @@ class StrategyService:
         candles_5m = await self._get_recent_candles("5m")
         candles_15m = await self._get_recent_candles("15m")
         futures: list[Candle] = []
+        futures_5m: list[Candle] = []
         active_instrument = await self._resolve_strategy_a_futures_instrument()
         if active_instrument:
             futures = await self._get_recent_candles("15m", active_instrument)
+            futures_5m = await self._get_recent_candles("5m", active_instrument)
             logger.info("Strategy A futures history: provider=%s instrument=%s interval=15m candles=%d",
                         self._market_data_status.get("provider"), active_instrument, len(futures))
+            logger.info("Strategy E futures history: provider=%s instrument=%s interval=5m candles=%d",
+                        self._market_data_status.get("provider"), active_instrument, len(futures_5m))
         self._market_data_status.update({
             "futures_instrument": active_instrument,
             "futures_candle_count": len(futures),
@@ -3531,6 +3545,7 @@ class StrategyService:
         elif futures:
             self._market_data_status["last_error"] = None
         self._market_snapshot = (candles_5m, candles_15m, futures)
+        self._strategy_e_futures_5m = futures_5m
 
         now = utc_now()
         spot_5m_age = (
@@ -3541,6 +3556,11 @@ class StrategyService:
         futures_15m_age = (
             max(0.0, (now - futures[-1].end_time).total_seconds())
             if futures
+            else None
+        )
+        futures_5m_age = (
+            max(0.0, (now - futures_5m[-1].end_time).total_seconds())
+            if futures_5m
             else None
         )
         try:
@@ -3583,6 +3603,11 @@ class StrategyService:
                 if futures_15m_age is not None
                 else None
             ),
+            "latest_futures_5m_candle_age_seconds": (
+                round(futures_5m_age, 3)
+                if futures_5m_age is not None
+                else None
+            ),
             "strategy_a_signal_data_fresh": bool(
                 futures_15m_age is not None
                 and futures_15m_age <= 1200.0
@@ -3590,6 +3615,10 @@ class StrategyService:
             "strategy_b_signal_data_fresh": bool(
                 spot_5m_age is not None
                 and spot_5m_age <= 600.0
+            ),
+            "strategy_e_signal_data_fresh": bool(
+                futures_5m_age is not None
+                and futures_5m_age <= 600.0
             ),
         })
 
