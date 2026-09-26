@@ -200,3 +200,144 @@ def test_strategy_d_registry_keeps_v1_control_and_frozen_v2_explicit():
     assert StrategyDConfig.v1_control().strategy_id.endswith("_V1")
     assert StrategyDConfig.v2_candidate().strategy_id == CANDIDATE_ID
     assert len(spec_fingerprint()) == 64
+
+
+def test_strategy_d_natural_signal_discovery_matches_dedicated_and_common_replay():
+    """Parity must include D's real pivot/RSI/ATR/VWAP discovery, not a stub."""
+    previous = date(2026, 9, 23)
+    current = date(2026, 9, 24)
+    closes = [
+        95.5, 97.5, 95.5, 97.5, 96.5, 98.5, 96.5, 95.5,
+        97.5, 98.5, 96.5, 97.5, 99.5, 97.5, 99.5, 102.0,
+    ]
+
+    def candle(day, hour, minute, close, *, high=None, low=None, instrument="INST-NIFTY-INDEX"):
+        start = datetime(day.year, day.month, day.day, hour, minute, tzinfo=IST)
+        return Candle(
+            instrument_id=instrument,
+            interval="5m",
+            start_time=start,
+            end_time=start + timedelta(minutes=5),
+            open=close,
+            high=float(high if high is not None else close + 1.0),
+            low=float(low if low is not None else close - 1.0),
+            close=float(close),
+            volume=1000,
+            open_interest=10000,
+            source="BREEZE",
+        )
+
+    # These two bars establish PDH=100 / PDL=90 while also forming the first
+    # two observations in the real RSI/ATR history used by both paths.
+    previous_bars = [
+        candle(previous, 9, 15, closes[0], high=100.0, low=90.0),
+        candle(previous, 15, 25, closes[1], high=99.0, low=94.0),
+    ]
+    session_bars = []
+    futures = []
+    start = datetime(current.year, current.month, current.day, 9, 15, tzinfo=IST)
+    for index, close in enumerate(closes[2:]):
+        at = start + timedelta(minutes=5 * index)
+        session_bars.append(candle(current, at.hour, at.minute, close))
+        # A rising futures series gives the shared VWAP authority an
+        # unambiguous bullish confirmation on the breakout bar.
+        futures.append(candle(
+            current,
+            at.hour,
+            at.minute,
+            200.0 + index,
+            instrument="INST-NIFTY-FUT-2026-09-29",
+        ))
+    # A later adverse bar resolves the naturally discovered trade.
+    adverse_at = start + timedelta(minutes=5 * len(closes[2:]))
+    adverse = candle(current, adverse_at.hour, adverse_at.minute, 90.0)
+    session_bars.append(adverse)
+    futures.append(candle(
+        current,
+        adverse_at.hour,
+        adverse_at.minute,
+        215.0,
+        instrument="INST-NIFTY-FUT-2026-09-29",
+    ))
+
+    cfg = StrategyDConfig.v2_candidate()
+    dedicated = run_backtest(
+        spot_candles=previous_bars + session_bars,
+        futures_candles=futures,
+        start_date=current,
+        end_date=current,
+        config=cfg,
+    )
+    assert len(dedicated["trades"]) == 1
+    dedicated_trade = dedicated["trades"][0]
+    assert dedicated_trade["rsi_previous"] <= cfg.long_rsi_cross
+    assert dedicated_trade["rsi_current"] > (
+        cfg.long_rsi_cross + cfg.minimum_rsi_clearance_points
+    )
+    assert dedicated_trade["breakout_level_name"] == "PDH"
+
+    recorder = ReplayManifestRecorder()
+    registry = ReplayStrategyRegistry.default(
+        StrategyTunablesConfig(),
+        SessionTimersConfig(),
+        selected_strategies=[StrategyName.SR_MOMENTUM_BREAKOUT],
+    )
+    replay_session = ReplaySessionContext(
+        trading_date=current.isoformat(),
+        instrument_id="INST-NIFTY-INDEX",
+        overrides=ThresholdOverrides(),
+        recorder=recorder,
+    )
+    registry.prepare_session(replay_session)
+    running = list(previous_bars)
+    record = None
+    entry_index = None
+    for index, bar in enumerate(session_bars):
+        running.append(bar)
+        active_futures = [item for item in futures if item.end_time <= bar.end_time]
+        context = ReplayBarContext(
+            session=replay_session,
+            bar=bar,
+            features=MarketFeatures(timestamp=bar.end_time, spot_price=bar.close),
+            spot_candles_5m=list(running),
+            spot_candles_15m=[],
+            futures_candles=active_futures,
+            active_futures_candles_5m=active_futures,
+        )
+        signal = registry.first_signal(
+            registry.evaluate_completed_bar(context, allow_evaluation=True)
+        )
+        if signal is not None:
+            record = registry.confirm_entry(signal, context)
+            entry_index = index
+            break
+
+    assert record is not None
+    assert entry_index is not None
+    assert record.simulated_entry_timestamp.isoformat() == dedicated_trade["entry_time"]
+    assert record.initial_structural_stop == dedicated_trade["initial_stop"]
+    assert record.initial_risk_points == dedicated_trade["risk_points"]
+
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=RiskConfig(),
+        session_config=SessionTimersConfig(),
+        recorder=recorder,
+        instrument_id="INST-NIFTY-INDEX",
+        warmup_candles=previous_bars,
+        session_candles=session_bars,
+        futures_candles=futures,
+        one_minute_candles=[],
+    )
+    position = replayer.start_record(record)
+    assert position is not None
+    running_for_lifecycle = previous_bars + session_bars[: entry_index + 1]
+    for bar in session_bars[entry_index + 1 :]:
+        running_for_lifecycle.append(bar)
+        if not replayer.advance_record(position, bar, running_for_lifecycle):
+            break
+
+    assert record.lifecycle_status == "RESOLVED"
+    assert record.exit_timestamp == datetime.fromisoformat(dedicated_trade["exit_time"])
+    assert record.exit_price == dedicated_trade["runner_exit_price"]
+    assert record.exit_reason == dedicated_trade["runner_exit_reason"]
+    assert record.realized_r == dedicated_trade["realized_r"]
