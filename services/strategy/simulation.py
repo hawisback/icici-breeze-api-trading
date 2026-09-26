@@ -16,6 +16,9 @@ from services.strategy.features import FeatureEngine
 from services.historical.strategy_c_forward_validation import (
     FREEZE_DATE as STRATEGY_C_FREEZE_DATE,
 )
+from services.historical.strategy_d_candidate_manifest import (
+    FREEZE_DATE as STRATEGY_D_FREEZE_DATE,
+)
 from services.strategy.futures_signal import (
     FuturesContractResolver,
     aggregate_completed_15m,
@@ -1059,7 +1062,7 @@ class SimulationEngine:
                         "cannot prove the premium/liquidity rule."
                     )
                 )
-            return "Current A/B Day Replay does not consume this override."
+            return "Current five-strategy Day Replay does not consume this override."
 
         conditional_overrides = {
             name: {
@@ -1208,11 +1211,16 @@ class SimulationEngine:
                         ),
                     },
                     "sizing": {
-                        "strategy_a_fallback_delta_proxy": (
+                        "delta_aware_structural_strategies": [
+                            StrategyName.TREND_PULLBACK.value,
+                            StrategyName.DI_CONTINUATION.value,
+                        ],
+                        "fallback_delta_proxy": (
                             self.option_selection_config.preferred_delta_min
                             + self.option_selection_config.preferred_delta_max
                         )
                         / 2.0,
+                        "strategy_e_max_lots": cfg.strategy_e_lots,
                         "exact_selection_price_basis": "POINT_IN_TIME_ASK",
                         "approximate_selection_price_basis": (
                             "HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARK"
@@ -1265,6 +1273,10 @@ class SimulationEngine:
                         "FROZEN_STRATEGY_C_DI_CONTINUATION_V1"
                     ),
                     "required_native_futures_1m": True,
+                    "required_for_this_session": bool(
+                        cfg.di_continuation_enabled
+                        and target_session_date > STRATEGY_C_FREEZE_DATE
+                    ),
                     "futures_1m_count": len(
                         futures_one_minute_candles
                     ),
@@ -1275,6 +1287,7 @@ class SimulationEngine:
                 },
                 "SR_MOMENTUM_BREAKOUT": {
                     "signal_authority": "FROZEN_STRATEGY_D_V2",
+                    "freeze_date": STRATEGY_D_FREEZE_DATE.isoformat(),
                     "spot_1m_count": len(one_minute_candles),
                     "intrabar_ordering": (
                         "NATIVE_SPOT_1M"
@@ -2053,6 +2066,72 @@ class SimulationEngine:
             "gate_funnel": gate_funnel,
             "component_funnel": component_funnel,
         }
+        strategy_records = replay_manifest_recorder.records()
+        replay_metadata["strategy_replay_summary"] = {
+            meta.strategy.value: {
+                "display_name": meta.display_name,
+                "priority": meta.priority,
+                "enabled": meta.enabled,
+                "signals": sum(
+                    record.strategy_id == meta.strategy.value
+                    for record in strategy_records
+                ),
+                "resolved": sum(
+                    record.strategy_id == meta.strategy.value
+                    and record.lifecycle_status == "RESOLVED"
+                    for record in strategy_records
+                ),
+                "unresolved": sum(
+                    record.strategy_id == meta.strategy.value
+                    and record.lifecycle_status == "UNRESOLVED"
+                    for record in strategy_records
+                ),
+                "ambiguous": sum(
+                    record.strategy_id == meta.strategy.value
+                    and record.lifecycle_status == "AMBIGUOUS"
+                    for record in strategy_records
+                ),
+                "total_realized_r": round(
+                    sum(
+                        float(record.realized_r or 0.0)
+                        for record in strategy_records
+                        if record.strategy_id == meta.strategy.value
+                        and record.realized_r is not None
+                    ),
+                    4,
+                ),
+            }
+            for meta in strategy_registry.strategy_metadata()
+        }
+        c_latencies = [
+            float(
+                record.entry_features.get(
+                    "replay_observation_latency_seconds"
+                )
+            )
+            for record in strategy_records
+            if record.strategy_id == StrategyName.DI_CONTINUATION.value
+            and record.entry_features.get(
+                "replay_observation_latency_seconds"
+            )
+            is not None
+        ]
+        replay_metadata["strategy_data_evidence"][
+            "DI_CONTINUATION"
+        ]["observed_signal_latency_seconds"] = {
+            "count": len(c_latencies),
+            "average": (
+                round(sum(c_latencies) / len(c_latencies), 3)
+                if c_latencies
+                else None
+            ),
+            "maximum": (
+                round(max(c_latencies), 3)
+                if c_latencies
+                else None
+            ),
+        }
+
         if not replay_manifest_recorder.records():
             top = ", ".join(f"{name}={count}" for name, count in blocker_counts.most_common(5))
             quality = ", ".join(f"{name}={count}" for name, count in data_quality_counts.most_common())
