@@ -34,8 +34,10 @@ def _float(value: Any) -> float | None:
         return None
 
 
-def _iso_utc(ts: datetime) -> str:
-    return ts.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+def _breeze_iso_wall(ts: datetime) -> str:
+    """Format Breeze's documented exchange-wall-time-with-Z convention."""
+
+    return ts.astimezone(IST).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 class BreezeFuturesClient:
@@ -88,8 +90,8 @@ class BreezeFuturesClient:
             end = datetime.combine(day, SESSION_END, tzinfo=IST)
             response = client.get_historical_data_v2(
                 interval="5minute",
-                from_date=_iso_utc(start),
-                to_date=_iso_utc(end),
+                from_date=_breeze_iso_wall(start),
+                to_date=_breeze_iso_wall(end),
                 stock_code="NIFTY",
                 exchange_code="NFO",
                 product_type="futures",
