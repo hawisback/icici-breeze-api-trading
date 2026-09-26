@@ -81,7 +81,7 @@
       "strategy": "PIVOT_VWAP_SCALP",
       "display_name": "Strategy E · Pivot/VWAP Scalp",
       "priority": 50,
-      "default_enabled": false
+      "default_enabled": true
     }
   ],
   "reproducibility": {
