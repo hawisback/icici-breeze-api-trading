@@ -99,6 +99,25 @@ def _period_metrics(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _session_summary(
+    trades: Sequence[dict[str, Any]],
+    usable_session_dates: Sequence[date],
+) -> dict[str, Any]:
+    trade_counts = Counter(str(row["date"]) for row in trades)
+    session_dates = [day.isoformat() for day in usable_session_dates]
+    trade_days = sum(trade_counts.get(day, 0) > 0 for day in session_dates)
+    return {
+        "session_count": len(session_dates),
+        "session_dates": session_dates,
+        "trade_days": trade_days,
+        "no_trade_days": len(session_dates) - trade_days,
+        "trades_by_date": {
+            day: trade_counts.get(day, 0)
+            for day in session_dates
+        },
+    }
+
+
 def _metrics(
     trades: Sequence[dict[str, Any]],
     usable_sessions: int,
@@ -155,6 +174,16 @@ def _metrics(
         ),
         "max_drawdown_r": round(max_drawdown, 6),
         "max_losing_streak": max_losing_streak,
+        "mean_mfe_r": (
+            round(mean(float(row["mfe_r"]) for row in trades), 6)
+            if trades
+            else None
+        ),
+        "mean_mae_r": (
+            round(mean(float(row["mae_r"]) for row in trades), 6)
+            if trades
+            else None
+        ),
         "scale_out_trades": sum(
             row.get("scale_out_time") is not None for row in trades
         ),
@@ -203,6 +232,7 @@ def run_backtest(
     one_minute_spot_candles: Sequence[Candle] = (),
     start_date: date | None = None,
     end_date: date | None = None,
+    session_dates: Sequence[date] | None = None,
     config: StrategyDConfig | None = None,
 ) -> dict[str, Any]:
     """Run one frozen Strategy D ruleset on preloaded real candles."""
@@ -225,11 +255,17 @@ def run_backtest(
         available_days = [
             day for day in available_days if day <= end_date
         ]
+    if session_dates is not None:
+        requested_days = set(session_dates)
+        available_days = [
+            day for day in available_days if day in requested_days
+        ]
 
     manager = StrategyDPositionManager(strategy_d_config=cfg)
     trades: list[dict[str, Any]] = []
     levels_rows: list[dict[str, Any]] = []
     usable_sessions = 0
+    usable_session_dates: list[date] = []
     usable_sessions_with_1m = 0
     skipped: Counter[str] = Counter()
 
@@ -245,6 +281,7 @@ def run_backtest(
             skipped["NO_ACTIVE_FUTURES_5M"] += 1
             continue
         usable_sessions += 1
+        usable_session_dates.append(day)
         if day_minutes:
             usable_sessions_with_1m += 1
         levels_rows.append(levels.to_dict())
@@ -385,6 +422,10 @@ def run_backtest(
         },
         "metrics": _metrics(trades, usable_sessions),
         "usable_sessions": usable_sessions,
+        "session_summary": _session_summary(
+            trades,
+            usable_session_dates,
+        ),
         "intrabar_coverage": {
             "one_minute_candles_loaded": len(
                 one_minute_spot_candles
@@ -447,6 +488,7 @@ def build_v2_comparison(
     one_minute_spot_candles: Sequence[Candle] = (),
     start_date: date | None = None,
     end_date: date | None = None,
+    session_dates: Sequence[date] | None = None,
 ) -> dict[str, Any]:
     """Return V2 as the main report with corrected V1 metrics beside it."""
     control = run_backtest(
@@ -455,6 +497,7 @@ def build_v2_comparison(
         one_minute_spot_candles=one_minute_spot_candles,
         start_date=start_date,
         end_date=end_date,
+        session_dates=session_dates,
         config=StrategyDConfig.v1_control(),
     )
     candidate = run_backtest(
@@ -463,6 +506,7 @@ def build_v2_comparison(
         one_minute_spot_candles=one_minute_spot_candles,
         start_date=start_date,
         end_date=end_date,
+        session_dates=session_dates,
         config=StrategyDConfig.v2_candidate(),
     )
     control_metrics = control["metrics"]
@@ -533,6 +577,74 @@ def _available_spot_dates(
     first = _aware(rows["first_ts"]).astimezone(IST).date()
     last = _aware(rows["last_ts"]).astimezone(IST).date()
     return first, last
+
+
+def _available_usable_session_dates(
+    conn: Any,
+    source: str,
+) -> list[date]:
+    """Return dates with both NIFTY spot and futures 5m data.
+
+    The first spot date is excluded because Strategy D requires previous-session
+    levels. Final usability is still verified by the backtest after candle
+    loading, so this helper is only the cheap database-side candidate filter.
+    """
+    source_clause, source_params = _source_predicate(source)
+    rows = conn.execute(
+        f"""
+        SELECT instrument_id, start_time
+        FROM historical_candles
+        WHERE interval = '5m'
+          AND (
+            instrument_id = 'INST-NIFTY-INDEX'
+            OR instrument_id LIKE 'INST-NIFTY-FUT-%'
+          )
+          AND {source_clause}
+        ORDER BY start_time ASC
+        """,
+        source_params,
+    ).fetchall()
+    spot_dates: set[date] = set()
+    futures_dates: set[date] = set()
+    for row in rows:
+        day = _aware(row["start_time"]).astimezone(IST).date()
+        if row["instrument_id"] == "INST-NIFTY-INDEX":
+            spot_dates.add(day)
+        else:
+            futures_dates.add(day)
+    if not spot_dates:
+        return []
+    first_spot_date = min(spot_dates)
+    return sorted(
+        day
+        for day in spot_dates & futures_dates
+        if day > first_spot_date
+    )
+
+
+def _select_requested_session_dates(
+    available_dates: Sequence[date],
+    *,
+    sessions: int,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[date]:
+    """Select an exact research-session window deterministically."""
+    if sessions <= 0:
+        raise ValueError("sessions must be greater than zero")
+    eligible = sorted(set(available_dates))
+    if start_date is not None:
+        eligible = [day for day in eligible if day >= start_date]
+    if end_date is not None:
+        eligible = [day for day in eligible if day <= end_date]
+    if len(eligible) < sessions:
+        raise ValueError(
+            f"requested {sessions} usable sessions but only "
+            f"{len(eligible)} candidate sessions are available"
+        )
+    if start_date is not None:
+        return eligible[:sessions]
+    return eligible[-sessions:]
 
 
 def _load_spot_interval_rows(
@@ -643,6 +755,15 @@ def _parse_args() -> argparse.Namespace:
         type=date.fromisoformat,
     )
     parser.add_argument(
+        "--sessions",
+        type=int,
+        help=(
+            "Run exactly this many usable sessions. Without --start-date, "
+            "the latest eligible sessions are selected; with --start-date, "
+            "selection proceeds forward from that date."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=(
@@ -660,8 +781,29 @@ def main() -> None:
             conn,
             args.source,
         )
-    start_date = args.start_date or first
-    end_date = args.end_date or last
+        available_session_dates = (
+            _available_usable_session_dates(conn, args.source)
+            if args.sessions is not None
+            else []
+        )
+
+    selected_session_dates: list[date] | None = None
+    if args.sessions is not None:
+        try:
+            selected_session_dates = _select_requested_session_dates(
+                available_session_dates,
+                sessions=args.sessions,
+                start_date=args.start_date,
+                end_date=args.end_date,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        start_date = selected_session_dates[0]
+        end_date = selected_session_dates[-1]
+    else:
+        start_date = args.start_date or first
+        end_date = args.end_date or last
+
     if end_date < start_date:
         raise SystemExit(
             "end-date must not precede start-date"
@@ -678,7 +820,18 @@ def main() -> None:
         one_minute_spot_candles=one_minute_spot,
         start_date=start_date,
         end_date=end_date,
+        session_dates=selected_session_dates,
     )
+    if (
+        args.sessions is not None
+        and report["usable_sessions"] != args.sessions
+    ):
+        raise SystemExit(
+            "candidate-date selection did not produce exactly "
+            f"{args.sessions} usable sessions; got "
+            f"{report['usable_sessions']}. "
+            "Review skipped_sessions_or_events and data coverage."
+        )
     args.output.parent.mkdir(
         parents=True,
         exist_ok=True,
@@ -698,6 +851,7 @@ def main() -> None:
                 "strategy_id": report["strategy_id"],
                 "metrics": report["metrics"],
                 "usable_sessions": report["usable_sessions"],
+                "session_summary": report["session_summary"],
                 "intrabar_coverage": report["intrabar_coverage"],
                 "comparison_to_corrected_v1": (
                     report["comparison_to_corrected_v1"]
