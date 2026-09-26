@@ -939,6 +939,15 @@ class SimulationRequest(BaseModel):
     bypass_entry_window: Optional[bool] = None
     historical_source: HistoricalReplaySource = HistoricalReplaySource.BREEZE
     replay_mode: HistoricalReplayMode = HistoricalReplayMode.RESEARCH
+    selected_strategies: list[StrategyName] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Optional Day Replay strategy selection. None runs the enabled strategy "
+            "suite; supplying values limits orchestration without changing strategy "
+            "configuration or frozen candidate contracts."
+        ),
+    )
     max_trades_per_day: int = Field(
         default=5,
         ge=1,
