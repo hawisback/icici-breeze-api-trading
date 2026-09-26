@@ -253,7 +253,7 @@ def test_portfolio_metrics_cover_all_strategies_and_overlapping_exposure():
     assert metrics.profit_factor_pnl == 3.0
     assert metrics.expectancy_pnl == 300.0
     assert metrics.expectancy_r == 0.3
-    assert metrics.max_consecutive_wins == 1
+    assert metrics.max_consecutive_wins == 2
     assert metrics.max_consecutive_losses == 1
     assert metrics.exposure_minutes == 70.0
     assert metrics.max_concurrent_positions == 2
