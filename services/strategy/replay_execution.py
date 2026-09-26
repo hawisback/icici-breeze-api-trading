@@ -59,6 +59,8 @@ class ChronologicalExecutionState:
     chronology_block_reason: str | None = None
     positions_open_at_session_end: int = 0
     rejected_opportunities: list[dict[str, Any]] = field(default_factory=list)
+    daily_loss_trigger_events: list[dict[str, Any]] = field(default_factory=list)
+    daily_loss_trigger_statuses: set[str] = field(default_factory=set)
 
 
 class ChronologicalReplayExecutor:
@@ -142,7 +144,7 @@ class ChronologicalReplayExecutor:
                 "CHRONOLOGY_INDETERMINATE",
                 {"reason": self.state.chronology_block_reason},
             )
-        for decision in (
+        decisions = (
             check_position_capacity(
                 self.risk_config,
                 active_count=len(self.state.active_positions),
@@ -166,8 +168,25 @@ class ChronologicalReplayExecutor:
                 self.risk_config,
                 daily_count=self.state.daily_entries,
             ),
-        ):
+        )
+        for decision in decisions:
             if not decision.allowed:
+                if (
+                    decision.status.startswith("DAILY_LOSS")
+                    and decision.status not in self.state.daily_loss_trigger_statuses
+                ):
+                    self.state.daily_loss_trigger_statuses.add(decision.status)
+                    self.state.daily_loss_trigger_events.append({
+                        "timestamp": at.isoformat(),
+                        "status": decision.status,
+                        "realized_r_total": round(self.state.realized_r_total, 4),
+                        "realized_net_pnl_total": (
+                            round(self.state.realized_net_pnl_total, 2)
+                            if self.state.realized_net_pnl_complete
+                            else None
+                        ),
+                        "details": dict(decision.details or {}),
+                    })
                 return decision
         return RiskGateDecision(True)
 
@@ -428,4 +447,5 @@ class ChronologicalReplayExecutor:
                 ),
             },
             "rejected_opportunities": list(self.state.rejected_opportunities),
+            "daily_loss_trigger_events": list(self.state.daily_loss_trigger_events),
         }
