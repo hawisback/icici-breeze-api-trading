@@ -128,41 +128,75 @@ class PublicNseChartClient:
         end: datetime,
         interval_minutes: int = 5,
     ) -> list[Candle]:
+        """Fetch intraday history in small windows and merge it deterministically.
+
+        NSE's public charting endpoint can return status=true with an empty data
+        array for larger intraday ranges. OpenChart's documented intraday example
+        uses a five-day request, so keep each request at or below that size.
+        """
         self._warm_cookies()
-        response = self.client.post(
-            HISTORY_URL,
-            json={
-                "token": instrument.token,
-                "fromDate": int(start.timestamp()),
-                "toDate": int(end.timestamp()),
-                "symbol": instrument.symbol,
-                "symbolType": instrument.instrument_type,
-                "chartType": "I",
-                "timeInterval": interval_minutes,
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-        raw_rows = list(payload.get("data") or [])
-        if not payload.get("status"):
-            self.last_history_debug = {
-                "symbol": instrument.symbol,
-                "status": payload.get("status"),
-                "raw_count": len(raw_rows),
-            }
+        if end <= start:
             return []
-        normalized = _normalize_candles(raw_rows, instrument, interval_minutes)
+
+        chunk_start = start
+        merged: dict[tuple[str, str], Candle] = {}
+        chunks: list[dict[str, Any]] = []
+        all_status_ok = True
+
+        while chunk_start < end:
+            chunk_end = min(chunk_start + timedelta(days=5), end)
+            response = self.client.post(
+                HISTORY_URL,
+                json={
+                    "token": instrument.token,
+                    "fromDate": int(chunk_start.timestamp()),
+                    "toDate": int(chunk_end.timestamp()),
+                    "symbol": instrument.symbol,
+                    "symbolType": instrument.instrument_type,
+                    "chartType": "I",
+                    "timeInterval": interval_minutes,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            status_ok = bool(payload.get("status"))
+            all_status_ok = all_status_ok and status_ok
+            raw_rows = list(payload.get("data") or [])
+            normalized = (
+                _normalize_candles(raw_rows, instrument, interval_minutes)
+                if status_ok
+                else []
+            )
+            for candle in normalized:
+                merged[(candle.instrument, candle.timestamp)] = candle
+
+            chunks.append(
+                {
+                    "start": chunk_start.isoformat(),
+                    "end": chunk_end.isoformat(),
+                    "status": payload.get("status"),
+                    "raw_count": len(raw_rows),
+                    "raw_first_time": raw_rows[0].get("time") if raw_rows else None,
+                    "raw_last_time": raw_rows[-1].get("time") if raw_rows else None,
+                    "normalized_count": len(normalized),
+                    "normalized_first": normalized[0].timestamp if normalized else None,
+                    "normalized_last": normalized[-1].timestamp if normalized else None,
+                }
+            )
+            chunk_start = chunk_end
+
+        result = sorted(merged.values(), key=lambda candle: candle.timestamp)
         self.last_history_debug = {
             "symbol": instrument.symbol,
-            "status": payload.get("status"),
-            "raw_count": len(raw_rows),
-            "raw_first_time": raw_rows[0].get("time") if raw_rows else None,
-            "raw_last_time": raw_rows[-1].get("time") if raw_rows else None,
-            "normalized_count": len(normalized),
-            "normalized_first": normalized[0].timestamp if normalized else None,
-            "normalized_last": normalized[-1].timestamp if normalized else None,
+            "status": all_status_ok,
+            "chunk_days": 5,
+            "chunk_count": len(chunks),
+            "chunks": chunks,
+            "normalized_count": len(result),
+            "normalized_first": result[0].timestamp if result else None,
+            "normalized_last": result[-1].timestamp if result else None,
         }
-        return normalized
+        return result
 
 
 def _to_exchange_bar_start(raw: Any, interval_minutes: int) -> datetime:
