@@ -603,8 +603,15 @@ def test_execution_parity_mode_is_explicit_and_chronological_on_empty_session():
     )
     assert (
         result.portfolio_metrics.calculation_basis
-        == "CHRONOLOGICAL_EXECUTION_AVAILABLE_PORTFOLIO_ANALYTICS_NOT_IMPLEMENTED"
+        == "CHRONOLOGICAL_ACCEPTED_ENTRIES_AND_RESOLVED_EXITS"
     )
+    assert result.portfolio_metrics.available is True
+    assert result.portfolio_metrics.pnl_complete is True
+    assert result.portfolio_metrics.daily_entries == 0
+    assert result.portfolio_metrics.net_executable_pnl == 0.0
+    assert result.portfolio_metrics.ending_equity == 500000.0
+    assert result.portfolio_metrics.max_drawdown_pnl == 0.0
+    assert result.portfolio_metrics.max_drawdown_r == 0.0
 
 
 def test_simulation_overrides_cannot_bypass_missing_real_data():
