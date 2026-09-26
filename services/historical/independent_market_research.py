@@ -27,6 +27,7 @@ import httpx
 from services.historical.research_provider_clients import (
     BreezeFuturesClient,
     DhanHistoricalClient,
+    KiteHistoricalClient,
     UpstoxHistoricalClient,
 )
 from services.historical.yahoo_chart import YahooChartClient
@@ -654,6 +655,8 @@ def build_research_dataset(
     breeze_futures_expiry: str | None = None,
     upstox_futures_key: str | None = None,
     dhan_futures_security_id: str | None = None,
+    kite_futures_instrument_token: str | None = None,
+    kite_vix_instrument_token: str | None = None,
 ) -> dict[str, Any]:
     if sessions <= 0:
         raise ValueError("sessions must be positive")
@@ -940,15 +943,95 @@ def build_research_dataset(
             "missing": missing,
         }
 
+
+    kite_key = _usable_secret("KITE_API_KEY")
+    kite_access = _usable_secret("KITE_ACCESS_TOKEN")
+    kite_futures_token = (
+        kite_futures_instrument_token
+        or os.getenv("RESEARCH_KITE_NIFTY_FUT_INSTRUMENT_TOKEN")
+    )
+    kite_vix_token = (
+        kite_vix_instrument_token
+        or os.getenv("RESEARCH_KITE_INDIA_VIX_INSTRUMENT_TOKEN")
+    )
+    if kite_key and kite_access and (kite_futures_token or kite_vix_token):
+        try:
+            client = KiteHistoricalClient(kite_key, kite_access)
+            kite_futures: list[Candle] = []
+            kite_vix: list[Candle] = []
+            futures_debug: dict[str, Any] | None = None
+            vix_debug: dict[str, Any] | None = None
+            if kite_futures_token:
+                kite_futures = _candles_from_provider_rows(
+                    client.history(
+                        kite_futures_token,
+                        query_start,
+                        query_end,
+                        instrument_name=f"KITE:{kite_futures_token}",
+                        include_oi=True,
+                    ),
+                    "Futures",
+                )
+                futures_debug = dict(client.last_history_debug)
+                if kite_futures:
+                    futures_by_provider["KITE"] = kite_futures
+            if kite_vix_token:
+                kite_vix = _candles_from_provider_rows(
+                    client.history(
+                        kite_vix_token,
+                        query_start,
+                        query_end,
+                        instrument_name="NSE:INDIA VIX",
+                        include_oi=False,
+                    ),
+                    "VolatilityIndex",
+                )
+                vix_debug = dict(client.last_history_debug)
+                if kite_vix:
+                    vix_by_provider["KITE"] = kite_vix
+            credentialed_status["KITE"] = {
+                "available": bool(kite_futures or kite_vix),
+                "series": [
+                    *(["NIFTY_FUTURES"] if kite_futures_token else []),
+                    *(["INDIA_VIX"] if kite_vix_token else []),
+                ],
+                "futures_instrument_token": kite_futures_token,
+                "vix_instrument_token": kite_vix_token,
+                "futures_diagnostics": futures_debug,
+                "vix_diagnostics": vix_debug,
+            }
+            if kite_futures or kite_vix:
+                broker_sources_used.append("KITE")
+        except Exception as exc:
+            credentialed_status["KITE"] = {
+                "available": False,
+                "series": ["NIFTY_FUTURES", "INDIA_VIX"],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    else:
+        missing = []
+        if not (kite_key and kite_access):
+            missing.append("KITE_API_KEY/KITE_ACCESS_TOKEN")
+        if not kite_futures_token:
+            missing.append("RESEARCH_KITE_NIFTY_FUT_INSTRUMENT_TOKEN")
+        if not kite_vix_token:
+            missing.append("RESEARCH_KITE_INDIA_VIX_INSTRUMENT_TOKEN")
+        credentialed_status["KITE"] = {
+            "available": False,
+            "series": ["NIFTY_FUTURES", "INDIA_VIX"],
+            "reason": "missing_configuration",
+            "missing": missing,
+        }
+
     futures_source, futures_rows = _select_canonical_provider(
         futures_by_provider,
         wanted,
-        ["BREEZE", "UPSTOX", "DHAN", "NSE_PUBLIC_CHART"],
+        ["BREEZE", "UPSTOX", "KITE", "DHAN", "NSE_PUBLIC_CHART"],
     )
     vix_source, vix_rows = _select_canonical_provider(
         vix_by_provider,
         wanted,
-        ["UPSTOX", "YAHOO_CHART", "NSE_PUBLIC_CHART"],
+        ["UPSTOX", "KITE", "YAHOO_CHART", "NSE_PUBLIC_CHART"],
     )
 
     index_selected_candles = [
@@ -1079,6 +1162,14 @@ def main() -> None:
         "--dhan-futures-security-id",
         help="Explicit Dhan NIFTY futures securityId; overrides env config.",
     )
+    parser.add_argument(
+        "--kite-futures-instrument-token",
+        help="Explicit Kite NIFTY futures instrument_token; overrides env config.",
+    )
+    parser.add_argument(
+        "--kite-vix-instrument-token",
+        help="Explicit Kite INDIA VIX instrument_token; overrides env config.",
+    )
     args = parser.parse_args()
 
     report = build_research_dataset(
@@ -1087,6 +1178,8 @@ def main() -> None:
         breeze_futures_expiry=args.breeze_futures_expiry,
         upstox_futures_key=args.upstox_futures_key,
         dhan_futures_security_id=args.dhan_futures_security_id,
+        kite_futures_instrument_token=args.kite_futures_instrument_token,
+        kite_vix_instrument_token=args.kite_vix_instrument_token,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
