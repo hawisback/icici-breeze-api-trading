@@ -177,6 +177,60 @@ def test_v2_comparison_preserves_corrected_v1_control():
     comparison = report["comparison_to_corrected_v1"]
     assert comparison["control_strategy_id"].endswith("V1")
     assert comparison["control_config"]["variant"] == "V1_CONTROL"
+
+    ablation = report["entry_filter_ablation"]
+    assert set(ablation) == {
+        "purpose",
+        "V1_CONTROL",
+        "RSI_CLEARANCE_ONLY",
+        "RANGE_FILTER_ONLY",
+        "V2_CANDIDATE",
+    }
+    assert (
+        ablation["V1_CONTROL"]["config"][
+            "minimum_rsi_clearance_points"
+        ]
+        == 0.0
+    )
+    assert (
+        ablation["V1_CONTROL"]["config"][
+            "max_previous_day_range_atr"
+        ]
+        is None
+    )
+    assert (
+        ablation["RSI_CLEARANCE_ONLY"]["config"][
+            "minimum_rsi_clearance_points"
+        ]
+        == 2.0
+    )
+    assert (
+        ablation["RSI_CLEARANCE_ONLY"]["config"][
+            "max_previous_day_range_atr"
+        ]
+        is None
+    )
+    assert (
+        ablation["RANGE_FILTER_ONLY"]["config"][
+            "minimum_rsi_clearance_points"
+        ]
+        == 0.0
+    )
+    assert (
+        ablation["RANGE_FILTER_ONLY"]["config"][
+            "max_previous_day_range_atr"
+        ]
+        == 8.0
+    )
+    assert (
+        ablation["V2_CANDIDATE"]["config"]
+        == report["config"]
+    )
+    assert all(
+        row["research_only"] is True
+        for key, row in ablation.items()
+        if key != "purpose"
+    )
     assert report["production_thresholds_changed"] is False
 
 
