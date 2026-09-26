@@ -657,14 +657,24 @@ def build_research_dataset(
     dhan_futures_security_id: str | None = None,
     kite_futures_instrument_token: str | None = None,
     kite_vix_instrument_token: str | None = None,
+    end_date: date | None = None,
 ) -> dict[str, Any]:
     if sessions <= 0:
         raise ValueError("sessions must be positive")
 
     _load_local_env()
-    now = datetime.now(IST)
-    start = datetime.combine(now.date() - timedelta(days=lookback_days), time.min, tzinfo=IST)
-    end = now
+    generated_at = datetime.now(IST)
+    if end_date is None:
+        end = generated_at
+        window_end_date = generated_at.date()
+    else:
+        window_end_date = end_date
+        end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=IST)
+    start = datetime.combine(
+        window_end_date - timedelta(days=lookback_days),
+        time.min,
+        tzinfo=IST,
+    )
 
     source_attempts: list[dict[str, Any]] = []
     nifty_rows: list[Candle] = []
@@ -1072,7 +1082,12 @@ def build_research_dataset(
         "research_only": True,
         "broker_sources_used": sorted(set(broker_sources_used)),
         "primary_source": primary_source,
-        "generated_at": now.isoformat(),
+        "generated_at": generated_at.isoformat(),
+        "requested_window": {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "end_date": end_date.isoformat() if end_date else None,
+        },
         "interval_minutes": 5,
         "session_dates": [day.isoformat() for day in dates],
         "source_attempts": source_attempts,
@@ -1156,6 +1171,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch independent NIFTY market research data")
     parser.add_argument("--sessions", type=int, default=10)
     parser.add_argument("--lookback-days", type=int, default=30)
+    parser.add_argument(
+        "--end-date",
+        type=date.fromisoformat,
+        help="Historical cutoff YYYY-MM-DD; includes that day's complete session.",
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
         "--breeze-futures-expiry",
@@ -1187,6 +1207,7 @@ def main() -> None:
         dhan_futures_security_id=args.dhan_futures_security_id,
         kite_futures_instrument_token=args.kite_futures_instrument_token,
         kite_vix_instrument_token=args.kite_vix_instrument_token,
+        end_date=args.end_date,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
