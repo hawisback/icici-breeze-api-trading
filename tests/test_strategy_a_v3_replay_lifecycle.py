@@ -146,3 +146,102 @@ def test_strategy_a_position_manager_tracks_underlying_mfe_and_mae():
     )
     assert trade.mfe_points == 15.0
     assert trade.mae_points == -5.0
+
+
+def test_strategy_a_lifecycle_never_applies_new_stop_to_earlier_same_minute_low():
+    """Wire-level invariant: future 5m high cannot retroactively activate a stop."""
+    start = datetime(2026, 9, 18, 4, 15, tzinfo=UTC)
+    entry_spot = _candle(
+        "INST-NIFTY-INDEX", start,
+        open_=100, high=101, low=99, close=100,
+    )
+    next_spot = _candle(
+        "INST-NIFTY-INDEX", start + timedelta(minutes=5),
+        open_=100, high=101, low=99, close=100,
+    )
+    contract = "INST-NIFTY-FUT-2026-09-29"
+    entry_future = _candle(
+        contract, start,
+        open_=100, high=101, low=99, close=100,
+    )
+    transition_future = _candle(
+        contract, start + timedelta(minutes=5),
+        open_=105, high=111, low=100, close=110,
+    )
+    minute = Candle(
+        instrument_id=contract,
+        interval="1m",
+        start_time=transition_future.start_time,
+        end_time=transition_future.start_time + timedelta(minutes=1),
+        open=105,
+        high=111,
+        low=100,
+        close=110,
+        volume=100,
+        open_interest=1000,
+        source="BREEZE",
+    )
+
+    recorder = ReplayManifestRecorder()
+    from services.strategy.models import StrategySignal, MarketFeatures, ThresholdOverrides
+    from services.strategy.replay_registry import (
+        ReplayBarContext,
+        ReplaySessionContext,
+        TrendPullbackReplayAdapter,
+    )
+
+    signal = StrategySignal(
+        signal_id="A-INTRABAR-CHRONOLOGY",
+        strategy=StrategyName.TREND_PULLBACK,
+        direction=TradeDirection.BULLISH,
+        option_type=OptionType.CALL,
+        timestamp=entry_spot.end_time,
+        spot_reference_price=100.0,
+        underlying_entry_price=100.0,
+        structural_stop=90.0,
+        r_points=10.0,
+        derivatives_score=0.0,
+        features_snapshot={"futures_contract": contract},
+    )
+    adapter = TrendPullbackReplayAdapter(StrategyTunablesConfig())
+    context = ReplayBarContext(
+        session=ReplaySessionContext(
+            trading_date="2026-09-18",
+            instrument_id="INST-NIFTY-INDEX",
+            overrides=ThresholdOverrides(),
+            recorder=recorder,
+        ),
+        bar=entry_spot,
+        features=MarketFeatures(timestamp=entry_spot.end_time, spot_price=100.0),
+        spot_candles_5m=[entry_spot],
+        spot_candles_15m=[],
+        futures_candles=[entry_future],
+        active_futures_candles_5m=[entry_future],
+    )
+    record = adapter.on_entry_confirmed(signal, context)
+
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=RiskConfig(),
+        session_config=SessionTimersConfig(),
+        strategy_config=StrategyTunablesConfig(),
+        recorder=recorder,
+        instrument_id="INST-NIFTY-INDEX",
+        warmup_candles=[],
+        session_candles=[entry_spot, next_spot],
+        futures_candles=[entry_future, transition_future],
+        one_minute_candles=[minute],
+    )
+    position = replayer.start_record(record)
+    assert position is not None
+    still_open = replayer.advance_record(
+        position,
+        next_spot,
+        [entry_spot, next_spot],
+    )
+
+    assert still_open is False
+    assert record.lifecycle_status == "AMBIGUOUS"
+    assert record.exit_reason == "AMBIGUOUS_INTRABAR_ORDER"
+    assert record.exit_price is None
+    assert replayer.stats["trailing_still_ambiguous"] == 1
+    assert any(event.event == "AMBIGUOUS" for event in record.events)
