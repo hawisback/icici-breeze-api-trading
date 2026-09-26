@@ -69,6 +69,10 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const [boxMaxHeightAtr, setBoxMaxHeightAtr] = useState<number>(1.30);
   const [bypassWindow, setBypassWindow] = useState<boolean>(false);
   const [replayMode, setReplayMode] = useState<"RESEARCH" | "EXECUTION_PARITY">("RESEARCH");
+  const [selectedStrategy, setSelectedStrategy] = useState<
+    "ALL" | "TREND_PULLBACK" | "VOLATILITY_BREAKOUT" | "DI_CONTINUATION" |
+    "SR_MOMENTUM_BREAKOUT" | "PIVOT_VWAP_SCALP"
+  >("ALL");
   const [replayCapital, setReplayCapital] = useState<number>(500000);
   const [replayRiskPct, setReplayRiskPct] = useState<number>(0.5);
   const [replayMaxTrades, setReplayMaxTrades] = useState<number>(5);
@@ -128,6 +132,9 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
         bypass_window: bypassWindow,
         historical_source: historicalSource,
         replay_mode: replayMode,
+        ...(selectedStrategy === "ALL"
+          ? {}
+          : { selected_strategies: [selectedStrategy] }),
         ...(replayMode === "EXECUTION_PARITY"
           ? {
               capital: Number(replayCapital),
@@ -404,6 +411,32 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 {mode === "RESEARCH" ? "Research / Signal Replay" : "Execution Parity"}
               </button>
             ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor="replay-strategy" className="text-xs font-semibold text-slate-300 mr-1">
+              Strategy:
+            </label>
+            <select
+              id="replay-strategy"
+              value={selectedStrategy}
+              onChange={(e) => {
+                setSelectedStrategy(e.target.value as typeof selectedStrategy);
+                setResult(null);
+              }}
+              className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
+            >
+              <option value="ALL">All enabled strategies</option>
+              <option value="TREND_PULLBACK">Strategy A · Trend Pullback R5</option>
+              <option value="VOLATILITY_BREAKOUT">Strategy B · Volatility Breakout</option>
+              <option value="DI_CONTINUATION">Strategy C · DI Continuation (Frozen)</option>
+              <option value="SR_MOMENTUM_BREAKOUT">Strategy D · S&amp;R Momentum</option>
+              <option value="PIVOT_VWAP_SCALP">Strategy E · Pivot/VWAP Scalp</option>
+            </select>
+            {selectedStrategy === "DI_CONTINUATION" && (
+              <span className="text-[10px] text-cyan-300">
+                Frozen candidate thresholds/fingerprint; selection changes orchestration only.
+              </span>
+            )}
           </div>
           <div className="text-[10px] leading-relaxed text-slate-400">
             {replayMode === "RESEARCH"
