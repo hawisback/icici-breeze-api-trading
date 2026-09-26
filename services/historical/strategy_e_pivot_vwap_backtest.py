@@ -450,9 +450,20 @@ def build_experiment(
             raise ValueError(
                 f"experiment arm {name} did not replay the control sessions"
             )
+        arm_signatures = {
+            _trade_signature(row) for row in report["trades"]
+        }
         incremental = [
             row for row in report["trades"]
             if _trade_signature(row) not in control_signatures
+        ]
+        retained_control = [
+            row for row in control["trades"]
+            if _trade_signature(row) in arm_signatures
+        ]
+        displaced_control = [
+            row for row in control["trades"]
+            if _trade_signature(row) not in arm_signatures
         ]
         diagnostics = report["signal_diagnostics"]
         arms[name] = {
@@ -486,6 +497,9 @@ def build_experiment(
                     6,
                 ),
                 "trade_rows": incremental,
+                "retained_control_trades": len(retained_control),
+                "displaced_control_trades": len(displaced_control),
+                "displaced_control_trade_rows": displaced_control,
             },
             "trades": report["trades"],
         }
@@ -526,6 +540,12 @@ def _experiment_console_summary(experiment: dict[str, Any]) -> dict[str, Any]:
                 "incremental_total_r_vs_control": arm[
                     "incremental_vs_control"
                 ]["total_r"],
+                "retained_control_trades": arm[
+                    "incremental_vs_control"
+                ]["retained_control_trades"],
+                "displaced_control_trades": arm[
+                    "incremental_vs_control"
+                ]["displaced_control_trades"],
                 "decision_reason_counts": arm["signal_diagnostics"][
                     "decision_reason_counts"
                 ],
