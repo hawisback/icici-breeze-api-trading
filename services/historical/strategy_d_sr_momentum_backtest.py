@@ -52,6 +52,8 @@ from services.strategy.strategies.sr_momentum_breakout import (
 SESSION_START = time(9, 15)
 SESSION_END_EXCLUSIVE = time(15, 35)
 DEFAULT_WARMUP_CALENDAR_DAYS = 35
+EXPECTED_SESSION_5M_BARS = 75
+SESSION_LAST_5M_START = time(15, 25)
 
 
 def _session_date(candle: Candle) -> date:
@@ -892,20 +894,49 @@ def _available_spot_dates(
     return first, last
 
 
+def _expected_session_5m_starts(day: date) -> set[datetime]:
+    cursor = datetime.combine(day, SESSION_START, tzinfo=IST)
+    last = datetime.combine(day, SESSION_LAST_5M_START, tzinfo=IST)
+    result: set[datetime] = set()
+    while cursor <= last:
+        result.add(cursor)
+        cursor += timedelta(minutes=5)
+    return result
+
+
+def _has_complete_session_5m(
+    candles: Sequence[Candle],
+    day: date,
+) -> bool:
+    expected = _expected_session_5m_starts(day)
+    actual = {
+        candle.start_time.astimezone(IST).replace(
+            second=0,
+            microsecond=0,
+        )
+        for candle in candles
+        if candle.interval == "5m"
+        and candle.source in REAL_SOURCES
+        and _session_date(candle) == day
+    }
+    return len(expected) == EXPECTED_SESSION_5M_BARS and expected <= actual
+
+
 def _available_usable_session_dates(
     conn: Any,
     source: str,
 ) -> list[date]:
-    """Return dates with both NIFTY spot and futures 5m data.
+    """Return dates with complete spot, prior-spot and active-futures 5m data.
 
-    The first spot date is excluded because Strategy D requires previous-session
-    levels. Final usability is still verified by the backtest after candle
-    loading, so this helper is only the cheap database-side candidate filter.
+    Exact-session research must not silently treat a partial intraday capture as
+    a usable trading session. Strategy D also needs complete previous-session
+    spot data because PDH/PDL and classic pivots are derived from that session.
     """
     source_clause, source_params = _source_predicate(source)
     rows = conn.execute(
         f"""
-        SELECT instrument_id, start_time
+        SELECT instrument_id, interval, start_time, end_time,
+               open, high, low, close, volume, open_interest, source
         FROM historical_candles
         WHERE interval = '5m'
           AND (
@@ -917,22 +948,41 @@ def _available_usable_session_dates(
         """,
         source_params,
     ).fetchall()
-    spot_dates: set[date] = set()
-    futures_dates: set[date] = set()
-    for row in rows:
-        day = _aware(row["start_time"]).astimezone(IST).date()
-        if row["instrument_id"] == "INST-NIFTY-INDEX":
-            spot_dates.add(day)
-        else:
-            futures_dates.add(day)
-    if not spot_dates:
-        return []
-    first_spot_date = min(spot_dates)
-    return sorted(
-        day
-        for day in spot_dates & futures_dates
-        if day > first_spot_date
+    candles = [_row_to_candle(row) for row in rows]
+    spot_by_day = _group_by_day(
+        [
+            candle
+            for candle in candles
+            if candle.instrument_id == "INST-NIFTY-INDEX"
+        ],
+        interval="5m",
     )
+    futures_by_day = _active_futures_by_day(
+        [
+            candle
+            for candle in candles
+            if "NIFTY-FUT-" in candle.instrument_id.upper()
+        ]
+    )
+    spot_dates = sorted(spot_by_day)
+    complete_spot_dates = {
+        day
+        for day, bars in spot_by_day.items()
+        if _has_complete_session_5m(bars, day)
+    }
+
+    eligible: list[date] = []
+    for index, day in enumerate(spot_dates):
+        if index == 0 or day not in complete_spot_dates:
+            continue
+        previous_day = spot_dates[index - 1]
+        if previous_day not in complete_spot_dates:
+            continue
+        active_futures = futures_by_day.get(day, [])
+        if not _has_complete_session_5m(active_futures, day):
+            continue
+        eligible.append(day)
+    return eligible
 
 
 def _select_requested_session_dates(
@@ -953,7 +1003,7 @@ def _select_requested_session_dates(
     if len(eligible) < sessions:
         raise ValueError(
             f"requested {sessions} usable sessions but only "
-            f"{len(eligible)} candidate sessions are available"
+            f"{len(eligible)} complete candidate sessions are available"
         )
     if start_date is not None:
         return eligible[:sessions]
