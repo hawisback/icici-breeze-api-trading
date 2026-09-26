@@ -111,7 +111,7 @@ def test_golden_a_to_e_metadata_names_priorities_and_default_enablement():
     assert actual == GOLDEN["strategy_metadata"]
     assert actual[0]["display_name"] == "Strategy A · Trend Pullback R5"
     assert actual[-1]["strategy"] == StrategyName.PIVOT_VWAP_SCALP.value
-    assert actual[-1]["default_enabled"] is False
+    assert actual[-1]["default_enabled"] is True
 
 
 @pytest.mark.parametrize(
