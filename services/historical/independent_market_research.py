@@ -1,8 +1,8 @@
 """Independent public-market data acquisition for NIFTY research.
 
-Research-only. This module deliberately does not call Breeze or Kite. It talks to
-NSE's public charting endpoints using the same protocol documented by the
-open-source OpenChart client, normalizes the response, and preserves provenance.
+Research-only. Credential-free index discovery is kept separate from optional
+credentialed validation sources. Provider observations are normalized and
+preserved independently before a canonical research series is selected.
 
 The NIFTY 50 index is not a traded instrument, so its intraday volume is not used
 as a liquidity feature. Futures volume (and OI when a provider exposes it) is the
@@ -484,13 +484,15 @@ def _select_canonical_provider(
     if not by_provider:
         return None, []
     priority_rank = {source: idx for idx, source in enumerate(priority)}
-    scored: list[tuple[int, int, str, list[Candle]]] = []
+    scored: list[tuple[int, int, int, str, list[Candle]]] = []
     for source, rows in by_provider.items():
         selected = [
             row for row in rows if datetime.fromisoformat(row.timestamp).date() in wanted
         ]
+        complete_sessions = len(_last_complete_dates(selected, len(wanted)))
         scored.append(
             (
+                complete_sessions,
                 len(selected),
                 -priority_rank.get(source, len(priority)),
                 source,
@@ -498,7 +500,7 @@ def _select_canonical_provider(
             )
         )
     scored.sort(reverse=True)
-    _, _, source, rows = scored[0]
+    _, _, _, source, rows = scored[0]
     rows.sort(key=lambda row: row.timestamp)
     return source, rows
 
@@ -578,8 +580,8 @@ def _provider_quality(
     return {
         "canonical_source": canonical_source,
         "selection_policy": (
-            "Choose the provider with the most rows on the selected sessions; "
-            "ties use a fixed provider priority. Never fill missing canonical "
+            "Choose the provider with the most complete selected sessions, then "
+            "the most rows; ties use a fixed provider priority. Never fill missing canonical "
             "timestamps from another provider."
         ),
         "providers": {
