@@ -183,12 +183,7 @@ def test_strategy_a_lifecycle_never_applies_new_stop_to_earlier_same_minute_low(
     )
 
     recorder = ReplayManifestRecorder()
-    from services.strategy.models import StrategySignal, MarketFeatures, ThresholdOverrides
-    from services.strategy.replay_registry import (
-        ReplayBarContext,
-        ReplaySessionContext,
-        TrendPullbackReplayAdapter,
-    )
+    from services.strategy.models import StrategySignal
 
     signal = StrategySignal(
         signal_id="A-INTRABAR-CHRONOLOGY",
@@ -203,22 +198,39 @@ def test_strategy_a_lifecycle_never_applies_new_stop_to_earlier_same_minute_low(
         derivatives_score=0.0,
         features_snapshot={"futures_contract": contract},
     )
-    adapter = TrendPullbackReplayAdapter(StrategyTunablesConfig())
-    context = ReplayBarContext(
-        session=ReplaySessionContext(
-            trading_date="2026-09-18",
-            instrument_id="INST-NIFTY-INDEX",
-            overrides=ThresholdOverrides(),
-            recorder=recorder,
-        ),
-        bar=entry_spot,
-        features=MarketFeatures(timestamp=entry_spot.end_time, spot_price=100.0),
-        spot_candles_5m=[entry_spot],
-        spot_candles_15m=[],
-        futures_candles=[entry_future],
-        active_futures_candles_5m=[entry_future],
+    record = recorder.record_entry(
+        signal=signal,
+        trading_date="2026-09-18",
+        trigger_source_candle_timestamp=entry_spot.end_time,
+        trigger_level=100.0,
+        simulated_entry_timestamp=entry_spot.end_time,
+        simulated_entry_price=100.0,
+        entry_5m_candle_timestamp=entry_spot.end_time,
+        entry_occurred_intrabar=False,
+        entry_features=signal.features_snapshot,
+        setup_id=signal.signal_id,
+        pullback_swing_low=None,
+        pullback_swing_high=None,
+        impulse_low=None,
+        impulse_high=None,
+        atr_at_entry=10.0,
+        initial_structural_stop=90.0,
+        initial_risk_points=10.0,
+        initial_risk_atr=1.0,
+        current_trailing_stop=90.0,
+        current_r=0.0,
+        highest_favorable_price=100.0,
+        lowest_favorable_price=100.0,
+        peak_r=0.0,
+        protected_breakeven_active=False,
+        profit_lock_active=False,
+        runner_mode_active=False,
+        current_ladder_stage="OPEN_INITIAL_RISK",
+        reversal_score=0,
+        adverse_health_counters={},
+        entry_bar_timestamp=entry_spot.end_time,
+        last_managed_completed_bar_timestamp=None,
     )
-    record = adapter.on_entry_confirmed(signal, context)
 
     replayer = HistoricalPositionManagerReplayer(
         risk_config=RiskConfig(),
