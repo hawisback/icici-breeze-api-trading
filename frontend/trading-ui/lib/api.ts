@@ -1305,11 +1305,31 @@ export interface ReplayPortfolioMetricsData {
   peak_premium_utilization_pct: number;
   peak_risk_budget_committed: number;
   peak_risk_budget_utilization_pct: number;
+  average_premium_utilization_pct: number;
+  capital_utilization_curve: Array<{
+    timestamp: string;
+    premium_committed: number;
+    utilization_pct: number;
+    active_positions: number;
+    event: string;
+    signal_id?: string;
+  }>;
   rejected_opportunities: number;
+  rejected_opportunity_details: Array<Record<string, any>>;
   risk_gate_block_counts: Record<string, number>;
+  daily_loss_trigger_events: Array<Record<string, any>>;
   daily_entries: number;
   daily_entries_by_strategy: Record<string, number>;
   strategy_realized_r: Record<string, number>;
+  strategy_r_statistics: Record<string, {
+    resolved_trades: number;
+    total_realized_r: number;
+    expectancy_r: number;
+    profit_factor_r: number | null;
+    max_drawdown_r: number;
+    max_consecutive_wins: number;
+    max_consecutive_losses: number;
+  }>;
   equity_curve: Array<{
     timestamp: string;
     equity: number;
