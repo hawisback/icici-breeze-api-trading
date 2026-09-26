@@ -552,3 +552,49 @@ async def test_replay_run_repository_round_trip_and_summary(tmp_path):
     assert summaries[0]["run_id"] == "RPL-PERSISTED"
     assert summaries[0]["configuration_fingerprint"] == "cfg-persisted"
     assert summaries[0]["net_estimated_executable_pnl"] == 1500.0
+
+
+def test_simulation_result_legacy_fields_are_only_canonical_projections():
+    """Legacy API fields must never become an independent metric source."""
+    result = _result(
+        run_id="projection-test",
+        config_fp="cfg",
+        data_fp="data",
+        total_r=2.5,
+        net_exec=1250.0,
+        max_drawdown_pnl=-375.0,
+    )
+
+    # Deliberately distinctive canonical values make cross-section mixing
+    # immediately visible if compatibility wiring regresses.
+    result.signal_metrics.total_bars_evaluated = 91
+    result.underlying_lifecycle_metrics.resolved_trades = 7
+    result.underlying_lifecycle_metrics.winning_trades = 4
+    result.underlying_lifecycle_metrics.losing_trades = 3
+    result.underlying_lifecycle_metrics.win_rate_pct = 57.142857
+    result.underlying_lifecycle_metrics.total_realized_r = 3.25
+    result.underlying_lifecycle_metrics.profit_factor_r = 1.75
+    result.underlying_lifecycle_metrics.max_drawdown_r = -1.25
+    result.option_mark_metrics.gross_mark_pnl = 4321.0
+    result.option_mark_metrics.net_mark_pnl = 3987.0
+    result.portfolio_metrics.max_drawdown_pnl = -876.0
+
+    # Revalidation is how API serialization/construction applies the
+    # compatibility projection in production.
+    projected = SimulationResult.model_validate(result.model_dump())
+    assert projected.total_bars_evaluated == 91
+    assert projected.total_trades == 7
+    assert projected.winning_trades == 4
+    assert projected.losing_trades == 3
+    assert projected.win_rate_pct == 57.142857
+    assert projected.total_realized_r == 3.25
+    assert projected.profit_factor == 1.75
+    assert projected.max_drawdown_r == -1.25
+    assert projected.total_pnl == 4321.0
+    assert projected.net_pnl == 3987.0
+    assert projected.max_drawdown_pnl == -876.0
+
+    # In particular, option/portfolio P&L must never leak into underlying R
+    # compatibility fields.
+    assert projected.profit_factor != projected.portfolio_metrics.profit_factor_pnl
+    assert projected.total_realized_r != projected.net_pnl
