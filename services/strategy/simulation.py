@@ -2395,10 +2395,13 @@ class SimulationEngine:
             strategy_manifest={
                 item["strategy"]: {
                     "revision": (
-                        item.get("audit_diagnostics", {}).get("version")
-                        or item.get("audit_diagnostics", {}).get("candidate_id")
-                        or item["display_name"]
-                    ),
+                        (
+                            item.get("audit_diagnostics", {}).get("version")
+                            or item.get("audit_diagnostics", {}).get("candidate_id")
+                        )
+                        if isinstance(item.get("audit_diagnostics"), dict)
+                        else None
+                    ) or item["display_name"],
                     "fingerprint": hashlib.sha256(
                         json.dumps(
                             item,
