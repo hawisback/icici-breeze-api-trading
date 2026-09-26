@@ -259,7 +259,7 @@ def test_golden_exact_contract_selection_reuses_production_selector():
     })
     ts = signal.timestamp.isoformat()
     candidate = {
-        "strike": 24000.0, "option_type": "CALL", "expiry": "2026-09-24",
+        "strike": 24000.0, "option_type": "CALL", "expiry": "2026-10-01",
         "bid": 99.0, "ask": 100.0, "mid": 99.5,
         "spread_points": 1.0, "spread_pct": 1.005, "delta": 0.62,
         "gamma": 0.01, "greek_source": "BROKER", "greek_timestamp": ts,
@@ -282,7 +282,7 @@ def test_golden_exact_contract_selection_reuses_production_selector():
         "signal_timestamp": ts,
         "chain_snapshot_timestamp": ts,
         "spot_price": 24000.0,
-        "expiry": "2026-09-24",
+        "expiry": "2026-10-01",
         "source": "KITE",
         "strategy": signal.strategy.value,
         "direction": signal.direction.value,
