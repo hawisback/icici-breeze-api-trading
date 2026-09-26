@@ -35,10 +35,15 @@ from services.historical.strategy_a_data_audit import (
     _row_to_candle,
     _source_predicate,
 )
+from services.strategy.features import FeatureEngine
 from services.strategy.strategies.sr_momentum_breakout import (
     REAL_SOURCES,
     StrategyDConfig,
     StrategyDPositionManager,
+    _crossed_resistance,
+    _crossed_support,
+    _futures_vwap_confirmation,
+    _in_entry_window,
     evaluate_strategy_d_signal,
     previous_session_levels,
 )
@@ -76,6 +81,266 @@ def _active_futures_by_day(candles: Sequence[Candle]) -> dict[date, list[Candle]
         if contract:
             result[day] = [bar for bar in bars if bar.instrument_id == contract]
     return result
+
+
+def _diagnose_strategy_d_bar(
+    *,
+    spot_history: Sequence[Candle],
+    futures_history: Sequence[Candle],
+    levels: Any,
+    config: StrategyDConfig,
+    signal: Any,
+) -> dict[str, Any]:
+    """Observe Strategy D qualification without changing signal behavior."""
+    conditions: dict[str, bool] = {}
+    values: dict[str, Any] = {}
+    blocker = "UNKNOWN"
+
+    if len(spot_history) < config.rsi_period + 2:
+        return {
+            "primary_blocker": "HISTORY_NOT_READY",
+            "conditions": {"history_ready": False},
+            "values": values,
+            "breakout_direction": None,
+            "qualified_signal": signal is not None,
+        }
+
+    conditions["history_ready"] = True
+    current = spot_history[-1]
+    previous = spot_history[-2]
+    in_window = _in_entry_window(current.end_time, config)
+    conditions["entry_window"] = in_window
+
+    closes = [float(bar.close) for bar in spot_history]
+    previous_rsi = FeatureEngine.calculate_rsi(
+        closes[:-1],
+        config.rsi_period,
+    )
+    current_rsi = FeatureEngine.calculate_rsi(
+        closes,
+        config.rsi_period,
+    )
+    values["rsi_previous"] = round(float(previous_rsi), 6)
+    values["rsi_current"] = round(float(current_rsi), 6)
+    outside_trap = not (
+        config.trap_rsi_low
+        <= current_rsi
+        <= config.trap_rsi_high
+    )
+    conditions["rsi_outside_trap_zone"] = outside_trap
+
+    atr = FeatureEngine.calculate_atr(
+        list(spot_history),
+        config.atr_period,
+    )
+    conditions["atr_valid"] = atr > 0
+    values["atr_5m"] = round(float(atr), 6)
+
+    range_pass = False
+    previous_day_range_atr = None
+    if atr > 0:
+        previous_day_range_atr = (
+            levels.pdh - levels.pdl
+        ) / float(atr)
+        values["previous_day_range_atr"] = round(
+            float(previous_day_range_atr),
+            6,
+        )
+        range_pass = (
+            config.max_previous_day_range_atr is None
+            or previous_day_range_atr
+            < config.max_previous_day_range_atr
+        )
+    conditions["previous_day_range_pass"] = range_pass
+
+    confirmation = _futures_vwap_confirmation(
+        futures_history,
+        through=current.end_time,
+    )
+    conditions["futures_vwap_available"] = confirmation is not None
+    futures_price = None
+    vwap = None
+    if confirmation is not None:
+        futures_price, vwap = confirmation
+        values["futures_price"] = round(float(futures_price), 6)
+        values["futures_vwap"] = round(float(vwap), 6)
+
+    resistance = _crossed_resistance(
+        float(previous.close),
+        float(current.close),
+        levels,
+    )
+    support = _crossed_support(
+        float(previous.close),
+        float(current.close),
+        levels,
+    )
+    conditions["resistance_breakout"] = resistance is not None
+    conditions["support_breakout"] = support is not None
+    structural = resistance is not None or support is not None
+    conditions["structural_breakout"] = structural
+
+    breakout_direction = (
+        "CALL"
+        if resistance is not None
+        else "PUT"
+        if support is not None
+        else None
+    )
+    values["breakout_level"] = (
+        resistance[0]
+        if resistance is not None
+        else support[0]
+        if support is not None
+        else None
+    )
+
+    long_current = (
+        current_rsi
+        > config.long_rsi_cross
+        + config.minimum_rsi_clearance_points
+    )
+    short_current = (
+        current_rsi
+        < config.short_rsi_cross
+        - config.minimum_rsi_clearance_points
+    )
+    long_cross = previous_rsi <= config.long_rsi_cross and long_current
+    short_cross = previous_rsi >= config.short_rsi_cross and short_current
+    long_already = previous_rsi > config.long_rsi_cross and long_current
+    short_already = previous_rsi < config.short_rsi_cross and short_current
+
+    conditions["long_rsi_current_qualified"] = long_current
+    conditions["short_rsi_current_qualified"] = short_current
+    conditions["long_rsi_cross_same_bar"] = long_cross
+    conditions["short_rsi_cross_same_bar"] = short_cross
+    conditions["long_rsi_already_qualified"] = long_already
+    conditions["short_rsi_already_qualified"] = short_already
+
+    vwap_aligned = False
+    rsi_current_aligned = False
+    rsi_cross_aligned = False
+    rsi_already_aligned = False
+    if resistance is not None:
+        vwap_aligned = (
+            confirmation is not None
+            and futures_price > vwap
+        )
+        rsi_current_aligned = long_current
+        rsi_cross_aligned = long_cross
+        rsi_already_aligned = long_already
+    elif support is not None:
+        vwap_aligned = (
+            confirmation is not None
+            and futures_price < vwap
+        )
+        rsi_current_aligned = short_current
+        rsi_cross_aligned = short_cross
+        rsi_already_aligned = short_already
+
+    conditions["breakout_vwap_aligned"] = structural and vwap_aligned
+    conditions["breakout_rsi_current_qualified"] = (
+        structural and rsi_current_aligned
+    )
+    conditions["breakout_rsi_cross_same_bar"] = (
+        structural and rsi_cross_aligned
+    )
+    conditions["breakout_rsi_already_qualified"] = (
+        structural and rsi_already_aligned
+    )
+    conditions["breakout_vwap_and_rsi_current"] = (
+        structural and vwap_aligned and rsi_current_aligned
+    )
+    conditions["breakout_vwap_and_rsi_cross"] = (
+        structural and vwap_aligned and rsi_cross_aligned
+    )
+    conditions["qualified_signal"] = signal is not None
+
+    if not in_window:
+        blocker = "OUTSIDE_ENTRY_WINDOW"
+    elif not outside_trap:
+        blocker = "RSI_TRAP_ZONE"
+    elif atr <= 0:
+        blocker = "ATR_INVALID"
+    elif not range_pass:
+        blocker = "PREVIOUS_DAY_RANGE_FILTER"
+    elif confirmation is None:
+        blocker = "FUTURES_VWAP_UNAVAILABLE"
+    elif not structural:
+        blocker = "NO_STRUCTURAL_BREAKOUT"
+    elif not vwap_aligned:
+        blocker = "FUTURES_VWAP_MISALIGNED"
+    elif rsi_already_aligned:
+        blocker = "RSI_ALREADY_QUALIFIED_BEFORE_BREAKOUT"
+    elif not rsi_cross_aligned:
+        blocker = "RSI_CROSS_NOT_CONFIRMED"
+    elif signal is None:
+        blocker = "UNCLASSIFIED_SIGNAL_REJECTION"
+    else:
+        blocker = "QUALIFIED_SIGNAL"
+
+    return {
+        "primary_blocker": blocker,
+        "conditions": conditions,
+        "values": values,
+        "breakout_direction": breakout_direction,
+        "qualified_signal": signal is not None,
+    }
+
+
+def _signal_diagnostic_report(
+    *,
+    condition_counts: Counter[str],
+    blocker_counts: Counter[str],
+    breakout_counts: Counter[str],
+    per_session: dict[str, dict[str, Any]],
+    bars_evaluated: int,
+) -> dict[str, Any]:
+    structural = condition_counts["structural_breakout"]
+    return {
+        "bars_evaluated": bars_evaluated,
+        "condition_counts": dict(sorted(condition_counts.items())),
+        "primary_blocker_counts": dict(sorted(blocker_counts.items())),
+        "breakout_direction_counts": dict(sorted(breakout_counts.items())),
+        "structural_breakouts": structural,
+        "breakout_with_vwap_alignment": (
+            condition_counts["breakout_vwap_aligned"]
+        ),
+        "breakout_with_rsi_current_qualified": (
+            condition_counts["breakout_rsi_current_qualified"]
+        ),
+        "breakout_with_rsi_cross_same_bar": (
+            condition_counts["breakout_rsi_cross_same_bar"]
+        ),
+        "breakout_with_rsi_already_qualified": (
+            condition_counts["breakout_rsi_already_qualified"]
+        ),
+        "breakout_with_vwap_and_rsi_current": (
+            condition_counts["breakout_vwap_and_rsi_current"]
+        ),
+        "breakout_with_vwap_and_rsi_cross": (
+            condition_counts["breakout_vwap_and_rsi_cross"]
+        ),
+        "qualified_signal_bars": condition_counts["qualified_signal"],
+        "per_session": {
+            day: {
+                "bars_evaluated": row["bars_evaluated"],
+                "structural_breakouts": row["structural_breakouts"],
+                "qualified_signal_bars": row["qualified_signal_bars"],
+                "primary_blocker_counts": dict(
+                    sorted(row["primary_blocker_counts"].items())
+                ),
+            }
+            for day, row in sorted(per_session.items())
+        },
+        "interpretation_note": (
+            "RSI-current-qualified counts breakouts where RSI was already "
+            "beyond the directional threshold or crossed it on that bar; "
+            "RSI-cross-same-bar counts only the stricter production entry "
+            "condition. Their gap directly measures breakout bars rejected "
+            "because RSI crossed earlier."
+        ),
+    }
 
 
 def _period_metrics(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -268,6 +533,11 @@ def run_backtest(
     usable_session_dates: list[date] = []
     usable_sessions_with_1m = 0
     skipped: Counter[str] = Counter()
+    diagnostic_conditions: Counter[str] = Counter()
+    diagnostic_blockers: Counter[str] = Counter()
+    diagnostic_breakouts: Counter[str] = Counter()
+    diagnostic_sessions: dict[str, dict[str, Any]] = {}
+    diagnostic_bars_evaluated = 0
 
     for day in available_days:
         day_spot = spot_by_day.get(day, [])
@@ -303,6 +573,41 @@ def run_backtest(
                 levels,
                 cfg,
             )
+            diagnostic = _diagnose_strategy_d_bar(
+                spot_history=history,
+                futures_history=futures_history,
+                levels=levels,
+                config=cfg,
+                signal=signal,
+            )
+            diagnostic_bars_evaluated += 1
+            for name, passed in diagnostic["conditions"].items():
+                if passed:
+                    diagnostic_conditions[name] += 1
+            diagnostic_blockers[diagnostic["primary_blocker"]] += 1
+            if diagnostic["breakout_direction"] is not None:
+                diagnostic_breakouts[
+                    diagnostic["breakout_direction"]
+                ] += 1
+            day_key = day.isoformat()
+            day_diag = diagnostic_sessions.setdefault(
+                day_key,
+                {
+                    "bars_evaluated": 0,
+                    "structural_breakouts": 0,
+                    "qualified_signal_bars": 0,
+                    "primary_blocker_counts": Counter(),
+                },
+            )
+            day_diag["bars_evaluated"] += 1
+            if diagnostic["conditions"].get("structural_breakout"):
+                day_diag["structural_breakouts"] += 1
+            if diagnostic["qualified_signal"]:
+                day_diag["qualified_signal_bars"] += 1
+            day_diag["primary_blocker_counts"][
+                diagnostic["primary_blocker"]
+            ] += 1
+
             signal_key = (
                 (signal.option_type, signal.breakout_level_name)
                 if signal
@@ -421,6 +726,13 @@ def run_backtest(
             ),
         },
         "metrics": _metrics(trades, usable_sessions),
+        "signal_diagnostics": _signal_diagnostic_report(
+            condition_counts=diagnostic_conditions,
+            blocker_counts=diagnostic_blockers,
+            breakout_counts=diagnostic_breakouts,
+            per_session=diagnostic_sessions,
+            bars_evaluated=diagnostic_bars_evaluated,
+        ),
         "usable_sessions": usable_sessions,
         "session_summary": _session_summary(
             trades,
@@ -515,6 +827,7 @@ def build_v2_comparison(
         "control_strategy_id": control["strategy_id"],
         "control_config": control["config"],
         "control_metrics": control_metrics,
+        "control_signal_diagnostics": control["signal_diagnostics"],
         "delta": {
             "trades": (
                 candidate_metrics["trades"]
@@ -850,6 +1163,7 @@ def main() -> None:
             {
                 "strategy_id": report["strategy_id"],
                 "metrics": report["metrics"],
+                "signal_diagnostics": report["signal_diagnostics"],
                 "usable_sessions": report["usable_sessions"],
                 "session_summary": report["session_summary"],
                 "intrabar_coverage": report["intrabar_coverage"],
