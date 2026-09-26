@@ -8,6 +8,7 @@ from libs.contracts.models import Candle
 import services.historical.strategy_d_sr_momentum_backtest as d_backtest
 from services.historical.strategy_d_sr_momentum_backtest import (
     _diagnose_strategy_d_bar,
+    _has_complete_session_5m,
     _select_requested_session_dates,
     build_v2_comparison,
     run_backtest,
@@ -480,3 +481,26 @@ def test_v2_report_includes_candidate_and_control_signal_diagnostics():
         control["control_signal_diagnostics"]["bars_evaluated"]
         == 20
     )
+
+
+
+def test_complete_session_coverage_requires_every_expected_5m_bar():
+    current = date(2026, 9, 23)
+    bars = []
+    for index in range(75):
+        minutes = 15 + index * 5
+        hour = 9 + minutes // 60
+        minute = minutes % 60
+        bars.append(
+            _bar(
+                current,
+                hour,
+                minute,
+                100.0 + index * 0.01,
+                instrument_id="INST-NIFTY-INDEX",
+            )
+        )
+
+    assert _has_complete_session_5m(bars, current) is True
+    assert _has_complete_session_5m(bars[:-1], current) is False
+    assert _has_complete_session_5m(bars[:4], current) is False
