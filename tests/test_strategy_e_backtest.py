@@ -5,17 +5,20 @@ import pytest
 from libs.contracts.models import Candle
 from services.historical.strategy_e_pivot_vwap_backtest import (
     EXPECTED_5M_BARS,
+    EXPERIMENT_ARMS,
     _advance_trade,
     _complete_candidate_dates,
     _is_complete_session,
     _select_requested_session_dates,
     _start_trade,
+    build_experiment,
     run_backtest,
 )
 from services.strategy.models import (
     OptionType,
     StrategyName,
     StrategySignal,
+    StrategyTunablesConfig,
     TradeDirection,
 )
 
@@ -178,3 +181,38 @@ def test_strategy_e_backtest_reports_exact_complete_session_and_funnel():
         == 75
     )
     assert report["skipped_sessions_or_events"] == {}
+
+
+
+def test_strategy_e_experiment_arms_change_exactly_one_control_tunable():
+    control = StrategyTunablesConfig()
+    expected = {
+        "MAX_STOP_40": ("strategy_e_max_stop_points", 40.0),
+        "MIN_RR_0_75": ("strategy_e_min_reward_risk", 0.75),
+        "MIN_ROOM_3": ("strategy_e_min_room_to_level_points", 3.0),
+        "CHOP_CROSS_3": ("strategy_e_chop_cross_threshold", 3),
+    }
+
+    assert EXPERIMENT_ARMS["CONTROL"] == {}
+    for name, (field, value) in expected.items():
+        assert EXPERIMENT_ARMS[name] == {field: value}
+        candidate = control.model_copy(update=EXPERIMENT_ARMS[name])
+        assert getattr(candidate, field) == value
+
+
+def test_strategy_e_experiment_replays_identical_complete_sessions():
+    previous = _session(date(2026, 9, 23))
+    current = _session(date(2026, 9, 24))
+
+    experiment = build_experiment(
+        futures_candles=[*previous, *current],
+        session_dates=[date(2026, 9, 24)],
+    )
+
+    assert experiment["research_only"] is True
+    assert experiment["production_defaults_changed"] is False
+    assert experiment["session_dates"] == ["2026-09-24"]
+    assert set(experiment["arms"]) == set(EXPERIMENT_ARMS)
+    for arm in experiment["arms"].values():
+        assert arm["session_summary"]["session_dates"] == ["2026-09-24"]
+        assert arm["signal_diagnostics"]["bars_evaluated"] == 75
