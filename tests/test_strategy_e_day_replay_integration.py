@@ -138,7 +138,7 @@ def test_strategy_e_replay_diagnostics_expose_setup_family_and_completed_5m_dedu
     assert audit["setup_family"] == "COUNTERTREND"
     assert audit["completed_5m_candle_timestamp"] == context.bar.end_time.isoformat()
     assert audit["dedupe_state"]["last_processed_candle"] == context.bar.end_time.isoformat()
-    assert audit["production_enabled"] is False
+    assert audit["production_enabled"] is True
     assert audit["replay_selected"] is True
 
     second = adapter.evaluate_completed_bar(context, allow_evaluation=True)
