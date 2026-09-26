@@ -1272,6 +1272,7 @@ class SimulationEngine:
                     "signal_authority": (
                         "FROZEN_STRATEGY_C_DI_CONTINUATION_V1"
                     ),
+                    "shadow_monitor_parallel_paper_account_replayed": False,
                     "required_native_futures_1m": True,
                     "required_for_this_session": bool(
                         cfg.di_continuation_enabled
@@ -1288,6 +1289,7 @@ class SimulationEngine:
                 "SR_MOMENTUM_BREAKOUT": {
                     "signal_authority": "FROZEN_STRATEGY_D_V2",
                     "freeze_date": STRATEGY_D_FREEZE_DATE.isoformat(),
+                    "paper_monitor_parallel_option_account_replayed": False,
                     "spot_1m_count": len(one_minute_candles),
                     "intrabar_ordering": (
                         "NATIVE_SPOT_1M"
@@ -2176,6 +2178,16 @@ class SimulationEngine:
             limitation = (
                 "Real completed spot/futures candles used. Historical completed option candles were "
                 "unavailable for one or more resolved trades."
+            )
+        if (
+            cfg.di_continuation_enabled
+            or cfg.sr_momentum_breakout_enabled
+        ):
+            limitation += (
+                " Candidate monitor sidecar paper-option accounts are not "
+                "replayed as separate portfolios; Day Replay replays the "
+                "promoted common execution path and frozen underlying "
+                "lifecycle authorities."
             )
         if (
             cfg.di_continuation_enabled
