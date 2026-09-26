@@ -147,16 +147,141 @@ def _position_exit_events(
     }]
 
 
+def _allocate_rounded_total(
+    total: float,
+    weights: list[float],
+) -> list[float]:
+    """Allocate a rounded total while preserving it exactly."""
+    allocations = [0.0 for _ in weights]
+    positive = [
+        index for index, weight in enumerate(weights)
+        if float(weight) > 0
+    ]
+    if not positive:
+        if allocations:
+            allocations[0] = round(float(total), 2)
+        return allocations
+
+    total_weight = sum(float(weights[index]) for index in positive)
+    remaining = round(float(total), 2)
+    last_positive = positive[-1]
+    for index in positive:
+        if index == last_positive:
+            allocations[index] = round(remaining, 2)
+            break
+        allocation = round(
+            float(total) * float(weights[index]) / total_weight,
+            2,
+        )
+        allocations[index] = allocation
+        remaining = round(remaining - allocation, 2)
+    return allocations
+
+
+def _execution_cost_allocations(
+    record: ReplayManifestRecord,
+    legs: list[dict[str, Any]],
+) -> list[float] | None:
+    """Allocate recorded paper costs to entry and exit orders chronologically."""
+    aggregate_gross = record.simulated_gross_pnl
+    aggregate_net = record.simulated_net_pnl
+    entry_fill = record.simulated_entry_fill_price
+    quantity = int(record.replay_quantity or 0)
+    if (
+        aggregate_gross is None
+        or aggregate_net is None
+        or entry_fill is None
+        or quantity <= 0
+        or not legs
+    ):
+        return None
+
+    total_costs = round(float(aggregate_gross) - float(aggregate_net), 2)
+    breakdown = record.simulated_cost_breakdown or {}
+    component_names = (
+        "brokerage",
+        "exchange_charges",
+        "stt",
+        "gst",
+        "sebi_charges",
+        "stamp_duty",
+    )
+    if not all(
+        isinstance(breakdown.get(name), (int, float))
+        for name in component_names
+    ):
+        return None
+
+    turnovers = [
+        float(entry_fill) * quantity,
+        *[
+            float(leg["executable_price"]) * int(leg["quantity"])
+            for leg in legs
+        ],
+    ]
+    order_weights = [1.0 for _ in turnovers]
+    sell_turnovers = [0.0, *turnovers[1:]]
+
+    brokerage = _allocate_rounded_total(
+        float(breakdown["brokerage"]),
+        order_weights,
+    )
+    exchange = _allocate_rounded_total(
+        float(breakdown["exchange_charges"]),
+        turnovers,
+    )
+    sebi = _allocate_rounded_total(
+        float(breakdown["sebi_charges"]),
+        turnovers,
+    )
+    stt = _allocate_rounded_total(
+        float(breakdown["stt"]),
+        sell_turnovers,
+    )
+    stamp = [0.0 for _ in turnovers]
+    stamp[0] = round(float(breakdown["stamp_duty"]), 2)
+    gst_weights = [
+        brokerage[index] + exchange[index] + sebi[index]
+        for index in range(len(turnovers))
+    ]
+    gst = _allocate_rounded_total(
+        float(breakdown["gst"]),
+        gst_weights,
+    )
+
+    costs = [
+        round(
+            brokerage[index]
+            + exchange[index]
+            + stt[index]
+            + gst[index]
+            + sebi[index]
+            + stamp[index],
+            2,
+        )
+        for index in range(len(turnovers))
+    ]
+    # Component rounding can differ by a paisa from gross-net. Preserve the
+    # authoritative aggregate economics by assigning the residual to the final
+    # exit order.
+    costs[-1] = round(
+        costs[-1] + total_costs - sum(costs),
+        2,
+    )
+    return costs
+
+
 def _execution_pnl_events(
     record: ReplayManifestRecord,
     *,
     session_end: datetime,
 ) -> list[dict[str, Any]]:
-    """Split aggregate executable P&L across historical exit-leg timestamps.
+    """Split aggregate executable P&L across historical order timestamps.
 
-    Aggregate trade economics remain authoritative. Costs are allocated by
-    closed quantity so the leg cashflows sum exactly to the recorded trade net
-    P&L while making partial-exit chronology visible to portfolio analytics.
+    Aggregate trade economics remain authoritative. When the replay carries the
+    production paper-cost breakdown, entry-side costs are booked at entry and
+    exit-side costs at each partial/final exit. Older records without that
+    breakdown retain the legacy final-exit projection.
     """
     aggregate_gross = record.simulated_gross_pnl
     aggregate_net = record.simulated_net_pnl
@@ -185,8 +310,6 @@ def _execution_pnl_events(
             "reason": record.exit_reason or "FINAL_EXIT",
         }]
 
-    quantity = int(record.replay_quantity or 0)
-    total_costs = round(float(aggregate_gross) - float(aggregate_net), 2)
     gross_values = [
         round(
             (float(leg["executable_price"]) - float(entry_fill))
@@ -202,20 +325,32 @@ def _execution_pnl_events(
         2,
     )
 
-    allocated_costs: list[float] = []
-    remaining_costs = total_costs
-    for index, leg in enumerate(legs):
-        if index == len(legs) - 1:
-            allocation = round(remaining_costs, 2)
-        else:
-            allocation = round(
-                total_costs * int(leg["quantity"]) / quantity,
-                2,
-            )
-            remaining_costs = round(remaining_costs - allocation, 2)
-        allocated_costs.append(allocation)
+    order_costs = _execution_cost_allocations(record, legs)
+    if order_costs is None:
+        total_costs = round(float(aggregate_gross) - float(aggregate_net), 2)
+        exit_costs = _allocate_rounded_total(
+            total_costs,
+            [float(leg["quantity"]) for leg in legs],
+        )
+        entry_cost = 0.0
+    else:
+        entry_cost = float(order_costs[0])
+        exit_costs = order_costs[1:]
 
-    return [
+    events: list[dict[str, Any]] = []
+    if entry_cost:
+        events.append({
+            "timestamp": record.simulated_entry_timestamp,
+            "event": "ENTRY_COST",
+            "quantity": int(record.replay_quantity or 0),
+            "gross_pnl": 0.0,
+            "allocated_transaction_costs": entry_cost,
+            "net_pnl": round(-entry_cost, 2),
+            "realized_r_delta": 0.0,
+            "reason": "ENTRY_TRANSACTION_COSTS",
+        })
+
+    events.extend(
         {
             "timestamp": leg["timestamp"],
             "event": "TRADE_EXIT" if leg["is_final"] else "PARTIAL_EXIT",
@@ -228,8 +363,9 @@ def _execution_pnl_events(
             ),
             "reason": leg["reason"],
         }
-        for leg, gross, costs in zip(legs, gross_values, allocated_costs)
-    ]
+        for leg, gross, costs in zip(legs, gross_values, exit_costs)
+    )
+    return events
 
 
 def _peak_commitments(
