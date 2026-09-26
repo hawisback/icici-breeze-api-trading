@@ -294,6 +294,39 @@ class PivotVwapScalpStrategy:
         self.last_decision = decision
         return decision
 
+    @staticmethod
+    def _candidate_metrics(
+        base_metrics: dict[str, Any],
+        *,
+        signal_type: str,
+        entry: float,
+        stop: float,
+        target: float,
+        extra_metrics: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Attach research-safe candidate geometry without changing decisions."""
+        risk = abs(float(entry) - float(stop))
+        reward = abs(float(target) - float(entry))
+        bullish = signal_type in {"TREND_LONG", "COUNTER_LONG"}
+        return {
+            **base_metrics,
+            **extra_metrics,
+            "candidate_signal_type": signal_type,
+            "candidate_direction": (
+                TradeDirection.BULLISH.value
+                if bullish
+                else TradeDirection.BEARISH.value
+            ),
+            "entry_price": round(float(entry), 2),
+            "stop": round(float(stop), 2),
+            "target": round(float(target), 2),
+            "risk_points": round(risk, 6),
+            "reward_points": round(reward, 6),
+            "reward_risk": (
+                round(reward / risk, 6) if risk > 0 else None
+            ),
+        }
+
     def _build_signal(
         self,
         *,
@@ -577,11 +610,17 @@ class PivotVwapScalpStrategy:
                         2,
                     )
                     reward = target - price
-                    metrics = {
-                        **base_metrics,
-                        "swing_low": round(pullback_low, 2),
-                        "swing_high": round(breakout_high, 2),
-                    }
+                    metrics = self._candidate_metrics(
+                        base_metrics,
+                        signal_type="TREND_LONG",
+                        entry=price,
+                        stop=stop,
+                        target=target,
+                        extra_metrics={
+                            "swing_low": round(pullback_low, 2),
+                            "swing_high": round(breakout_high, 2),
+                        },
+                    )
                     if risk <= 0:
                         return self._no_trade("INVALID_TREND_LONG_STOP", metrics)
                     if risk > cfg.strategy_e_max_stop_points:
@@ -638,11 +677,17 @@ class PivotVwapScalpStrategy:
                         2,
                     )
                     reward = price - target
-                    metrics = {
-                        **base_metrics,
-                        "swing_low": round(breakout_low, 2),
-                        "swing_high": round(pullback_high, 2),
-                    }
+                    metrics = self._candidate_metrics(
+                        base_metrics,
+                        signal_type="TREND_SHORT",
+                        entry=price,
+                        stop=stop,
+                        target=target,
+                        extra_metrics={
+                            "swing_low": round(breakout_low, 2),
+                            "swing_high": round(pullback_high, 2),
+                        },
+                    )
                     if risk <= 0:
                         return self._no_trade("INVALID_TREND_SHORT_STOP", metrics)
                     if risk > cfg.strategy_e_max_stop_points:
@@ -724,14 +769,22 @@ class PivotVwapScalpStrategy:
                     2,
                 )
                 reward = target - price
-                metrics = {
-                    **base_metrics,
-                    "swing_low": round(nearest_support, 2),
-                    "swing_high": None,
-                    "counter_confirmation": (
-                        "VWAP_RECLAIM" if reclaim_vwap else "BULLISH_MICRO_SWING"
-                    ),
-                }
+                metrics = self._candidate_metrics(
+                    base_metrics,
+                    signal_type="COUNTER_LONG",
+                    entry=price,
+                    stop=stop,
+                    target=target,
+                    extra_metrics={
+                        "swing_low": round(nearest_support, 2),
+                        "swing_high": None,
+                        "counter_confirmation": (
+                            "VWAP_RECLAIM"
+                            if reclaim_vwap
+                            else "BULLISH_MICRO_SWING"
+                        ),
+                    },
+                )
                 if risk <= 0:
                     return self._no_trade("INVALID_COUNTER_LONG_STOP", metrics)
                 if risk > cfg.strategy_e_max_stop_points:
@@ -806,14 +859,22 @@ class PivotVwapScalpStrategy:
                     2,
                 )
                 reward = price - target
-                metrics = {
-                    **base_metrics,
-                    "swing_low": None,
-                    "swing_high": round(nearest_resistance, 2),
-                    "counter_confirmation": (
-                        "VWAP_LOSS" if lose_vwap else "BEARISH_MICRO_SWING"
-                    ),
-                }
+                metrics = self._candidate_metrics(
+                    base_metrics,
+                    signal_type="COUNTER_SHORT",
+                    entry=price,
+                    stop=stop,
+                    target=target,
+                    extra_metrics={
+                        "swing_low": None,
+                        "swing_high": round(nearest_resistance, 2),
+                        "counter_confirmation": (
+                            "VWAP_LOSS"
+                            if lose_vwap
+                            else "BEARISH_MICRO_SWING"
+                        ),
+                    },
+                )
                 if risk <= 0:
                     return self._no_trade("INVALID_COUNTER_SHORT_STOP", metrics)
                 if risk > cfg.strategy_e_max_stop_points:
