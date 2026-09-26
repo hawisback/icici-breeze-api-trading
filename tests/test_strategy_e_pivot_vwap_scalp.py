@@ -211,6 +211,42 @@ def test_strategy_e_emits_trend_long_and_deduplicates_completed_bar():
     assert duplicate.reason == "NO_NEW_COMPLETED_5M_BAR"
 
 
+def test_strategy_e_rejected_formed_setup_exposes_candidate_geometry():
+    strategy = _strategy(strategy_e_min_reward_risk=10.0)
+    current = [
+        _candle(24, 0, open_=100.2, high=101.0, low=100.0, close=100.6),
+        _candle(24, 1, open_=100.6, high=103.0, low=100.5, close=102.0),
+        _candle(24, 2, open_=102.0, high=102.2, low=100.2, close=100.8),
+        _candle(24, 3, open_=100.8, high=101.2, low=99.8, close=100.5),
+        _candle(24, 4, open_=100.5, high=102.0, low=100.4, close=101.6),
+        _candle(
+            24,
+            5,
+            open_=101.6,
+            high=104.0,
+            low=101.3,
+            close=103.5,
+            volume=1400,
+        ),
+    ]
+
+    decision = strategy.evaluate(
+        [*_previous_session(), *current],
+        as_of=current[-1].end_time,
+    )
+
+    assert decision.signal is None
+    assert decision.reason == "INSUFFICIENT_REWARD_TO_RISK"
+    assert decision.metrics["candidate_signal_type"] == "TREND_LONG"
+    assert decision.metrics["candidate_direction"] == "BULLISH"
+    assert decision.metrics["entry_price"] == 103.5
+    assert decision.metrics["stop"] == 97.8
+    assert decision.metrics["target"] == 123.5
+    assert decision.metrics["risk_points"] == pytest.approx(5.7)
+    assert decision.metrics["reward_points"] == 20.0
+    assert decision.metrics["reward_risk"] == pytest.approx(20.0 / 5.7, abs=1e-6)
+
+
 def test_strategy_e_emits_trend_short():
     strategy = _strategy()
     current = [
