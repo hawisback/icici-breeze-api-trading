@@ -37,6 +37,7 @@ class ReplayConfigurationSnapshot(BaseModel):
     strategy_a_enabled: bool
     threshold_overrides: dict[str, Any]
     strategy_a: dict[str, Any]
+    strategy_suite: dict[str, Any]
     entry_window: dict[str, str]
     setup_window: dict[str, int]
     warmup: dict[str, Any]
@@ -163,6 +164,36 @@ def build_configuration_snapshot(
         strategy_a_enabled=strategy_a_enabled,
         threshold_overrides=overrides.model_dump(mode="json"),
         strategy_a=strategy_a,
+        strategy_suite={
+            "enabled": {
+                "TREND_PULLBACK": tunables.trend_pullback_enabled,
+                "VOLATILITY_BREAKOUT": (
+                    tunables.volatility_breakout_enabled
+                ),
+                "DI_CONTINUATION": tunables.di_continuation_enabled,
+                "SR_MOMENTUM_BREAKOUT": (
+                    tunables.sr_momentum_breakout_enabled
+                ),
+                "PIVOT_VWAP_SCALP": tunables.pivot_vwap_scalp_enabled,
+            },
+            "strategy_tunables": tunables.model_dump(mode="json"),
+            "session_timers": session.model_dump(mode="json"),
+            "candidate_contracts": {
+                "DI_CONTINUATION": (
+                    "STRATEGY_C_DI_CONTINUATION_V1_CANDIDATE"
+                ),
+                "SR_MOMENTUM_BREAKOUT": (
+                    "STRATEGY_D_SR_MOMENTUM_V2_CANDIDATE"
+                ),
+            },
+            "priority": [
+                "TREND_PULLBACK",
+                "VOLATILITY_BREAKOUT",
+                "DI_CONTINUATION",
+                "SR_MOMENTUM_BREAKOUT",
+                "PIVOT_VWAP_SCALP",
+            ],
+        },
         entry_window={
             "no_new_trade_before_ist": tunables.entry_session_start,
             "no_new_trade_after_ist": tunables.entry_session_end,
