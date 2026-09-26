@@ -154,6 +154,28 @@ class _FakeKite:
     def set_access_token(self, access_token):
         self.access_token = access_token
 
+    def instruments(self, exchange):
+        if exchange == "NSE":
+            return [
+                {
+                    "instrument_token": 264969,
+                    "tradingsymbol": "INDIA VIX",
+                    "name": "INDIA VIX",
+                    "instrument_type": "EQ",
+                }
+            ]
+        if exchange == "NFO":
+            return [
+                {
+                    "instrument_token": 12345,
+                    "tradingsymbol": "NIFTY26SEPFUT",
+                    "name": "NIFTY",
+                    "instrument_type": "FUT",
+                    "expiry": date(2026, 9, 29),
+                }
+            ]
+        return []
+
     def historical_data(
         self,
         instrument_token,
@@ -213,3 +235,10 @@ def test_kite_historical_normalizes_current_future_with_oi():
     assert call["interval"] == "5minute"
     assert call["continuous"] is False
     assert call["oi"] is True
+
+
+def test_kite_resolves_vix_and_nifty_future_from_daily_instruments():
+    client = KiteHistoricalClient("key", "access", kite_factory=_FakeKite)
+
+    assert client.resolve_india_vix_token() == "264969"
+    assert client.resolve_nifty_future_token("2026-09-29") == "12345"
