@@ -64,7 +64,7 @@ def test_strategy_c_selection_is_fingerprinted_but_does_not_change_tunables():
         all_strategies
     )
     assert tunables.model_dump(mode="json") == original
-    assert strategy_c_spec_fingerprint() == strategy_c_spec_fingerprint()
+    assert strategy_c_spec_fingerprint() == strategy_c_spec_fingerprint()  # frozen pure manifest hash
 
 
 def test_strategy_c_selection_preserves_research_and_execution_parity_modes():
