@@ -131,3 +131,38 @@ def test_normalize_last_five_minute_bar_maps_152959_to_1525_start():
 
     assert len(rows) == 1
     assert rows[0].timestamp == "2026-09-01T15:25:00+05:30"
+
+
+def test_client_chunks_long_intraday_history_requests_and_deduplicates():
+    history_calls: list[dict] = []
+    boundary = int(datetime.fromisoformat("2026-09-06T09:19:59+00:00").timestamp() * 1000)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "www.nseindia.com":
+            return httpx.Response(200, text="ok")
+        if request.url.path.endswith("symbolHistoricalData"):
+            payload = __import__("json").loads(request.content.decode())
+            history_calls.append(payload)
+            return httpx.Response(
+                200,
+                json={"status": True, "data": [_raw(boundary, volume=10)]},
+            )
+        raise AssertionError(str(request.url))
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    client = PublicNseChartClient(http)
+    instrument = Instrument("NIFTY 50", "26000", "Index", "IDX")
+
+    rows = client.history(
+        instrument,
+        datetime.fromisoformat("2026-09-01T00:00:00+05:30"),
+        datetime.fromisoformat("2026-09-13T00:00:00+05:30"),
+    )
+
+    assert len(history_calls) == 3
+    assert len(rows) == 1
+    assert client.last_history_debug["chunk_count"] == 3
+    assert all(
+        call["toDate"] - call["fromDate"] <= 5 * 24 * 60 * 60
+        for call in history_calls
+    )
