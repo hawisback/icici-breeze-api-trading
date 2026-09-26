@@ -41,6 +41,7 @@ def test_day_replay_can_select_strategy_c_without_mutating_frozen_contract():
 def test_strategy_c_selection_is_fingerprinted_but_does_not_change_tunables():
     tunables = StrategyTunablesConfig()
     original = tunables.model_dump(mode="json")
+    frozen_fingerprint = strategy_c_spec_fingerprint()
     common = {
         "start_date": "2026-09-24",
         "end_date": "2026-09-24",
@@ -64,7 +65,7 @@ def test_strategy_c_selection_is_fingerprinted_but_does_not_change_tunables():
         all_strategies
     )
     assert tunables.model_dump(mode="json") == original
-    assert strategy_c_spec_fingerprint() == strategy_c_spec_fingerprint()  # frozen pure manifest hash
+    assert strategy_c_spec_fingerprint() == frozen_fingerprint
 
 
 def test_strategy_c_selection_preserves_research_and_execution_parity_modes():
