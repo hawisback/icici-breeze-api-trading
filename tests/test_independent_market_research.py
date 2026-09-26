@@ -6,8 +6,11 @@ from services.historical.independent_market_research import (
     Candle,
     Instrument,
     PublicNseChartClient,
+    _canonical_rows,
+    _compare_provider_pair,
     _last_complete_dates,
     _normalize_candles,
+    _select_canonical_provider,
 )
 
 
@@ -166,3 +169,105 @@ def test_client_chunks_long_intraday_history_requests_and_deduplicates():
         call["toDate"] - call["fromDate"] <= 5 * 24 * 60 * 60
         for call in history_calls
     )
+
+
+def _candle(ts: str, close: float, *, source: str, volume=100, oi=1000):
+    return Candle(
+        timestamp=ts,
+        open=close - 1,
+        high=close + 1,
+        low=close - 2,
+        close=close,
+        volume=volume,
+        open_interest=oi,
+        source=source,
+        instrument="NIFTY-FUT",
+        instrument_type="Futures",
+    )
+
+
+def test_canonical_provider_prefers_coverage_then_priority_without_backfill():
+    wanted = {date(2026, 9, 24), date(2026, 9, 25)}
+    a = [
+        _candle("2026-09-24T09:15:00+05:30", 100, source="BREEZE"),
+    ]
+    b = [
+        _candle("2026-09-24T09:15:00+05:30", 100, source="UPSTOX"),
+        _candle("2026-09-25T09:15:00+05:30", 101, source="UPSTOX"),
+    ]
+
+    source, rows = _select_canonical_provider(
+        {"BREEZE": a, "UPSTOX": b},
+        wanted,
+        ["BREEZE", "UPSTOX"],
+    )
+
+    assert source == "UPSTOX"
+    assert len(rows) == 2
+
+
+def test_provider_comparison_reports_price_volume_and_oi_disagreement():
+    wanted = {date(2026, 9, 25)}
+    left = [
+        _candle(
+            "2026-09-25T09:15:00+05:30",
+            100,
+            source="BREEZE",
+            volume=100,
+            oi=1000,
+        )
+    ]
+    right = [
+        _candle(
+            "2026-09-25T09:15:00+05:30",
+            101,
+            source="UPSTOX",
+            volume=200,
+            oi=1010,
+        )
+    ]
+
+    result = _compare_provider_pair("BREEZE", left, "UPSTOX", right, wanted)
+
+    assert result["overlap_rows"] == 1
+    assert result["mean_abs_close_diff"] == 1
+    assert result["median_larger_to_smaller_volume_ratio"] == 2
+    assert result["mean_abs_open_interest_diff"] == 10
+
+
+def test_canonical_rows_align_on_spot_timestamps_and_compute_basis():
+    ts = "2026-09-25T09:15:00+05:30"
+    spot = Candle(
+        timestamp=ts,
+        open=100,
+        high=102,
+        low=99,
+        close=101,
+        volume=0,
+        open_interest=None,
+        source="YAHOO_CHART",
+        instrument="^NSEI",
+        instrument_type="Index",
+    )
+    future = _candle(ts, 105, source="BREEZE", volume=500, oi=9000)
+    vix = Candle(
+        timestamp=ts,
+        open=12,
+        high=13,
+        low=11,
+        close=12.5,
+        volume=0,
+        open_interest=None,
+        source="UPSTOX",
+        instrument="NSE_INDEX|India VIX",
+        instrument_type="VolatilityIndex",
+    )
+
+    rows = _canonical_rows([spot], [future], [vix], [], "BREEZE", "UPSTOX")
+
+    assert rows[0]["futures_basis_points"] == 4
+    assert rows[0]["futures_volume"] == 500
+    assert rows[0]["futures_open_interest"] == 9000
+    assert rows[0]["vix_close"] == 12.5
+    assert rows[0]["futures_source"] == "BREEZE"
+    assert rows[0]["vix_source"] == "UPSTOX"
