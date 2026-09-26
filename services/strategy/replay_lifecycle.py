@@ -841,7 +841,7 @@ class HistoricalPositionManagerReplayer:
             and not self._entry_resolution(record, trade, entry_bar)
         ):
             return None
-        return HistoricalManagedReplayPosition(
+        position = HistoricalManagedReplayPosition(
             record=record,
             trade=trade,
             entry_bar=entry_bar,
@@ -851,6 +851,13 @@ class HistoricalPositionManagerReplayer:
                 strategy_config=self.strategy_config,
             ),
         )
+        # Strategy C can trigger and resolve on native 1m bars between two
+        # completed 5m orchestration points. Re-evaluate its frozen lifecycle
+        # immediately through the observation bar so such trades are not lost.
+        if record.strategy_id == StrategyName.DI_CONTINUATION.value:
+            if not self._advance_strategy_c(position, entry_bar):
+                return None
+        return position
 
     def advance_record(
         self,
