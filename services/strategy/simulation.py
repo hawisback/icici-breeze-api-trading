@@ -90,6 +90,39 @@ from services.strategy.replay_analytics import (
 
 logger = logging.getLogger(__name__)
 
+def _assert_replay_control_accounting(
+    *,
+    supplied_overrides: dict[str, Any],
+    applied_overrides: dict[str, Any],
+    conditional_overrides: dict[str, Any],
+    not_applied_overrides: dict[str, Any],
+) -> None:
+    """Fail closed if a supplied replay override is not explicitly classified.
+
+    Unsupported controls must never leak into the effective configuration as
+    metadata-only knobs. Every supplied override is exactly one of applied,
+    conditional-on-evidence, or explicitly not applied.
+    """
+    supplied = set(supplied_overrides)
+    buckets = {
+        "applied": set(applied_overrides),
+        "conditional": set(conditional_overrides),
+        "not_applied": set(not_applied_overrides),
+    }
+    accounted = set().union(*buckets.values())
+    unclassified = supplied - accounted
+    overlaps = {
+        name
+        for name in supplied
+        if sum(name in values for values in buckets.values()) != 1
+    }
+    if unclassified or overlaps:
+        raise RuntimeError(
+            "Replay control accounting invariant violated: "
+            f"unclassified={sorted(unclassified)}, overlaps={sorted(overlaps)}"
+        )
+
+
 class SimulationEngine:
     """Replays historical 5m candles bar-by-bar to simulate intraday trading."""
 
@@ -1100,6 +1133,12 @@ class SimulationEngine:
             and name != "bypass_entry_window"
             and name not in conditional_overrides
         }
+        _assert_replay_control_accounting(
+            supplied_overrides=override_values,
+            applied_overrides=applied_overrides,
+            conditional_overrides=conditional_overrides,
+            not_applied_overrides=not_applied_overrides,
+        )
         effective_overrides = ThresholdOverrides.model_validate(applied_overrides)
 
         risk_updates: dict[str, Any] = {}
