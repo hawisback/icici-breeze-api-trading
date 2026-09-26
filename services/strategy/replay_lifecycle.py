@@ -746,6 +746,89 @@ class HistoricalPositionManagerReplayer:
                 self.strategy_config.strategy_e_forced_exit_time
             ),
         )
+        intrabar_resolution = None
+        if decision.stop_hit or decision.target_hit:
+            minutes = [
+                candle
+                for candle in self.futures_one_minute
+                if candle.instrument_id == price_bar.instrument_id
+                and candle.start_time >= price_bar.start_time
+                and candle.start_time < price_bar.end_time
+            ]
+            if decision.stop_hit and decision.target_hit and not minutes:
+                self.stats["strategy_e_intrabar_unavailable"] += 1
+                self._record_event(
+                    record,
+                    event="AMBIGUOUS",
+                    timestamp=bar.end_time,
+                    price=None,
+                    trade=trade,
+                    source=price_bar.start_time,
+                    details={
+                        "reason": "1-minute data unavailable for stop/target ordering",
+                        "active_stop": float(record.initial_structural_stop),
+                        "target": float(target_raw),
+                    },
+                )
+                self._finish(
+                    record,
+                    trade,
+                    status="AMBIGUOUS",
+                    reason="AMBIGUOUS_INTRABAR_ORDER",
+                    timestamp=bar.end_time,
+                    ambiguous=True,
+                )
+                return False
+            if minutes:
+                intrabar_resolution = resolve_stop_target_order(
+                    record.direction,
+                    active_stop=float(record.initial_structural_stop),
+                    target=float(target_raw),
+                    minute_candles=minutes,
+                )
+                if intrabar_resolution.ambiguous:
+                    self.stats["strategy_e_intrabar_still_ambiguous"] += 1
+                    self._record_event(
+                        record,
+                        event="AMBIGUOUS",
+                        timestamp=intrabar_resolution.event_time or bar.end_time,
+                        price=None,
+                        trade=trade,
+                        source=price_bar.start_time,
+                        details={
+                            "reason": intrabar_resolution.detail,
+                            "active_stop": float(record.initial_structural_stop),
+                            "target": float(target_raw),
+                        },
+                    )
+                    self._finish(
+                        record,
+                        trade,
+                        status="AMBIGUOUS",
+                        reason="AMBIGUOUS_INTRABAR_ORDER",
+                        timestamp=intrabar_resolution.event_time or bar.end_time,
+                        ambiguous=True,
+                    )
+                    return False
+                if intrabar_resolution.event == "STRUCTURAL_STOP":
+                    decision = decision.__class__(
+                        exit_reason="STRATEGY_E_STOP_LOSS",
+                        decision_price=float(intrabar_resolution.exit_price),
+                        current_r=decision.current_r,
+                        stop_hit=True,
+                        target_hit=decision.target_hit,
+                        force_exit=False,
+                    )
+                elif intrabar_resolution.event == "TARGET":
+                    decision = decision.__class__(
+                        exit_reason="STRATEGY_E_TARGET",
+                        decision_price=float(intrabar_resolution.exit_price),
+                        current_r=decision.current_r,
+                        stop_hit=decision.stop_hit,
+                        target_hit=True,
+                        force_exit=False,
+                    )
+
         trade.current_spot_price = float(price_bar.close)
         trade.underlying_current_price = float(price_bar.close)
         trade.current_r = float(decision.current_r)
@@ -788,7 +871,12 @@ class HistoricalPositionManagerReplayer:
         )
         event = ReplayEvent(
             event=decision.exit_reason,
-            timestamp=bar.end_time,
+            timestamp=(
+                intrabar_resolution.event_time
+                if intrabar_resolution is not None
+                and intrabar_resolution.event_time is not None
+                else bar.end_time
+            ),
             reference_price=decision.decision_price,
             active_stop=trade.current_trailing_stop,
             r_multiple=realized_r,
@@ -809,7 +897,12 @@ class HistoricalPositionManagerReplayer:
         self.recorder.set_lifecycle_result(
             record.replay_signal_id,
             status="RESOLVED",
-            exit_timestamp=bar.end_time,
+            exit_timestamp=(
+                intrabar_resolution.event_time
+                if intrabar_resolution is not None
+                and intrabar_resolution.event_time is not None
+                else bar.end_time
+            ),
             exit_price=decision.decision_price,
             exit_reason=decision.exit_reason,
             realized_r=realized_r,
