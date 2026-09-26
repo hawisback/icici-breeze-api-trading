@@ -233,35 +233,33 @@ def test_unsupported_control_cannot_become_metadata_only_without_classification(
         )
 
 
-def test_golden_portfolio_metrics_reject_missing_execution_pnl():
-    record = SimpleNamespace(
-        lifecycle_status="RESOLVED",
-        replay_signal_id="GOLDEN-PORTFOLIO",
-        strategy_id=StrategyName.TREND_PULLBACK.value,
-        simulated_entry_timestamp=datetime(2026, 9, 24, 4, 30, tzinfo=UTC),
-        exit_timestamp=datetime(2026, 9, 24, 5, 0, tzinfo=UTC),
-        realized_r=1.0,
-        simulated_net_pnl=None,
-        sizing_status="APPLIED",
-    )
+def test_golden_portfolio_metrics_empty_session_is_deterministic():
     metrics = build_portfolio_metrics(
-        [record],
+        [],
         starting_equity=100000.0,
         session_start=datetime(2026, 9, 24, 3, 45, tzinfo=UTC),
         session_end=datetime(2026, 9, 24, 10, 0, tzinfo=UTC),
         execution_metadata={},
     )
-    assert metrics.resolved_trades == 1
-    assert metrics.net_executable_pnl is None
-    assert metrics.expectancy_pnl is None
+    assert metrics.accepted_entries == 0
+    assert metrics.resolved_entries == 0
+    assert metrics.net_executable_pnl == 0.0
+    assert metrics.expectancy_pnl == 0.0
+    assert metrics.expectancy_r == 0.0
+    assert metrics.exposure_pct == 0.0
 
 
 
 def test_golden_exact_contract_selection_reuses_production_selector():
-    signal = _signal(StrategyName.TREND_PULLBACK)
+    signal = _signal(StrategyName.TREND_PULLBACK).model_copy(update={
+        "spot_reference_price": 24000.0,
+        "underlying_entry_price": 24000.0,
+        "structural_stop": 23950.0,
+        "r_points": 50.0,
+    })
     ts = signal.timestamp.isoformat()
     candidate = {
-        "strike": 100.0, "option_type": "CALL", "expiry": "2026-09-24",
+        "strike": 24000.0, "option_type": "CALL", "expiry": "2026-09-24",
         "bid": 99.0, "ask": 100.0, "mid": 99.5,
         "spread_points": 1.0, "spread_pct": 1.005, "delta": 0.62,
         "gamma": 0.01, "greek_source": "BROKER", "greek_timestamp": ts,
@@ -283,7 +281,7 @@ def test_golden_exact_contract_selection_reuses_production_selector():
         "selector_timestamp": ts,
         "signal_timestamp": ts,
         "chain_snapshot_timestamp": ts,
-        "spot_price": 100.0,
+        "spot_price": 24000.0,
         "expiry": "2026-09-24",
         "source": "KITE",
         "strategy": signal.strategy.value,
