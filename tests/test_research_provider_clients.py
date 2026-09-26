@@ -5,6 +5,7 @@ import httpx
 from services.historical.research_provider_clients import (
     BreezeFuturesClient,
     DhanHistoricalClient,
+    KiteHistoricalClient,
     UpstoxHistoricalClient,
 )
 
@@ -142,3 +143,73 @@ def test_dhan_futures_normalizes_true_epoch_and_oi():
     assert rows[0]["volume"] == 12345.0
     assert rows[0]["open_interest"] == 456789.0
     assert rows[0]["source"] == "DHAN"
+
+
+class _FakeKite:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.access_token = None
+        self.calls = []
+
+    def set_access_token(self, access_token):
+        self.access_token = access_token
+
+    def historical_data(
+        self,
+        instrument_token,
+        from_date,
+        to_date,
+        interval,
+        continuous=False,
+        oi=False,
+    ):
+        self.calls.append(
+            {
+                "instrument_token": instrument_token,
+                "from_date": from_date,
+                "to_date": to_date,
+                "interval": interval,
+                "continuous": continuous,
+                "oi": oi,
+            }
+        )
+        return [
+            {
+                "date": datetime.fromisoformat("2026-09-25T09:15:00+05:30"),
+                "open": 25000,
+                "high": 25020,
+                "low": 24990,
+                "close": 25010,
+                "volume": 12345,
+                "oi": 456789,
+            }
+        ]
+
+
+def test_kite_historical_normalizes_current_future_with_oi():
+    created = []
+
+    def factory(api_key):
+        client = _FakeKite(api_key)
+        created.append(client)
+        return client
+
+    client = KiteHistoricalClient("key", "access", kite_factory=factory)
+    rows = client.history(
+        "12345",
+        datetime.fromisoformat("2026-09-25T09:15:00+05:30"),
+        datetime.fromisoformat("2026-09-25T15:30:00+05:30"),
+        instrument_name="NIFTY26SEPFUT",
+        include_oi=True,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["source"] == "KITE"
+    assert rows[0]["volume"] == 12345.0
+    assert rows[0]["open_interest"] == 456789.0
+    assert created[0].access_token == "access"
+    call = created[0].calls[0]
+    assert call["instrument_token"] == 12345
+    assert call["interval"] == "5minute"
+    assert call["continuous"] is False
+    assert call["oi"] is True
