@@ -779,8 +779,8 @@ def test_strategy_e_lifecycle_dispatch_uses_shared_production_helper():
     )
 
     assert active is False
-    assert record.lifecycle_status == "RESOLVED"
-    assert record.exit_reason == "STRATEGY_E_STOP_LOSS"
-    assert record.exit_price == 95.0
-    assert record.realized_r == -1.0
-    assert replayer.stats["strategy_e_resolved"] == 1
+    assert record.lifecycle_status == "AMBIGUOUS"
+    assert record.exit_reason == "AMBIGUOUS_INTRABAR_ORDER"
+    assert record.exit_price is None
+    assert record.realized_r is None
+    assert replayer.stats["strategy_e_intrabar_unavailable"] == 1
