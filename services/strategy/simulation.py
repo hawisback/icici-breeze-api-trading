@@ -2351,8 +2351,9 @@ class SimulationEngine:
                 "production selector only for exact point-in-time signal snapshots; "
                 "otherwise it is explicitly APPROXIMATED_SELECTION. Estimated fills "
                 "use point-in-time bid/ask plus configured slippage when available, "
-                "otherwise completed-mark +/- slippage. Partial option exits are not "
-                "modeled in this increment."
+                "otherwise completed-mark +/- slippage. Partial option exits are "
+                "modeled as quantity-conserving execution legs using the recorded "
+                "lifecycle decision timestamp and available historical fill evidence."
             )
         elif option_complete:
             limitation = (
