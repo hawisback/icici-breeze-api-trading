@@ -13,11 +13,15 @@ from services.strategy.models import (
     SimulationResult,
 )
 from services.strategy.replay_analytics import (
+    REPLAY_ENGINE_REVISION,
     build_portfolio_metrics,
     build_replay_run_identity,
     compare_replay_results,
 )
 from services.strategy.replay_execution import ChronologicalReplayExecutor
+from services.strategy.replay_execution_model import (
+    REPLAY_EXECUTION_MODEL_VERSION,
+)
 from services.strategy.replay_manifest import ReplayManifestRecord
 from services.strategy.repository import StrategyRepository
 
@@ -539,10 +543,24 @@ def test_replay_run_identity_is_deterministic_and_tracks_provenance():
     changed = build_replay_run_identity(
         **{**kwargs, "data_fingerprint": "data-789"}
     )
+    changed_execution = build_replay_run_identity(
+        **{
+            **kwargs,
+            "execution_model_version": "paper_options_multi_exit_v2",
+        }
+    )
 
     assert first["run_id"] != second["run_id"]
     assert first["run_fingerprint"] == second["run_fingerprint"]
     assert first["run_fingerprint"] != changed["run_fingerprint"]
+    assert first["run_fingerprint"] != changed_execution["run_fingerprint"]
+    assert first["replay_engine_revision"] == REPLAY_ENGINE_REVISION
+    assert REPLAY_ENGINE_REVISION == "day_replay_increment_9_v1"
+    assert (
+        first["execution_model_version"]
+        == REPLAY_EXECUTION_MODEL_VERSION
+        == "paper_options_multi_exit_v1"
+    )
     assert first["strategy_versions"]["TREND_PULLBACK"] == "trend_pullback_r5"
     assert first["historical_source"] == "BREEZE"
     assert first["data_provenance"]["dataset_hash"] == "data-456"
@@ -559,6 +577,42 @@ def test_replay_run_identity_is_deterministic_and_tracks_provenance():
     assert (
         first["strategy_versions"]["SR_MOMENTUM_BREAKOUT"]
         == "STRATEGY_D_SR_MOMENTUM_BREAKOUT_V2_CANDIDATE"
+    )
+
+
+def test_replay_comparison_marks_execution_model_mismatch_incompatible():
+    baseline = _result(
+        run_id="RPL-EXEC-V1",
+        config_fp="cfg-same",
+        data_fp="data-same",
+        total_r=1.0,
+        net_exec=1000.0,
+        max_drawdown_pnl=-250.0,
+    )
+    candidate = _result(
+        run_id="RPL-EXEC-V2",
+        config_fp="cfg-same",
+        data_fp="data-same",
+        total_r=1.0,
+        net_exec=1000.0,
+        max_drawdown_pnl=-250.0,
+    )
+    baseline.reproducibility.update({
+        "replay_engine_revision": REPLAY_ENGINE_REVISION,
+        "execution_model_version": "paper_options_multi_exit_v1",
+    })
+    candidate.reproducibility.update({
+        "replay_engine_revision": REPLAY_ENGINE_REVISION,
+        "execution_model_version": "paper_options_multi_exit_v2",
+    })
+
+    comparison = compare_replay_results(baseline, candidate)
+
+    assert comparison["identity"]["same_execution_model_version"] is False
+    assert comparison["configuration_compatible"] is False
+    assert (
+        "execution_model_version"
+        in comparison["configuration_mismatches"]
     )
 
 
