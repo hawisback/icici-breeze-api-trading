@@ -527,8 +527,6 @@ class DiContinuationReplayAdapter:
                 meta,
                 phase="WAITING_FOR_POST_FREEZE_SESSION",
             )
-        if not allow_evaluation:
-            return ReplayStrategyEvaluation(meta, phase="WAITING")
         if (
             not context.active_futures_candles_5m
             or not context.futures_candles_1m
@@ -559,7 +557,7 @@ class DiContinuationReplayAdapter:
                 eligible_candidates.append((entry_time, row))
 
         signal = None
-        if eligible_candidates:
+        if allow_evaluation and eligible_candidates:
             entry_time, candidate = min(
                 eligible_candidates,
                 key=lambda item: item[0],
@@ -695,6 +693,8 @@ class SRMomentumBreakoutReplayAdapter:
         self.tunables = tunables
         self.config = StrategyDConfig.v2_candidate()
         self._consumed_signal_ids: set[str] = set()
+        self._used_level_keys: set[str] = set()
+        self._pending_signal: StrategySignal | None = None
 
     def strategy_metadata(self) -> ReplayStrategyMetadata:
         return ReplayStrategyMetadata(
@@ -712,6 +712,8 @@ class SRMomentumBreakoutReplayAdapter:
 
     def prepare_session(self, context: ReplaySessionContext) -> None:
         self._consumed_signal_ids.clear()
+        self._used_level_keys.clear()
+        self._pending_signal = None
 
     def evaluate_completed_bar(
         self,
@@ -728,8 +730,6 @@ class SRMomentumBreakoutReplayAdapter:
                 meta,
                 phase="WAITING_FOR_FREEZE_DATE",
             )
-        if not allow_evaluation:
-            return ReplayStrategyEvaluation(meta, phase="WAITING")
         levels = previous_session_levels(
             context.spot_candles_5m,
             local_day,
@@ -745,40 +745,77 @@ class SRMomentumBreakoutReplayAdapter:
             levels,
             self.config,
         )
-        signal = None
         if raw_signal is not None:
             signal_id = strategy_d_signal_id(raw_signal)
-            status = {
-                "candidate_id": STRATEGY_D_CANDIDATE_ID,
-                "candidate_spec_fingerprint": strategy_d_spec_fingerprint(),
-                "execution_signal": raw_signal.to_dict(),
-                "execution_signal_id": signal_id,
-            }
-            signal = strategy_d_signal_from_status(
-                status,
-                as_of=context.bar.end_time,
+            level_key = (
+                f"{local_day.isoformat()}|{raw_signal.option_type}|"
+                f"{raw_signal.breakout_level_name}"
             )
-            if signal is not None:
-                signal = signal.model_copy(update={
-                    "features_snapshot": {
-                        **signal.features_snapshot,
-                        "strategy_d_signal": raw_signal.to_dict(),
-                    }
-                })
-                if signal.signal_id in self._consumed_signal_ids:
-                    signal = None
+            if (
+                level_key not in self._used_level_keys
+                and signal_id not in self._consumed_signal_ids
+            ):
+                status = {
+                    "candidate_id": STRATEGY_D_CANDIDATE_ID,
+                    "candidate_spec_fingerprint": (
+                        strategy_d_spec_fingerprint()
+                    ),
+                    "execution_signal": raw_signal.to_dict(),
+                    "execution_signal_id": signal_id,
+                }
+                pending = strategy_d_signal_from_status(
+                    status,
+                    as_of=context.bar.end_time,
+                )
+                if pending is not None:
+                    self._pending_signal = pending.model_copy(update={
+                        "features_snapshot": {
+                            **pending.features_snapshot,
+                            "strategy_d_signal": raw_signal.to_dict(),
+                        }
+                    })
+                    # The paper monitor freezes the level as soon as the
+                    # candidate is captured, before StrategyService gates.
+                    self._used_level_keys.add(level_key)
+
+        if self._pending_signal is not None:
+            age = (
+                context.bar.end_time - self._pending_signal.timestamp
+            ).total_seconds()
+            if (
+                age < -5.0
+                or age > 300.0
+                or self._pending_signal.signal_id
+                in self._consumed_signal_ids
+            ):
+                self._pending_signal = None
+
+        signal = self._pending_signal if allow_evaluation else None
+        phase = (
+            "SIGNAL_READY"
+            if signal is not None
+            else (
+                "SIGNAL_HELD_BY_HIGHER_PRIORITY_OR_RISK_GATE"
+                if self._pending_signal is not None
+                else "MONITORING"
+            )
+        )
         return ReplayStrategyEvaluation(
             meta,
             signal=signal,
-            phase=("SIGNAL_READY" if signal is not None else "MONITORING"),
+            phase=phase,
             audit_records=[{
                 "timestamp": context.bar.end_time.isoformat(),
                 "strategy": StrategyName.SR_MOMENTUM_BREAKOUT.value,
-                "phase_state": (
-                    "SIGNAL_READY" if signal is not None else "MONITORING"
-                ),
+                "phase_state": phase,
                 "candidate_id": STRATEGY_D_CANDIDATE_ID,
                 "levels": levels.to_dict(),
+                "used_level_keys": sorted(self._used_level_keys),
+                "pending_signal_id": (
+                    self._pending_signal.signal_id
+                    if self._pending_signal is not None
+                    else None
+                ),
             }],
         )
 
@@ -788,6 +825,11 @@ class SRMomentumBreakoutReplayAdapter:
         context: ReplayBarContext,
     ) -> ReplayManifestRecord:
         self._consumed_signal_ids.add(signal.signal_id)
+        if (
+            self._pending_signal is not None
+            and self._pending_signal.signal_id == signal.signal_id
+        ):
+            self._pending_signal = None
         snapshot = dict(signal.features_snapshot)
         raw = dict(snapshot.get("strategy_d_signal") or {})
         entry = float(signal.spot_reference_price)
@@ -847,8 +889,15 @@ class SRMomentumBreakoutReplayAdapter:
         reason: str,
     ) -> None:
         self._consumed_signal_ids.add(signal.signal_id)
+        if (
+            self._pending_signal is not None
+            and self._pending_signal.signal_id == signal.signal_id
+        ):
+            self._pending_signal = None
 
     def reset(self, at: datetime) -> None:
+        # Production's frozen D paper monitor is observed before main entry
+        # gates and retains used-level/pending state across blocked cycles.
         return None
 
 
@@ -1084,14 +1133,21 @@ class ReplayStrategyRegistry:
         stop_after_signal: bool = False,
     ) -> list[ReplayStrategyEvaluation]:
         results: list[ReplayStrategyEvaluation] = []
+        winner_selected = False
         for adapter in self.adapters:
             result = adapter.evaluate_completed_bar(
                 context,
-                allow_evaluation=allow_evaluation,
+                allow_evaluation=(
+                    allow_evaluation and not winner_selected
+                ),
             )
             results.append(result)
-            if stop_after_signal and result.signal is not None:
-                break
+            if (
+                stop_after_signal
+                and result.signal is not None
+                and not winner_selected
+            ):
+                winner_selected = True
         return results
 
     def refresh_diagnostics(
