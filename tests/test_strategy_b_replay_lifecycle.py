@@ -295,6 +295,19 @@ def test_chronological_executor_does_not_scan_future_and_blocks_capacity():
     }
     assert executor.can_accept_entry() is True
 
+    # This is the executor-level chronology contract: a loss produced by the
+    # real lifecycle updates the same state that the next entry gate consumes.
+    cooldown_gate = executor.global_entry_gate(
+        record.exit_timestamp + timedelta(minutes=5)
+    )
+    assert cooldown_gate.status == "IN_LOSS_COOLDOWN"
+    after_cooldown = executor.global_entry_gate(
+        record.exit_timestamp + timedelta(
+            minutes=executor.risk_config.cooldown_after_loss_min + 1
+        )
+    )
+    assert after_cooldown.allowed is True
+
 
 def test_chronological_executor_enforces_daily_and_strategy_risk_gates():
     recorder = ReplayManifestRecorder()
