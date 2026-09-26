@@ -842,6 +842,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                   <div className="text-[9px] uppercase tracking-wider text-slate-500">Expectancy</div>
                   <div className="mt-1 font-mono font-bold text-slate-200">{formatPnl(portfolio.expectancy_pnl)}</div>
                   <div className="text-[10px] text-slate-500">{portfolio.expectancy_r == null ? "N/A" : String(portfolio.expectancy_r) + "R / trade"} · PF {portfolio.profit_factor_pnl ?? "N/A"}</div>
+                  <div className="text-[10px] text-slate-500">Streaks: {portfolio.max_consecutive_wins}W / {portfolio.max_consecutive_losses}L</div>
                 </div>
                 <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
                   <div className="text-[9px] uppercase tracking-wider text-slate-500">Exposure & Utilization</div>
@@ -920,9 +921,27 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[10px] font-mono text-slate-400">
                 <div>Current: {result.run_id}</div>
                 <div>Cost model: {String(reproducibility.cost_model_version || "N/A")}</div>
+                <div>Run fingerprint: {String(reproducibility.run_fingerprint || "N/A")}</div>
                 <div>Config fingerprint: {String(reproducibility.configuration_fingerprint || "N/A")}</div>
                 <div>Data fingerprint: {String(reproducibility.data_fingerprint || "N/A")}</div>
+                <div>Selection policy: {String(reproducibility.contract_selection_policy || "N/A")}</div>
+                <div>Historical source: {String(reproducibility.historical_source || historicalSource)}</div>
               </div>
+
+              {(reproducibility.contract_selection_evidence || reproducibility.execution_fill_methods) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[10px] text-slate-400">
+                  <div>
+                    Selection evidence: {Object.entries((reproducibility.contract_selection_evidence || {}) as Record<string, number>)
+                      .map(([name, count]) => name + ": " + count)
+                      .join(" · ") || "none"}
+                  </div>
+                  <div>
+                    Fill evidence: {Object.entries((reproducibility.execution_fill_methods || {}) as Record<string, number>)
+                      .map(([name, count]) => name + ": " + count)
+                      .join(" · ") || "none"}
+                  </div>
+                </div>
+              )}
 
               {comparison && (
                 <div className="space-y-3">

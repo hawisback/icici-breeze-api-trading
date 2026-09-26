@@ -1293,6 +1293,8 @@ export interface ReplayPortfolioMetricsData {
   profit_factor_pnl: number | null;
   expectancy_pnl: number | null;
   expectancy_r: number | null;
+  max_consecutive_wins: number;
+  max_consecutive_losses: number;
   exposure_minutes: number;
   exposure_pct: number;
   max_concurrent_positions: number;
