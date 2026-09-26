@@ -1516,6 +1516,10 @@ class SimulationEngine:
                                 signal_id=signal.signal_id,
                                 details=strategy_gate.details,
                             )
+                            strategy_registry.notify_execution_rejected(
+                                signal,
+                                f"EXECUTION_REJECTED_RISK:{strategy_gate.status}",
+                            )
                             event = "ENTRY_REJECTED_RISK"
                             details = strategy_gate.status
                             logs.append(
