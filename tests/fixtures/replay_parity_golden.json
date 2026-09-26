@@ -1,11 +1,26 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "strategy_registry": [
-    ["TREND_PULLBACK", "TrendPullbackReplayAdapter"],
-    ["VOLATILITY_BREAKOUT", "VolatilityBreakoutReplayAdapter"],
-    ["DI_CONTINUATION", "DiContinuationReplayAdapter"],
-    ["SR_MOMENTUM_BREAKOUT", "SRMomentumBreakoutReplayAdapter"],
-    ["PIVOT_VWAP_SCALP", "PivotVwapScalpReplayAdapter"]
+    [
+      "TREND_PULLBACK",
+      "TrendPullbackReplayAdapter"
+    ],
+    [
+      "VOLATILITY_BREAKOUT",
+      "VolatilityBreakoutReplayAdapter"
+    ],
+    [
+      "DI_CONTINUATION",
+      "DiContinuationReplayAdapter"
+    ],
+    [
+      "SR_MOMENTUM_BREAKOUT",
+      "SRMomentumBreakoutReplayAdapter"
+    ],
+    [
+      "PIVOT_VWAP_SCALP",
+      "PivotVwapScalpReplayAdapter"
+    ]
   ],
   "risk": {
     "cooldown_status": "IN_LOSS_COOLDOWN",
@@ -25,8 +40,53 @@
     "same_minute_stop_target": "STILL_AMBIGUOUS"
   },
   "execution": {
-    "gross_pnl": 400.0,
+    "gross_pnl": 400,
     "transaction_costs": 57.15,
-    "net_pnl": 342.85
+    "net_pnl": 342.85,
+    "multi_exit": {
+      "quantity": 50,
+      "gross_pnl": 150,
+      "slippage_cost": 100,
+      "transaction_costs": 80.4,
+      "net_pnl": 69.6,
+      "quote_equivalent": true
+    }
+  },
+  "strategy_metadata": [
+    {
+      "strategy": "TREND_PULLBACK",
+      "display_name": "Strategy A · Trend Pullback R5",
+      "priority": 10,
+      "default_enabled": true
+    },
+    {
+      "strategy": "VOLATILITY_BREAKOUT",
+      "display_name": "Strategy B · Volatility Breakout",
+      "priority": 20,
+      "default_enabled": true
+    },
+    {
+      "strategy": "DI_CONTINUATION",
+      "display_name": "Strategy C · DI Continuation",
+      "priority": 30,
+      "default_enabled": true
+    },
+    {
+      "strategy": "SR_MOMENTUM_BREAKOUT",
+      "display_name": "Strategy D · S&R Momentum V2 (Frozen Candidate)",
+      "priority": 40,
+      "default_enabled": true
+    },
+    {
+      "strategy": "PIVOT_VWAP_SCALP",
+      "display_name": "Strategy E · Pivot/VWAP Scalp",
+      "priority": 50,
+      "default_enabled": false
+    }
+  ],
+  "reproducibility": {
+    "replay_engine_revision": "day_replay_increment_9_v1",
+    "execution_model_version": "paper_options_multi_exit_v1",
+    "cost_model_version": "paper_options_costs_v1"
   }
 }
