@@ -963,6 +963,9 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 <div>Data fingerprint: {String(reproducibility.data_fingerprint || "N/A")}</div>
                 <div>Selection policy: {String(reproducibility.contract_selection_policy || "N/A")}</div>
                 <div>Historical source: {String(reproducibility.historical_source || historicalSource)}</div>
+                <div>Engine revision: {String(reproducibility.replay_engine_revision || "N/A")}</div>
+                <div>Strategy manifest: {Object.keys((reproducibility.strategy_manifest || {}) as Record<string, unknown>).length} fingerprinted strategies</div>
+                <div>Data provenance: {String((reproducibility.data_provenance as Record<string, any> | undefined)?.dataset_hash || reproducibility.data_fingerprint || "N/A")}</div>
               </div>
 
               {(reproducibility.contract_selection_evidence || reproducibility.execution_fill_methods) && (
@@ -982,6 +985,11 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
 
               {comparison && (
                 <div className="space-y-3">
+                  {!comparison.configuration_compatible && (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+                      Configuration/provenance mismatch: {comparison.configuration_mismatches.join(", ")}. Metric deltas are shown for inspection only; these runs are not like-for-like.
+                    </div>
+                  )}
                   <div className="flex flex-wrap gap-2 text-[10px]">
                     {Object.entries(comparison.identity).map(([name, same]) => (
                       <span key={name} className="rounded border border-slate-700 bg-slate-950/60 px-2 py-1 text-slate-300">

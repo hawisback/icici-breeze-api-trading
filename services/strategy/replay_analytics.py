@@ -19,7 +19,7 @@ from services.strategy.models import ReplayPortfolioMetrics, SimulationResult
 from services.strategy.replay_manifest import ReplayManifestRecord
 
 
-REPLAY_ENGINE_REVISION = "day_replay_increment_8_v1"
+REPLAY_ENGINE_REVISION = "day_replay_increment_8_v2"
 
 
 def _round(value: float | None, digits: int = 4) -> float | None:
@@ -457,6 +457,8 @@ def build_replay_run_identity(
     cost_model_version: str,
     contract_selection_policy: str,
     historical_source: str,
+    data_provenance: dict[str, Any] | None = None,
+    strategy_manifest: dict[str, Any] | None = None,
     contract_selection_evidence: dict[str, int] | None = None,
     execution_fill_methods: dict[str, int] | None = None,
 ) -> dict[str, Any]:
@@ -477,6 +479,29 @@ def build_replay_run_identity(
         ),
         "PIVOT_VWAP_SCALP": "production_pivot_vwap_scalp_v2",
     }
+    strategy_manifest_payload = strategy_manifest or {
+        strategy: {
+            "revision": version,
+            "fingerprint": (
+                strategy_c_spec_fingerprint()
+                if strategy == "DI_CONTINUATION"
+                else strategy_d_spec_fingerprint()
+                if strategy == "SR_MOMENTUM_BREAKOUT"
+                else hashlib.sha256(
+                    json.dumps(
+                        {
+                            "strategy": strategy,
+                            "version": version,
+                            "configuration_fingerprint": configuration_fingerprint,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            ),
+        }
+        for strategy, version in strategy_versions.items()
+    }
     identity_payload = {
         "replay_engine_revision": REPLAY_ENGINE_REVISION,
         "session_date": session_date,
@@ -487,6 +512,7 @@ def build_replay_run_identity(
         "contract_selection_policy": contract_selection_policy,
         "historical_source": historical_source,
         "strategy_versions": strategy_versions,
+        "strategy_manifest": strategy_manifest_payload,
         "frozen_candidate_fingerprints": {
             "DI_CONTINUATION": strategy_c_spec_fingerprint(),
             "SR_MOMENTUM_BREAKOUT": strategy_d_spec_fingerprint(),
@@ -497,6 +523,7 @@ def build_replay_run_identity(
         "execution_fill_methods": dict(
             sorted((execution_fill_methods or {}).items())
         ),
+        "data_provenance": data_provenance or {},
     }
     canonical = json.dumps(
         identity_payload,
@@ -544,29 +571,28 @@ def compare_replay_results(
     b_rep = baseline.reproducibility or {}
     c_rep = candidate.reproducibility or {}
 
+    identity_checks = {
+        "same_session_date": baseline.session_date == candidate.session_date,
+        "same_replay_mode": baseline.replay_mode == candidate.replay_mode,
+        "same_configuration_fingerprint": b_rep.get("configuration_fingerprint") == c_rep.get("configuration_fingerprint"),
+        "same_data_fingerprint": b_rep.get("data_fingerprint") == c_rep.get("data_fingerprint"),
+        "same_cost_model_version": b_rep.get("cost_model_version") == c_rep.get("cost_model_version"),
+        "same_contract_selection_policy": b_rep.get("contract_selection_policy") == c_rep.get("contract_selection_policy"),
+        "same_replay_engine_revision": b_rep.get("replay_engine_revision") == c_rep.get("replay_engine_revision"),
+        "same_strategy_manifest": b_rep.get("strategy_manifest") == c_rep.get("strategy_manifest"),
+        "same_data_provenance": b_rep.get("data_provenance") == c_rep.get("data_provenance"),
+    }
+    incompatible = sorted(
+        name.removeprefix("same_")
+        for name, matches in identity_checks.items()
+        if not matches
+    )
     return {
         "baseline_run_id": baseline.run_id,
         "candidate_run_id": candidate.run_id,
-        "identity": {
-            "same_session_date": baseline.session_date == candidate.session_date,
-            "same_replay_mode": baseline.replay_mode == candidate.replay_mode,
-            "same_configuration_fingerprint": (
-                b_rep.get("configuration_fingerprint")
-                == c_rep.get("configuration_fingerprint")
-            ),
-            "same_data_fingerprint": (
-                b_rep.get("data_fingerprint")
-                == c_rep.get("data_fingerprint")
-            ),
-            "same_cost_model_version": (
-                b_rep.get("cost_model_version")
-                == c_rep.get("cost_model_version")
-            ),
-            "same_contract_selection_policy": (
-                b_rep.get("contract_selection_policy")
-                == c_rep.get("contract_selection_policy")
-            ),
-        },
+        "identity": identity_checks,
+        "configuration_compatible": not incompatible,
+        "configuration_mismatches": incompatible,
         "metrics": {
             "qualified_signals": _metric(
                 baseline.signal_metrics.qualified_signals,

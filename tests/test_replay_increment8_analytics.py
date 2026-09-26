@@ -398,6 +398,17 @@ def test_replay_run_identity_is_deterministic_and_tracks_provenance():
             "PRODUCTION_CONTRACT_SELECTOR_WITH_EXPLICIT_APPROXIMATION"
         ),
         "historical_source": "BREEZE",
+        "data_provenance": {
+            "source": "BREEZE",
+            "dataset_hash": "data-456",
+            "requested_date_range": {"start": "2026-09-24", "end": "2026-09-24"},
+        },
+        "strategy_manifest": {
+            "TREND_PULLBACK": {
+                "revision": "trend_pullback_r5",
+                "fingerprint": "strategy-a-fingerprint",
+            }
+        },
         "contract_selection_evidence": {
             "POINT_IN_TIME_SNAPSHOT": 2,
             "APPROXIMATED_SELECTION": 3,
@@ -419,6 +430,11 @@ def test_replay_run_identity_is_deterministic_and_tracks_provenance():
     assert first["run_fingerprint"] != changed["run_fingerprint"]
     assert first["strategy_versions"]["TREND_PULLBACK"] == "trend_pullback_r5"
     assert first["historical_source"] == "BREEZE"
+    assert first["data_provenance"]["dataset_hash"] == "data-456"
+    assert (
+        first["strategy_manifest"]["TREND_PULLBACK"]["fingerprint"]
+        == "strategy-a-fingerprint"
+    )
     assert first["contract_selection_evidence"]["POINT_IN_TIME_SNAPSHOT"] == 2
     assert first["execution_fill_methods"]["MARK_WITH_SLIPPAGE"] == 3
     assert len(first["frozen_candidate_fingerprints"]["DI_CONTINUATION"]) == 64
@@ -501,6 +517,8 @@ def test_replay_comparison_reports_deltas_without_ranking():
     assert comparison["candidate_run_id"] == "RPL-CANDIDATE"
     assert comparison["identity"]["same_data_fingerprint"] is True
     assert comparison["identity"]["same_configuration_fingerprint"] is False
+    assert comparison["configuration_compatible"] is False
+    assert "configuration_fingerprint" in comparison["configuration_mismatches"]
     assert comparison["metrics"]["total_realized_r"]["delta"] == 0.5
     assert (
         comparison["metrics"]["net_estimated_executable_pnl"]["delta"]

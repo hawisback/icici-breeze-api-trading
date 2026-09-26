@@ -1442,6 +1442,8 @@ export interface ReplayComparisonData {
   baseline_run_id: string | null;
   candidate_run_id: string | null;
   identity: Record<string, boolean>;
+  configuration_compatible: boolean;
+  configuration_mismatches: string[];
   metrics: Record<string, ReplayComparisonMetricData>;
   strategy_realized_r: Record<string, ReplayComparisonMetricData>;
   provenance: {
