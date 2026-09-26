@@ -54,10 +54,16 @@ class ReplayDataFingerprint(BaseModel):
     source: HistoricalReplaySource
     spot_candle_count: int
     futures_candle_count: int
+    spot_one_minute_candle_count: int = 0
+    futures_one_minute_candle_count: int = 0
     spot_earliest_timestamp: str | None = None
     spot_latest_timestamp: str | None = None
     futures_earliest_timestamp: str | None = None
     futures_latest_timestamp: str | None = None
+    spot_one_minute_earliest_timestamp: str | None = None
+    spot_one_minute_latest_timestamp: str | None = None
+    futures_one_minute_earliest_timestamp: str | None = None
+    futures_one_minute_latest_timestamp: str | None = None
     requested_date_range: dict[str, str]
     observed_date_range: dict[str, str | None]
     futures_contracts: list[dict[str, str | None]] = Field(default_factory=list)
@@ -243,11 +249,24 @@ def build_data_fingerprint(
     source_diagnostics: dict[str, Any],
     futures_contracts: list[dict[str, str | None]],
     missing_data: list[str],
+    spot_one_minute_candles: list[Candle] | None = None,
+    futures_one_minute_candles: list[Candle] | None = None,
 ) -> ReplayDataFingerprint:
+    spot_1m = list(spot_one_minute_candles or [])
+    futures_1m = list(futures_one_minute_candles or [])
     spot_earliest, spot_latest = _timestamp_range(spot_candles)
     futures_earliest, futures_latest = _timestamp_range(futures_candles)
-    all_candles = spot_candles + futures_candles
-    rows = _sorted_candles("spot", spot_candles) + _sorted_candles("futures", futures_candles)
+    spot_1m_earliest, spot_1m_latest = _timestamp_range(spot_1m)
+    futures_1m_earliest, futures_1m_latest = _timestamp_range(
+        futures_1m
+    )
+    all_candles = spot_candles + futures_candles + spot_1m + futures_1m
+    rows = (
+        _sorted_candles("spot_5m", spot_candles)
+        + _sorted_candles("futures_5m", futures_candles)
+        + _sorted_candles("spot_1m", spot_1m)
+        + _sorted_candles("futures_1m", futures_1m)
+    )
     canonical = {
         "source": source.value,
         "requested_date_range": {"start": start_date, "end": end_date},
@@ -271,10 +290,16 @@ def build_data_fingerprint(
         source=source,
         spot_candle_count=len(spot_candles),
         futures_candle_count=len(futures_candles),
+        spot_one_minute_candle_count=len(spot_1m),
+        futures_one_minute_candle_count=len(futures_1m),
         spot_earliest_timestamp=spot_earliest,
         spot_latest_timestamp=spot_latest,
         futures_earliest_timestamp=futures_earliest,
         futures_latest_timestamp=futures_latest,
+        spot_one_minute_earliest_timestamp=spot_1m_earliest,
+        spot_one_minute_latest_timestamp=spot_1m_latest,
+        futures_one_minute_earliest_timestamp=futures_1m_earliest,
+        futures_one_minute_latest_timestamp=futures_1m_latest,
         requested_date_range={"start": start_date, "end": end_date},
         observed_date_range={"earliest": observed[0], "latest": observed[1]},
         futures_contracts=futures_contracts,
