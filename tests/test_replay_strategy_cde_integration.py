@@ -4,6 +4,7 @@ from libs.contracts.models import Candle
 from services.strategy.models import (
     HistoricalReplaySource,
     OptionType,
+    RiskConfig,
     SessionTimersConfig,
     StrategyName,
     StrategySignal,
@@ -11,6 +12,7 @@ from services.strategy.models import (
     ThresholdOverrides,
     TradeDirection,
 )
+from services.strategy.replay_lifecycle import HistoricalPositionManagerReplayer
 from services.strategy.replay_manifest import ReplayManifestRecorder
 from services.strategy.replay_metadata import (
     build_configuration_snapshot,
@@ -324,3 +326,296 @@ def test_default_registry_priority_matches_production_order():
         StrategyName.SR_MOMENTUM_BREAKOUT,
         StrategyName.PIVOT_VWAP_SCALP,
     ]
+
+
+def _record_signal(
+    recorder: ReplayManifestRecorder,
+    signal: StrategySignal,
+    entry_bar: Candle,
+    *,
+    entry_features: dict | None = None,
+):
+    entry = float(
+        signal.underlying_entry_price or signal.spot_reference_price
+    )
+    risk = float(signal.r_points)
+    return recorder.record_entry(
+        signal=signal,
+        trading_date=entry_bar.end_time.astimezone(IST).date().isoformat(),
+        trigger_source_candle_timestamp=signal.timestamp,
+        trigger_level=entry,
+        simulated_entry_timestamp=signal.timestamp,
+        simulated_entry_price=entry,
+        entry_5m_candle_timestamp=entry_bar.end_time,
+        entry_occurred_intrabar=False,
+        entry_features=entry_features or signal.features_snapshot,
+        setup_id=signal.signal_id,
+        pullback_swing_low=None,
+        pullback_swing_high=None,
+        impulse_low=None,
+        impulse_high=None,
+        atr_at_entry=risk,
+        initial_structural_stop=float(signal.structural_stop),
+        initial_risk_points=risk,
+        initial_risk_atr=1.0,
+        current_trailing_stop=float(signal.structural_stop),
+        current_r=0.0,
+        highest_favorable_price=entry,
+        lowest_favorable_price=entry,
+        peak_r=0.0,
+        protected_breakeven_active=False,
+        profit_lock_active=False,
+        runner_mode_active=False,
+        current_ladder_stage="OPEN_INITIAL_RISK",
+        reversal_score=0,
+        adverse_health_counters={},
+        entry_bar_timestamp=entry_bar.end_time,
+        last_managed_completed_bar_timestamp=None,
+    )
+
+
+def test_strategy_c_lifecycle_dispatch_uses_frozen_observer(monkeypatch):
+    entry_end = datetime(2026, 9, 24, 10, 0, tzinfo=IST)
+    entry_bar = _bar(
+        entry_end,
+        instrument_id="INST-NIFTY-FUT-2026-09-29",
+    )
+    minute = _bar(
+        entry_end,
+        instrument_id=entry_bar.instrument_id,
+        interval="1m",
+    )
+    signal = StrategySignal(
+        signal_id="C-LIFECYCLE",
+        strategy=StrategyName.DI_CONTINUATION,
+        direction=TradeDirection.BULLISH,
+        option_type=OptionType.CALL,
+        timestamp=entry_end.astimezone(UTC) - timedelta(minutes=2),
+        spot_reference_price=100.0,
+        underlying_entry_price=100.0,
+        structural_stop=95.0,
+        r_points=5.0,
+        derivatives_score=0.0,
+    )
+    recorder = ReplayManifestRecorder()
+    record = _record_signal(
+        recorder,
+        signal,
+        entry_bar,
+        entry_features={
+            "underlying_entry_price": 100.0,
+            "futures_contract": entry_bar.instrument_id,
+        },
+    )
+    monkeypatch.setattr(
+        "services.strategy.replay_lifecycle.replay_strategy_c_to_as_of",
+        lambda *args, **kwargs: {
+            "candidate_entries": [{
+                "candidate_signal_id": signal.signal_id,
+                "lifecycle": {
+                    "status": "RESOLVED",
+                    "current_stop": 95.0,
+                    "current_r": -1.0,
+                    "exit_time": (
+                        signal.timestamp + timedelta(minutes=1)
+                    ).isoformat(),
+                    "exit_price": 95.0,
+                    "exit_reason": "STOP_OR_TRAIL",
+                    "realized_r": -1.0,
+                    "mfe_r": 0.1,
+                    "mae_r": -1.0,
+                },
+            }],
+        },
+    )
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=RiskConfig(),
+        session_config=SessionTimersConfig(),
+        recorder=recorder,
+        instrument_id="INST-NIFTY-INDEX",
+        warmup_candles=[],
+        session_candles=[entry_bar],
+        futures_candles=[entry_bar],
+        one_minute_candles=[],
+        futures_one_minute_candles=[minute],
+    )
+
+    position = replayer.start_record(record)
+
+    assert position is None
+    assert record.lifecycle_status == "RESOLVED"
+    assert record.exit_reason == "STOP_OR_TRAIL"
+    assert record.realized_r == -1.0
+    assert replayer.stats["strategy_c_resolved"] == 1
+
+
+def test_strategy_d_lifecycle_dispatch_uses_frozen_v2_manager():
+    entry_end = datetime(2026, 9, 24, 10, 0, tzinfo=IST)
+    entry_bar = _bar(
+        entry_end,
+        open_=100.0,
+        high=101.0,
+        low=99.5,
+        close=100.0,
+    )
+    stop_bar = _bar(
+        entry_end + timedelta(minutes=5),
+        open_=100.0,
+        high=100.5,
+        low=94.0,
+        close=95.0,
+    )
+    levels = {
+        "session_date": "2026-09-24",
+        "source_session_date": "2026-09-23",
+        "pdh": 100.0,
+        "pdl": 90.0,
+        "pdc": 95.0,
+        "pivot": 95.0,
+        "r1": 100.0,
+        "s1": 90.0,
+        "r2": 105.0,
+        "s2": 85.0,
+    }
+    raw = {
+        "strategy_id": "STRATEGY_D_SR_MOMENTUM_BREAKOUT_V2_CANDIDATE",
+        "direction": "BULLISH",
+        "option_type": "CALL",
+        "timestamp": entry_end.astimezone(UTC).isoformat(),
+        "breakout_level_name": "PDH",
+        "breakout_level": 100.0,
+        "entry_price": 100.0,
+        "initial_stop": 95.0,
+        "risk_points": 5.0,
+        "atr_5m": 3.333333,
+        "rsi_previous": 59.0,
+        "rsi_current": 63.0,
+        "rsi_clearance_points": 3.0,
+        "previous_day_range_atr": 3.0,
+        "vwap_reference_price": 101.0,
+        "vwap": 99.0,
+        "vwap_source": "ACTIVE_NIFTY_FUTURES_5M",
+        "next_pivot_name": "R2",
+        "next_pivot_price": 105.0,
+        "levels": levels,
+    }
+    signal = StrategySignal(
+        signal_id=strategy_d_signal_id(raw),
+        strategy=StrategyName.SR_MOMENTUM_BREAKOUT,
+        direction=TradeDirection.BULLISH,
+        option_type=OptionType.CALL,
+        timestamp=entry_end.astimezone(UTC),
+        spot_reference_price=100.0,
+        underlying_entry_price=100.0,
+        structural_stop=95.0,
+        r_points=5.0,
+        derivatives_score=0.0,
+        features_snapshot={"strategy_d_signal": raw},
+    )
+    recorder = ReplayManifestRecorder()
+    record = _record_signal(
+        recorder,
+        signal,
+        entry_bar,
+        entry_features={
+            "strategy_d_signal": raw,
+            "underlying_entry_price": 100.0,
+        },
+    )
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=RiskConfig(),
+        session_config=SessionTimersConfig(),
+        recorder=recorder,
+        instrument_id="INST-NIFTY-INDEX",
+        warmup_candles=[],
+        session_candles=[entry_bar, stop_bar],
+        futures_candles=[],
+        one_minute_candles=[],
+    )
+    position = replayer.start_record(record)
+    assert position is not None
+
+    active = replayer.advance_record(
+        position,
+        stop_bar,
+        [entry_bar, stop_bar],
+    )
+
+    assert active is False
+    assert record.lifecycle_status == "RESOLVED"
+    assert record.exit_reason == "ATR_HARD_STOP"
+    assert record.realized_r == -1.0
+    assert replayer.stats["strategy_d_resolved"] == 1
+
+
+def test_strategy_e_lifecycle_dispatch_uses_shared_production_helper():
+    entry_end = datetime(2026, 9, 24, 10, 0, tzinfo=IST)
+    entry_spot = _bar(entry_end)
+    next_spot = _bar(entry_end + timedelta(minutes=5))
+    futures_id = "INST-NIFTY-FUT-2026-09-29"
+    entry_future = _bar(
+        entry_end,
+        instrument_id=futures_id,
+        open_=100.0,
+        high=102.0,
+        low=99.0,
+        close=100.0,
+    )
+    ambiguous_future = _bar(
+        entry_end + timedelta(minutes=5),
+        instrument_id=futures_id,
+        open_=100.0,
+        high=111.0,
+        low=94.0,
+        close=108.0,
+    )
+    signal = StrategySignal(
+        signal_id="E-LIFECYCLE",
+        strategy=StrategyName.PIVOT_VWAP_SCALP,
+        direction=TradeDirection.BULLISH,
+        option_type=OptionType.CALL,
+        timestamp=entry_end.astimezone(UTC),
+        spot_reference_price=100.0,
+        underlying_entry_price=100.0,
+        structural_stop=95.0,
+        r_points=5.0,
+        derivatives_score=0.0,
+        features_snapshot={
+            "target_price": 110.0,
+            "strategy_target_price": 110.0,
+            "futures_contract": futures_id,
+            "signal_type": "TREND_CONTINUATION",
+        },
+    )
+    recorder = ReplayManifestRecorder()
+    record = _record_signal(
+        recorder,
+        signal,
+        entry_spot,
+        entry_features=signal.features_snapshot,
+    )
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=RiskConfig(),
+        session_config=SessionTimersConfig(),
+        recorder=recorder,
+        instrument_id="INST-NIFTY-INDEX",
+        warmup_candles=[],
+        session_candles=[entry_spot, next_spot],
+        futures_candles=[entry_future, ambiguous_future],
+        one_minute_candles=[],
+    )
+    position = replayer.start_record(record)
+    assert position is not None
+
+    active = replayer.advance_record(
+        position,
+        next_spot,
+        [entry_spot, next_spot],
+    )
+
+    assert active is False
+    assert record.lifecycle_status == "RESOLVED"
+    assert record.exit_reason == "STRATEGY_E_STOP_LOSS"
+    assert record.exit_price == 95.0
+    assert record.realized_r == -1.0
+    assert replayer.stats["strategy_e_resolved"] == 1
