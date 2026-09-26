@@ -14,14 +14,20 @@ from services.strategy.models import (
     StrategyName,
     StrategySignal,
     StrategyTunablesConfig,
+    ThresholdOverrides,
     TradeDirection,
+    HistoricalReplaySource,
 )
 from services.strategy.replay_analytics import build_portfolio_metrics
 from services.strategy.replay_execution_model import estimate_round_trip_execution
 from services.strategy.replay_intrabar import resolve_stop_target_order
 from services.strategy.replay_registry import ReplayStrategyRegistry
 from services.strategy.replay_sizing import calculate_replay_sizing
-from services.strategy.replay_contract_selection import ReplayPriceEvidence
+from services.strategy.replay_contract_selection import (
+    HistoricalContractSelectionProvider,
+    ReplayPriceEvidence,
+)
+from services.strategy.replay_metadata import build_data_fingerprint
 from services.strategy.risk_gates import (
     check_daily_loss_limits,
     check_daily_trade_limit,
@@ -248,3 +254,81 @@ def test_golden_portfolio_metrics_reject_missing_execution_pnl():
     assert metrics.resolved_trades == 1
     assert metrics.net_executable_pnl is None
     assert metrics.expectancy_pnl is None
+
+
+
+def test_golden_exact_contract_selection_reuses_production_selector():
+    signal = _signal(StrategyName.TREND_PULLBACK)
+    ts = signal.timestamp.isoformat()
+    candidate = {
+        "strike": 100.0, "option_type": "CALL", "expiry": "2026-09-24",
+        "bid": 99.0, "ask": 100.0, "mid": 99.5,
+        "spread_points": 1.0, "spread_pct": 1.005, "delta": 0.62,
+        "gamma": 0.01, "greek_source": "BROKER", "greek_timestamp": ts,
+        "quote_timestamp": ts, "quote_freshness_seconds": 0.0,
+        "open_interest": 50000, "volume": 1000, "lot_size": 50,
+        "instrument_id": "OPT-GOLDEN", "symbol": "OPT-GOLDEN",
+        "instrument_token": "OPT-GOLDEN", "ltp": 99.5, "status": "ELIGIBLE",
+    }
+    provider = HistoricalContractSelectionProvider(
+        historical_service=None,
+        strategy_repository=None,
+        option_config=OptionSelectionConfig(),
+    )
+    provider.date_str = "2026-09-24"
+    provider.snapshots = [{
+        "snapshot_id": "GOLDEN-SNAPSHOT",
+        "strategy_signal_id": signal.signal_id,
+        "captured_at": ts,
+        "selector_timestamp": ts,
+        "signal_timestamp": ts,
+        "chain_snapshot_timestamp": ts,
+        "spot_price": 100.0,
+        "expiry": "2026-09-24",
+        "source": "KITE",
+        "strategy": signal.strategy.value,
+        "direction": signal.direction.value,
+        "selector_candidates": [candidate],
+        "chain_candidates": [],
+        "selected_contract": None,
+        "selector_result": "SELECTED",
+        "rejection_reason": None,
+    }]
+
+    import asyncio
+    decision = asyncio.run(provider.select_contract(signal))
+    assert decision.actual_method == "PRODUCTION_CONTRACT_SELECTOR"
+    assert decision.production_rules_applied is True
+    assert decision.selected_contract.instrument_id == "OPT-GOLDEN"
+
+
+def test_golden_missing_data_changes_dataset_identity():
+    base = dict(
+        source=HistoricalReplaySource.BREEZE,
+        start_date="2026-09-24",
+        end_date="2026-09-24",
+        spot_candles=[],
+        futures_candles=[],
+        source_diagnostics={},
+        futures_contracts=[],
+    )
+    complete = build_data_fingerprint(**base, missing_data=[])
+    missing = build_data_fingerprint(**base, missing_data=["spot", "futures"])
+    assert complete.dataset_hash != missing.dataset_hash
+    assert missing.missing_data == ("futures", "spot")
+
+
+def test_golden_simultaneous_signal_priority_is_stable():
+    registry = ReplayStrategyRegistry.default(
+        StrategyTunablesConfig(pivot_vwap_scalp_enabled=True),
+        SessionTimersConfig(),
+    )
+    priorities = [
+        (meta.priority, meta.strategy.value)
+        for meta in registry.strategy_metadata()
+        if meta.enabled
+    ]
+    assert priorities == sorted(priorities)
+    assert [name for _, name in priorities] == [
+        row[0] for row in GOLDEN["strategy_registry"]
+    ]
