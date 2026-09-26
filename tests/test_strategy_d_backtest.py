@@ -9,6 +9,7 @@ import services.historical.strategy_d_sr_momentum_backtest as d_backtest
 from services.historical.strategy_d_sr_momentum_backtest import (
     _diagnose_strategy_d_bar,
     _has_complete_session_5m,
+    _regular_session_5m,
     _select_requested_session_dates,
     build_v2_comparison,
     run_backtest,
@@ -504,3 +505,45 @@ def test_complete_session_coverage_requires_every_expected_5m_bar():
     assert _has_complete_session_5m(bars, current) is True
     assert _has_complete_session_5m(bars[:-1], current) is False
     assert _has_complete_session_5m(bars[:4], current) is False
+
+
+
+def test_regular_session_5m_excludes_preopen_and_close_marker_rows():
+    current = date(2026, 9, 23)
+    candles = [
+        _bar(
+            current,
+            9,
+            0,
+            99.0,
+            instrument_id="INST-NIFTY-INDEX",
+        ),
+        _bar(
+            current,
+            9,
+            15,
+            100.0,
+            instrument_id="INST-NIFTY-INDEX",
+        ),
+        _bar(
+            current,
+            15,
+            25,
+            101.0,
+            instrument_id="INST-NIFTY-INDEX",
+        ),
+        _bar(
+            current,
+            15,
+            30,
+            102.0,
+            instrument_id="INST-NIFTY-INDEX",
+        ),
+    ]
+
+    regular = _regular_session_5m(candles)
+
+    assert [
+        candle.start_time.astimezone(IST).strftime("%H:%M")
+        for candle in regular
+    ] == ["09:15", "15:25"]
