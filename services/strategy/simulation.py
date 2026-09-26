@@ -1033,6 +1033,12 @@ class SimulationEngine:
         strategy_registry = ReplayStrategyRegistry.default(
             cfg,
             self.session_config,
+            selected_strategies=request.selected_strategies,
+        )
+        selected_strategy_names = (
+            {strategy.value for strategy in request.selected_strategies}
+            if request.selected_strategies is not None
+            else None
         )
         override_values = overrides.model_dump(
             mode="json",
@@ -1197,6 +1203,11 @@ class SimulationEngine:
             bypass_entry_window=bypass_entry_window,
             strategy_a_enabled=cfg.trend_pullback_enabled,
             overrides=effective_overrides,
+            selected_strategies=(
+                sorted(selected_strategy_names)
+                if selected_strategy_names is not None
+                else None
+            ),
             tunables=cfg,
             session=self.session_config,
             execution_parity=(
@@ -1268,6 +1279,11 @@ class SimulationEngine:
             "data_fingerprint": data_snapshot.model_dump(mode="json"),
             "historical_source": historical_source.value,
             "requested_replay_mode": request.replay_mode.value,
+            "selected_strategies": (
+                sorted(selected_strategy_names)
+                if selected_strategy_names is not None
+                else None
+            ),
             "bypass_entry_window": bypass_entry_window,
             "missing_data": sorted(set(missing_data)),
             "strategy_registry": strategy_registry.metadata_snapshot(),
@@ -1280,6 +1296,11 @@ class SimulationEngine:
                     "required_native_futures_1m": True,
                     "required_for_this_session": bool(
                         cfg.di_continuation_enabled
+                        and (
+                            selected_strategy_names is None
+                            or StrategyName.DI_CONTINUATION.value
+                            in selected_strategy_names
+                        )
                         and target_session_date > STRATEGY_C_FREEZE_DATE
                     ),
                     "futures_1m_count": len(
