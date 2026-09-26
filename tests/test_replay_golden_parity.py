@@ -315,7 +315,7 @@ def test_golden_missing_data_changes_dataset_identity():
     complete = build_data_fingerprint(**base, missing_data=[])
     missing = build_data_fingerprint(**base, missing_data=["spot", "futures"])
     assert complete.dataset_hash != missing.dataset_hash
-    assert missing.missing_data == ("futures", "spot")
+    assert missing.missing_data == ["futures", "spot"]
 
 
 def test_golden_simultaneous_signal_priority_is_stable():
