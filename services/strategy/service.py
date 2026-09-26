@@ -71,6 +71,7 @@ from services.strategy.reason_codes import (
     is_option_emergency_stop,
 )
 from services.strategy.repository import StrategyRepository
+from services.strategy.replay_analytics import compare_replay_results
 from services.strategy.simulation import SimulationEngine
 from services.strategy.strategies.candidate_runtime import (
     strategy_c_signal_from_status,
@@ -5747,8 +5748,27 @@ class StrategyService:
         return [t.model_dump(mode="json") for t in trades]
 
     async def run_simulation(self, request: SimulationRequest) -> SimulationResult:
-        """Runs a complete walk-forward intraday simulation against historical data."""
-        return await self.simulation_engine.run_day_simulation(request)
+        """Run, fingerprint, and persist one historical replay result."""
+        result = await self.simulation_engine.run_day_simulation(request)
+        await self.repo.save_replay_run(result)
+        return result
+
+    async def list_replay_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        return await self.repo.list_replay_runs(limit=limit)
+
+    async def get_replay_run(self, run_id: str) -> SimulationResult | None:
+        return await self.repo.get_replay_run(run_id)
+
+    async def compare_replay_runs(
+        self,
+        baseline_run_id: str,
+        candidate_run_id: str,
+    ) -> dict[str, Any] | None:
+        baseline = await self.repo.get_replay_run(baseline_run_id)
+        candidate = await self.repo.get_replay_run(candidate_run_id)
+        if baseline is None or candidate is None:
+            return None
+        return compare_replay_results(baseline, candidate)
 
     async def get_available_simulation_dates(
         self,

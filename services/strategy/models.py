@@ -1071,15 +1071,37 @@ class ReplayOptionMarkMetrics(BaseModel):
 
 
 class ReplayPortfolioMetrics(BaseModel):
-    """Portfolio metrics are explicit even when chronological execution is unavailable."""
+    """Chronological account-level analytics for execution-parity replay."""
 
     price_basis: str = "NOT_AVAILABLE"
-    calculation_basis: str = "CHRONOLOGICAL_PORTFOLIO_EXECUTION_NOT_IMPLEMENTED"
+    calculation_basis: str = "CHRONOLOGICAL_PORTFOLIO_EXECUTION_NOT_AVAILABLE"
     available: bool = False
+    pnl_complete: bool = False
+    starting_equity: float | None = None
+    ending_equity: float | None = None
+    gross_executable_pnl: float | None = None
+    net_executable_pnl: float | None = None
     max_drawdown_pnl: float | None = None
-    limitation: str = (
-        "Current Day Replay resolves signals independently after discovery; "
-        "portfolio-level chronological equity and risk-gate metrics are unavailable."
+    max_drawdown_pct: float | None = None
+    max_drawdown_r: float | None = None
+    profit_factor_pnl: float | None = None
+    expectancy_pnl: float | None = None
+    expectancy_r: float | None = None
+    exposure_minutes: float = 0.0
+    exposure_pct: float = 0.0
+    max_concurrent_positions: int = 0
+    peak_premium_committed: float = 0.0
+    peak_premium_utilization_pct: float = 0.0
+    peak_risk_budget_committed: float = 0.0
+    peak_risk_budget_utilization_pct: float = 0.0
+    rejected_opportunities: int = 0
+    risk_gate_block_counts: dict[str, int] = Field(default_factory=dict)
+    daily_entries: int = 0
+    daily_entries_by_strategy: dict[str, int] = Field(default_factory=dict)
+    strategy_realized_r: dict[str, float] = Field(default_factory=dict)
+    equity_curve: list[dict[str, Any]] = Field(default_factory=list)
+    limitation: str | None = (
+        "Portfolio analytics require chronological EXECUTION_PARITY replay."
     )
 
 
@@ -1102,6 +1124,8 @@ class SimulationResult(BaseModel):
     replay_mode: str = "SIGNALS_ONLY"
     limitation: str = "Real completed spot/futures candles only. Historical executable option quotes are unavailable; option-dependent rules are unavailable."
     session_date: str
+    run_id: str | None = None
+    reproducibility: dict[str, Any] = Field(default_factory=dict)
 
     # Canonical replay result model. Compatibility fields below are projections
     # of these sections and must not be calculated independently.

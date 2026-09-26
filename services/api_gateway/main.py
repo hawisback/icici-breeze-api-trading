@@ -372,6 +372,11 @@ class StrategyForceEntryRequest(BaseModel):
     override_premium_cap: Optional[float] = None
 
 
+class ReplayComparisonRequest(BaseModel):
+    baseline_run_id: str = Field(min_length=1, max_length=128)
+    candidate_run_id: str = Field(min_length=1, max_length=128)
+
+
 # ==============================================================================
 # REST Endpoints (/api/v1)
 # ==============================================================================
@@ -1750,6 +1755,36 @@ async def run_strategy_simulation(req: SimulationRequest):
     services = get_services()
     res = await services.strategy_svc.run_simulation(req)
     return res.model_dump(mode="json")
+
+
+@app.get("/api/v1/strategies/simulate/runs")
+async def list_strategy_replay_runs(limit: int = Query(default=20, ge=1, le=100)):
+    services = get_services()
+    return {"runs": await services.strategy_svc.list_replay_runs(limit=limit)}
+
+
+@app.get("/api/v1/strategies/simulate/runs/{run_id}")
+async def get_strategy_replay_run(run_id: str):
+    services = get_services()
+    result = await services.strategy_svc.get_replay_run(run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Replay run not found")
+    return result.model_dump(mode="json")
+
+
+@app.post("/api/v1/strategies/simulate/compare")
+async def compare_strategy_replay_runs(req: ReplayComparisonRequest):
+    services = get_services()
+    comparison = await services.strategy_svc.compare_replay_runs(
+        req.baseline_run_id,
+        req.candidate_run_id,
+    )
+    if comparison is None:
+        raise HTTPException(
+            status_code=404,
+            detail="One or both replay runs were not found",
+        )
+    return comparison
 
 
 @app.get("/api/v1/strategies/simulate/available-dates")
