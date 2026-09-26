@@ -120,6 +120,107 @@ def _peak_commitments(
     )
 
 
+def _strategy_r_statistics(
+    records: list[ReplayManifestRecord],
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for record in sorted(
+        records,
+        key=lambda item: (
+            item.exit_timestamp or item.simulated_entry_timestamp,
+            item.replay_signal_id,
+        ),
+    ):
+        if record.realized_r is not None:
+            grouped[record.strategy_id].append(float(record.realized_r))
+
+    stats: dict[str, dict[str, Any]] = {}
+    for strategy, values in sorted(grouped.items()):
+        gains = sum(value for value in values if value > 0)
+        losses = abs(sum(value for value in values if value < 0))
+        wins, consecutive_losses = _streaks(values)
+        stats[strategy] = {
+            "resolved_trades": len(values),
+            "total_realized_r": round(sum(values), 4),
+            "expectancy_r": round(sum(values) / len(values), 4) if values else 0.0,
+            "profit_factor_r": round(gains / losses, 4) if losses > 0 else None,
+            "max_drawdown_r": _drawdown(values),
+            "max_consecutive_wins": wins,
+            "max_consecutive_losses": consecutive_losses,
+        }
+    return stats
+
+
+def _capital_utilization(
+    records: list[ReplayManifestRecord],
+    *,
+    starting_equity: float,
+    session_start: datetime,
+    session_end: datetime,
+) -> tuple[list[dict[str, Any]], float]:
+    events: list[tuple[datetime, int, float, str]] = []
+    for record in records:
+        entry = max(session_start, record.simulated_entry_timestamp)
+        exit_time = min(session_end, record.exit_timestamp or session_end)
+        quantity = int(record.replay_quantity or 0)
+        entry_price = (
+            record.simulated_entry_fill_price
+            or record.sizing_entry_reference_price
+            or record.option_entry_price
+            or 0.0
+        )
+        premium = max(0.0, float(entry_price) * quantity)
+        if exit_time <= entry:
+            continue
+        events.append((entry, 1, premium, record.replay_signal_id))
+        events.append((exit_time, -1, -premium, record.replay_signal_id))
+
+    ordered = sorted(events, key=lambda item: (item[0], item[1], item[3]))
+    curve: list[dict[str, Any]] = [{
+        "timestamp": session_start.isoformat(),
+        "premium_committed": 0.0,
+        "utilization_pct": 0.0,
+        "active_positions": 0,
+        "event": "SESSION_START",
+    }]
+    committed = 0.0
+    active = 0
+    weighted_pct_minutes = 0.0
+    previous = session_start
+    for timestamp, direction, delta, signal_id in ordered:
+        bounded = min(max(timestamp, session_start), session_end)
+        minutes = max(0.0, (bounded - previous).total_seconds() / 60.0)
+        current_pct = (
+            committed / starting_equity * 100 if starting_equity > 0 else 0.0
+        )
+        weighted_pct_minutes += current_pct * minutes
+        committed += delta
+        active += direction
+        curve.append({
+            "timestamp": bounded.isoformat(),
+            "premium_committed": round(max(0.0, committed), 2),
+            "utilization_pct": round(
+                max(0.0, committed) / starting_equity * 100, 4
+            ) if starting_equity > 0 else 0.0,
+            "active_positions": max(0, active),
+            "event": "ENTRY" if direction > 0 else "EXIT",
+            "signal_id": signal_id,
+        })
+        previous = bounded
+
+    tail_minutes = max(0.0, (session_end - previous).total_seconds() / 60.0)
+    tail_pct = committed / starting_equity * 100 if starting_equity > 0 else 0.0
+    weighted_pct_minutes += tail_pct * tail_minutes
+    session_minutes = max(
+        0.0, (session_end - session_start).total_seconds() / 60.0
+    )
+    average = (
+        round(weighted_pct_minutes / session_minutes, 4)
+        if session_minutes > 0 else 0.0
+    )
+    return curve, average
+
+
 def build_portfolio_metrics(
     records: Iterable[ReplayManifestRecord],
     *,
@@ -250,8 +351,20 @@ def build_portfolio_metrics(
     strategy_r: dict[str, float] = defaultdict(float)
     for record in resolved:
         strategy_r[record.strategy_id] += float(record.realized_r or 0.0)
+    strategy_r_statistics = _strategy_r_statistics(resolved)
+    capital_utilization_curve, average_premium_utilization_pct = (
+        _capital_utilization(
+            accepted,
+            starting_equity=starting_equity,
+            session_start=session_start,
+            session_end=session_end,
+        )
+    )
 
     rejected = list(execution_metadata.get("rejected_opportunities") or [])
+    daily_loss_trigger_events = list(
+        execution_metadata.get("daily_loss_trigger_events") or []
+    )
     block_counts = dict(
         execution_metadata.get("entry_gate_block_counts") or {}
     )
@@ -310,10 +423,14 @@ def build_portfolio_metrics(
             if starting_equity > 0
             else 0.0
         ),
+        average_premium_utilization_pct=average_premium_utilization_pct,
+        capital_utilization_curve=capital_utilization_curve,
         rejected_opportunities=len(rejected),
+        rejected_opportunity_details=rejected,
         risk_gate_block_counts={
             str(key): int(value) for key, value in sorted(block_counts.items())
         },
+        daily_loss_trigger_events=daily_loss_trigger_events,
         daily_entries=int(execution_metadata.get("daily_entries") or 0),
         daily_entries_by_strategy={
             str(key): int(value)
@@ -324,6 +441,7 @@ def build_portfolio_metrics(
         strategy_realized_r={
             key: round(value, 4) for key, value in sorted(strategy_r.items())
         },
+        strategy_r_statistics=strategy_r_statistics,
         equity_curve=equity_curve,
         limitation=limitation,
     )
