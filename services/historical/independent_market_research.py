@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from itertools import combinations
+from statistics import median
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -21,6 +24,11 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from services.historical.research_provider_clients import (
+    BreezeFuturesClient,
+    DhanHistoricalClient,
+    UpstoxHistoricalClient,
+)
 from services.historical.yahoo_chart import YahooChartClient
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -397,26 +405,273 @@ def _fetch_futures_covering_dates(
     return selected, contract_by_date
 
 
-def build_research_dataset(sessions: int = 10, lookback_days: int = 30) -> dict[str, Any]:
+def _candles_from_provider_rows(
+    rows: list[dict[str, Any]],
+    instrument_type: str,
+) -> list[Candle]:
+    candles: list[Candle] = []
+    for row in rows:
+        candles.append(
+            Candle(
+                timestamp=str(row["timestamp"]),
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=float(row["volume"]) if row.get("volume") is not None else None,
+                open_interest=(
+                    float(row["open_interest"])
+                    if row.get("open_interest") is not None
+                    else None
+                ),
+                source=str(row["source"]),
+                instrument=str(row["instrument"]),
+                instrument_type=instrument_type,
+            )
+        )
+    candles.sort(key=lambda candle: candle.timestamp)
+    return candles
+
+
+def _load_local_env(path: Path = Path(".env")) -> None:
+    """Load missing values from a local .env without logging secrets."""
+
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def _usable_secret(name: str) -> str | None:
+    value = os.getenv(name)
+    if not value:
+        return None
+    lowered = value.lower()
+    if "your_" in lowered or "change_me" in lowered:
+        return None
+    return value
+
+
+def _coverage(candles: list[Candle], wanted: set[date]) -> dict[str, Any]:
+    selected = [
+        row for row in candles if datetime.fromisoformat(row.timestamp).date() in wanted
+    ]
+    days = sorted(
+        {datetime.fromisoformat(row.timestamp).date().isoformat() for row in selected}
+    )
+    complete = _last_complete_dates(selected, len(wanted)) if wanted else []
+    return {
+        "rows": len(selected),
+        "dates": days,
+        "complete_sessions": len([day for day in complete if day in wanted]),
+        "volume_rows": sum(row.volume is not None for row in selected),
+        "open_interest_rows": sum(row.open_interest is not None for row in selected),
+    }
+
+
+def _select_canonical_provider(
+    by_provider: dict[str, list[Candle]],
+    wanted: set[date],
+    priority: list[str],
+) -> tuple[str | None, list[Candle]]:
+    if not by_provider:
+        return None, []
+    priority_rank = {source: idx for idx, source in enumerate(priority)}
+    scored: list[tuple[int, int, str, list[Candle]]] = []
+    for source, rows in by_provider.items():
+        selected = [
+            row for row in rows if datetime.fromisoformat(row.timestamp).date() in wanted
+        ]
+        scored.append(
+            (
+                len(selected),
+                -priority_rank.get(source, len(priority)),
+                source,
+                selected,
+            )
+        )
+    scored.sort(reverse=True)
+    _, _, source, rows = scored[0]
+    rows.sort(key=lambda row: row.timestamp)
+    return source, rows
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _compare_provider_pair(
+    left_source: str,
+    left: list[Candle],
+    right_source: str,
+    right: list[Candle],
+    wanted: set[date],
+) -> dict[str, Any]:
+    left_map = {
+        row.timestamp: row
+        for row in left
+        if datetime.fromisoformat(row.timestamp).date() in wanted
+    }
+    right_map = {
+        row.timestamp: row
+        for row in right
+        if datetime.fromisoformat(row.timestamp).date() in wanted
+    }
+    overlap = sorted(set(left_map) & set(right_map))
+    close_diff = [
+        abs(left_map[ts].close - right_map[ts].close)
+        for ts in overlap
+    ]
+    ohlc_max_diff = [
+        max(
+            abs(left_map[ts].open - right_map[ts].open),
+            abs(left_map[ts].high - right_map[ts].high),
+            abs(left_map[ts].low - right_map[ts].low),
+            abs(left_map[ts].close - right_map[ts].close),
+        )
+        for ts in overlap
+    ]
+    volume_ratios: list[float] = []
+    oi_diff: list[float] = []
+    for ts in overlap:
+        lrow = left_map[ts]
+        rrow = right_map[ts]
+        if lrow.volume not in (None, 0) and rrow.volume not in (None, 0):
+            lo = min(abs(lrow.volume), abs(rrow.volume))
+            hi = max(abs(lrow.volume), abs(rrow.volume))
+            if lo:
+                volume_ratios.append(hi / lo)
+        if lrow.open_interest is not None and rrow.open_interest is not None:
+            oi_diff.append(abs(lrow.open_interest - rrow.open_interest))
+
+    return {
+        "left": left_source,
+        "right": right_source,
+        "overlap_rows": len(overlap),
+        "mean_abs_close_diff": _mean(close_diff),
+        "max_abs_close_diff": max(close_diff) if close_diff else None,
+        "mean_max_ohlc_diff": _mean(ohlc_max_diff),
+        "max_ohlc_diff": max(ohlc_max_diff) if ohlc_max_diff else None,
+        "volume_overlap_rows": len(volume_ratios),
+        "median_larger_to_smaller_volume_ratio": (
+            median(volume_ratios) if volume_ratios else None
+        ),
+        "open_interest_overlap_rows": len(oi_diff),
+        "mean_abs_open_interest_diff": _mean(oi_diff),
+        "max_abs_open_interest_diff": max(oi_diff) if oi_diff else None,
+    }
+
+
+def _provider_quality(
+    by_provider: dict[str, list[Candle]],
+    wanted: set[date],
+    canonical_source: str | None,
+) -> dict[str, Any]:
+    sources = sorted(by_provider)
+    return {
+        "canonical_source": canonical_source,
+        "selection_policy": (
+            "Choose the provider with the most rows on the selected sessions; "
+            "ties use a fixed provider priority. Never fill missing canonical "
+            "timestamps from another provider."
+        ),
+        "providers": {
+            source: _coverage(by_provider[source], wanted)
+            for source in sources
+        },
+        "comparisons": [
+            _compare_provider_pair(
+                left,
+                by_provider[left],
+                right,
+                by_provider[right],
+                wanted,
+            )
+            for left, right in combinations(sources, 2)
+        ],
+    }
+
+
+def _canonical_rows(
+    index_rows: list[Candle],
+    futures_rows: list[Candle],
+    vix_rows: list[Candle],
+    proxy_rows: list[Candle],
+    futures_source: str | None,
+    vix_source: str | None,
+) -> list[dict[str, Any]]:
+    futures = {row.timestamp: row for row in futures_rows}
+    vix = {row.timestamp: row for row in vix_rows}
+    proxy = {row.timestamp: row for row in proxy_rows}
+    result: list[dict[str, Any]] = []
+
+    for spot in sorted(index_rows, key=lambda row: row.timestamp):
+        future = futures.get(spot.timestamp)
+        vix_row = vix.get(spot.timestamp)
+        proxy_row = proxy.get(spot.timestamp)
+        result.append(
+            {
+                "timestamp": spot.timestamp,
+                "spot_open": spot.open,
+                "spot_high": spot.high,
+                "spot_low": spot.low,
+                "spot_close": spot.close,
+                "spot_source": spot.source,
+                "futures_open": future.open if future else None,
+                "futures_high": future.high if future else None,
+                "futures_low": future.low if future else None,
+                "futures_close": future.close if future else None,
+                "futures_volume": future.volume if future else None,
+                "futures_open_interest": future.open_interest if future else None,
+                "futures_basis_points": (
+                    future.close - spot.close if future else None
+                ),
+                "futures_source": futures_source if future else None,
+                "vix_open": vix_row.open if vix_row else None,
+                "vix_high": vix_row.high if vix_row else None,
+                "vix_low": vix_row.low if vix_row else None,
+                "vix_close": vix_row.close if vix_row else None,
+                "vix_source": vix_source if vix_row else None,
+                "niftybees_volume": proxy_row.volume if proxy_row else None,
+            }
+        )
+    return result
+
+
+def build_research_dataset(
+    sessions: int = 10,
+    lookback_days: int = 30,
+    *,
+    breeze_futures_expiry: str | None = None,
+    upstox_futures_key: str | None = None,
+    dhan_futures_security_id: str | None = None,
+) -> dict[str, Any]:
     if sessions <= 0:
         raise ValueError("sessions must be positive")
+
+    _load_local_env()
     now = datetime.now(IST)
     start = datetime.combine(now.date() - timedelta(days=lookback_days), time.min, tzinfo=IST)
     end = now
 
     source_attempts: list[dict[str, Any]] = []
     nifty_rows: list[Candle] = []
-    vix_rows: list[Candle] = []
-    futures_rows: list[Candle] = []
+    public_vix_rows: list[Candle] = []
+    public_futures_rows: list[Candle] = []
     volume_proxy_rows: list[Candle] = []
     contract_by_date: dict[str, list[str]] = {}
     primary_source = ""
     vix_status: dict[str, Any] = {"available": False}
-    futures_status: dict[str, Any] = {"available": False}
     volume_proxy_status: dict[str, Any] = {"available": False}
 
-    # Prefer NSE's public chart endpoint, but tolerate its current behavior of
-    # returning status=true with an empty intraday data array.
+    # Credential-free price discovery remains the base layer.
     try:
         with PublicNseChartClient() as client:
             nifty = client.resolve_exact("NIFTY 50", "IDX")
@@ -425,6 +680,7 @@ def build_research_dataset(sessions: int = 10, lookback_days: int = 30) -> dict[
             source_attempts.append(
                 {
                     "source": "NSE_PUBLIC_CHART",
+                    "series": "NIFTY_INDEX",
                     "history_response": client.last_history_debug,
                     "complete_sessions": len(candidate_dates),
                     "session_shape": _session_diagnostics(candidate_rows),
@@ -436,9 +692,9 @@ def build_research_dataset(sessions: int = 10, lookback_days: int = 30) -> dict[
 
                 try:
                     vix = _resolve_vix(client)
-                    vix_rows = client.history(vix, start, end, 5)
+                    public_vix_rows = client.history(vix, start, end, 5)
                     vix_status = {
-                        "available": bool(vix_rows),
+                        "available": bool(public_vix_rows),
                         "instrument": vix.symbol,
                         "source": "NSE_PUBLIC_CHART",
                     }
@@ -449,26 +705,21 @@ def build_research_dataset(sessions: int = 10, lookback_days: int = 30) -> dict[
                         "error": str(exc),
                     }
 
-                wanted = set(candidate_dates)
-                future_candidates = _future_candidates(client)
-                futures_rows, contract_by_date = _fetch_futures_covering_dates(
-                    client, future_candidates, start, end, wanted
+                wanted_public = set(candidate_dates)
+                candidates = _future_candidates(client)
+                public_futures_rows, contract_by_date = _fetch_futures_covering_dates(
+                    client, candidates, start, end, wanted_public
                 )
-                futures_status = {
-                    "available": bool(futures_rows),
-                    "source": "NSE_PUBLIC_CHART",
-                }
     except (RuntimeError, httpx.HTTPError) as exc:
         source_attempts.append(
             {
                 "source": "NSE_PUBLIC_CHART",
+                "series": "NIFTY_INDEX",
                 "error": str(exc),
                 "complete_sessions": 0,
             }
         )
 
-    # Fallback: Yahoo recent intraday for NIFTY 50 and India VIX. NIFTYBEES is
-    # collected only as a traded-volume proxy; it is not futures volume.
     if not primary_source:
         with YahooChartClient() as client:
             yahoo_nifty = _candles_from_yahoo(
@@ -479,6 +730,7 @@ def build_research_dataset(sessions: int = 10, lookback_days: int = 30) -> dict[
             source_attempts.append(
                 {
                     "source": "YAHOO_CHART",
+                    "series": "NIFTY_INDEX",
                     "instrument": "^NSEI",
                     "history_response": nifty_debug,
                     "complete_sessions": len(yahoo_dates),
@@ -489,14 +741,14 @@ def build_research_dataset(sessions: int = 10, lookback_days: int = 30) -> dict[
                 primary_source = "YAHOO_CHART"
                 nifty_rows = yahoo_nifty
 
-                vix_rows = _candles_from_yahoo(
+                public_vix_rows = _candles_from_yahoo(
                     client.history("^INDIAVIX", start, end, 5),
                     "^INDIAVIX",
                     "VolatilityIndex",
                 )
                 vix_debug = dict(client.last_history_debug)
                 vix_status = {
-                    "available": bool(vix_rows),
+                    "available": bool(public_vix_rows),
                     "instrument": "^INDIAVIX",
                     "source": "YAHOO_CHART",
                     "diagnostics": vix_debug,
@@ -514,15 +766,6 @@ def build_research_dataset(sessions: int = 10, lookback_days: int = 30) -> dict[
                     "source": "YAHOO_CHART",
                     "semantics": "ETF traded-volume proxy; not NIFTY futures volume",
                     "diagnostics": proxy_debug,
-                }
-
-                futures_status = {
-                    "available": False,
-                    "source": None,
-                    "reason": (
-                        "No credential-free NIFTY futures intraday source has been "
-                        "validated in this run; futures volume/OI are not substituted."
-                    ),
                 }
 
     dates = _last_complete_dates(nifty_rows, sessions)
@@ -543,67 +786,277 @@ def build_research_dataset(sessions: int = 10, lookback_days: int = 30) -> dict[
         )
 
     wanted = set(dates)
-    index_selected = _rows_for_dates(nifty_rows, wanted)
-    vix_selected = _rows_for_dates(vix_rows, wanted)
-    futures_selected = _rows_for_dates(futures_rows, wanted)
-    volume_proxy_selected = _rows_for_dates(volume_proxy_rows, wanted)
+    query_start = datetime.combine(min(dates), SESSION_START, tzinfo=IST)
+    query_end = datetime.combine(max(dates), SESSION_END, tzinfo=IST)
+
+    futures_by_provider: dict[str, list[Candle]] = {}
+    vix_by_provider: dict[str, list[Candle]] = {}
+    if public_futures_rows:
+        futures_by_provider[public_futures_rows[0].source] = public_futures_rows
+    if public_vix_rows:
+        vix_by_provider[public_vix_rows[0].source] = public_vix_rows
+
+    credentialed_status: dict[str, Any] = {}
+    broker_sources_used: list[str] = []
+
+    # Breeze: credentials already exist in the project; expiry stays explicit.
+    breeze_key = _usable_secret("BREEZE_API_KEY")
+    breeze_secret = _usable_secret("BREEZE_SECRET_KEY")
+    breeze_session = _usable_secret("BREEZE_SESSION_TOKEN")
+    breeze_expiry = (
+        breeze_futures_expiry
+        or os.getenv("RESEARCH_BREEZE_NIFTY_FUT_EXPIRY")
+        or os.getenv("RESEARCH_NIFTY_FUT_EXPIRY")
+    )
+    if breeze_key and breeze_secret and breeze_session and breeze_expiry:
+        try:
+            client = BreezeFuturesClient(breeze_key, breeze_secret, breeze_session)
+            rows = _candles_from_provider_rows(
+                client.history(dates, breeze_expiry),
+                "Futures",
+            )
+            futures_by_provider["BREEZE"] = rows
+            credentialed_status["BREEZE"] = {
+                "available": bool(rows),
+                "series": ["NIFTY_FUTURES"],
+                "instrument_config": {"expiry_date": breeze_expiry},
+                "diagnostics": client.last_history_debug,
+            }
+            if rows:
+                broker_sources_used.append("BREEZE")
+        except Exception as exc:
+            credentialed_status["BREEZE"] = {
+                "available": False,
+                "series": ["NIFTY_FUTURES"],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    else:
+        missing = []
+        if not (breeze_key and breeze_secret and breeze_session):
+            missing.append("BREEZE_API_KEY/BREEZE_SECRET_KEY/BREEZE_SESSION_TOKEN")
+        if not breeze_expiry:
+            missing.append("RESEARCH_BREEZE_NIFTY_FUT_EXPIRY")
+        credentialed_status["BREEZE"] = {
+            "available": False,
+            "series": ["NIFTY_FUTURES"],
+            "reason": "missing_configuration",
+            "missing": missing,
+        }
+
+    # Upstox: the India VIX instrument key is stable and documented; the
+    # futures instrument key is explicit so contract selection is reproducible.
+    upstox_token = _usable_secret("UPSTOX_ACCESS_TOKEN")
+    upstox_key = (
+        upstox_futures_key
+        or os.getenv("RESEARCH_UPSTOX_NIFTY_FUT_INSTRUMENT_KEY")
+    )
+    if upstox_token:
+        try:
+            with UpstoxHistoricalClient(upstox_token) as client:
+                upstox_vix = _candles_from_provider_rows(
+                    client.history("NSE_INDEX|India VIX", query_start, query_end),
+                    "VolatilityIndex",
+                )
+                vix_debug = dict(client.last_history_debug)
+                if upstox_vix:
+                    vix_by_provider["UPSTOX"] = upstox_vix
+                    broker_sources_used.append("UPSTOX")
+
+                upstox_futures: list[Candle] = []
+                futures_debug: dict[str, Any] | None = None
+                if upstox_key:
+                    upstox_futures = _candles_from_provider_rows(
+                        client.history(upstox_key, query_start, query_end),
+                        "Futures",
+                    )
+                    futures_debug = dict(client.last_history_debug)
+                    if upstox_futures:
+                        futures_by_provider["UPSTOX"] = upstox_futures
+
+                credentialed_status["UPSTOX"] = {
+                    "available": bool(upstox_vix or upstox_futures),
+                    "series": [
+                        "INDIA_VIX",
+                        *(["NIFTY_FUTURES"] if upstox_key else []),
+                    ],
+                    "vix_diagnostics": vix_debug,
+                    "futures_instrument_key": upstox_key,
+                    "futures_diagnostics": futures_debug,
+                    "futures_configuration_missing": not bool(upstox_key),
+                }
+        except (RuntimeError, httpx.HTTPError) as exc:
+            credentialed_status["UPSTOX"] = {
+                "available": False,
+                "series": ["INDIA_VIX", "NIFTY_FUTURES"],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    else:
+        credentialed_status["UPSTOX"] = {
+            "available": False,
+            "series": ["INDIA_VIX", "NIFTY_FUTURES"],
+            "reason": "missing_configuration",
+            "missing": ["UPSTOX_ACCESS_TOKEN"],
+        }
+
+    dhan_token = _usable_secret("DHAN_ACCESS_TOKEN")
+    dhan_security_id = (
+        dhan_futures_security_id
+        or os.getenv("RESEARCH_DHAN_NIFTY_FUT_SECURITY_ID")
+    )
+    if dhan_token and dhan_security_id:
+        try:
+            with DhanHistoricalClient(dhan_token) as client:
+                rows = _candles_from_provider_rows(
+                    client.history(dhan_security_id, query_start, query_end),
+                    "Futures",
+                )
+                futures_by_provider["DHAN"] = rows
+                credentialed_status["DHAN"] = {
+                    "available": bool(rows),
+                    "series": ["NIFTY_FUTURES"],
+                    "security_id": dhan_security_id,
+                    "diagnostics": client.last_history_debug,
+                }
+                if rows:
+                    broker_sources_used.append("DHAN")
+        except (RuntimeError, httpx.HTTPError) as exc:
+            credentialed_status["DHAN"] = {
+                "available": False,
+                "series": ["NIFTY_FUTURES"],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    else:
+        missing = []
+        if not dhan_token:
+            missing.append("DHAN_ACCESS_TOKEN")
+        if not dhan_security_id:
+            missing.append("RESEARCH_DHAN_NIFTY_FUT_SECURITY_ID")
+        credentialed_status["DHAN"] = {
+            "available": False,
+            "series": ["NIFTY_FUTURES"],
+            "reason": "missing_configuration",
+            "missing": missing,
+        }
+
+    futures_source, futures_rows = _select_canonical_provider(
+        futures_by_provider,
+        wanted,
+        ["BREEZE", "UPSTOX", "DHAN", "NSE_PUBLIC_CHART"],
+    )
+    vix_source, vix_rows = _select_canonical_provider(
+        vix_by_provider,
+        wanted,
+        ["UPSTOX", "YAHOO_CHART", "NSE_PUBLIC_CHART"],
+    )
+
+    index_selected_candles = [
+        row for row in nifty_rows if datetime.fromisoformat(row.timestamp).date() in wanted
+    ]
+    proxy_selected_candles = [
+        row
+        for row in volume_proxy_rows
+        if datetime.fromisoformat(row.timestamp).date() in wanted
+    ]
+    futures_selected = [
+        row for row in futures_rows if datetime.fromisoformat(row.timestamp).date() in wanted
+    ]
+    vix_selected = [
+        row for row in vix_rows if datetime.fromisoformat(row.timestamp).date() in wanted
+    ]
+
+    provider_series = {
+        "nifty_futures": {
+            source: _rows_for_dates(rows, wanted)
+            for source, rows in sorted(futures_by_provider.items())
+        },
+        "india_vix": {
+            source: _rows_for_dates(rows, wanted)
+            for source, rows in sorted(vix_by_provider.items())
+        },
+    }
 
     return {
         "research_type": "INDEPENDENT_NIFTY_MARKET_DATA",
         "research_only": True,
-        "broker_sources_used": [],
+        "broker_sources_used": sorted(set(broker_sources_used)),
         "primary_source": primary_source,
         "generated_at": now.isoformat(),
         "interval_minutes": 5,
         "session_dates": [day.isoformat() for day in dates],
         "source_attempts": source_attempts,
+        "credentialed_sources": credentialed_status,
+        "data_source_policy": {
+            "raw_provider_series_preserved": True,
+            "canonical_series_never_backfilled_from_secondary_provider": True,
+            "contract_identifiers_explicit": True,
+            "niftybees_is_only_a_volume_proxy": True,
+        },
         "provenance": {
             "nifty_index": {
-                "instrument": "NIFTY 50" if primary_source == "NSE_PUBLIC_CHART" else "^NSEI",
+                "instrument": (
+                    "NIFTY 50" if primary_source == "NSE_PUBLIC_CHART" else "^NSEI"
+                ),
                 "source": primary_source,
                 "volume_semantics": "not_used",
             },
             "nifty_futures": {
-                "contract_selection": (
-                    "highest observed session volume among returned NIFTY futures"
-                    if futures_rows
-                    else None
-                ),
-                "contracts_by_date": contract_by_date,
-                "volume_semantics": "traded futures volume when available",
-                **futures_status,
+                "canonical_source": futures_source,
+                "available": bool(futures_selected),
+                "contract_selection": "explicit provider contract identifier",
+                "public_contracts_by_date": contract_by_date,
+                "volume_semantics": "actual futures traded volume",
+                "open_interest_semantics": "provider-reported futures open interest",
             },
-            "india_vix": vix_status,
+            "india_vix": {
+                "canonical_source": vix_source,
+                "available": bool(vix_selected),
+                "public_fallback": vix_status,
+            },
             "nifty_volume_proxy": volume_proxy_status,
         },
         "coverage": {
-            "nifty_index_rows": len(index_selected),
+            "nifty_index_rows": len(index_selected_candles),
             "nifty_futures_rows": len(futures_selected),
             "india_vix_rows": len(vix_selected),
-            "nifty_volume_proxy_rows": len(volume_proxy_selected),
+            "nifty_volume_proxy_rows": len(proxy_selected_candles),
             "futures_dates": sorted(
                 {
-                    datetime.fromisoformat(row["timestamp"]).date().isoformat()
+                    datetime.fromisoformat(row.timestamp).date().isoformat()
                     for row in futures_selected
                 }
             ),
             "vix_dates": sorted(
                 {
-                    datetime.fromisoformat(row["timestamp"]).date().isoformat()
+                    datetime.fromisoformat(row.timestamp).date().isoformat()
                     for row in vix_selected
                 }
             ),
             "volume_proxy_dates": sorted(
                 {
-                    datetime.fromisoformat(row["timestamp"]).date().isoformat()
-                    for row in volume_proxy_selected
+                    datetime.fromisoformat(row.timestamp).date().isoformat()
+                    for row in proxy_selected_candles
                 }
             ),
         },
-        "nifty_index": index_selected,
-        "nifty_futures": futures_selected,
-        "india_vix": vix_selected,
-        "nifty_volume_proxy": volume_proxy_selected,
+        "provider_quality": {
+            "nifty_futures": _provider_quality(
+                futures_by_provider, wanted, futures_source
+            ),
+            "india_vix": _provider_quality(vix_by_provider, wanted, vix_source),
+        },
+        "canonical_market_rows": _canonical_rows(
+            index_selected_candles,
+            futures_selected,
+            vix_selected,
+            proxy_selected_candles,
+            futures_source,
+            vix_source,
+        ),
+        "provider_series": provider_series,
+        "nifty_index": [asdict(row) for row in index_selected_candles],
+        "nifty_futures": [asdict(row) for row in futures_selected],
+        "india_vix": [asdict(row) for row in vix_selected],
+        "nifty_volume_proxy": [asdict(row) for row in proxy_selected_candles],
     }
 
 
@@ -612,9 +1065,27 @@ def main() -> None:
     parser.add_argument("--sessions", type=int, default=10)
     parser.add_argument("--lookback-days", type=int, default=30)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--breeze-futures-expiry",
+        help="Explicit NIFTY futures expiry YYYY-MM-DD; overrides env config.",
+    )
+    parser.add_argument(
+        "--upstox-futures-key",
+        help="Explicit Upstox NIFTY futures instrument_key; overrides env config.",
+    )
+    parser.add_argument(
+        "--dhan-futures-security-id",
+        help="Explicit Dhan NIFTY futures securityId; overrides env config.",
+    )
     args = parser.parse_args()
 
-    report = build_research_dataset(args.sessions, args.lookback_days)
+    report = build_research_dataset(
+        args.sessions,
+        args.lookback_days,
+        breeze_futures_expiry=args.breeze_futures_expiry,
+        upstox_futures_key=args.upstox_futures_key,
+        dhan_futures_security_id=args.dhan_futures_security_id,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
     print(
@@ -624,6 +1095,8 @@ def main() -> None:
                 "session_dates": report["session_dates"],
                 "coverage": report["coverage"],
                 "provenance": report["provenance"],
+                "credentialed_sources": report["credentialed_sources"],
+                "provider_quality": report["provider_quality"],
             },
             indent=2,
         )
