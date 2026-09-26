@@ -216,3 +216,5 @@ def test_strategy_e_experiment_replays_identical_complete_sessions():
     for arm in experiment["arms"].values():
         assert arm["session_summary"]["session_dates"] == ["2026-09-24"]
         assert arm["signal_diagnostics"]["bars_evaluated"] == 75
+        assert arm["incremental_vs_control"]["retained_control_trades"] == 0
+        assert arm["incremental_vs_control"]["displaced_control_trades"] == 0
