@@ -8,6 +8,7 @@ to decide when an intrabar event is chronologically usable.
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from collections.abc import Iterable
@@ -32,7 +33,12 @@ from services.strategy.models import (
     TradeLifecycleState,
 )
 from services.strategy.position_manager import PositionManager
-from services.strategy.replay_intrabar import resolve_entry_candle, resolve_stop_order
+from services.strategy.replay_intrabar import (
+    resolve_active_stop_transition,
+    resolve_entry_candle,
+    resolve_stop_order,
+    resolve_stop_target_order,
+)
 from services.strategy.replay_manifest import (
     ReplayEvent,
     ReplayManifestRecord,
@@ -925,25 +931,49 @@ class HistoricalPositionManagerReplayer:
         )
         level, favorable_price = self._next_favorable_level(trade, price_bar)
         resolution = None
-        if stop_decision.crossed and level is not None:
+        if level is not None and favorable_price is not None:
             minutes = self._minutes(
                 price_bar.start_time,
                 price_bar.end_time,
                 instrument_id=price_bar.instrument_id,
             )
-            if not minutes:
+            preview_trade = deepcopy(trade)
+            preview_trade, _ = pm.update_position(
+                preview_trade,
+                0.0,
+                _feature_at(
+                    features,
+                    spot=favorable_price,
+                    timestamp=bar.end_time,
+                    completed=False,
+                ),
+                as_of=bar.end_time,
+            )
+            transitioned_stop = preview_trade.current_trailing_stop
+            needs_intrabar_order = (
+                stop_decision.crossed
+                or transitioned_stop != active_stop
+            )
+            if needs_intrabar_order and not minutes:
                 self.stats["trailing_unavailable"] += 1
                 self._record_event(record, event="AMBIGUOUS", timestamp=bar.end_time, price=None, trade=trade,
-                                   source=price_bar.start_time, details={"reason": "1-minute data unavailable", "active_stop": active_stop, "favorable_level": favorable_price})
+                                   source=price_bar.start_time, details={"reason": "1-minute data unavailable", "active_stop": active_stop, "favorable_level": favorable_price, "transitioned_stop": transitioned_stop})
                 self._finish(record, trade, status="AMBIGUOUS", reason="AMBIGUOUS_INTRABAR_ORDER", timestamp=bar.end_time, ambiguous=True)
                 return False
-            resolution = resolve_stop_order(record.direction, active_stop=active_stop, minute_candles=minutes, favorable_level=favorable_price)
-            if resolution.ambiguous:
-                self.stats["trailing_still_ambiguous"] += 1
-                self._record_event(record, event="AMBIGUOUS", timestamp=resolution.event_time or bar.end_time, price=None, trade=trade,
-                                   source=price_bar.start_time, details={"reason": resolution.detail, "active_stop": active_stop, "favorable_level": favorable_price})
-                self._finish(record, trade, status="AMBIGUOUS", reason="AMBIGUOUS_INTRABAR_ORDER", timestamp=resolution.event_time or bar.end_time, ambiguous=True)
-                return False
+            if needs_intrabar_order:
+                resolution = resolve_active_stop_transition(
+                    record.direction,
+                    active_stop=active_stop,
+                    transition_level=favorable_price,
+                    transitioned_stop=transitioned_stop,
+                    minute_candles=minutes,
+                )
+                if resolution.ambiguous:
+                    self.stats["trailing_still_ambiguous"] += 1
+                    self._record_event(record, event="AMBIGUOUS", timestamp=resolution.event_time or bar.end_time, price=None, trade=trade,
+                                       source=price_bar.start_time, details={"reason": resolution.detail, "active_stop": active_stop, "favorable_level": favorable_price, "transitioned_stop": transitioned_stop})
+                    self._finish(record, trade, status="AMBIGUOUS", reason="AMBIGUOUS_INTRABAR_ORDER", timestamp=resolution.event_time or bar.end_time, ambiguous=True)
+                    return False
 
         if stop_decision.crossed and (resolution is None or resolution.event == "STRUCTURAL_STOP"):
             exit_price = stop_decision.exit_price or active_stop
@@ -960,7 +990,7 @@ class HistoricalPositionManagerReplayer:
             self.stats["structural_stop"] += 1
             return False
 
-        if resolution is not None and resolution.event == "FAVORABLE_THEN_STOP":
+        if resolution is not None and resolution.event in {"FAVORABLE_THEN_STOP", "TRANSITION_THEN_STOP"}:
             fav_time = resolution.event_time or price_bar.start_time
             trade, _ = pm.update_position(trade, 0.0, _feature_at(features, spot=favorable_price or features.spot_price, timestamp=fav_time, completed=False), as_of=fav_time)
             self._record_event(record, event=_event_name_for_level(level or 0.0), timestamp=fav_time,
