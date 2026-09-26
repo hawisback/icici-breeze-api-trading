@@ -73,6 +73,7 @@ class PublicNseChartClient:
         self._owns_client = client is None
         self.client = client or httpx.Client(headers=HEADERS, timeout=20.0, follow_redirects=True)
         self._cookies_warmed = False
+        self.last_history_debug: dict[str, Any] = {}
 
     def close(self) -> None:
         if self._owns_client:
@@ -142,9 +143,26 @@ class PublicNseChartClient:
         )
         response.raise_for_status()
         payload = response.json()
+        raw_rows = list(payload.get("data") or [])
         if not payload.get("status"):
+            self.last_history_debug = {
+                "symbol": instrument.symbol,
+                "status": payload.get("status"),
+                "raw_count": len(raw_rows),
+            }
             return []
-        return _normalize_candles(payload.get("data") or [], instrument, interval_minutes)
+        normalized = _normalize_candles(raw_rows, instrument, interval_minutes)
+        self.last_history_debug = {
+            "symbol": instrument.symbol,
+            "status": payload.get("status"),
+            "raw_count": len(raw_rows),
+            "raw_first_time": raw_rows[0].get("time") if raw_rows else None,
+            "raw_last_time": raw_rows[-1].get("time") if raw_rows else None,
+            "normalized_count": len(normalized),
+            "normalized_first": normalized[0].timestamp if normalized else None,
+            "normalized_last": normalized[-1].timestamp if normalized else None,
+        }
+        return normalized
 
 
 def _to_exchange_bar_start(raw: Any, interval_minutes: int) -> datetime:
@@ -222,6 +240,32 @@ def _last_complete_dates(candles: list[Candle], sessions: int) -> list[date]:
         if expected.issubset(starts):
             complete.append(day)
     return complete[-sessions:]
+
+
+def _session_diagnostics(candles: list[Candle]) -> dict[str, Any]:
+    by_day: dict[date, list[Candle]] = {}
+    for candle in candles:
+        day = datetime.fromisoformat(candle.timestamp).date()
+        by_day.setdefault(day, []).append(candle)
+
+    days: dict[str, Any] = {}
+    for day, rows in sorted(by_day.items()):
+        starts = {datetime.fromisoformat(row.timestamp).time() for row in rows}
+        expected = [
+            (datetime.combine(day, SESSION_START) + timedelta(minutes=5 * idx)).time()
+            for idx in range(75)
+        ]
+        missing = [slot.strftime("%H:%M:%S") for slot in expected if slot not in starts]
+        ordered = sorted(rows, key=lambda row: row.timestamp)
+        days[day.isoformat()] = {
+            "bars": len(rows),
+            "unique_starts": len(starts),
+            "first": ordered[0].timestamp if ordered else None,
+            "last": ordered[-1].timestamp if ordered else None,
+            "missing_expected_count": len(missing),
+            "missing_expected_first_10": missing[:10],
+        }
+    return {"normalized_rows": len(candles), "days": days}
 
 
 def _rows_for_dates(candles: list[Candle], dates: set[date]) -> list[dict[str, Any]]:
@@ -309,8 +353,19 @@ def build_research_dataset(sessions: int = 10, lookback_days: int = 30) -> dict[
         nifty_rows = client.history(nifty, start, end, 5)
         dates = _last_complete_dates(nifty_rows, sessions)
         if len(dates) != sessions:
+            diagnostics = {
+                "request": {
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                    "sessions": sessions,
+                    "lookback_days": lookback_days,
+                },
+                "history_response": client.last_history_debug,
+                "session_shape": _session_diagnostics(nifty_rows),
+            }
             raise RuntimeError(
-                f"Only {len(dates)} complete NIFTY sessions found in {lookback_days} calendar days"
+                f"Only {len(dates)} complete NIFTY sessions found in {lookback_days} calendar days. "
+                f"Diagnostics: {json.dumps(diagnostics, separators=(',', ':'))}"
             )
         wanted = set(dates)
 
