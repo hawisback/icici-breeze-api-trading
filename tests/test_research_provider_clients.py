@@ -58,6 +58,8 @@ def test_breeze_futures_normalizes_volume_oi_and_keeps_expiry_explicit():
     call = created[0].calls[0]
     assert call["interval"] == "5minute"
     assert call["product_type"] == "futures"
+    assert call["from_date"] == "2026-09-25T09:15:00.000Z"
+    assert call["to_date"] == "2026-09-25T15:30:00.000Z"
     assert call["expiry_date"] == "2026-09-29T07:00:00.000Z"
 
 
