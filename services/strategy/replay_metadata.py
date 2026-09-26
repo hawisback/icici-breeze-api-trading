@@ -183,7 +183,7 @@ def build_configuration_snapshot(
                     "STRATEGY_C_DI_CONTINUATION_V1_CANDIDATE"
                 ),
                 "SR_MOMENTUM_BREAKOUT": (
-                    "STRATEGY_D_SR_MOMENTUM_V2_CANDIDATE"
+                    "STRATEGY_D_SR_MOMENTUM_BREAKOUT_V2_CANDIDATE"
                 ),
             },
             "priority": [
