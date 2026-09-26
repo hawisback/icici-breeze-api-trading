@@ -183,6 +183,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const lifecycleMetrics = result?.underlying_lifecycle_metrics;
   const optionMarkMetrics = result?.option_mark_metrics;
   const resolvedTrades = lifecycleMetrics?.resolved_trades ?? 0;
+  const totalRealizedR = lifecycleMetrics?.total_realized_r ?? 0;
   const netPnl = optionMarkMetrics?.net_mark_pnl;
   const grossPnl = optionMarkMetrics?.gross_mark_pnl;
   const hasNetPnl = netPnl !== null && netPnl !== undefined;
@@ -794,11 +795,11 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               </div>
               <div
                 className={`text-xl font-mono font-bold ${
-                  (lifecycleMetrics?.total_realized_r ?? 0) >= 0 ? "text-cyan-400" : "text-rose-400"
+                  totalRealizedR >= 0 ? "text-cyan-400" : "text-rose-400"
                 }`}
               >
-                {lifecycleMetrics?.total_realized_r ?? 0 >= 0 ? "+" : ""}
-                {lifecycleMetrics?.total_realized_r ?? 0}R
+                {totalRealizedR >= 0 ? "+" : ""}
+                {totalRealizedR}R
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
                 Avg: {resolvedTrades > 0 ? (lifecycleMetrics?.average_realized_r ?? 0).toFixed(2) : "0.00"}R / trade
