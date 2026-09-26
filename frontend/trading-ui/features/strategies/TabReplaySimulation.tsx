@@ -821,7 +821,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                   </p>
                 </div>
                 <div className="text-[10px] font-mono text-slate-400">
-                  {portfolio.pnl_complete ? "P&L COMPLETE" : "P&L INCOMPLETE"} · {portfolio.daily_entries} accepted entries
+                  {portfolio.lifecycle_complete ? "LIFECYCLE COMPLETE" : "LIFECYCLE INCOMPLETE"} · {portfolio.pnl_complete ? "P&L COMPLETE" : "P&L INCOMPLETE"} · {portfolio.resolved_entries}/{portfolio.accepted_entries} resolved
                 </div>
               </div>
 

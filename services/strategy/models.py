@@ -1076,7 +1076,10 @@ class ReplayPortfolioMetrics(BaseModel):
     price_basis: str = "NOT_AVAILABLE"
     calculation_basis: str = "CHRONOLOGICAL_PORTFOLIO_EXECUTION_NOT_AVAILABLE"
     available: bool = False
+    lifecycle_complete: bool = False
     pnl_complete: bool = False
+    accepted_entries: int = 0
+    resolved_entries: int = 0
     starting_equity: float | None = None
     ending_equity: float | None = None
     gross_executable_pnl: float | None = None

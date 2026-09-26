@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from libs.contracts.models import utc_now
+from libs.contracts.models import generate_id, utc_now
 from services.historical.strategy_c_candidate_manifest import (
     _spec_fingerprint as strategy_c_spec_fingerprint,
 )
@@ -149,7 +149,8 @@ def build_portfolio_metrics(
         )
     )
 
-    pnl_complete = all(
+    lifecycle_complete = len(resolved) == len(accepted)
+    pnl_complete = lifecycle_complete and all(
         record.simulated_net_pnl is not None
         and record.simulated_gross_pnl is not None
         for record in resolved
@@ -218,9 +219,13 @@ def build_portfolio_metrics(
         else (0.0 if pnl_complete else None)
     )
     expectancy_r = (
-        round(sum(r_values) / len(resolved), 4) if resolved else 0.0
+        round(sum(r_values) / len(resolved), 4)
+        if lifecycle_complete and resolved
+        else (0.0 if lifecycle_complete else None)
     )
-    max_consecutive_wins, max_consecutive_losses = _streaks(r_values)
+    max_consecutive_wins, max_consecutive_losses = (
+        _streaks(r_values) if lifecycle_complete else (0, 0)
+    )
 
     intervals: list[tuple[datetime, datetime]] = []
     for record in accepted:
@@ -251,7 +256,13 @@ def build_portfolio_metrics(
         execution_metadata.get("entry_gate_block_counts") or {}
     )
     limitation = None
-    if not pnl_complete:
+    if not lifecycle_complete:
+        limitation = (
+            "One or more accepted positions have unresolved or ambiguous "
+            "lifecycles; account equity, portfolio R drawdown and expectancy "
+            "are intentionally unavailable rather than partially calculated."
+        )
+    elif not pnl_complete:
         limitation = (
             "One or more resolved trades lack estimated executable P&L; "
             "account-equity, P&L drawdown, P&L profit factor and P&L expectancy "
@@ -266,14 +277,19 @@ def build_portfolio_metrics(
             "CHRONOLOGICAL_ACCEPTED_ENTRIES_AND_RESOLVED_EXITS"
         ),
         available=True,
+        lifecycle_complete=lifecycle_complete,
         pnl_complete=pnl_complete,
+        accepted_entries=len(accepted),
+        resolved_entries=len(resolved),
         starting_equity=round(starting_equity, 2),
         ending_equity=ending_equity,
         gross_executable_pnl=gross_total,
         net_executable_pnl=net_total,
         max_drawdown_pnl=pnl_drawdown,
         max_drawdown_pct=drawdown_pct,
-        max_drawdown_r=_drawdown(r_values),
+        max_drawdown_r=(
+            _drawdown(r_values) if lifecycle_complete else None
+        ),
         profit_factor_pnl=profit_factor,
         expectancy_pnl=expectancy_pnl,
         expectancy_r=expectancy_r,
@@ -374,12 +390,7 @@ def build_replay_run_identity(
     generated_at = utc_now().astimezone(timezone.utc)
     return {
         **identity_payload,
-        "run_id": (
-            "RPL-"
-            + generated_at.strftime("%Y%m%dT%H%M%S%fZ")
-            + "-"
-            + fingerprint[:12]
-        ),
+        "run_id": "RPL-" + generate_id(),
         "run_fingerprint": fingerprint,
         "generated_at": generated_at.isoformat(),
     }

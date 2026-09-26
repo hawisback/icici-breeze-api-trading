@@ -1282,7 +1282,10 @@ export interface ReplayPortfolioMetricsData {
   price_basis: string;
   calculation_basis: string;
   available: boolean;
+  lifecycle_complete: boolean;
   pnl_complete: boolean;
+  accepted_entries: number;
+  resolved_entries: number;
   starting_equity: number | null;
   ending_equity: number | null;
   gross_executable_pnl: number | null;

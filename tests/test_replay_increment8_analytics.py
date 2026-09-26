@@ -241,7 +241,10 @@ def test_portfolio_metrics_cover_all_strategies_and_overlapping_exposure():
     )
 
     assert metrics.available is True
+    assert metrics.lifecycle_complete is True
     assert metrics.pnl_complete is True
+    assert metrics.accepted_entries == 5
+    assert metrics.resolved_entries == 5
     assert metrics.ending_equity == 501500.0
     assert metrics.net_executable_pnl == 1500.0
     assert metrics.max_drawdown_pnl == -500.0
@@ -297,6 +300,7 @@ def test_incomplete_execution_pnl_never_builds_partial_equity_curve():
     )
 
     assert metrics.available is True
+    assert metrics.lifecycle_complete is True
     assert metrics.pnl_complete is False
     assert metrics.ending_equity is None
     assert metrics.net_executable_pnl is None
@@ -307,6 +311,54 @@ def test_incomplete_execution_pnl_never_builds_partial_equity_curve():
     assert metrics.max_drawdown_r == -1.0
     assert len(metrics.equity_curve) == 1
     assert "intentionally unavailable" in (metrics.limitation or "")
+
+
+def test_unresolved_accepted_position_fails_closed_for_portfolio_metrics():
+    resolved = _record(
+        "TREND_PULLBACK",
+        0,
+        entry_minute=15,
+        exit_minute=30,
+        realized_r=1.0,
+        gross_pnl=1100.0,
+        net_pnl=1000.0,
+    )
+    unresolved = _record(
+        "DI_CONTINUATION",
+        1,
+        entry_minute=35,
+        exit_minute=50,
+        realized_r=-1.0,
+        gross_pnl=-500.0,
+        net_pnl=-600.0,
+    ).model_copy(update={
+        "lifecycle_status": "UNRESOLVED",
+        "exit_timestamp": None,
+        "exit_price": None,
+        "exit_reason": "INSUFFICIENT_INTRABAR_EVIDENCE",
+        "realized_r": None,
+        "simulated_gross_pnl": None,
+        "simulated_net_pnl": None,
+    })
+
+    metrics = build_portfolio_metrics(
+        [resolved, unresolved],
+        starting_equity=500000.0,
+        session_start=SESSION_START,
+        session_end=SESSION_END,
+        execution_metadata={"daily_entries": 2},
+    )
+
+    assert metrics.lifecycle_complete is False
+    assert metrics.pnl_complete is False
+    assert metrics.accepted_entries == 2
+    assert metrics.resolved_entries == 1
+    assert metrics.ending_equity is None
+    assert metrics.max_drawdown_pnl is None
+    assert metrics.max_drawdown_r is None
+    assert metrics.expectancy_r is None
+    assert len(metrics.equity_curve) == 1
+    assert "unresolved or ambiguous" in (metrics.limitation or "")
 
 
 def test_replay_run_identity_is_deterministic_and_tracks_provenance():
