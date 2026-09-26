@@ -603,7 +603,7 @@ def test_execution_parity_mode_is_explicit_and_chronological_on_empty_session():
     )
     assert (
         result.portfolio_metrics.calculation_basis
-        == "CHRONOLOGICAL_ACCEPTED_ENTRIES_AND_RESOLVED_EXITS"
+        == "CHRONOLOGICAL_ACCEPTED_ENTRIES_AND_EXECUTION_EXIT_LEGS"
     )
     assert result.portfolio_metrics.available is True
     assert result.portfolio_metrics.pnl_complete is True
