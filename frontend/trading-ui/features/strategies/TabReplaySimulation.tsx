@@ -180,8 +180,11 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
       ? result.timeline[Math.min(selectedBarIndex, result.timeline.length - 1)]
       : null;
   const trades = result?.trades ?? [];
-  const netPnl = result?.net_pnl;
-  const grossPnl = result?.total_pnl;
+  const lifecycleMetrics = result?.underlying_lifecycle_metrics;
+  const optionMarkMetrics = result?.option_mark_metrics;
+  const resolvedTrades = lifecycleMetrics?.resolved_trades ?? 0;
+  const netPnl = optionMarkMetrics?.net_mark_pnl;
+  const grossPnl = optionMarkMetrics?.gross_mark_pnl;
   const hasNetPnl = netPnl !== null && netPnl !== undefined;
   const executionNetPnl = result?.option_mark_metrics?.net_estimated_executable_pnl;
   const executionGrossPnl = result?.option_mark_metrics?.gross_estimated_executable_pnl;
@@ -721,13 +724,13 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
             {/* Total Trades */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5">
               <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mb-1">
-                Total Trades
+                Resolved Trades
               </div>
               <div className="text-xl font-mono font-bold text-slate-100">
-                {trades.length}
+                {resolvedTrades}
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
-                {result.winning_trades}W - {result.losing_trades}L
+                {lifecycleMetrics?.winning_trades ?? 0}W - {lifecycleMetrics?.losing_trades ?? 0}L
               </div>
             </div>
 
@@ -738,13 +741,13 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               </div>
               <div
                 className={`text-xl font-mono font-bold ${
-                  result.win_rate_pct >= 50.0 ? "text-emerald-400" : "text-amber-400"
+                  lifecycleMetrics?.win_rate_pct ?? 0 >= 50.0 ? "text-emerald-400" : "text-amber-400"
                 }`}
               >
-                {trades.length > 0 ? `${result.win_rate_pct}%` : "N/A"}
+                {resolvedTrades > 0 ? `${lifecycleMetrics?.win_rate_pct ?? 0}%` : "N/A"}
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
-                R Profit Factor: <span className="font-bold text-slate-200">{trades.length > 0 && result.profit_factor != null ? result.profit_factor : "N/A"}</span>
+                R Profit Factor: <span className="font-bold text-slate-200">{resolvedTrades > 0 && lifecycleMetrics?.profit_factor_r != null ? lifecycleMetrics.profit_factor_r : "N/A"}</span>
               </div>
             </div>
 
@@ -791,14 +794,14 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               </div>
               <div
                 className={`text-xl font-mono font-bold ${
-                  result.total_realized_r >= 0 ? "text-cyan-400" : "text-rose-400"
+                  lifecycleMetrics?.total_realized_r ?? 0 >= 0 ? "text-cyan-400" : "text-rose-400"
                 }`}
               >
-                {result.total_realized_r >= 0 ? "+" : ""}
-                {result.total_realized_r}R
+                {lifecycleMetrics?.total_realized_r ?? 0 >= 0 ? "+" : ""}
+                {lifecycleMetrics?.total_realized_r ?? 0}R
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
-                Avg: {trades.length > 0 ? (result.total_realized_r / trades.length).toFixed(2) : "0.00"}R / trade
+                Avg: {trades.length > 0 ? (lifecycleMetrics?.total_realized_r ?? 0 / trades.length).toFixed(2) : "0.00"}R / trade
               </div>
             </div>
 
@@ -808,7 +811,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 Underlying R Drawdown
               </div>
               <div className="text-xl font-mono font-bold text-slate-300">
-                {result.max_drawdown_r == null ? "N/A" : `${result.max_drawdown_r}R`}
+                {lifecycleMetrics?.max_drawdown_r == null ? "N/A" : `${lifecycleMetrics.max_drawdown_r}R`}
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
                 Realized lifecycle peak-to-trough
