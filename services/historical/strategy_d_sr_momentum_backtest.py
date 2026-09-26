@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter, defaultdict
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from statistics import mean
@@ -830,6 +831,38 @@ def run_backtest(
     }
 
 
+def _ablation_snapshot(
+    label: str,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """Compact research-only view for entry-filter causal comparison."""
+    return {
+        "label": label,
+        "research_only": True,
+        "config": report["config"],
+        "metrics": report["metrics"],
+        "signal_diagnostics": report["signal_diagnostics"],
+        "session_summary": report["session_summary"],
+        "trade_outcomes": [
+            {
+                "date": row["date"],
+                "direction": row["direction"],
+                "breakout_level_name": row["breakout_level_name"],
+                "entry_time": row["entry_time"],
+                "rsi_previous": row["rsi_previous"],
+                "rsi_current": row["rsi_current"],
+                "rsi_clearance_points": row["rsi_clearance_points"],
+                "previous_day_range_atr": row[
+                    "previous_day_range_atr"
+                ],
+                "realized_r": row["realized_r"],
+                "runner_exit_reason": row["runner_exit_reason"],
+            }
+            for row in report["trades"]
+        ],
+    }
+
+
 def build_v2_comparison(
     *,
     spot_candles: Sequence[Candle],
@@ -858,6 +891,60 @@ def build_v2_comparison(
         session_dates=session_dates,
         config=StrategyDConfig.v2_candidate(),
     )
+
+    # Research-only ablations isolate the two V2 entry changes without
+    # mutating the frozen V2 candidate or any production thresholds.
+    rsi_only_config = replace(
+        StrategyDConfig.v1_control(),
+        variant="ABLATION_RSI_CLEARANCE_ONLY",
+        minimum_rsi_clearance_points=(
+            StrategyDConfig.v2_candidate().minimum_rsi_clearance_points
+        ),
+    )
+    range_only_config = replace(
+        StrategyDConfig.v1_control(),
+        variant="ABLATION_RANGE_FILTER_ONLY",
+        max_previous_day_range_atr=(
+            StrategyDConfig.v2_candidate().max_previous_day_range_atr
+        ),
+    )
+    rsi_only = run_backtest(
+        spot_candles=spot_candles,
+        futures_candles=futures_candles,
+        one_minute_spot_candles=one_minute_spot_candles,
+        start_date=start_date,
+        end_date=end_date,
+        session_dates=session_dates,
+        config=rsi_only_config,
+    )
+    range_only = run_backtest(
+        spot_candles=spot_candles,
+        futures_candles=futures_candles,
+        one_minute_spot_candles=one_minute_spot_candles,
+        start_date=start_date,
+        end_date=end_date,
+        session_dates=session_dates,
+        config=range_only_config,
+    )
+    candidate["entry_filter_ablation"] = {
+        "purpose": (
+            "Research-only causal isolation of V2 entry filters; "
+            "the frozen V2 candidate is unchanged."
+        ),
+        "V1_CONTROL": _ablation_snapshot("V1_CONTROL", control),
+        "RSI_CLEARANCE_ONLY": _ablation_snapshot(
+            "RSI_CLEARANCE_ONLY",
+            rsi_only,
+        ),
+        "RANGE_FILTER_ONLY": _ablation_snapshot(
+            "RANGE_FILTER_ONLY",
+            range_only,
+        ),
+        "V2_CANDIDATE": _ablation_snapshot(
+            "V2_CANDIDATE",
+            candidate,
+        ),
+    }
     control_metrics = control["metrics"]
     candidate_metrics = candidate["metrics"]
     candidate["comparison_to_corrected_v1"] = {
@@ -1257,6 +1344,9 @@ def main() -> None:
                 "comparison_to_corrected_v1": (
                     report["comparison_to_corrected_v1"]
                 ),
+                "entry_filter_ablation": report[
+                    "entry_filter_ablation"
+                ],
                 "skipped": report["skipped_sessions_or_events"],
                 "output": str(args.output),
             },
