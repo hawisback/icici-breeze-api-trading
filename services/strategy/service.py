@@ -79,6 +79,7 @@ from services.strategy.strategies.candidate_runtime import (
 from services.strategy.strategies.pivot_vwap_scalp import (
     PivotVwapScalpStrategy,
     StrategyEDecision,
+    evaluate_strategy_e_lifecycle_bar,
 )
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
@@ -3188,24 +3189,28 @@ class StrategyService:
             "VALID" if quote_valid else trade.option_data_status
         )
 
-        now_ist = (tick_timestamp or utc_now()).astimezone(
-            IST
-        )
-        force_exit = (
-            now_ist.strftime("%H:%M")
-            >= self.config.tunables.strategy_e_forced_exit_time
-        )
-
-        stop_hit = False
-        target_hit = False
+        exit_reason: str | None = None
+        decision_price = underlying_price
         if fallback_candle is not None:
-            if trade.direction == TradeDirection.BULLISH:
-                stop_hit = float(fallback_candle.low) <= stop
-                target_hit = float(fallback_candle.high) >= target
-            else:
-                stop_hit = float(fallback_candle.high) >= stop
-                target_hit = float(fallback_candle.low) <= target
+            lifecycle = evaluate_strategy_e_lifecycle_bar(
+                direction=trade.direction,
+                entry=entry,
+                risk=risk,
+                stop=stop,
+                target=target,
+                bar=fallback_candle,
+                forced_exit_time=(
+                    self.config.tunables.strategy_e_forced_exit_time
+                ),
+            )
+            exit_reason = lifecycle.exit_reason
+            decision_price = lifecycle.decision_price
         else:
+            now_ist = (tick_timestamp or utc_now()).astimezone(IST)
+            force_exit = (
+                now_ist.strftime("%H:%M")
+                >= self.config.tunables.strategy_e_forced_exit_time
+            )
             if trade.direction == TradeDirection.BULLISH:
                 stop_hit = underlying_price <= stop
                 target_hit = underlying_price >= target
@@ -3213,17 +3218,14 @@ class StrategyService:
                 stop_hit = underlying_price >= stop
                 target_hit = underlying_price <= target
 
-        # Conservative OHLC ambiguity rule: stop has precedence over target.
-        exit_reason: str | None = None
-        decision_price = underlying_price
-        if stop_hit:
-            exit_reason = "STRATEGY_E_STOP_LOSS"
-            decision_price = stop
-        elif target_hit:
-            exit_reason = "STRATEGY_E_TARGET"
-            decision_price = target
-        elif force_exit:
-            exit_reason = "STRATEGY_E_FORCED_EXIT"
+            if stop_hit:
+                exit_reason = "STRATEGY_E_STOP_LOSS"
+                decision_price = stop
+            elif target_hit:
+                exit_reason = "STRATEGY_E_TARGET"
+                decision_price = target
+            elif force_exit:
+                exit_reason = "STRATEGY_E_FORCED_EXIT"
 
         # PAPER/SHADOW retains the shared emergency option stop. LIVE is owned
         # by _sync_live_protective_stop above and must never race a second SELL.
