@@ -17,7 +17,7 @@ from services.strategy.replay_analytics import (
     build_replay_run_identity,
     compare_replay_results,
 )
-from services.strategy.replay_execution import ReplayExecutionCoordinator
+from services.strategy.replay_execution import ChronologicalReplayExecutor
 from services.strategy.replay_manifest import ReplayManifestRecord
 from services.strategy.repository import StrategyRepository
 
@@ -367,7 +367,7 @@ def test_replay_run_identity_is_deterministic_and_tracks_provenance():
 
 
 def test_execution_coordinator_blocks_second_simultaneous_entry_at_capacity():
-    coordinator = ReplayExecutionCoordinator(
+    coordinator = ChronologicalReplayExecutor(
         lifecycle_replayer=Mock(),
         registry=Mock(),
         risk_config=RiskConfig(max_concurrent_positions=1),
