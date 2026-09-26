@@ -284,6 +284,121 @@ def test_portfolio_metrics_cover_all_strategies_and_overlapping_exposure():
     }
 
 
+def test_partial_exit_legs_update_equity_and_capital_at_t1_timestamp():
+    record = _record(
+        "TREND_PULLBACK",
+        0,
+        entry_minute=15,
+        exit_minute=55,
+        realized_r=-0.5,
+        gross_pnl=-500.0,
+        net_pnl=-600.0,
+    ).model_copy(update={
+        "replay_lots": 2,
+        "replay_quantity": 100,
+        "simulated_entry_fill_price": 100.0,
+        "simulated_exit_fill_price": 95.0,
+        "simulated_gross_pnl": -500.0,
+        "simulated_transaction_costs": 100.0,
+        "simulated_net_pnl": -600.0,
+        "simulated_cost_breakdown": {
+            "brokerage": 60.0,
+            "exchange_charges": 0.0,
+            "stt": 0.0,
+            "gst": 0.0,
+            "sebi_charges": 0.0,
+            "stamp_duty": 40.0,
+            "order_count": 3,
+        },
+        "simulated_execution_provenance": {
+            "exit_legs": [
+                {
+                    "quantity": 50,
+                    "timestamp": (
+                        SESSION_START + timedelta(minutes=20)
+                    ).isoformat(),
+                    "reason": "T1_PARTIAL_EXIT",
+                    "fill": {"executable_price": 120.0},
+                },
+                {
+                    "quantity": 50,
+                    "timestamp": (
+                        SESSION_START + timedelta(minutes=55)
+                    ).isoformat(),
+                    "reason": "FINAL_EXIT",
+                    "fill": {"executable_price": 70.0},
+                },
+            ],
+            "quantity_conserved": True,
+        },
+    })
+
+    metrics = build_portfolio_metrics(
+        [record],
+        starting_equity=500000.0,
+        session_start=SESSION_START,
+        session_end=SESSION_END,
+        execution_metadata={"daily_entries": 1},
+    )
+
+    assert metrics.pnl_complete is True
+    assert metrics.net_executable_pnl == -600.0
+    assert metrics.ending_equity == 499400.0
+
+    # T1 cashflow is realized at its own historical timestamp rather than
+    # being deferred into the final trade-exit event.
+    assert len(metrics.equity_curve) == 4
+    entry_cost, partial, final = metrics.equity_curve[1:]
+    assert entry_cost["event"] == "ENTRY_COST"
+    assert entry_cost["timestamp"] == (
+        SESSION_START + timedelta(minutes=15)
+    ).isoformat()
+    assert entry_cost["allocated_transaction_costs"] == 60.0
+    assert entry_cost["net_pnl"] == -60.0
+    assert entry_cost["cumulative_net_pnl"] == -60.0
+
+    assert partial["event"] == "PARTIAL_EXIT"
+    assert partial["timestamp"] == (
+        SESSION_START + timedelta(minutes=20)
+    ).isoformat()
+    assert partial["quantity"] == 50
+    assert partial["gross_pnl"] == 1000.0
+    assert partial["allocated_transaction_costs"] == 20.0
+    assert partial["net_pnl"] == 980.0
+    assert partial["cumulative_net_pnl"] == 920.0
+    assert partial["cumulative_r"] == 0.0
+
+    assert final["event"] == "TRADE_EXIT"
+    assert final["timestamp"] == (
+        SESSION_START + timedelta(minutes=55)
+    ).isoformat()
+    assert final["quantity"] == 50
+    assert final["gross_pnl"] == -1500.0
+    assert final["allocated_transaction_costs"] == 20.0
+    assert final["net_pnl"] == -1520.0
+    assert final["cumulative_net_pnl"] == -600.0
+    assert final["cumulative_r"] == -0.5
+
+    # Drawdown now observes the partial-exit equity peak before the losing
+    # runner exits, rather than treating the trade as one -600 final event.
+    assert metrics.max_drawdown_pnl == -1520.0
+    assert metrics.max_drawdown_pct == -0.304
+
+    # Premium commitment steps down at T1, but the position slot remains
+    # occupied until the final leg closes.
+    assert len(metrics.capital_utilization_curve) == 4
+    entry, partial_release, final_release = metrics.capital_utilization_curve[1:]
+    assert entry["premium_committed"] == 10000.0
+    assert entry["active_positions"] == 1
+    assert partial_release["event"] == "PARTIAL_EXIT"
+    assert partial_release["premium_committed"] == 5000.0
+    assert partial_release["active_positions"] == 1
+    assert final_release["event"] == "EXIT"
+    assert final_release["premium_committed"] == 0.0
+    assert final_release["active_positions"] == 0
+    assert metrics.average_premium_utilization_pct == 0.12
+
+
 def test_incomplete_execution_pnl_never_builds_partial_equity_curve():
     complete = _record(
         "TREND_PULLBACK",

@@ -75,6 +75,299 @@ def _merged_exposure_minutes(
     return round(total, 3)
 
 
+def _parse_execution_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def _execution_exit_legs(
+    record: ReplayManifestRecord,
+) -> list[dict[str, Any]]:
+    """Return validated quantity-conserving executable exit-leg provenance."""
+    provenance = record.simulated_execution_provenance or {}
+    raw_legs = provenance.get("exit_legs")
+    total_quantity = int(record.replay_quantity or 0)
+    if not isinstance(raw_legs, list) or not raw_legs or total_quantity <= 0:
+        return []
+
+    legs: list[dict[str, Any]] = []
+    for raw in raw_legs:
+        if not isinstance(raw, dict):
+            return []
+        quantity = int(raw.get("quantity") or 0)
+        timestamp = _parse_execution_timestamp(raw.get("timestamp"))
+        fill = raw.get("fill") or {}
+        executable_price = (
+            fill.get("executable_price") if isinstance(fill, dict) else None
+        )
+        if quantity <= 0 or timestamp is None or executable_price is None:
+            return []
+        if timestamp < record.simulated_entry_timestamp:
+            return []
+        legs.append({
+            "quantity": quantity,
+            "timestamp": timestamp,
+            "reason": str(raw.get("reason") or "EXIT"),
+            "executable_price": float(executable_price),
+        })
+
+    legs.sort(key=lambda item: item["timestamp"])
+    if sum(int(item["quantity"]) for item in legs) != total_quantity:
+        return []
+    for index, leg in enumerate(legs):
+        leg["is_final"] = index == len(legs) - 1
+    return legs
+
+
+def _position_exit_events(
+    record: ReplayManifestRecord,
+    *,
+    session_end: datetime,
+) -> list[dict[str, Any]]:
+    """Return quantity releases while keeping the position open until final exit."""
+    legs = _execution_exit_legs(record)
+    if legs:
+        return legs
+    quantity = int(record.replay_quantity or 0)
+    if quantity <= 0:
+        return []
+    return [{
+        "quantity": quantity,
+        "timestamp": record.exit_timestamp or session_end,
+        "reason": "FINAL_EXIT",
+        "is_final": True,
+        "executable_price": record.simulated_exit_fill_price,
+    }]
+
+
+def _allocate_rounded_total(
+    total: float,
+    weights: list[float],
+) -> list[float]:
+    """Allocate a rounded total while preserving it exactly."""
+    allocations = [0.0 for _ in weights]
+    positive = [
+        index for index, weight in enumerate(weights)
+        if float(weight) > 0
+    ]
+    if not positive:
+        if allocations:
+            allocations[0] = round(float(total), 2)
+        return allocations
+
+    total_weight = sum(float(weights[index]) for index in positive)
+    remaining = round(float(total), 2)
+    last_positive = positive[-1]
+    for index in positive:
+        if index == last_positive:
+            allocations[index] = round(remaining, 2)
+            break
+        allocation = round(
+            float(total) * float(weights[index]) / total_weight,
+            2,
+        )
+        allocations[index] = allocation
+        remaining = round(remaining - allocation, 2)
+    return allocations
+
+
+def _execution_cost_allocations(
+    record: ReplayManifestRecord,
+    legs: list[dict[str, Any]],
+) -> list[float] | None:
+    """Allocate recorded paper costs to entry and exit orders chronologically."""
+    aggregate_gross = record.simulated_gross_pnl
+    aggregate_net = record.simulated_net_pnl
+    entry_fill = record.simulated_entry_fill_price
+    quantity = int(record.replay_quantity or 0)
+    if (
+        aggregate_gross is None
+        or aggregate_net is None
+        or entry_fill is None
+        or quantity <= 0
+        or not legs
+    ):
+        return None
+
+    total_costs = round(float(aggregate_gross) - float(aggregate_net), 2)
+    breakdown = record.simulated_cost_breakdown or {}
+    component_names = (
+        "brokerage",
+        "exchange_charges",
+        "stt",
+        "gst",
+        "sebi_charges",
+        "stamp_duty",
+    )
+    if not all(
+        isinstance(breakdown.get(name), (int, float))
+        for name in component_names
+    ):
+        return None
+
+    turnovers = [
+        float(entry_fill) * quantity,
+        *[
+            float(leg["executable_price"]) * int(leg["quantity"])
+            for leg in legs
+        ],
+    ]
+    order_weights = [1.0 for _ in turnovers]
+    sell_turnovers = [0.0, *turnovers[1:]]
+
+    brokerage = _allocate_rounded_total(
+        float(breakdown["brokerage"]),
+        order_weights,
+    )
+    exchange = _allocate_rounded_total(
+        float(breakdown["exchange_charges"]),
+        turnovers,
+    )
+    sebi = _allocate_rounded_total(
+        float(breakdown["sebi_charges"]),
+        turnovers,
+    )
+    stt = _allocate_rounded_total(
+        float(breakdown["stt"]),
+        sell_turnovers,
+    )
+    stamp = [0.0 for _ in turnovers]
+    stamp[0] = round(float(breakdown["stamp_duty"]), 2)
+    gst_weights = [
+        brokerage[index] + exchange[index] + sebi[index]
+        for index in range(len(turnovers))
+    ]
+    gst = _allocate_rounded_total(
+        float(breakdown["gst"]),
+        gst_weights,
+    )
+
+    costs = [
+        round(
+            brokerage[index]
+            + exchange[index]
+            + stt[index]
+            + gst[index]
+            + sebi[index]
+            + stamp[index],
+            2,
+        )
+        for index in range(len(turnovers))
+    ]
+    # Component rounding can differ by a paisa from gross-net. Preserve the
+    # authoritative aggregate economics by assigning the residual to the final
+    # exit order.
+    costs[-1] = round(
+        costs[-1] + total_costs - sum(costs),
+        2,
+    )
+    return costs
+
+
+def _execution_pnl_events(
+    record: ReplayManifestRecord,
+    *,
+    session_end: datetime,
+) -> list[dict[str, Any]]:
+    """Split aggregate executable P&L across historical order timestamps.
+
+    Aggregate trade economics remain authoritative. When the replay carries the
+    production paper-cost breakdown, entry-side costs are booked at entry and
+    exit-side costs at each partial/final exit. Older records without that
+    breakdown retain the legacy final-exit projection.
+    """
+    aggregate_gross = record.simulated_gross_pnl
+    aggregate_net = record.simulated_net_pnl
+    entry_fill = record.simulated_entry_fill_price
+    legs = _execution_exit_legs(record)
+    if (
+        aggregate_gross is None
+        or aggregate_net is None
+        or entry_fill is None
+        or not legs
+    ):
+        if aggregate_net is None:
+            return []
+        return [{
+            "timestamp": record.exit_timestamp or session_end,
+            "event": "TRADE_EXIT",
+            "quantity": int(record.replay_quantity or 0),
+            "gross_pnl": aggregate_gross,
+            "allocated_transaction_costs": (
+                round(float(aggregate_gross) - float(aggregate_net), 2)
+                if aggregate_gross is not None
+                else None
+            ),
+            "net_pnl": float(aggregate_net),
+            "realized_r_delta": float(record.realized_r or 0.0),
+            "reason": record.exit_reason or "FINAL_EXIT",
+        }]
+
+    gross_values = [
+        round(
+            (float(leg["executable_price"]) - float(entry_fill))
+            * int(leg["quantity"]),
+            2,
+        )
+        for leg in legs
+    ]
+    gross_values[-1] = round(
+        gross_values[-1]
+        + float(aggregate_gross)
+        - sum(gross_values),
+        2,
+    )
+
+    order_costs = _execution_cost_allocations(record, legs)
+    if order_costs is None:
+        total_costs = round(float(aggregate_gross) - float(aggregate_net), 2)
+        exit_costs = _allocate_rounded_total(
+            total_costs,
+            [float(leg["quantity"]) for leg in legs],
+        )
+        entry_cost = 0.0
+    else:
+        entry_cost = float(order_costs[0])
+        exit_costs = order_costs[1:]
+
+    events: list[dict[str, Any]] = []
+    if entry_cost:
+        events.append({
+            "timestamp": record.simulated_entry_timestamp,
+            "event": "ENTRY_COST",
+            "quantity": int(record.replay_quantity or 0),
+            "gross_pnl": 0.0,
+            "allocated_transaction_costs": entry_cost,
+            "net_pnl": round(-entry_cost, 2),
+            "realized_r_delta": 0.0,
+            "reason": "ENTRY_TRANSACTION_COSTS",
+        })
+
+    events.extend(
+        {
+            "timestamp": leg["timestamp"],
+            "event": "TRADE_EXIT" if leg["is_final"] else "PARTIAL_EXIT",
+            "quantity": int(leg["quantity"]),
+            "gross_pnl": gross,
+            "allocated_transaction_costs": costs,
+            "net_pnl": round(gross - costs, 2),
+            "realized_r_delta": (
+                float(record.realized_r or 0.0) if leg["is_final"] else 0.0
+            ),
+            "reason": leg["reason"],
+        }
+        for leg, gross, costs in zip(legs, gross_values, exit_costs)
+    )
+    return events
+
+
 def _peak_commitments(
     records: list[ReplayManifestRecord],
     *,
@@ -83,7 +376,6 @@ def _peak_commitments(
     events: list[tuple[datetime, int, float, float]] = []
     for record in records:
         entry = record.simulated_entry_timestamp
-        exit_time = record.exit_timestamp or session_end
         quantity = int(record.replay_quantity or 0)
         entry_price = (
             record.simulated_entry_fill_price
@@ -91,11 +383,26 @@ def _peak_commitments(
             or record.option_entry_price
             or 0.0
         )
-        premium = max(0.0, float(entry_price) * quantity)
         risk_budget = max(0.0, float(record.sizing_risk_budget or 0.0))
-        events.append((entry, 1, premium, risk_budget))
-        # Exit events sort before entries at the same timestamp.
-        events.append((exit_time, -1, -premium, -risk_budget))
+        events.append(
+            (entry, 1, max(0.0, float(entry_price) * quantity), risk_budget)
+        )
+        for exit_event in _position_exit_events(
+            record,
+            session_end=session_end,
+        ):
+            release = max(
+                0.0,
+                float(entry_price) * int(exit_event["quantity"]),
+            )
+            is_final = bool(exit_event["is_final"])
+            # Partial exits release premium without closing the position slot.
+            events.append((
+                exit_event["timestamp"],
+                -1 if is_final else 0,
+                -release,
+                -risk_budget if is_final else 0.0,
+            ))
 
     concurrent = 0
     premium = 0.0
@@ -158,10 +465,9 @@ def _capital_utilization(
     session_start: datetime,
     session_end: datetime,
 ) -> tuple[list[dict[str, Any]], float]:
-    events: list[tuple[datetime, int, float, str]] = []
+    events: list[tuple[datetime, int, float, str, str]] = []
     for record in records:
         entry = max(session_start, record.simulated_entry_timestamp)
-        exit_time = min(session_end, record.exit_timestamp or session_end)
         quantity = int(record.replay_quantity or 0)
         entry_price = (
             record.simulated_entry_fill_price
@@ -170,10 +476,37 @@ def _capital_utilization(
             or 0.0
         )
         premium = max(0.0, float(entry_price) * quantity)
-        if exit_time <= entry:
+        if quantity <= 0:
             continue
-        events.append((entry, 1, premium, record.replay_signal_id))
-        events.append((exit_time, -1, -premium, record.replay_signal_id))
+        events.append((
+            entry,
+            1,
+            premium,
+            record.replay_signal_id,
+            "ENTRY",
+        ))
+        for exit_event in _position_exit_events(
+            record,
+            session_end=session_end,
+        ):
+            timestamp = min(
+                session_end,
+                max(session_start, exit_event["timestamp"]),
+            )
+            if timestamp < entry:
+                continue
+            release = max(
+                0.0,
+                float(entry_price) * int(exit_event["quantity"]),
+            )
+            is_final = bool(exit_event["is_final"])
+            events.append((
+                timestamp,
+                -1 if is_final else 0,
+                -release,
+                record.replay_signal_id,
+                "EXIT" if is_final else "PARTIAL_EXIT",
+            ))
 
     ordered = sorted(events, key=lambda item: (item[0], item[1], item[3]))
     curve: list[dict[str, Any]] = [{
@@ -187,7 +520,7 @@ def _capital_utilization(
     active = 0
     weighted_pct_minutes = 0.0
     previous = session_start
-    for timestamp, direction, delta, signal_id in ordered:
+    for timestamp, direction, delta, signal_id, event_name in ordered:
         bounded = min(max(timestamp, session_start), session_end)
         minutes = max(0.0, (bounded - previous).total_seconds() / 60.0)
         current_pct = (
@@ -203,7 +536,7 @@ def _capital_utilization(
                 max(0.0, committed) / starting_equity * 100, 4
             ) if starting_equity > 0 else 0.0,
             "active_positions": max(0, active),
-            "event": "ENTRY" if direction > 0 else "EXIT",
+            "event": event_name,
             "signal_id": signal_id,
         })
         previous = bounded
@@ -283,25 +616,56 @@ def build_portfolio_metrics(
         "cumulative_r": 0.0,
         "event": "SESSION_START",
     }]
-    cumulative_pnl = 0.0
-    cumulative_r = 0.0
+    chronological_pnl_events: list[dict[str, Any]] = []
     if pnl_complete:
         for record in resolved:
-            cumulative_pnl += float(record.simulated_net_pnl or 0.0)
-            cumulative_r += float(record.realized_r or 0.0)
-            equity_curve.append({
-                "timestamp": (
-                    record.exit_timestamp or session_end
-                ).isoformat(),
-                "equity": round(starting_equity + cumulative_pnl, 2),
-                "cumulative_net_pnl": round(cumulative_pnl, 2),
-                "cumulative_r": round(cumulative_r, 4),
-                "event": "TRADE_EXIT",
-                "strategy": record.strategy_id,
-                "signal_id": record.replay_signal_id,
-            })
+            for event in _execution_pnl_events(
+                record,
+                session_end=session_end,
+            ):
+                chronological_pnl_events.append({
+                    **event,
+                    "strategy": record.strategy_id,
+                    "signal_id": record.replay_signal_id,
+                })
+        chronological_pnl_events.sort(
+            key=lambda item: (
+                item["timestamp"],
+                item["signal_id"],
+                item["event"],
+            )
+        )
 
-    pnl_drawdown = _drawdown(net_values) if pnl_complete else None
+    cumulative_pnl = 0.0
+    cumulative_r = 0.0
+    for event in chronological_pnl_events:
+        cumulative_pnl += float(event["net_pnl"])
+        cumulative_r += float(event["realized_r_delta"])
+        equity_curve.append({
+            "timestamp": event["timestamp"].isoformat(),
+            "equity": round(starting_equity + cumulative_pnl, 2),
+            "cumulative_net_pnl": round(cumulative_pnl, 2),
+            "cumulative_r": round(cumulative_r, 4),
+            "event": event["event"],
+            "strategy": event["strategy"],
+            "signal_id": event["signal_id"],
+            "quantity": event["quantity"],
+            "gross_pnl": event["gross_pnl"],
+            "allocated_transaction_costs": (
+                event["allocated_transaction_costs"]
+            ),
+            "net_pnl": event["net_pnl"],
+            "reason": event["reason"],
+        })
+
+    pnl_drawdown = (
+        _drawdown(
+            float(event["net_pnl"])
+            for event in chronological_pnl_events
+        )
+        if pnl_complete
+        else None
+    )
     drawdown_pct = (
         round((float(pnl_drawdown) / starting_equity) * 100, 4)
         if pnl_drawdown is not None and starting_equity > 0
@@ -387,7 +751,7 @@ def build_portfolio_metrics(
             "ESTIMATED_EXECUTABLE_OPTION_FILLS_WITH_UNDERLYING_R_LIFECYCLES"
         ),
         calculation_basis=(
-            "CHRONOLOGICAL_ACCEPTED_ENTRIES_AND_RESOLVED_EXITS"
+            "CHRONOLOGICAL_ACCEPTED_ENTRIES_AND_EXECUTION_EXIT_LEGS"
         ),
         available=True,
         lifecycle_complete=lifecycle_complete,

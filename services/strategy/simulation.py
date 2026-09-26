@@ -67,6 +67,8 @@ from services.strategy.replay_contract_selection import (
 )
 from services.strategy.replay_execution import ChronologicalReplayExecutor
 from services.strategy.replay_execution_model import (
+    estimate_fill,
+    estimate_multi_exit_execution,
     estimate_round_trip_execution,
 )
 from services.strategy.replay_lifecycle import (
@@ -156,10 +158,7 @@ class SimulationEngine:
         selection: ReplayContractSelectionDecision | None,
         recorder: ReplayManifestRecorder,
     ) -> None:
-        if (
-            record.lifecycle_status != "RESOLVED"
-            or record.exit_timestamp is None
-        ):
+        if record.lifecycle_status != "RESOLVED" or record.exit_timestamp is None:
             return
         instrument_id = str(
             record.sizing_contract_instrument_id
@@ -167,6 +166,8 @@ class SimulationEngine:
             or ""
         )
         quantity = int(record.replay_quantity or 0)
+        lot_size = int(record.sizing_contract_lot_size or record.option_lot_size or 0)
+        lots = int(record.replay_lots or 0)
         if not instrument_id or quantity <= 0:
             record.option_data_quality_reason = (
                 "Historical selected contract or replay quantity unavailable"
@@ -179,41 +180,85 @@ class SimulationEngine:
         record.option_strike = record.sizing_contract_strike
         record.option_lot_size = record.sizing_contract_lot_size
 
+        # PositionManager records the authoritative T1 decision timestamp using
+        # a one-lot lifecycle surrogate. Map that decision onto the historical
+        # replay-sized position without changing lifecycle state/thresholds.
+        t1_event = next(
+            (
+                event for event in record.events
+                if event.event in {"T1_PARTIAL_EXIT", "T1_REACHED_NO_PARTIAL_ONE_LOT"}
+                and event.timestamp <= record.exit_timestamp
+            ),
+            None,
+        )
+        exit_plan: list[tuple[int, datetime, str]] = []
+        if t1_event is not None and lots >= 2 and lot_size > 0:
+            partial_lots = lots // 2
+            partial_quantity = partial_lots * lot_size
+            if 0 < partial_quantity < quantity:
+                exit_plan.append(
+                    (partial_quantity, t1_event.timestamp, "T1_PARTIAL_EXIT")
+                )
+        remaining_quantity = quantity - sum(leg[0] for leg in exit_plan)
+        if remaining_quantity <= 0:
+            raise RuntimeError(
+                f"Replay exit quantities do not conserve entry quantity for {record.replay_signal_id}"
+            )
+        exit_plan.append(
+            (remaining_quantity, record.exit_timestamp, "FINAL_EXIT")
+        )
+        if sum(leg[0] for leg in exit_plan) != quantity:
+            raise RuntimeError(
+                f"Replay exit quantities do not conserve entry quantity for {record.replay_signal_id}"
+            )
+
         mark_entry = await provider.completed_mark_evidence(
             instrument_id=instrument_id,
             event_time=record.simulated_entry_timestamp,
         )
-        mark_exit = await provider.completed_mark_evidence(
-            instrument_id=instrument_id,
-            event_time=record.exit_timestamp,
-        )
+        mark_exit_legs = [
+            (
+                leg_quantity,
+                await provider.completed_mark_evidence(
+                    instrument_id=instrument_id,
+                    event_time=event_time,
+                ),
+                event_time,
+                reason,
+            )
+            for leg_quantity, event_time, reason in exit_plan
+        ]
         mark_risk = risk_config.model_copy(
             update={"paper_slippage_points": 0.0}
         )
-        mark_round_trip = estimate_round_trip_execution(
+        mark_execution = estimate_multi_exit_execution(
             entry_evidence=mark_entry,
-            exit_evidence=mark_exit,
+            exit_legs=[
+                (leg_quantity, evidence)
+                for leg_quantity, evidence, _, _ in mark_exit_legs
+            ],
             quantity=quantity,
             risk_config=mark_risk,
         )
-        if (
+        mark_prices_available = (
             mark_entry.mark_price is not None
-            and mark_exit.mark_price is not None
-            and mark_round_trip.gross_execution_pnl is not None
-        ):
-            record.option_entry_price = round(
-                float(mark_entry.mark_price),
-                2,
+            and all(
+                evidence.mark_price is not None
+                for _, evidence, _, _ in mark_exit_legs
             )
+        )
+        if mark_prices_available and mark_execution.gross_execution_pnl is not None:
+            record.option_entry_price = round(float(mark_entry.mark_price), 2)
             record.option_exit_price = round(
-                float(mark_exit.mark_price),
+                sum(
+                    float(evidence.mark_price) * leg_quantity
+                    for leg_quantity, evidence, _, _ in mark_exit_legs
+                ) / quantity,
                 2,
             )
-            record.option_gross_pnl = mark_round_trip.gross_execution_pnl
-            record.option_transaction_costs = (
-                mark_round_trip.transaction_costs
-            )
-            record.option_net_pnl = mark_round_trip.net_execution_pnl
+            record.option_gross_pnl = mark_execution.gross_execution_pnl
+            record.option_transaction_costs = mark_execution.transaction_costs
+            record.option_net_pnl = mark_execution.net_execution_pnl
             record.option_price_source = (
                 "HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARK"
             )
@@ -222,7 +267,7 @@ class SimulationEngine:
         else:
             record.option_data_status = "UNAVAILABLE"
             record.option_data_quality_reason = (
-                "Historical option completed mark unavailable at entry or exit"
+                "Historical option completed mark unavailable for entry or an exit leg"
             )
 
         entry_evidence = await provider.price_evidence(
@@ -232,31 +277,75 @@ class SimulationEngine:
             side="BUY",
             selection=selection,
         )
-        exit_evidence = await provider.price_evidence(
-            instrument_id=instrument_id,
-            signal_id=record.replay_signal_id,
-            event_time=record.exit_timestamp,
-            side="SELL",
-            selection=None,
-        )
-        execution = estimate_round_trip_execution(
+        execution_exit_legs = [
+            (
+                leg_quantity,
+                await provider.price_evidence(
+                    instrument_id=instrument_id,
+                    signal_id=record.replay_signal_id,
+                    event_time=event_time,
+                    side="SELL",
+                    selection=None,
+                ),
+                event_time,
+                reason,
+            )
+            for leg_quantity, event_time, reason in exit_plan
+        ]
+        execution = estimate_multi_exit_execution(
             entry_evidence=entry_evidence,
-            exit_evidence=exit_evidence,
+            exit_legs=[
+                (leg_quantity, evidence)
+                for leg_quantity, evidence, _, _ in execution_exit_legs
+            ],
             quantity=quantity,
             risk_config=risk_config,
         )
+        exit_fills = [
+            (
+                leg_quantity,
+                estimate_fill(evidence, side="SELL", risk_config=risk_config),
+                event_time,
+                reason,
+            )
+            for leg_quantity, evidence, event_time, reason in execution_exit_legs
+        ]
+        weighted_exit_fill = (
+            round(
+                sum(
+                    float(fill.executable_price) * leg_quantity
+                    for leg_quantity, fill, _, _ in exit_fills
+                ) / quantity,
+                2,
+            )
+            if all(fill.executable_price is not None for _, fill, _, _ in exit_fills)
+            else None
+        )
+        all_quote_equivalent = (
+            execution.entry.executable_quote_equivalent
+            and all(
+                fill.executable_quote_equivalent
+                for _, fill, _, _ in exit_fills
+            )
+        )
+        multi_leg = len(exit_fills) > 1
         recorder.set_execution_estimate(
             record.replay_signal_id,
             entry_fill_price=execution.entry.executable_price,
-            exit_fill_price=execution.exit.executable_price,
+            exit_fill_price=weighted_exit_fill,
             entry_method=execution.entry.method,
-            exit_method=execution.exit.method,
-            entry_basis=execution.entry.evidence_basis,
-            exit_basis=execution.exit.evidence_basis,
-            quote_equivalent=(
-                execution.entry.executable_quote_equivalent
-                and execution.exit.executable_quote_equivalent
+            exit_method=(
+                "MULTI_LEG_WEIGHTED_EXIT"
+                if multi_leg
+                else execution.exit.method
             ),
+            entry_basis=execution.entry.evidence_basis,
+            exit_basis=(
+                "MULTI_LEG_EXIT_EVIDENCE"
+                if multi_leg
+                else execution.exit.evidence_basis
+            ),
+            quote_equivalent=all_quote_equivalent,
             gross_pnl=execution.gross_execution_pnl,
             slippage_cost=execution.slippage_cost,
             transaction_costs=execution.transaction_costs,
@@ -268,17 +357,24 @@ class SimulationEngine:
                 "gst": execution.gst,
                 "sebi_charges": execution.sebi_charges,
                 "stamp_duty": execution.stamp_duty,
-                "cost_assumption_version": (
-                    execution.cost_assumption_version
-                ),
+                "cost_assumption_version": execution.cost_assumption_version,
+                "order_count": 1 + len(exit_fills),
             },
             provenance={
                 "entry": execution.entry.to_dict(),
-                "exit": execution.exit.to_dict(),
-                "partial_option_exits_modeled": False,
-                "limitation": (
-                    "Execution estimate currently models one option entry and "
-                    "the final option exit; partial option exits remain deferred."
+                "exit_legs": [
+                    {
+                        "quantity": leg_quantity,
+                        "timestamp": event_time.isoformat(),
+                        "reason": reason,
+                        "fill": fill.to_dict(),
+                    }
+                    for leg_quantity, fill, event_time, reason in exit_fills
+                ],
+                "partial_option_exits_modeled": multi_leg,
+                "quantity_conserved": (
+                    sum(leg_quantity for leg_quantity, _, _, _ in exit_fills)
+                    == quantity
                 ),
             },
         )
@@ -299,19 +395,26 @@ class SimulationEngine:
                 "mark_price": mark_entry.mark_price,
                 "freshness_seconds": mark_entry.freshness_seconds,
             },
-            "mark_exit": {
-                "basis": mark_exit.basis,
-                "source": mark_exit.source,
-                "evidence_timestamp": (
-                    mark_exit.evidence_timestamp.isoformat()
-                    if mark_exit.evidence_timestamp
-                    else None
-                ),
-                "mark_price": mark_exit.mark_price,
-                "freshness_seconds": mark_exit.freshness_seconds,
-            },
+            "mark_exit_legs": [
+                {
+                    "quantity": leg_quantity,
+                    "timestamp": event_time.isoformat(),
+                    "reason": reason,
+                    "basis": evidence.basis,
+                    "source": evidence.source,
+                    "evidence_timestamp": (
+                        evidence.evidence_timestamp.isoformat()
+                        if evidence.evidence_timestamp
+                        else None
+                    ),
+                    "mark_price": evidence.mark_price,
+                    "freshness_seconds": evidence.freshness_seconds,
+                }
+                for leg_quantity, evidence, event_time, reason in mark_exit_legs
+            ],
             "execution_estimate": execution.to_dict(),
-            "bid_ask_available_for_both_fills": (
+            "partial_option_exits_modeled": multi_leg,
+            "bid_ask_available_for_all_fills": (
                 record.simulated_fill_quote_equivalent
             ),
             "historical_marks_are_executable_fills": False,
@@ -2005,7 +2108,7 @@ class SimulationEngine:
                     "point_in_time_bid_ask_plus_slippage_when_available_"
                     "else_completed_mark_plus_slippage_estimate"
                 ),
-                "partial_option_exits_modeled": False,
+                "partial_option_exits_modeled": True,
             }
         else:
             target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -2248,8 +2351,9 @@ class SimulationEngine:
                 "production selector only for exact point-in-time signal snapshots; "
                 "otherwise it is explicitly APPROXIMATED_SELECTION. Estimated fills "
                 "use point-in-time bid/ask plus configured slippage when available, "
-                "otherwise completed-mark +/- slippage. Partial option exits are not "
-                "modeled in this increment."
+                "otherwise completed-mark +/- slippage. Partial option exits are "
+                "modeled as quantity-conserving execution legs using the recorded "
+                "lifecycle decision timestamp and available historical fill evidence."
             )
         elif option_complete:
             limitation = (

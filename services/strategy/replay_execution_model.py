@@ -270,3 +270,114 @@ def estimate_round_trip_execution(
         net_execution_pnl=net,
         cost_assumption_version=risk_config.paper_cost_assumption_version,
     )
+
+
+def estimate_multi_exit_execution(
+    *,
+    entry_evidence: ReplayPriceEvidence,
+    exit_legs: list[tuple[int, ReplayPriceEvidence]],
+    quantity: int,
+    risk_config: RiskConfig,
+) -> ReplayRoundTripExecution:
+    """Estimate one buy followed by one or more quantity-conserving sell legs."""
+    entry = estimate_fill(entry_evidence, side="BUY", risk_config=risk_config)
+    exits = [
+        (int(leg_quantity), estimate_fill(evidence, side="SELL", risk_config=risk_config))
+        for leg_quantity, evidence in exit_legs
+        if int(leg_quantity) > 0
+    ]
+    final_exit = exits[-1][1] if exits else estimate_fill(
+        ReplayPriceEvidence(
+            status="UNAVAILABLE",
+            basis="NO_EXIT_LEGS",
+            source="REPLAY",
+            event_timestamp=entry_evidence.event_timestamp,
+            evidence_timestamp=None,
+            reason="NO_EXIT_LEGS",
+        ),
+        side="SELL",
+        risk_config=risk_config,
+    )
+    valid = (
+        quantity > 0
+        and sum(leg_quantity for leg_quantity, _ in exits) == quantity
+        and entry.executable_price is not None
+        and entry.raw_reference_price is not None
+        and exits
+        and all(
+            fill.executable_price is not None
+            and fill.raw_reference_price is not None
+            for _, fill in exits
+        )
+    )
+    if not valid:
+        return ReplayRoundTripExecution(
+            entry=entry,
+            exit=final_exit,
+            quantity=quantity,
+            gross_execution_pnl=None,
+            slippage_cost=None,
+            brokerage=None,
+            exchange_charges=None,
+            stt=None,
+            gst=None,
+            sebi_charges=None,
+            stamp_duty=None,
+            transaction_costs=None,
+            net_execution_pnl=None,
+            cost_assumption_version=risk_config.paper_cost_assumption_version,
+        )
+
+    entry_fill = float(entry.executable_price)
+    entry_raw = float(entry.raw_reference_price)
+    gross = round(sum(
+        (float(fill.executable_price) - entry_fill) * leg_quantity
+        for leg_quantity, fill in exits
+    ), 2)
+    slippage_cost = round(
+        abs(entry_fill - entry_raw) * quantity
+        + sum(
+            abs(float(fill.raw_reference_price) - float(fill.executable_price))
+            * leg_quantity
+            for leg_quantity, fill in exits
+        ),
+        2,
+    )
+    buy_turnover = entry_fill * quantity
+    sell_turnover = sum(
+        float(fill.executable_price) * leg_quantity
+        for leg_quantity, fill in exits
+    )
+    turnover = buy_turnover + sell_turnover
+    brokerage = round(
+        (1 + len(exits)) * risk_config.paper_brokerage_per_order,
+        2,
+    )
+    exchange = round(turnover * risk_config.paper_exchange_charge_rate, 2)
+    stt = round(sell_turnover * risk_config.paper_stt_sell_rate, 2)
+    sebi = round(turnover * risk_config.paper_sebi_charge_rate, 2)
+    stamp = round(buy_turnover * risk_config.paper_stamp_buy_rate, 2)
+    gst = round(
+        (brokerage + exchange + sebi) * risk_config.paper_gst_rate,
+        2,
+    )
+    transaction_costs = round(
+        brokerage + exchange + stt + gst + sebi + stamp,
+        2,
+    )
+    return ReplayRoundTripExecution(
+        entry=entry,
+        exit=final_exit,
+        quantity=quantity,
+        gross_execution_pnl=gross,
+        slippage_cost=slippage_cost,
+        brokerage=brokerage,
+        exchange_charges=exchange,
+        stt=stt,
+        gst=gst,
+        sebi_charges=sebi,
+        stamp_duty=stamp,
+        transaction_costs=transaction_costs,
+        net_execution_pnl=round(gross - transaction_costs, 2),
+        cost_assumption_version=risk_config.paper_cost_assumption_version,
+    )
