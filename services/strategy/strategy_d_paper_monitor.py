@@ -11,7 +11,6 @@ No broker order is ever created by this monitor itself.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
 import logging
 from typing import Any, Sequence
 
@@ -25,6 +24,7 @@ from services.historical.strategy_d_candidate_manifest import (
 )
 from services.strategy.features import FeatureEngine
 from services.strategy.models import AutoTradingMode, DecisionLogEntry, TradeDirection
+from services.strategy.strategies.candidate_runtime import strategy_d_signal_id
 from services.strategy.strategies.sr_momentum_breakout import (
     REAL_SOURCES,
     PivotLevels,
@@ -55,17 +55,7 @@ def _aware(value: Any) -> datetime | None:
 
 
 def _signal_id(signal: StrategyDSignal) -> str:
-    payload = "|".join(
-        (
-            signal.strategy_id,
-            signal.timestamp.isoformat(),
-            signal.option_type,
-            signal.breakout_level_name,
-            f"{signal.entry_price:.6f}",
-        )
-    )
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
-    return f"STRAT-D-{digest}"
+    return strategy_d_signal_id(signal)
 
 
 def _signal_from_payload(payload: dict[str, Any]) -> StrategyDSignal:
