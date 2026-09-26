@@ -1282,8 +1282,44 @@ export interface ReplayPortfolioMetricsData {
   price_basis: string;
   calculation_basis: string;
   available: boolean;
+  lifecycle_complete: boolean;
+  pnl_complete: boolean;
+  accepted_entries: number;
+  resolved_entries: number;
+  starting_equity: number | null;
+  ending_equity: number | null;
+  gross_executable_pnl: number | null;
+  net_executable_pnl: number | null;
   max_drawdown_pnl: number | null;
-  limitation: string;
+  max_drawdown_pct: number | null;
+  max_drawdown_r: number | null;
+  profit_factor_pnl: number | null;
+  expectancy_pnl: number | null;
+  expectancy_r: number | null;
+  max_consecutive_wins: number;
+  max_consecutive_losses: number;
+  exposure_minutes: number;
+  exposure_pct: number;
+  max_concurrent_positions: number;
+  peak_premium_committed: number;
+  peak_premium_utilization_pct: number;
+  peak_risk_budget_committed: number;
+  peak_risk_budget_utilization_pct: number;
+  rejected_opportunities: number;
+  risk_gate_block_counts: Record<string, number>;
+  daily_entries: number;
+  daily_entries_by_strategy: Record<string, number>;
+  strategy_realized_r: Record<string, number>;
+  equity_curve: Array<{
+    timestamp: string;
+    equity: number;
+    cumulative_net_pnl: number;
+    cumulative_r: number;
+    event: string;
+    strategy?: string;
+    signal_id?: string;
+  }>;
+  limitation: string | null;
 }
 
 export interface ReplayDataQualityData {
@@ -1303,6 +1339,8 @@ export interface SimulationResultData {
   replay_mode: "POSITION_MANAGER_REPLAY" | "EXECUTION_PARITY" | string;
   limitation?: string;
   session_date: string;
+  run_id?: string | null;
+  reproducibility?: Record<string, any>;
   signal_metrics: ReplaySignalMetricsData;
   underlying_lifecycle_metrics: ReplayUnderlyingLifecycleMetricsData;
   option_mark_metrics: ReplayOptionMarkMetricsData;
@@ -1352,6 +1390,71 @@ export async function runStrategySimulation(req: SimulationRequestData = {}): Pr
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || "Failed to run strategy simulation");
+  }
+  return res.json();
+}
+
+export interface ReplayRunSummaryData {
+  run_id: string;
+  created_at: string;
+  session_date: string;
+  replay_mode: string;
+  configuration_fingerprint?: string | null;
+  data_fingerprint?: string | null;
+  resolved_trades: number;
+  total_realized_r: number;
+  net_estimated_executable_pnl?: number | null;
+  max_drawdown_pnl?: number | null;
+}
+
+export interface ReplayComparisonMetricData {
+  baseline: number | null;
+  candidate: number | null;
+  delta: number | null;
+}
+
+export interface ReplayComparisonData {
+  baseline_run_id: string | null;
+  candidate_run_id: string | null;
+  identity: Record<string, boolean>;
+  metrics: Record<string, ReplayComparisonMetricData>;
+  strategy_realized_r: Record<string, ReplayComparisonMetricData>;
+  provenance: {
+    baseline: Record<string, any>;
+    candidate: Record<string, any>;
+  };
+}
+
+export async function fetchReplayRuns(limit: number = 20): Promise<ReplayRunSummaryData[]> {
+  const res = await fetch(API_BASE + "/strategies/simulate/runs?limit=" + limit);
+  if (!res.ok) throw new Error("Failed to fetch replay run history");
+  const data = await res.json();
+  return Array.isArray(data.runs) ? data.runs : [];
+}
+
+export async function fetchReplayRun(runId: string): Promise<SimulationResultData> {
+  const res = await fetch(
+    API_BASE + "/strategies/simulate/runs/" + encodeURIComponent(runId),
+  );
+  if (!res.ok) throw new Error("Failed to fetch replay run");
+  return res.json();
+}
+
+export async function compareReplayRuns(
+  baselineRunId: string,
+  candidateRunId: string,
+): Promise<ReplayComparisonData> {
+  const res = await fetch(API_BASE + "/strategies/simulate/compare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      baseline_run_id: baselineRunId,
+      candidate_run_id: candidateRunId,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to compare replay runs");
   }
   return res.json();
 }

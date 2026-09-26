@@ -78,6 +78,10 @@ from services.strategy.replay_registry import (
     ReplayStrategyRegistry,
 )
 from services.strategy.replay_sizing import calculate_replay_sizing
+from services.strategy.replay_analytics import (
+    build_portfolio_metrics,
+    build_replay_run_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2295,14 +2299,27 @@ class SimulationEngine:
             ],
         )
         portfolio_metrics = (
-            ReplayPortfolioMetrics(
-                calculation_basis=(
-                    "CHRONOLOGICAL_EXECUTION_AVAILABLE_PORTFOLIO_ANALYTICS_NOT_IMPLEMENTED"
-                ),
-                limitation=(
-                    "Execution-parity replay is chronological, but portfolio equity, "
-                    "capital utilisation and portfolio drawdown reporting are deferred "
-                    "to the portfolio-analytics increment."
+            build_portfolio_metrics(
+                replay_manifest_recorder.records(),
+                starting_equity=effective_risk_config.account_equity,
+                session_start=datetime(
+                    target_session_date.year,
+                    target_session_date.month,
+                    target_session_date.day,
+                    9,
+                    15,
+                    tzinfo=IST,
+                ).astimezone(timezone.utc),
+                session_end=datetime(
+                    target_session_date.year,
+                    target_session_date.month,
+                    target_session_date.day,
+                    15,
+                    30,
+                    tzinfo=IST,
+                ).astimezone(timezone.utc),
+                execution_metadata=(
+                    replay_metadata.get("execution_parity") or {}
                 ),
             )
             if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
@@ -2321,6 +2338,32 @@ class SimulationEngine:
             execution_fill_method_counts=dict(fill_method_counts),
         )
 
+        reproducibility = build_replay_run_identity(
+            session_date=date_str,
+            replay_mode=(
+                "EXECUTION_PARITY"
+                if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+                else "POSITION_MANAGER_REPLAY"
+            ),
+            configuration_fingerprint=config_hash,
+            data_fingerprint=data_snapshot.dataset_hash,
+            configuration_snapshot=config_snapshot.model_dump(mode="json"),
+            cost_model_version=effective_risk_config.paper_cost_assumption_version,
+            contract_selection_policy=(
+                "PRODUCTION_CONTRACT_SELECTOR_WITH_EXPLICIT_APPROXIMATION"
+                if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+                else "RESEARCH_REPLAY_CONTRACT_APPROXIMATION"
+            ),
+            historical_source=request.historical_source.value,
+            contract_selection_evidence=(
+                data_quality.contract_selection_evidence_counts
+            ),
+            execution_fill_methods=(
+                data_quality.execution_fill_method_counts
+            ),
+        )
+        replay_metadata["reproducibility"] = reproducibility
+
         return SimulationResult(
             replay_mode=(
                 "EXECUTION_PARITY"
@@ -2329,6 +2372,8 @@ class SimulationEngine:
             ),
             limitation=limitation,
             session_date=date_str,
+            run_id=reproducibility["run_id"],
+            reproducibility=reproducibility,
             signal_metrics=signal_metrics,
             underlying_lifecycle_metrics=underlying_lifecycle_metrics,
             option_mark_metrics=option_mark_metrics,

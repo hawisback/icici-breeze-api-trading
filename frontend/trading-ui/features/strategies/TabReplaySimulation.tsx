@@ -25,9 +25,13 @@ import {
   Zap,
 } from "lucide-react";
 import {
+  ReplayComparisonData,
+  ReplayRunSummaryData,
   SimulatedTradeRecordData,
   SimulationBarSnapshotData,
   SimulationResultData,
+  compareReplayRuns,
+  fetchReplayRuns,
   fetchSimulationAvailableDates,
   runStrategySimulation,
 } from "../../lib/api";
@@ -50,6 +54,10 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [result, setResult] = useState<SimulationResultData | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [replayRuns, setReplayRuns] = useState<ReplayRunSummaryData[]>([]);
+  const [comparisonBaselineId, setComparisonBaselineId] = useState<string>("");
+  const [comparison, setComparison] = useState<ReplayComparisonData | null>(null);
+  const [isComparing, setIsComparing] = useState<boolean>(false);
 
   // Timeline scrubber state
   const [selectedBarIndex, setSelectedBarIndex] = useState<number>(0);
@@ -67,8 +75,29 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
 
   useEffect(() => {
     setResult(null);
+    setComparison(null);
     loadDates();
+    loadReplayRuns();
   }, [historicalSource]);
+
+  const loadReplayRuns = async (candidateRunId?: string) => {
+    try {
+      const runs = await fetchReplayRuns(30);
+      setReplayRuns(runs);
+      setComparisonBaselineId((current) => {
+        if (
+          current
+          && current !== candidateRunId
+          && runs.some((run) => run.run_id === current)
+        ) {
+          return current;
+        }
+        return runs.find((run) => run.run_id !== candidateRunId)?.run_id || "";
+      });
+    } catch (err) {
+      console.error("Failed to load replay run history", err);
+    }
+  };
 
   const loadDates = async () => {
     try {
@@ -108,11 +137,34 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
           : {}),
       });
       setResult(res);
+      setComparison(null);
       setSelectedBarIndex(0);
+      await loadReplayRuns(res.run_id || undefined);
     } catch (err: any) {
       setErrorMsg(err.message || "Simulation failed to run.");
     } finally {
       setIsRunning(false);
+    }
+  };
+
+  const handleCompareRuns = async () => {
+    if (
+      !comparisonBaselineId
+      || !result?.run_id
+      || comparisonBaselineId === result.run_id
+    ) {
+      return;
+    }
+    setIsComparing(true);
+    setErrorMsg(null);
+    try {
+      setComparison(
+        await compareReplayRuns(comparisonBaselineId, result.run_id),
+      );
+    } catch (err: any) {
+      setErrorMsg(err.message || "Replay comparison failed.");
+    } finally {
+      setIsComparing(false);
     }
   };
 
@@ -129,6 +181,12 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const executionSlippage = result?.option_mark_metrics?.estimated_slippage_costs;
   const executionCosts = result?.option_mark_metrics?.estimated_execution_transaction_costs;
   const hasExecutionPnl = executionNetPnl !== null && executionNetPnl !== undefined;
+  const portfolio = result?.portfolio_metrics;
+  const reproducibility = result?.reproducibility || {};
+  const comparisonMetrics = Object.entries(comparison?.metrics || {});
+  const comparisonStrategyRows = Object.entries(
+    comparison?.strategy_realized_r || {},
+  );
   const replayDiagnostics = result?.replay_metadata?.strategy_a_replay_diagnostics as
     | {
         directional_evaluations?: number;
@@ -225,6 +283,21 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
         <span>
           Replay mode: <span className="font-mono font-bold text-indigo-300">{(result?.replay_metadata?.requested_replay_mode as string | undefined) || replayMode}</span>
         </span>
+        {result?.run_id && (
+          <span>
+            Run: <span className="font-mono font-bold text-slate-200">{result.run_id}</span>
+          </span>
+        )}
+        {reproducibility.configuration_fingerprint && (
+          <span title={String(reproducibility.configuration_fingerprint)}>
+            Config: <span className="font-mono text-slate-300">{String(reproducibility.configuration_fingerprint).slice(0, 10)}</span>
+          </span>
+        )}
+        {reproducibility.data_fingerprint && (
+          <span title={String(reproducibility.data_fingerprint)}>
+            Data: <span className="font-mono text-slate-300">{String(reproducibility.data_fingerprint).slice(0, 10)}</span>
+          </span>
+        )}
       </div>
       {/* 1. Simulation Control & Session Selector */}
       <div className="bg-slate-900/95 border border-slate-800 rounded-xl p-5 shadow-xl">
@@ -736,6 +809,181 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
             </div>
           </div>
 
+          {replayMode === "EXECUTION_PARITY" && portfolio?.available && (
+            <div className="bg-slate-900/95 border border-slate-800 rounded-xl p-5 shadow-xl space-y-4">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider">
+                    Chronological Portfolio Analytics
+                  </h3>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Account metrics use accepted chronological entries and resolved estimated executable exits. P&L metrics fail closed when any resolved trade lacks execution economics.
+                  </p>
+                </div>
+                <div className="text-[10px] font-mono text-slate-400">
+                  {portfolio.lifecycle_complete ? "LIFECYCLE COMPLETE" : "LIFECYCLE INCOMPLETE"} · {portfolio.pnl_complete ? "P&L COMPLETE" : "P&L INCOMPLETE"} · {portfolio.resolved_entries}/{portfolio.accepted_entries} resolved
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500">Ending Equity</div>
+                  <div className="mt-1 font-mono font-bold text-slate-200">{formatAmount(portfolio.ending_equity)}</div>
+                  <div className="text-[10px] text-slate-500">Start {formatAmount(portfolio.starting_equity)}</div>
+                </div>
+                <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500">Portfolio Drawdown</div>
+                  <div className="mt-1 font-mono font-bold text-slate-200">{formatAmount(portfolio.max_drawdown_pnl)}</div>
+                  <div className="text-[10px] text-slate-500">
+                    {portfolio.max_drawdown_pct == null ? "N/A" : String(portfolio.max_drawdown_pct) + "%"} · {portfolio.max_drawdown_r == null ? "N/A" : String(portfolio.max_drawdown_r) + "R"}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500">Expectancy</div>
+                  <div className="mt-1 font-mono font-bold text-slate-200">{formatPnl(portfolio.expectancy_pnl)}</div>
+                  <div className="text-[10px] text-slate-500">{portfolio.expectancy_r == null ? "N/A" : String(portfolio.expectancy_r) + "R / trade"} · PF {portfolio.profit_factor_pnl ?? "N/A"}</div>
+                  <div className="text-[10px] text-slate-500">Streaks: {portfolio.max_consecutive_wins}W / {portfolio.max_consecutive_losses}L</div>
+                </div>
+                <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500">Exposure & Utilization</div>
+                  <div className="mt-1 font-mono font-bold text-slate-200">{portfolio.exposure_pct}%</div>
+                  <div className="text-[10px] text-slate-500">
+                    {portfolio.exposure_minutes}m · max {portfolio.max_concurrent_positions} concurrent
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 text-[11px]">
+                <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Capital / Risk Budget</div>
+                  <div className="text-slate-300">Peak premium: {formatAmount(portfolio.peak_premium_committed)} ({portfolio.peak_premium_utilization_pct}%)</div>
+                  <div className="text-slate-300">Peak risk budget: {formatAmount(portfolio.peak_risk_budget_committed)} ({portfolio.peak_risk_budget_utilization_pct}%)</div>
+                </div>
+                <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Risk Triggers / Rejects</div>
+                  <div className="text-slate-300">Rejected opportunities: {portfolio.rejected_opportunities}</div>
+                  <div className="text-slate-500">
+                    {Object.entries(portfolio.risk_gate_block_counts || {}).length > 0
+                      ? Object.entries(portfolio.risk_gate_block_counts).map(([name, count]) => name + ": " + count).join(" · ")
+                      : "No global risk-gate suppression recorded."}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Strategy Realized R</div>
+                  <div className="text-slate-300">
+                    {Object.entries(portfolio.strategy_realized_r || {}).length > 0
+                      ? Object.entries(portfolio.strategy_realized_r).map(([strategy, value]) => strategy + ": " + value + "R").join(" · ")
+                      : "No resolved strategy R."}
+                  </div>
+                </div>
+              </div>
+              {portfolio.limitation && (
+                <div className="text-[11px] text-amber-300">{portfolio.limitation}</div>
+              )}
+            </div>
+          )}
+
+          {result?.run_id && (
+            <div className="bg-slate-900/95 border border-slate-800 rounded-xl p-5 shadow-xl space-y-3">
+              <div>
+                <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider">Replay Reproducibility & Comparison</h3>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Compare canonical replay metrics against a persisted run. Deltas are descriptive only; no run is ranked or selected as a winner.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-2">
+                <select
+                  value={comparisonBaselineId}
+                  onChange={(event) => {
+                    setComparisonBaselineId(event.target.value);
+                    setComparison(null);
+                  }}
+                  className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200"
+                >
+                  <option value="">Select baseline run</option>
+                  {replayRuns
+                    .filter((run) => run.run_id !== result.run_id)
+                    .map((run) => (
+                      <option key={run.run_id} value={run.run_id}>
+                        {run.session_date} · {run.replay_mode} · {run.run_id}
+                      </option>
+                    ))}
+                </select>
+                <button
+                  onClick={handleCompareRuns}
+                  disabled={!comparisonBaselineId || comparisonBaselineId === result.run_id || isComparing}
+                  className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-xs font-semibold text-cyan-300 disabled:opacity-40"
+                >
+                  {isComparing ? "Comparing..." : "Compare with current run"}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[10px] font-mono text-slate-400">
+                <div>Current: {result.run_id}</div>
+                <div>Cost model: {String(reproducibility.cost_model_version || "N/A")}</div>
+                <div>Run fingerprint: {String(reproducibility.run_fingerprint || "N/A")}</div>
+                <div>Config fingerprint: {String(reproducibility.configuration_fingerprint || "N/A")}</div>
+                <div>Data fingerprint: {String(reproducibility.data_fingerprint || "N/A")}</div>
+                <div>Selection policy: {String(reproducibility.contract_selection_policy || "N/A")}</div>
+                <div>Historical source: {String(reproducibility.historical_source || historicalSource)}</div>
+              </div>
+
+              {(reproducibility.contract_selection_evidence || reproducibility.execution_fill_methods) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[10px] text-slate-400">
+                  <div>
+                    Selection evidence: {Object.entries((reproducibility.contract_selection_evidence || {}) as Record<string, number>)
+                      .map(([name, count]) => name + ": " + count)
+                      .join(" · ") || "none"}
+                  </div>
+                  <div>
+                    Fill evidence: {Object.entries((reproducibility.execution_fill_methods || {}) as Record<string, number>)
+                      .map(([name, count]) => name + ": " + count)
+                      .join(" · ") || "none"}
+                  </div>
+                </div>
+              )}
+
+              {comparison && (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap gap-2 text-[10px]">
+                    {Object.entries(comparison.identity).map(([name, same]) => (
+                      <span key={name} className="rounded border border-slate-700 bg-slate-950/60 px-2 py-1 text-slate-300">
+                        {name.replace(/^same_/, "").replaceAll("_", " ")}: {same ? "same" : "different"}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="overflow-x-auto rounded-lg border border-slate-800">
+                    <table className="w-full text-left text-[11px]">
+                      <thead className="bg-slate-950 text-[9px] uppercase tracking-wider text-slate-500">
+                        <tr>
+                          <th className="px-3 py-2">Metric</th>
+                          <th className="px-3 py-2 text-right">Baseline</th>
+                          <th className="px-3 py-2 text-right">Current</th>
+                          <th className="px-3 py-2 text-right">Delta</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800 font-mono text-slate-300">
+                        {comparisonMetrics.map(([name, metric]) => (
+                          <tr key={name}>
+                            <td className="px-3 py-2 font-sans">{name.replaceAll("_", " ")}</td>
+                            <td className="px-3 py-2 text-right">{metric.baseline ?? "N/A"}</td>
+                            <td className="px-3 py-2 text-right">{metric.candidate ?? "N/A"}</td>
+                            <td className="px-3 py-2 text-right">{metric.delta == null ? "N/A" : (metric.delta >= 0 ? "+" : "") + metric.delta}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {comparisonStrategyRows.length > 0 && (
+                    <div className="text-[10px] text-slate-400">
+                      Strategy R deltas: {comparisonStrategyRows.map(([strategy, metric]) => strategy + " " + (metric.delta == null ? "N/A" : (metric.delta >= 0 ? "+" : "") + metric.delta + "R")).join(" · ")}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* 3. Simulated Trades Table */}
           <div className="bg-slate-900/95 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
             <div className="bg-slate-950 px-5 py-3.5 border-b border-slate-800 flex items-center justify-between">
@@ -777,6 +1025,13 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                   </thead>
                   <tbody className="divide-y divide-slate-800/50 font-mono">
                     {trades.map((t) => {
+                      const strategyLabel: Record<string, string> = {
+                        TREND_PULLBACK: "STRAT A",
+                        VOLATILITY_BREAKOUT: "STRAT B",
+                        DI_CONTINUATION: "STRAT C",
+                        SR_MOMENTUM_BREAKOUT: "STRAT D",
+                        PIVOT_VWAP_SCALP: "STRAT E",
+                      };
                       const tradeNetPnl = t.net_pnl;
                       const hasTradeNetPnl = tradeNetPnl !== null && tradeNetPnl !== undefined;
                       const isWin = hasTradeNetPnl && tradeNetPnl > 0;
@@ -795,7 +1050,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                                   : "bg-purple-500/10 text-purple-300 border border-purple-500/30"
                               }`}
                             >
-                              {t.strategy === "TREND_PULLBACK" ? "STRAT A" : "STRAT B"}
+                              {strategyLabel[t.strategy] || t.strategy}
                             </span>
                           </td>
                           <td className="py-3 px-3">

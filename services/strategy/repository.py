@@ -15,6 +15,7 @@ from services.strategy.models import (
     AutoTradingConfig,
     DecisionLogEntry,
     StrategySignal,
+    SimulationResult,
 )
 
 
@@ -213,6 +214,21 @@ class StrategyRepository:
                     PRIMARY KEY (session_date, direction)
                 );
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS strategy_replay_runs (
+                    run_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    session_date TEXT NOT NULL,
+                    replay_mode TEXT NOT NULL,
+                    configuration_fingerprint TEXT,
+                    data_fingerprint TEXT,
+                    result_json TEXT NOT NULL
+                );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_strategy_replay_runs_created "
+                "ON strategy_replay_runs(created_at DESC);"
+            )
 
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS strategy_signals (
@@ -234,6 +250,82 @@ class StrategyRepository:
             if "underlying_entry_price" not in {r["name"] for r in signal_columns}:
                 await conn.execute("ALTER TABLE strategy_signals ADD COLUMN underlying_entry_price REAL")
             await conn.commit()
+
+    async def save_replay_run(self, result: SimulationResult) -> None:
+        if not result.run_id:
+            raise ValueError("Replay result is missing run_id")
+        reproducibility = result.reproducibility or {}
+        created_at = str(
+            reproducibility.get("generated_at") or utc_now().isoformat()
+        )
+        payload = result.model_dump(mode="json")
+        async with self.engine.connect() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO strategy_replay_runs (
+                    run_id, created_at, session_date, replay_mode,
+                    configuration_fingerprint, data_fingerprint, result_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result.run_id,
+                    created_at,
+                    result.session_date,
+                    result.replay_mode,
+                    reproducibility.get("configuration_fingerprint"),
+                    reproducibility.get("data_fingerprint"),
+                    json.dumps(payload, sort_keys=True),
+                ),
+            )
+            await conn.commit()
+
+    async def get_replay_run(self, run_id: str) -> SimulationResult | None:
+        async with self.engine.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT result_json FROM strategy_replay_runs WHERE run_id = ?",
+                (run_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return SimulationResult.model_validate(json.loads(row["result_json"]))
+
+    async def list_replay_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        async with self.engine.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT run_id, created_at, session_date, replay_mode,
+                       configuration_fingerprint, data_fingerprint, result_json
+                FROM strategy_replay_runs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+
+        summaries: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(row["result_json"])
+            lifecycle = payload.get("underlying_lifecycle_metrics") or {}
+            option = payload.get("option_mark_metrics") or {}
+            portfolio = payload.get("portfolio_metrics") or {}
+            summaries.append({
+                "run_id": row["run_id"],
+                "created_at": row["created_at"],
+                "session_date": row["session_date"],
+                "replay_mode": row["replay_mode"],
+                "configuration_fingerprint": row["configuration_fingerprint"],
+                "data_fingerprint": row["data_fingerprint"],
+                "resolved_trades": lifecycle.get("resolved_trades", 0),
+                "total_realized_r": lifecycle.get("total_realized_r", 0.0),
+                "net_estimated_executable_pnl": option.get(
+                    "net_estimated_executable_pnl"
+                ),
+                "max_drawdown_pnl": portfolio.get("max_drawdown_pnl"),
+            })
+        return summaries
 
     async def save_definition(self, definition_id: str, name: str, version: str, description: str) -> None:
         async with self.engine.connect() as conn:
