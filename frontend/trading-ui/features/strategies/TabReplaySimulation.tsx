@@ -961,6 +961,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[10px] font-mono text-slate-400">
                 <div>Current: {result.run_id}</div>
                 <div>Cost model: {String(reproducibility.cost_model_version || "N/A")}</div>
+                <div>Execution model: {String(reproducibility.execution_model_version || "N/A")}</div>
                 <div>Run fingerprint: {String(reproducibility.run_fingerprint || "N/A")}</div>
                 <div>Config fingerprint: {String(reproducibility.configuration_fingerprint || "N/A")}</div>
                 <div>Data fingerprint: {String(reproducibility.data_fingerprint || "N/A")}</div>
