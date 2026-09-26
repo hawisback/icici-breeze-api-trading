@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from statistics import median
@@ -40,6 +40,18 @@ from services.strategy.replay_manifest import (
     ReplayStateSnapshot,
 )
 from services.strategy.replay_stops import evaluate_replay_candle
+from services.historical.strategy_c_shadow_observer import (
+    replay_strategy_c_to_as_of,
+)
+from services.strategy.strategies.pivot_vwap_scalp import (
+    evaluate_strategy_e_lifecycle_bar,
+)
+from services.strategy.strategies.sr_momentum_breakout import (
+    PivotLevels,
+    StrategyDConfig,
+    StrategyDPositionManager,
+    StrategyDSignal,
+)
 
 
 def _direction(value: str) -> TradeDirection:
@@ -196,6 +208,7 @@ class HistoricalManagedReplayPosition:
     entry_bar: Candle
     manager: PositionManager
     managed_bars: int = 0
+    strategy_state: dict[str, Any] = field(default_factory=dict)
 
 
 class HistoricalPositionManagerReplayer:
@@ -212,6 +225,7 @@ class HistoricalPositionManagerReplayer:
         session_candles: list[Candle],
         futures_candles: list[Candle],
         one_minute_candles: list[Candle] | None = None,
+        futures_one_minute_candles: list[Candle] | None = None,
         strategy_config: StrategyTunablesConfig | None = None,
     ) -> None:
         self.risk_config = risk_config
@@ -222,6 +236,7 @@ class HistoricalPositionManagerReplayer:
         self.session = session_candles
         self.futures = futures_candles
         self.one_minute = one_minute_candles or []
+        self.futures_one_minute = futures_one_minute_candles or []
         self.strategy_config = strategy_config or StrategyTunablesConfig()
         self.stats: dict[str, int] = defaultdict(int)
 
