@@ -1087,6 +1087,8 @@ class ReplayPortfolioMetrics(BaseModel):
     profit_factor_pnl: float | None = None
     expectancy_pnl: float | None = None
     expectancy_r: float | None = None
+    max_consecutive_wins: int = 0
+    max_consecutive_losses: int = 0
     exposure_minutes: float = 0.0
     exposure_pct: float = 0.0
     max_concurrent_positions: int = 0

@@ -9,6 +9,12 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from libs.contracts.models import utc_now
+from services.historical.strategy_c_candidate_manifest import (
+    _spec_fingerprint as strategy_c_spec_fingerprint,
+)
+from services.historical.strategy_d_candidate_manifest import (
+    spec_fingerprint as strategy_d_spec_fingerprint,
+)
 from services.strategy.models import ReplayPortfolioMetrics, SimulationResult
 from services.strategy.replay_manifest import ReplayManifestRecord
 
@@ -29,6 +35,26 @@ def _drawdown(values: Iterable[float]) -> float:
         peak = max(peak, cumulative)
         worst = min(worst, cumulative - peak)
     return round(worst, 4)
+
+
+def _streaks(values: Iterable[float]) -> tuple[int, int]:
+    max_wins = 0
+    max_losses = 0
+    current_wins = 0
+    current_losses = 0
+    for value in values:
+        if value > 0:
+            current_wins += 1
+            current_losses = 0
+            max_wins = max(max_wins, current_wins)
+        elif value < 0:
+            current_losses += 1
+            current_wins = 0
+            max_losses = max(max_losses, current_losses)
+        else:
+            current_wins = 0
+            current_losses = 0
+    return max_wins, max_losses
 
 
 def _merged_exposure_minutes(
@@ -194,6 +220,7 @@ def build_portfolio_metrics(
     expectancy_r = (
         round(sum(r_values) / len(resolved), 4) if resolved else 0.0
     )
+    max_consecutive_wins, max_consecutive_losses = _streaks(r_values)
 
     intervals: list[tuple[datetime, datetime]] = []
     for record in accepted:
@@ -250,6 +277,8 @@ def build_portfolio_metrics(
         profit_factor_pnl=profit_factor,
         expectancy_pnl=expectancy_pnl,
         expectancy_r=expectancy_r,
+        max_consecutive_wins=max_consecutive_wins,
+        max_consecutive_losses=max_consecutive_losses,
         exposure_minutes=exposure_minutes,
         exposure_pct=exposure_pct,
         max_concurrent_positions=peak_concurrent,
@@ -293,8 +322,11 @@ def build_replay_run_identity(
     configuration_snapshot: dict[str, Any],
     cost_model_version: str,
     contract_selection_policy: str,
+    historical_source: str,
+    contract_selection_evidence: dict[str, int] | None = None,
+    execution_fill_methods: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    """Return deterministic replay identity plus explicit provenance."""
+    """Return a unique run id plus deterministic reproducibility fingerprint."""
     suite = configuration_snapshot.get("strategy_suite") or {}
     candidate_contracts = suite.get("candidate_contracts") or {}
     strategy_a = configuration_snapshot.get("strategy_a") or {}
@@ -319,7 +351,18 @@ def build_replay_run_identity(
         "data_fingerprint": data_fingerprint,
         "cost_model_version": cost_model_version,
         "contract_selection_policy": contract_selection_policy,
+        "historical_source": historical_source,
         "strategy_versions": strategy_versions,
+        "frozen_candidate_fingerprints": {
+            "DI_CONTINUATION": strategy_c_spec_fingerprint(),
+            "SR_MOMENTUM_BREAKOUT": strategy_d_spec_fingerprint(),
+        },
+        "contract_selection_evidence": dict(
+            sorted((contract_selection_evidence or {}).items())
+        ),
+        "execution_fill_methods": dict(
+            sorted((execution_fill_methods or {}).items())
+        ),
     }
     canonical = json.dumps(
         identity_payload,
@@ -328,11 +371,17 @@ def build_replay_run_identity(
         ensure_ascii=True,
     ).encode("utf-8")
     fingerprint = hashlib.sha256(canonical).hexdigest()
+    generated_at = utc_now().astimezone(timezone.utc)
     return {
         **identity_payload,
-        "run_id": f"RPL-{fingerprint[:20]}",
+        "run_id": (
+            "RPL-"
+            + generated_at.strftime("%Y%m%dT%H%M%S%fZ")
+            + "-"
+            + fingerprint[:12]
+        ),
         "run_fingerprint": fingerprint,
-        "generated_at": utc_now().astimezone(timezone.utc).isoformat(),
+        "generated_at": generated_at.isoformat(),
     }
 
 

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock
 
 import pytest
 
@@ -8,6 +9,7 @@ from services.strategy.models import (
     ReplayPortfolioMetrics,
     ReplaySignalMetrics,
     ReplayUnderlyingLifecycleMetrics,
+    RiskConfig,
     SimulationResult,
 )
 from services.strategy.replay_analytics import (
@@ -15,6 +17,7 @@ from services.strategy.replay_analytics import (
     build_replay_run_identity,
     compare_replay_results,
 )
+from services.strategy.replay_execution import ReplayExecutionCoordinator
 from services.strategy.replay_manifest import ReplayManifestRecord
 from services.strategy.repository import StrategyRepository
 
@@ -247,6 +250,8 @@ def test_portfolio_metrics_cover_all_strategies_and_overlapping_exposure():
     assert metrics.profit_factor_pnl == 3.0
     assert metrics.expectancy_pnl == 300.0
     assert metrics.expectancy_r == 0.3
+    assert metrics.max_consecutive_wins == 1
+    assert metrics.max_consecutive_losses == 1
     assert metrics.exposure_minutes == 70.0
     assert metrics.max_concurrent_positions == 2
     assert metrics.peak_premium_committed == 10000.0
@@ -327,6 +332,15 @@ def test_replay_run_identity_is_deterministic_and_tracks_provenance():
         "contract_selection_policy": (
             "PRODUCTION_CONTRACT_SELECTOR_WITH_EXPLICIT_APPROXIMATION"
         ),
+        "historical_source": "BREEZE",
+        "contract_selection_evidence": {
+            "POINT_IN_TIME_SNAPSHOT": 2,
+            "APPROXIMATED_SELECTION": 3,
+        },
+        "execution_fill_methods": {
+            "POINT_IN_TIME_BID_ASK": 2,
+            "MARK_WITH_SLIPPAGE": 3,
+        },
     }
 
     first = build_replay_run_identity(**kwargs)
@@ -335,14 +349,36 @@ def test_replay_run_identity_is_deterministic_and_tracks_provenance():
         **{**kwargs, "data_fingerprint": "data-789"}
     )
 
-    assert first["run_id"] == second["run_id"]
+    assert first["run_id"] != second["run_id"]
     assert first["run_fingerprint"] == second["run_fingerprint"]
-    assert first["run_id"] != changed["run_id"]
+    assert first["run_fingerprint"] != changed["run_fingerprint"]
     assert first["strategy_versions"]["TREND_PULLBACK"] == "trend_pullback_r5"
+    assert first["historical_source"] == "BREEZE"
+    assert first["contract_selection_evidence"]["POINT_IN_TIME_SNAPSHOT"] == 2
+    assert first["execution_fill_methods"]["MARK_WITH_SLIPPAGE"] == 3
+    assert len(first["frozen_candidate_fingerprints"]["DI_CONTINUATION"]) == 64
+    assert len(
+        first["frozen_candidate_fingerprints"]["SR_MOMENTUM_BREAKOUT"]
+    ) == 64
     assert (
         first["strategy_versions"]["SR_MOMENTUM_BREAKOUT"]
         == "STRATEGY_D_SR_MOMENTUM_BREAKOUT_V2_CANDIDATE"
     )
+
+
+def test_execution_coordinator_blocks_second_simultaneous_entry_at_capacity():
+    coordinator = ReplayExecutionCoordinator(
+        lifecycle_replayer=Mock(),
+        registry=Mock(),
+        risk_config=RiskConfig(max_concurrent_positions=1),
+    )
+    coordinator.state.active_positions.append(Mock())
+    at = datetime(2026, 9, 24, 5, 0, tzinfo=UTC)
+
+    decision = coordinator.global_entry_gate(at)
+
+    assert decision.allowed is False
+    assert decision.status == "MAX_CONCURRENT_POSITIONS_REACHED"
 
 
 def test_replay_comparison_reports_deltas_without_ranking():

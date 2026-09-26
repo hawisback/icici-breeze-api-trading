@@ -2354,6 +2354,13 @@ class SimulationEngine:
                 if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
                 else "RESEARCH_REPLAY_CONTRACT_APPROXIMATION"
             ),
+            historical_source=request.historical_source.value,
+            contract_selection_evidence=(
+                data_quality.contract_selection_evidence_counts
+            ),
+            execution_fill_methods=(
+                data_quality.execution_fill_method_counts
+            ),
         )
         replay_metadata["reproducibility"] = reproducibility
 
