@@ -1046,14 +1046,23 @@ class ReplayStrategyRegistry:
         cls,
         tunables: StrategyTunablesConfig,
         session: SessionTimersConfig,
+        selected_strategies: Sequence[StrategyName] | None = None,
     ) -> "ReplayStrategyRegistry":
-        return cls((
+        adapters: tuple[ReplayStrategyAdapter, ...] = (
             TrendPullbackReplayAdapter(tunables),
             VolatilityBreakoutReplayAdapter(tunables, session),
             DiContinuationReplayAdapter(tunables),
             SRMomentumBreakoutReplayAdapter(tunables),
             PivotVwapScalpReplayAdapter(tunables),
-        ))
+        )
+        if selected_strategies is not None:
+            selected = set(selected_strategies)
+            adapters = tuple(
+                adapter
+                for adapter in adapters
+                if adapter.strategy_metadata().strategy in selected
+            )
+        return cls(adapters)
 
     def strategy_metadata(self) -> list[ReplayStrategyMetadata]:
         return [adapter.strategy_metadata() for adapter in self.adapters]
