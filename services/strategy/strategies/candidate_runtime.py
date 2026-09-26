@@ -9,6 +9,7 @@ engine; it does not relax candidate rules or synthesize signals.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 from typing import Any
 
 from services.strategy.models import (
@@ -32,6 +33,25 @@ def _aware_timestamp(value: Any) -> datetime | None:
 
 
 MAX_EXECUTION_SIGNAL_LATENCY_SECONDS = 300.0
+
+
+def strategy_d_signal_id(payload: Any) -> str:
+    """Return the frozen Strategy D signal id used by paper/runtime adapters."""
+    if hasattr(payload, "to_dict"):
+        row = payload.to_dict()
+    else:
+        row = dict(payload)
+    raw = "|".join(
+        (
+            str(row["strategy_id"]),
+            str(row["timestamp"]),
+            str(row["option_type"]),
+            str(row["breakout_level_name"]),
+            f"{float(row['entry_price']):.6f}",
+        )
+    )
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+    return f"STRAT-D-{digest}"
 
 
 def _is_fresh(timestamp: datetime, as_of: datetime | None) -> bool:

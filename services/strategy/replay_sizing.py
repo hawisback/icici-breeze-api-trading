@@ -123,7 +123,10 @@ def calculate_replay_sizing(
             entry_reference_price=entry_reference_price,
         )
 
-    if signal.strategy == StrategyName.TREND_PULLBACK:
+    if signal.strategy in {
+        StrategyName.TREND_PULLBACK,
+        StrategyName.DI_CONTINUATION,
+    }:
         underlying_entry = signal.underlying_entry_price
         if underlying_entry is None:
             return ReplaySizingDecision(
@@ -211,6 +214,10 @@ def calculate_replay_sizing(
         account_equity=account_equity,
         lot_size=lot_size,
     )
+    if signal.strategy == StrategyName.PIVOT_VWAP_SCALP:
+        lots = min(lots, strategy_config.strategy_e_lots)
+        quantity = lots * lot_size
+
     option_loss_per_lot = (
         entry_reference_price
         * (risk_config.option_hard_stop_pct / 100.0)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from statistics import median
@@ -40,6 +40,18 @@ from services.strategy.replay_manifest import (
     ReplayStateSnapshot,
 )
 from services.strategy.replay_stops import evaluate_replay_candle
+from services.historical.strategy_c_shadow_observer import (
+    replay_strategy_c_to_as_of,
+)
+from services.strategy.strategies.pivot_vwap_scalp import (
+    evaluate_strategy_e_lifecycle_bar,
+)
+from services.strategy.strategies.sr_momentum_breakout import (
+    PivotLevels,
+    StrategyDConfig,
+    StrategyDPositionManager,
+    StrategyDSignal,
+)
 
 
 def _direction(value: str) -> TradeDirection:
@@ -98,14 +110,18 @@ def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrad
             "consecutive_inside_box_closes": record.consecutive_inside_box_closes or 0,
         }
 
-    strategy_a_entry = (
+    underlying_entry = (
         float(record.entry_features.get("underlying_entry_price"))
-        if strategy == StrategyName.TREND_PULLBACK
-        and record.entry_features.get("underlying_entry_price") is not None
+        if record.entry_features.get("underlying_entry_price") is not None
         else record.simulated_entry_price
     )
-    strategy_a_stop = record.initial_structural_stop
-    strategy_a_r = record.initial_risk_points
+    structural_stop = record.initial_structural_stop
+    structural_r = record.initial_risk_points
+    futures_authoritative = strategy in {
+        StrategyName.TREND_PULLBACK,
+        StrategyName.DI_CONTINUATION,
+        StrategyName.PIVOT_VWAP_SCALP,
+    }
     return ActiveTrade(
         trade_id=record.replay_signal_id,
         mode=AutoTradingMode.PAPER,
@@ -121,9 +137,9 @@ def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrad
         lots=1,
         entry_time=record.simulated_entry_timestamp,
         entry_option_price=0.0,
-        entry_spot_price=strategy_a_entry,
-        initial_structural_stop=strategy_a_stop,
-        initial_r_points=strategy_a_r,
+        entry_spot_price=underlying_entry,
+        initial_structural_stop=structural_stop,
+        initial_r_points=structural_r,
         pullback_swing_low=record.pullback_swing_low,
         pullback_swing_high=record.pullback_swing_high,
         **strategy_b_state,
@@ -131,17 +147,29 @@ def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrad
         lowest_close_since_entry=record.lowest_favorable_price or record.simulated_entry_price,
         last_managed_bar=record.last_managed_completed_bar_timestamp,
         current_option_price=0.0,
-        current_spot_price=strategy_a_entry,
+        current_spot_price=underlying_entry,
         futures_contract_id=(
-            record.entry_features.get("futures_contract")
-            or record.entry_features.get("futures_contract_id")
-            if strategy == StrategyName.TREND_PULLBACK
+            (
+                record.entry_features.get("futures_contract")
+                or record.entry_features.get("futures_contract_id")
+            )
+            if futures_authoritative
             else None
         ),
-        underlying_entry_price=(strategy_a_entry if strategy == StrategyName.TREND_PULLBACK else None),
-        underlying_current_price=(strategy_a_entry if strategy == StrategyName.TREND_PULLBACK else None),
-        underlying_structural_stop=(strategy_a_stop if strategy == StrategyName.TREND_PULLBACK else None),
-        underlying_r=(strategy_a_r if strategy == StrategyName.TREND_PULLBACK else None),
+        underlying_entry_price=underlying_entry,
+        underlying_current_price=underlying_entry,
+        underlying_structural_stop=structural_stop,
+        underlying_r=structural_r,
+        strategy_signal_type=record.entry_features.get("signal_type"),
+        strategy_target_price=(
+            float(record.entry_features["strategy_target_price"])
+            if record.entry_features.get("strategy_target_price") is not None
+            else (
+                float(record.entry_features["target_price"])
+                if record.entry_features.get("target_price") is not None
+                else None
+            )
+        ),
         initial_quantity=1,
         remaining_quantity=1,
         current_trailing_stop=record.current_trailing_stop,
@@ -196,6 +224,7 @@ class HistoricalManagedReplayPosition:
     entry_bar: Candle
     manager: PositionManager
     managed_bars: int = 0
+    strategy_state: dict[str, Any] = field(default_factory=dict)
 
 
 class HistoricalPositionManagerReplayer:
@@ -212,6 +241,7 @@ class HistoricalPositionManagerReplayer:
         session_candles: list[Candle],
         futures_candles: list[Candle],
         one_minute_candles: list[Candle] | None = None,
+        futures_one_minute_candles: list[Candle] | None = None,
         strategy_config: StrategyTunablesConfig | None = None,
     ) -> None:
         self.risk_config = risk_config
@@ -222,6 +252,7 @@ class HistoricalPositionManagerReplayer:
         self.session = session_candles
         self.futures = futures_candles
         self.one_minute = one_minute_candles or []
+        self.futures_one_minute = futures_one_minute_candles or []
         self.strategy_config = strategy_config or StrategyTunablesConfig()
         self.stats: dict[str, int] = defaultdict(int)
 
@@ -389,6 +420,407 @@ class HistoricalPositionManagerReplayer:
         hit = bar.high >= price if trade.direction == TradeDirection.BULLISH else bar.low <= price
         return (level, price) if hit else (None, None)
 
+    @staticmethod
+    def _strategy_d_signal(
+        record: ReplayManifestRecord,
+    ) -> StrategyDSignal:
+        raw = dict(record.entry_features.get("strategy_d_signal") or {})
+        levels_raw = dict(raw.get("levels") or {})
+        if not raw or not levels_raw:
+            raise ValueError(
+                f"Strategy D replay record {record.replay_signal_id} "
+                "is missing frozen signal payload"
+            )
+        levels = PivotLevels(
+            session_date=datetime.fromisoformat(
+                str(levels_raw["session_date"])
+            ).date(),
+            source_session_date=datetime.fromisoformat(
+                str(levels_raw["source_session_date"])
+            ).date(),
+            pdh=float(levels_raw["pdh"]),
+            pdl=float(levels_raw["pdl"]),
+            pdc=float(levels_raw["pdc"]),
+            pivot=float(levels_raw["pivot"]),
+            r1=float(levels_raw["r1"]),
+            s1=float(levels_raw["s1"]),
+            r2=float(levels_raw["r2"]),
+            s2=float(levels_raw["s2"]),
+        )
+        return StrategyDSignal(
+            strategy_id=str(raw["strategy_id"]),
+            direction=TradeDirection(str(raw["direction"])),
+            option_type=str(raw["option_type"]),
+            timestamp=datetime.fromisoformat(
+                str(raw["timestamp"]).replace("Z", "+00:00")
+            ),
+            breakout_level_name=str(raw["breakout_level_name"]),
+            breakout_level=float(raw["breakout_level"]),
+            entry_price=float(raw["entry_price"]),
+            initial_stop=float(raw["initial_stop"]),
+            risk_points=float(raw["risk_points"]),
+            atr_5m=float(raw["atr_5m"]),
+            rsi_previous=float(raw["rsi_previous"]),
+            rsi_current=float(raw["rsi_current"]),
+            rsi_clearance_points=float(raw["rsi_clearance_points"]),
+            previous_day_range_atr=float(
+                raw["previous_day_range_atr"]
+            ),
+            vwap_reference_price=float(raw["vwap_reference_price"]),
+            vwap=float(raw["vwap"]),
+            vwap_source=str(raw["vwap_source"]),
+            next_pivot_name=raw.get("next_pivot_name"),
+            next_pivot_price=(
+                float(raw["next_pivot_price"])
+                if raw.get("next_pivot_price") is not None
+                else None
+            ),
+            levels=levels,
+        )
+
+    def _advance_strategy_c(
+        self,
+        position: HistoricalManagedReplayPosition,
+        bar: Candle,
+    ) -> bool:
+        record = position.record
+        trade = position.trade
+        report = replay_strategy_c_to_as_of(
+            self.futures,
+            self.futures_one_minute,
+            as_of=bar.end_time,
+        )
+        row = next(
+            (
+                candidate
+                for candidate in report.get("candidate_entries") or []
+                if str(candidate.get("candidate_signal_id") or "")
+                == record.replay_signal_id
+            ),
+            None,
+        )
+        if row is None:
+            self.stats["strategy_c_lifecycle_missing"] += 1
+            return True
+
+        lifecycle = dict(row.get("lifecycle") or {})
+        before = _state_snapshot(trade, bar.start_time)
+        try:
+            trade.current_trailing_stop = float(
+                lifecycle.get("current_stop")
+            )
+        except (TypeError, ValueError):
+            pass
+        try:
+            trade.current_r = float(lifecycle.get("current_r"))
+        except (TypeError, ValueError):
+            pass
+        trade.peak_r = max(
+            trade.peak_r,
+            float(lifecycle.get("mfe_r") or trade.peak_r),
+        )
+        after = _state_snapshot(trade, bar.end_time)
+
+        if lifecycle.get("status") == "OPEN":
+            self.recorder.record_state_timeline(
+                record.replay_signal_id,
+                before=before,
+                after=after,
+            )
+            position.trade = trade
+            position.managed_bars += 1
+            return True
+
+        if lifecycle.get("status") != "RESOLVED":
+            self._finish(
+                record,
+                trade,
+                status="UNRESOLVED",
+                reason="STRATEGY_C_LIFECYCLE_INDETERMINATE",
+                timestamp=bar.end_time,
+            )
+            return False
+
+        raw_exit_time = lifecycle.get("exit_time")
+        exit_time = (
+            datetime.fromisoformat(
+                str(raw_exit_time).replace("Z", "+00:00")
+            )
+            if raw_exit_time
+            else bar.end_time
+        )
+        exit_price = float(lifecycle["exit_price"])
+        realized_r = float(lifecycle["realized_r"])
+        reason = str(lifecycle.get("exit_reason") or "UNKNOWN")
+        event = ReplayEvent(
+            event=reason,
+            timestamp=exit_time,
+            reference_price=exit_price,
+            active_stop=trade.current_trailing_stop,
+            r_multiple=realized_r,
+            source_candle=bar.start_time,
+            details={
+                "lifecycle_authority": "FROZEN_STRATEGY_C_OBSERVER",
+                "observed_on_completed_5m": bar.end_time.isoformat(),
+            },
+        )
+        self.recorder.record_state_timeline(
+            record.replay_signal_id,
+            before=before,
+            after=after,
+            exit_event=event,
+        )
+        self.recorder.set_lifecycle_result(
+            record.replay_signal_id,
+            status="RESOLVED",
+            exit_timestamp=exit_time,
+            exit_price=exit_price,
+            exit_reason=reason,
+            realized_r=realized_r,
+            mfe_r=float(lifecycle.get("mfe_r") or 0.0),
+            mae_r=float(lifecycle.get("mae_r") or 0.0),
+        )
+        self.stats["strategy_c_resolved"] += 1
+        return False
+
+    def _advance_strategy_d(
+        self,
+        position: HistoricalManagedReplayPosition,
+        bar: Candle,
+    ) -> bool:
+        record = position.record
+        trade = position.trade
+        signal = self._strategy_d_signal(record)
+        history = [
+            candle
+            for candle in [*self.warmup, *self.session]
+            if candle.end_time <= signal.timestamp
+        ]
+        future = [
+            candle
+            for candle in self.session
+            if candle.start_time >= signal.timestamp
+            and candle.end_time <= bar.end_time
+        ]
+        if not future:
+            return True
+
+        manager = StrategyDPositionManager(
+            risk_config=self.risk_config,
+            session_config=self.session_config,
+            strategy_d_config=StrategyDConfig.v2_candidate(),
+        )
+        result = manager.replay_underlying_lifecycle(
+            signal,
+            history_through_entry=history,
+            future_bars=future,
+            one_minute_bars=self.one_minute,
+        )
+        before = _state_snapshot(trade, bar.start_time)
+        trade.current_trailing_stop = float(result.final_stop)
+        trade.current_r = float(result.runner_r)
+        trade.peak_r = max(trade.peak_r, float(result.mfe_r))
+        after = _state_snapshot(trade, bar.end_time)
+
+        prior_scale = position.strategy_state.get("scale_out_time")
+        if result.scale_out_time is not None and prior_scale is None:
+            position.strategy_state["scale_out_time"] = (
+                result.scale_out_time.isoformat()
+            )
+            self._record_event(
+                record,
+                event="D_1_5R_SCALE_OUT",
+                timestamp=result.scale_out_time,
+                price=result.scale_out_price,
+                trade=trade,
+                source=bar.start_time,
+                details={
+                    "scale_out_fraction": result.scale_out_fraction,
+                    "lifecycle_authority": "FROZEN_STRATEGY_D_V2",
+                },
+            )
+
+        if result.runner_exit_reason == "DATA_END":
+            self.recorder.record_state_timeline(
+                record.replay_signal_id,
+                before=before,
+                after=after,
+            )
+            position.trade = trade
+            position.managed_bars += 1
+            return True
+
+        event = ReplayEvent(
+            event=result.runner_exit_reason,
+            timestamp=result.exit_time,
+            reference_price=result.runner_exit_price,
+            active_stop=result.final_stop,
+            r_multiple=result.realized_r,
+            source_candle=bar.start_time,
+            details={
+                "lifecycle_authority": "FROZEN_STRATEGY_D_V2",
+                "scale_out_time": (
+                    result.scale_out_time.isoformat()
+                    if result.scale_out_time
+                    else None
+                ),
+                "scale_out_price": result.scale_out_price,
+                "scale_out_fraction": result.scale_out_fraction,
+                "runner_r": result.runner_r,
+            },
+        )
+        self.recorder.record_state_timeline(
+            record.replay_signal_id,
+            before=before,
+            after=after,
+            exit_event=event,
+        )
+        self.recorder.set_lifecycle_result(
+            record.replay_signal_id,
+            status="RESOLVED",
+            exit_timestamp=result.exit_time,
+            exit_price=result.runner_exit_price,
+            exit_reason=result.runner_exit_reason,
+            realized_r=result.realized_r,
+            mfe_r=result.mfe_r,
+            mae_r=result.mae_r,
+        )
+        self.stats["strategy_d_resolved"] += 1
+        return False
+
+    def _advance_strategy_e(
+        self,
+        position: HistoricalManagedReplayPosition,
+        bar: Candle,
+    ) -> bool:
+        record = position.record
+        trade = position.trade
+        if bar.end_time <= record.simulated_entry_timestamp:
+            return True
+
+        contract = (
+            record.entry_features.get("futures_contract")
+            or record.entry_features.get("futures_contract_id")
+        )
+        candidates = [
+            candle
+            for candle in self.futures
+            if candle.start_time == bar.start_time
+            and candle.end_time == bar.end_time
+            and (not contract or candle.instrument_id == contract)
+        ]
+        if not candidates:
+            self.stats["strategy_e_futures_bar_missing"] += 1
+            return True
+
+        price_bar = candidates[-1]
+        target_raw = (
+            record.entry_features.get("strategy_target_price")
+            or record.entry_features.get("target_price")
+        )
+        if target_raw is None:
+            self._finish(
+                record,
+                trade,
+                status="UNRESOLVED",
+                reason="STRATEGY_E_TARGET_MISSING",
+                timestamp=bar.end_time,
+            )
+            return False
+
+        before = _state_snapshot(trade, bar.start_time)
+        decision = evaluate_strategy_e_lifecycle_bar(
+            direction=trade.direction,
+            entry=float(record.simulated_entry_price),
+            risk=float(record.initial_risk_points),
+            stop=float(record.initial_structural_stop),
+            target=float(target_raw),
+            bar=price_bar,
+            forced_exit_time=(
+                self.strategy_config.strategy_e_forced_exit_time
+            ),
+        )
+        trade.current_spot_price = float(price_bar.close)
+        trade.underlying_current_price = float(price_bar.close)
+        trade.current_r = float(decision.current_r)
+        trade.peak_r = max(trade.peak_r, trade.current_r)
+        if trade.direction == TradeDirection.BULLISH:
+            trade.mfe_points = max(
+                trade.mfe_points,
+                float(price_bar.high) - trade.entry_spot_price,
+            )
+            trade.mae_points = min(
+                trade.mae_points,
+                float(price_bar.low) - trade.entry_spot_price,
+            )
+        else:
+            trade.mfe_points = max(
+                trade.mfe_points,
+                trade.entry_spot_price - float(price_bar.low),
+            )
+            trade.mae_points = min(
+                trade.mae_points,
+                trade.entry_spot_price - float(price_bar.high),
+            )
+        after = _state_snapshot(trade, bar.end_time)
+
+        if decision.exit_reason is None:
+            self.recorder.record_state_timeline(
+                record.replay_signal_id,
+                before=before,
+                after=after,
+            )
+            position.trade = trade
+            position.managed_bars += 1
+            return True
+
+        realized_r = _r_for(
+            trade.direction,
+            trade.entry_spot_price,
+            decision.decision_price,
+            trade.initial_r_points,
+        )
+        event = ReplayEvent(
+            event=decision.exit_reason,
+            timestamp=bar.end_time,
+            reference_price=decision.decision_price,
+            active_stop=trade.current_trailing_stop,
+            r_multiple=realized_r,
+            source_candle=price_bar.start_time,
+            details={
+                "lifecycle_authority": "STRATEGY_E_PRODUCTION_HELPER",
+                "stop_hit": decision.stop_hit,
+                "target_hit": decision.target_hit,
+                "force_exit": decision.force_exit,
+            },
+        )
+        self.recorder.record_state_timeline(
+            record.replay_signal_id,
+            before=before,
+            after=after,
+            exit_event=event,
+        )
+        self.recorder.set_lifecycle_result(
+            record.replay_signal_id,
+            status="RESOLVED",
+            exit_timestamp=bar.end_time,
+            exit_price=decision.decision_price,
+            exit_reason=decision.exit_reason,
+            realized_r=realized_r,
+            mfe_r=(
+                trade.mfe_points / trade.initial_r_points
+                if trade.initial_r_points > 0
+                else None
+            ),
+            mae_r=(
+                trade.mae_points / trade.initial_r_points
+                if trade.initial_r_points > 0
+                else None
+            ),
+        )
+        self.stats["strategy_e_resolved"] += 1
+        return False
+
     def start_record(
         self,
         record: ReplayManifestRecord,
@@ -409,7 +841,7 @@ class HistoricalPositionManagerReplayer:
             and not self._entry_resolution(record, trade, entry_bar)
         ):
             return None
-        return HistoricalManagedReplayPosition(
+        position = HistoricalManagedReplayPosition(
             record=record,
             trade=trade,
             entry_bar=entry_bar,
@@ -419,6 +851,13 @@ class HistoricalPositionManagerReplayer:
                 strategy_config=self.strategy_config,
             ),
         )
+        # Strategy C can trigger and resolve on native 1m bars between two
+        # completed 5m orchestration points. Re-evaluate its frozen lifecycle
+        # immediately through the observation bar so such trades are not lost.
+        if record.strategy_id == StrategyName.DI_CONTINUATION.value:
+            if not self._advance_strategy_c(position, entry_bar):
+                return None
+        return position
 
     def advance_record(
         self,
@@ -432,6 +871,13 @@ class HistoricalPositionManagerReplayer:
         pm = position.manager
         if bar.start_time < position.entry_bar.end_time:
             return True
+
+        if record.strategy_id == StrategyName.DI_CONTINUATION.value:
+            return self._advance_strategy_c(position, bar)
+        if record.strategy_id == StrategyName.SR_MOMENTUM_BREAKOUT.value:
+            return self._advance_strategy_d(position, bar)
+        if record.strategy_id == StrategyName.PIVOT_VWAP_SCALP.value:
+            return self._advance_strategy_e(position, bar)
 
         price_bar = self._underlying_bar(record, bar)
         if price_bar is None:

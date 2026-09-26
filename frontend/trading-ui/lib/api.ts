@@ -1186,6 +1186,9 @@ export interface SimulationBarSnapshotData {
   bb_width_percentile: number;
   strategy_a_phase: string;
   strategy_b_phase: string;
+  strategy_c_phase?: string;
+  strategy_d_phase?: string;
+  strategy_e_phase?: string;
   active_trade_id?: string | null;
   event?: string | null;
   event_details?: string | null;

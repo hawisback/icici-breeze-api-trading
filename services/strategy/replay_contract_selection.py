@@ -350,7 +350,10 @@ class HistoricalContractSelectionProvider:
         underlying = float(
             signal.underlying_entry_price or signal.spot_reference_price
         )
-        strategy_a = signal.strategy == StrategyName.TREND_PULLBACK
+        delta_aware = signal.strategy in {
+            StrategyName.TREND_PULLBACK,
+            StrategyName.DI_CONTINUATION,
+        }
 
         if snapshot is not None:
             chain = self._snapshot_chain(snapshot, signal)
@@ -366,7 +369,7 @@ class HistoricalContractSelectionProvider:
                 underlying_price=underlying,
                 option_chain=chain,
                 override_premium_cap=override_premium_cap,
-                strategy_a=strategy_a,
+                strategy_a=delta_aware,
                 as_of=as_of,
             )
             return ReplayContractSelectionDecision(

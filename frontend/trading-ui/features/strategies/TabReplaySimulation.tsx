@@ -176,6 +176,22 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
   const conditionalReplayControls = Object.entries(controlApplication?.conditionally_applied_overrides || {});
   const ignoredReplayOverrides = Object.entries(controlApplication?.not_applied_overrides || {});
   const unsupportedRequestControls = Object.entries(controlApplication?.not_applied_request_controls || {});
+  const strategyReplaySummary = (result?.replay_metadata?.strategy_replay_summary || {}) as Record<
+    string,
+    {
+      display_name?: string;
+      priority?: number;
+      enabled?: boolean;
+      signals?: number;
+      resolved?: number;
+      unresolved?: number;
+      ambiguous?: number;
+      total_realized_r?: number;
+    }
+  >;
+  const strategySummaryEntries = Object.entries(strategyReplaySummary).sort(
+    ([, left], [, right]) => (left.priority ?? 999) - (right.priority ?? 999),
+  );
 
   const jumpToNextEvent = () => {
     if (!result?.timeline) return;
@@ -318,7 +334,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
           </div>
           <div className="text-[10px] leading-relaxed text-slate-400">
             {replayMode === "RESEARCH"
-              ? "Discovers qualified strategy signals independently, then resolves each lifecycle afterward. Useful for hypothesis analysis."
+              ? "Discovers qualified A/B/C/D/E signals independently, then resolves each strategy with its own production or frozen lifecycle authority. Useful for hypothesis analysis."
               : "Walks forward chronologically with production numeric risk gates and sizing. Exact stored point-in-time chain snapshots rerun the production ContractSelector; other dates are explicitly APPROXIMATED_SELECTION. Historical marks remain separate from estimated fills."}
           </div>
         </div>
@@ -330,7 +346,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
               Strategy B signal overrides apply in both modes. In Execution Parity, replay capital,
               risk-per-trade %, daily trade limits, concurrent-position limits, cooldown, daily-R loss
               limits, and per-strategy limits are applied. Strategy A keeps its canonical signal contract.
-              Premium-cap selection is conditional on exact point-in-time chain evidence; approximated selection cannot prove liquidity/premium gates. The legacy hard-ADX control remains unapplied.
+              Premium-cap selection is conditional on exact point-in-time chain evidence; approximated selection cannot prove liquidity/premium gates. Strategy C/D frozen candidate thresholds and Strategy E production lifecycle rules are not what-if tuned here. The legacy hard-ADX control remains unapplied.
             </div>
 
             {replayMode === "EXECUTION_PARITY" && (
@@ -479,6 +495,29 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 </span>
               </div>
             </div>
+            {strategySummaryEntries.length > 0 && (
+              <div className="mt-3">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-1.5">
+                  Five-strategy replay summary
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                  {strategySummaryEntries.map(([strategy, stats]) => (
+                    <div key={strategy} className="rounded border border-slate-700 bg-slate-950/60 px-2 py-1.5">
+                      <div className="text-[9px] uppercase text-slate-500 truncate" title={stats.display_name || strategy}>
+                        {strategy}
+                      </div>
+                      <div className="text-xs font-mono font-bold text-cyan-300">
+                        {stats.resolved ?? 0}/{stats.signals ?? 0} resolved
+                      </div>
+                      <div className="text-[9px] text-slate-400">
+                        R: {(stats.total_realized_r ?? 0).toFixed(2)}
+                        {stats.enabled === false ? " · disabled" : ""}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {(appliedReplayControls.length > 0 || conditionalReplayControls.length > 0 || ignoredReplayOverrides.length > 0 || unsupportedRequestControls.length > 0) && (
               <div className="mt-3 rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-[10px]">
                 <div className="font-bold uppercase tracking-wider text-slate-400">Replay control application</div>
@@ -1001,6 +1040,20 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                       <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/10 text-purple-300 border border-purple-500/30">
                         {currentBar.strategy_b_phase}
                       </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {[
+                        ["C", currentBar.strategy_c_phase],
+                        ["D", currentBar.strategy_d_phase],
+                        ["E", currentBar.strategy_e_phase],
+                      ].map(([label, phase]) => (
+                        <div key={label}>
+                          <span className="text-[9px] text-slate-500 block">Strat {label}</span>
+                          <span className="block truncate px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-300 border border-slate-700" title={phase || "WAITING"}>
+                            {phase || "WAITING"}
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 </div>

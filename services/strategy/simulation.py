@@ -13,6 +13,12 @@ from typing import Any, Optional
 from libs.contracts.models import Candle, utc_now
 from libs.market_time import IST
 from services.strategy.features import FeatureEngine
+from services.historical.strategy_c_forward_validation import (
+    FREEZE_DATE as STRATEGY_C_FREEZE_DATE,
+)
+from services.historical.strategy_d_candidate_manifest import (
+    FREEZE_DATE as STRATEGY_D_FREEZE_DATE,
+)
 from services.strategy.futures_signal import (
     FuturesContractResolver,
     aggregate_completed_15m,
@@ -835,11 +841,15 @@ class SimulationEngine:
         instrument_id: str,
         historical_source: HistoricalReplaySource,
     ) -> list[Candle]:
-        """Load authoritative 1-minute candles used only for intrabar ordering."""
-        if not self.hist_svc or not hasattr(self.hist_svc, "repo"):
+        """Load authoritative native 1m history for intrabar/C replay.
+
+        Cache is preferred but the exact target-day provider window is fetched
+        when that capability exists. Synthetic candles are never accepted.
+        """
+        if not self.hist_svc:
             return []
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        start = datetime(
+        start_time = datetime(
             target_date.year,
             target_date.month,
             target_date.day,
@@ -847,7 +857,7 @@ class SimulationEngine:
             15,
             tzinfo=IST,
         ).astimezone(timezone.utc)
-        end = datetime(
+        session_end = datetime(
             target_date.year,
             target_date.month,
             target_date.day,
@@ -855,23 +865,87 @@ class SimulationEngine:
             30,
             tzinfo=IST,
         ).astimezone(timezone.utc)
-        try:
-            candles = await self.hist_svc.repo.get_candles(
-                instrument_id,
-                "1m",
-                start_time=start,
-                end_time=end,
-                limit=1000,
-            )
-        except Exception as exc:
-            logger.warning("Historical 1m replay query error: %s", exc)
-            return []
+        end_time = min(utc_now(), session_end)
+        all_candles: list[Candle] = []
+
+        repo = getattr(self.hist_svc, "repo", None)
+        if repo is not None:
+            try:
+                all_candles.extend(
+                    await repo.get_candles(
+                        instrument_id,
+                        "1m",
+                        start_time=start_time,
+                        end_time=session_end,
+                        limit=1000,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Historical 1m replay cache query failed for %s: %s",
+                    instrument_id,
+                    exc,
+                )
+
+        targeted_fetch = getattr(
+            self.hist_svc,
+            "fetch_candles_from_provider_window",
+            None,
+        )
+        if callable(targeted_fetch) and end_time >= start_time:
+            try:
+                all_candles.extend(
+                    await targeted_fetch(
+                        instrument_id,
+                        interval="1m",
+                        start_time=start_time,
+                        end_time=end_time,
+                        requested_source=historical_source.value,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Historical 1m replay provider fetch failed for %s: %s",
+                    instrument_id,
+                    exc,
+                )
+        elif repo is None:
+            try:
+                all_candles.extend(
+                    await self.hist_svc.get_candles(
+                        instrument_id=instrument_id,
+                        interval="1m",
+                        start_time=start_time,
+                        end_time=session_end,
+                        limit=1000,
+                        requested_source=historical_source.value,
+                        allow_provider_fallback=False,
+                        allow_synthetic_fallback=False,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Historical 1m replay query failed for %s: %s",
+                    instrument_id,
+                    exc,
+                )
+
         allowed = (
             {"BREEZE", "KITE", "LIVE"}
             if historical_source == HistoricalReplaySource.MIXED
             else {historical_source.value}
         )
-        return [candle for candle in candles if candle.source in allowed]
+        deduped = {
+            (candle.source, candle.start_time): candle
+            for candle in all_candles
+            if candle.source in allowed
+            and candle.interval == "1m"
+            and candle.end_time <= end_time
+        }
+        return sorted(
+            deduped.values(),
+            key=lambda candle: candle.start_time,
+        )
 
     async def run_day_simulation(self, request: SimulationRequest) -> SimulationResult:
         """Replay actual bars without inventing historical option fills or PnL."""
@@ -988,7 +1062,7 @@ class SimulationEngine:
                         "cannot prove the premium/liquidity rule."
                     )
                 )
-            return "Current A/B Day Replay does not consume this override."
+            return "Current five-strategy Day Replay does not consume this override."
 
         conditional_overrides = {
             name: {
@@ -1063,6 +1137,48 @@ class SimulationEngine:
             missing_data.append("spot")
         if source_diagnostics["futures"]["missing_selected_source"] or not strategy_a_futures_history:
             missing_data.append("futures")
+
+        one_minute_candles = await self._load_replay_one_minute_candles(
+            date_str,
+            request.instrument_id,
+            historical_source,
+        )
+        futures_one_minute_candles = (
+            await self._load_replay_one_minute_candles(
+                date_str,
+                active_instrument,
+                historical_source,
+            )
+            if active_instrument
+            else []
+        )
+        target_session_date = datetime.strptime(
+            date_str,
+            "%Y-%m-%d",
+        ).date()
+        if (
+            cfg.di_continuation_enabled
+            and target_session_date > STRATEGY_C_FREEZE_DATE
+            and not futures_one_minute_candles
+        ):
+            missing_data.append("strategy_c_futures_1m")
+        source_diagnostics["native_1m"] = {
+            "spot_1m_count": len(one_minute_candles),
+            "futures_1m_count": len(futures_one_minute_candles),
+            "strategy_c_required": bool(
+                cfg.di_continuation_enabled
+                and target_session_date > STRATEGY_C_FREEZE_DATE
+            ),
+            "strategy_c_available": bool(futures_one_minute_candles),
+            "strategy_d_intrabar_preferred": (
+                cfg.sr_momentum_breakout_enabled
+            ),
+            "strategy_d_fallback": (
+                "CONSERVATIVE_5M_OHLC"
+                if not one_minute_candles
+                else None
+            ),
+        }
         futures_coverage = self._strategy_a_futures_coverage(
             date_str,
             strategy_a_futures_history,
@@ -1095,11 +1211,16 @@ class SimulationEngine:
                         ),
                     },
                     "sizing": {
-                        "strategy_a_fallback_delta_proxy": (
+                        "delta_aware_structural_strategies": [
+                            StrategyName.TREND_PULLBACK.value,
+                            StrategyName.DI_CONTINUATION.value,
+                        ],
+                        "fallback_delta_proxy": (
                             self.option_selection_config.preferred_delta_min
                             + self.option_selection_config.preferred_delta_max
                         )
                         / 2.0,
+                        "strategy_e_max_lots": cfg.strategy_e_lots,
                         "exact_selection_price_basis": "POINT_IN_TIME_ASK",
                         "approximate_selection_price_basis": (
                             "HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARK"
@@ -1134,6 +1255,8 @@ class SimulationEngine:
             source_diagnostics=source_diagnostics,
             futures_contracts=selected_contracts,
             missing_data=missing_data,
+            spot_one_minute_candles=one_minute_candles,
+            futures_one_minute_candles=futures_one_minute_candles,
         )
         replay_metadata = {
             "configuration_snapshot": config_snapshot.model_dump(mode="json"),
@@ -1144,6 +1267,44 @@ class SimulationEngine:
             "bypass_entry_window": bypass_entry_window,
             "missing_data": sorted(set(missing_data)),
             "strategy_registry": strategy_registry.metadata_snapshot(),
+            "strategy_data_evidence": {
+                "DI_CONTINUATION": {
+                    "signal_authority": (
+                        "FROZEN_STRATEGY_C_DI_CONTINUATION_V1"
+                    ),
+                    "shadow_monitor_parallel_paper_account_replayed": False,
+                    "required_native_futures_1m": True,
+                    "required_for_this_session": bool(
+                        cfg.di_continuation_enabled
+                        and target_session_date > STRATEGY_C_FREEZE_DATE
+                    ),
+                    "futures_1m_count": len(
+                        futures_one_minute_candles
+                    ),
+                    "replay_observation_cadence": (
+                        "5M_ORCHESTRATION_WITH_TRUE_1M_SIGNAL_TIMESTAMP"
+                    ),
+                    "freeze_date": STRATEGY_C_FREEZE_DATE.isoformat(),
+                },
+                "SR_MOMENTUM_BREAKOUT": {
+                    "signal_authority": "FROZEN_STRATEGY_D_V2",
+                    "freeze_date": STRATEGY_D_FREEZE_DATE.isoformat(),
+                    "paper_monitor_parallel_option_account_replayed": False,
+                    "spot_1m_count": len(one_minute_candles),
+                    "intrabar_ordering": (
+                        "NATIVE_SPOT_1M"
+                        if one_minute_candles
+                        else "CONSERVATIVE_5M_OHLC_FALLBACK"
+                    ),
+                },
+                "PIVOT_VWAP_SCALP": {
+                    "signal_authority": "PRODUCTION_STRATEGY_E",
+                    "lifecycle_authority": (
+                        "PRODUCTION_COMPLETED_FUTURES_5M_HELPER"
+                    ),
+                    "stop_target_same_bar_policy": "STOP_FIRST",
+                },
+            },
             "control_application": {
                 "applied_overrides": applied_overrides,
                 "conditionally_applied_overrides": conditional_overrides,
@@ -1195,11 +1356,6 @@ class SimulationEngine:
                 else None
             ),
         }
-        one_minute_candles = await self._load_replay_one_minute_candles(
-            date_str,
-            request.instrument_id,
-            historical_source,
-        )
         contract_provider = (
             HistoricalContractSelectionProvider(
                 historical_service=self.hist_svc,
@@ -1242,6 +1398,7 @@ class SimulationEngine:
             session_candles=session,
             futures_candles=futures_history,
             one_minute_candles=one_minute_candles,
+            futures_one_minute_candles=futures_one_minute_candles,
         )
         chronological_executor = (
             ChronologicalReplayExecutor(
@@ -1258,6 +1415,11 @@ class SimulationEngine:
             running.append(bar)
             macro = self.resample_to_15m(running, request.instrument_id)
             futures = [c for c in futures_history if c.end_time <= bar.end_time]
+            futures_1m = [
+                c
+                for c in futures_one_minute_candles
+                if c.end_time <= bar.end_time
+            ]
             strategy_futures = [
                 c for c in strategy_a_futures_history if c.end_time <= bar.end_time
             ]
@@ -1288,6 +1450,8 @@ class SimulationEngine:
                 spot_candles_5m=running,
                 spot_candles_15m=macro,
                 futures_candles=strategy_futures,
+                active_futures_candles_5m=futures,
+                futures_candles_1m=futures_1m,
             )
 
             event, details = None, None
@@ -1351,6 +1515,10 @@ class SimulationEngine:
                                 strategy=signal.strategy,
                                 signal_id=signal.signal_id,
                                 details=strategy_gate.details,
+                            )
+                            strategy_registry.notify_execution_rejected(
+                                signal,
+                                f"EXECUTION_REJECTED_RISK:{strategy_gate.status}",
                             )
                             event = "ENTRY_REJECTED_RISK"
                             details = strategy_gate.status
@@ -1677,6 +1845,18 @@ class SimulationEngine:
                     bb_width_percentile=features.bb_width_percentile,
                     strategy_a_phase=phases.get("strategy_a_phase", "FLAT"),
                     strategy_b_phase=phases.get("strategy_b_phase", "RESET"),
+                    strategy_c_phase=phases.get(
+                        "strategy_c_phase",
+                        "WAITING",
+                    ),
+                    strategy_d_phase=phases.get(
+                        "strategy_d_phase",
+                        "WAITING",
+                    ),
+                    strategy_e_phase=phases.get(
+                        "strategy_e_phase",
+                        "WAITING",
+                    ),
                     active_trade_id=active_trade_id,
                     event=event,
                     event_details=details,
@@ -1718,6 +1898,9 @@ class SimulationEngine:
             lifecycle_resolver = {
                 "resolver": dict(sorted(lifecycle_replayer.stats.items())),
                 "one_minute_candles": len(one_minute_candles),
+                "futures_one_minute_candles": len(
+                    futures_one_minute_candles
+                ),
             }
         else:
             lifecycle_resolver = lifecycle_replayer.replay(
@@ -1889,6 +2072,72 @@ class SimulationEngine:
             "gate_funnel": gate_funnel,
             "component_funnel": component_funnel,
         }
+        strategy_records = replay_manifest_recorder.records()
+        replay_metadata["strategy_replay_summary"] = {
+            meta.strategy.value: {
+                "display_name": meta.display_name,
+                "priority": meta.priority,
+                "enabled": meta.enabled,
+                "signals": sum(
+                    record.strategy_id == meta.strategy.value
+                    for record in strategy_records
+                ),
+                "resolved": sum(
+                    record.strategy_id == meta.strategy.value
+                    and record.lifecycle_status == "RESOLVED"
+                    for record in strategy_records
+                ),
+                "unresolved": sum(
+                    record.strategy_id == meta.strategy.value
+                    and record.lifecycle_status == "UNRESOLVED"
+                    for record in strategy_records
+                ),
+                "ambiguous": sum(
+                    record.strategy_id == meta.strategy.value
+                    and record.lifecycle_status == "AMBIGUOUS"
+                    for record in strategy_records
+                ),
+                "total_realized_r": round(
+                    sum(
+                        float(record.realized_r or 0.0)
+                        for record in strategy_records
+                        if record.strategy_id == meta.strategy.value
+                        and record.realized_r is not None
+                    ),
+                    4,
+                ),
+            }
+            for meta in strategy_registry.strategy_metadata()
+        }
+        c_latencies = [
+            float(
+                record.entry_features.get(
+                    "replay_observation_latency_seconds"
+                )
+            )
+            for record in strategy_records
+            if record.strategy_id == StrategyName.DI_CONTINUATION.value
+            and record.entry_features.get(
+                "replay_observation_latency_seconds"
+            )
+            is not None
+        ]
+        replay_metadata["strategy_data_evidence"][
+            "DI_CONTINUATION"
+        ]["observed_signal_latency_seconds"] = {
+            "count": len(c_latencies),
+            "average": (
+                round(sum(c_latencies) / len(c_latencies), 3)
+                if c_latencies
+                else None
+            ),
+            "maximum": (
+                round(max(c_latencies), 3)
+                if c_latencies
+                else None
+            ),
+        }
+
         if not replay_manifest_recorder.records():
             top = ", ".join(f"{name}={count}" for name, count in blocker_counts.most_common(5))
             quality = ", ".join(f"{name}={count}" for name, count in data_quality_counts.most_common())
@@ -1933,6 +2182,35 @@ class SimulationEngine:
             limitation = (
                 "Real completed spot/futures candles used. Historical completed option candles were "
                 "unavailable for one or more resolved trades."
+            )
+        if (
+            cfg.di_continuation_enabled
+            or cfg.sr_momentum_breakout_enabled
+        ):
+            limitation += (
+                " Candidate monitor sidecar paper-option accounts are not "
+                "replayed as separate portfolios; Day Replay replays the "
+                "promoted common execution path and frozen underlying "
+                "lifecycle authorities."
+            )
+        if (
+            cfg.di_continuation_enabled
+            and target_session_date > STRATEGY_C_FREEZE_DATE
+        ):
+            limitation += (
+                " Strategy C preserves its native 1-minute signal timestamp, "
+                "but the current Day Replay admission loop observes candidate "
+                "availability on completed 5-minute orchestration points; the "
+                "result records signal-to-observation latency explicitly."
+            )
+        if (
+            cfg.sr_momentum_breakout_enabled
+            and not one_minute_candles
+        ):
+            limitation += (
+                " Strategy D native spot 1-minute ordering was unavailable, "
+                "so its frozen lifecycle used the candidate's explicit "
+                "conservative 5-minute OHLC fallback."
             )
         if (
             chronological_executor is not None

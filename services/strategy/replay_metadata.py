@@ -37,6 +37,7 @@ class ReplayConfigurationSnapshot(BaseModel):
     strategy_a_enabled: bool
     threshold_overrides: dict[str, Any]
     strategy_a: dict[str, Any]
+    strategy_suite: dict[str, Any]
     entry_window: dict[str, str]
     setup_window: dict[str, int]
     warmup: dict[str, Any]
@@ -53,10 +54,16 @@ class ReplayDataFingerprint(BaseModel):
     source: HistoricalReplaySource
     spot_candle_count: int
     futures_candle_count: int
+    spot_one_minute_candle_count: int = 0
+    futures_one_minute_candle_count: int = 0
     spot_earliest_timestamp: str | None = None
     spot_latest_timestamp: str | None = None
     futures_earliest_timestamp: str | None = None
     futures_latest_timestamp: str | None = None
+    spot_one_minute_earliest_timestamp: str | None = None
+    spot_one_minute_latest_timestamp: str | None = None
+    futures_one_minute_earliest_timestamp: str | None = None
+    futures_one_minute_latest_timestamp: str | None = None
     requested_date_range: dict[str, str]
     observed_date_range: dict[str, str | None]
     futures_contracts: list[dict[str, str | None]] = Field(default_factory=list)
@@ -163,6 +170,36 @@ def build_configuration_snapshot(
         strategy_a_enabled=strategy_a_enabled,
         threshold_overrides=overrides.model_dump(mode="json"),
         strategy_a=strategy_a,
+        strategy_suite={
+            "enabled": {
+                "TREND_PULLBACK": tunables.trend_pullback_enabled,
+                "VOLATILITY_BREAKOUT": (
+                    tunables.volatility_breakout_enabled
+                ),
+                "DI_CONTINUATION": tunables.di_continuation_enabled,
+                "SR_MOMENTUM_BREAKOUT": (
+                    tunables.sr_momentum_breakout_enabled
+                ),
+                "PIVOT_VWAP_SCALP": tunables.pivot_vwap_scalp_enabled,
+            },
+            "strategy_tunables": tunables.model_dump(mode="json"),
+            "session_timers": session.model_dump(mode="json"),
+            "candidate_contracts": {
+                "DI_CONTINUATION": (
+                    "STRATEGY_C_DI_CONTINUATION_V1_CANDIDATE"
+                ),
+                "SR_MOMENTUM_BREAKOUT": (
+                    "STRATEGY_D_SR_MOMENTUM_BREAKOUT_V2_CANDIDATE"
+                ),
+            },
+            "priority": [
+                "TREND_PULLBACK",
+                "VOLATILITY_BREAKOUT",
+                "DI_CONTINUATION",
+                "SR_MOMENTUM_BREAKOUT",
+                "PIVOT_VWAP_SCALP",
+            ],
+        },
         entry_window={
             "no_new_trade_before_ist": tunables.entry_session_start,
             "no_new_trade_after_ist": tunables.entry_session_end,
@@ -212,11 +249,24 @@ def build_data_fingerprint(
     source_diagnostics: dict[str, Any],
     futures_contracts: list[dict[str, str | None]],
     missing_data: list[str],
+    spot_one_minute_candles: list[Candle] | None = None,
+    futures_one_minute_candles: list[Candle] | None = None,
 ) -> ReplayDataFingerprint:
+    spot_1m = list(spot_one_minute_candles or [])
+    futures_1m = list(futures_one_minute_candles or [])
     spot_earliest, spot_latest = _timestamp_range(spot_candles)
     futures_earliest, futures_latest = _timestamp_range(futures_candles)
-    all_candles = spot_candles + futures_candles
-    rows = _sorted_candles("spot", spot_candles) + _sorted_candles("futures", futures_candles)
+    spot_1m_earliest, spot_1m_latest = _timestamp_range(spot_1m)
+    futures_1m_earliest, futures_1m_latest = _timestamp_range(
+        futures_1m
+    )
+    all_candles = spot_candles + futures_candles + spot_1m + futures_1m
+    rows = (
+        _sorted_candles("spot_5m", spot_candles)
+        + _sorted_candles("futures_5m", futures_candles)
+        + _sorted_candles("spot_1m", spot_1m)
+        + _sorted_candles("futures_1m", futures_1m)
+    )
     canonical = {
         "source": source.value,
         "requested_date_range": {"start": start_date, "end": end_date},
@@ -240,10 +290,16 @@ def build_data_fingerprint(
         source=source,
         spot_candle_count=len(spot_candles),
         futures_candle_count=len(futures_candles),
+        spot_one_minute_candle_count=len(spot_1m),
+        futures_one_minute_candle_count=len(futures_1m),
         spot_earliest_timestamp=spot_earliest,
         spot_latest_timestamp=spot_latest,
         futures_earliest_timestamp=futures_earliest,
         futures_latest_timestamp=futures_latest,
+        spot_one_minute_earliest_timestamp=spot_1m_earliest,
+        spot_one_minute_latest_timestamp=spot_1m_latest,
+        futures_one_minute_earliest_timestamp=futures_1m_earliest,
+        futures_one_minute_latest_timestamp=futures_1m_latest,
         requested_date_range={"start": start_date, "end": end_date},
         observed_date_range={"earliest": observed[0], "latest": observed[1]},
         futures_contracts=futures_contracts,

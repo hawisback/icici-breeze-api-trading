@@ -25,6 +25,77 @@ from services.strategy.models import (
 
 
 @dataclass(frozen=True)
+class StrategyELifecycleDecision:
+    """Pure completed-bar Strategy E lifecycle decision shared by service/replay."""
+
+    exit_reason: str | None
+    decision_price: float
+    current_r: float
+    stop_hit: bool
+    target_hit: bool
+    force_exit: bool
+
+
+def evaluate_strategy_e_lifecycle_bar(
+    *,
+    direction: TradeDirection,
+    entry: float,
+    risk: float,
+    stop: float,
+    target: float,
+    bar: Candle,
+    forced_exit_time: str,
+) -> StrategyELifecycleDecision:
+    """Evaluate one completed futures bar with production's conservative order.
+
+    When one OHLC bar spans both stop and target, stop wins because the bar
+    cannot prove favorable ordering. Forced exit is considered only after
+    stop/target checks, matching StrategyService.
+    """
+    if entry <= 0 or risk <= 0 or stop <= 0 or target <= 0:
+        raise ValueError("invalid Strategy E lifecycle inputs")
+    if bar.interval != "5m" or bar.source not in ("BREEZE", "KITE", "LIVE"):
+        raise ValueError("Strategy E lifecycle requires a real completed 5m bar")
+
+    current = float(bar.close)
+    current_r = (
+        (current - entry) / risk
+        if direction == TradeDirection.BULLISH
+        else (entry - current) / risk
+    )
+    if direction == TradeDirection.BULLISH:
+        stop_hit = float(bar.low) <= stop
+        target_hit = float(bar.high) >= target
+    else:
+        stop_hit = float(bar.high) >= stop
+        target_hit = float(bar.low) <= target
+
+    force_exit = (
+        bar.end_time.astimezone(IST).strftime("%H:%M")
+        >= forced_exit_time
+    )
+    exit_reason: str | None = None
+    decision_price = current
+    if stop_hit:
+        exit_reason = "STRATEGY_E_STOP_LOSS"
+        decision_price = stop
+    elif target_hit:
+        exit_reason = "STRATEGY_E_TARGET"
+        decision_price = target
+    elif force_exit:
+        exit_reason = "STRATEGY_E_FORCED_EXIT"
+
+    return StrategyELifecycleDecision(
+        exit_reason=exit_reason,
+        decision_price=round(float(decision_price), 6),
+        current_r=round(float(current_r), 6),
+        stop_hit=stop_hit,
+        target_hit=target_hit,
+        force_exit=force_exit,
+    )
+
+
+@dataclass(frozen=True)
 class StrategyEDecision:
     result: str
     reason: str

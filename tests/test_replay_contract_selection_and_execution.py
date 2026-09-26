@@ -38,7 +38,14 @@ def _signal(
         option_type=OptionType.CALL,
         timestamp=datetime(2026, 9, 17, 4, 30, tzinfo=UTC),
         spot_reference_price=24000.0,
-        underlying_entry_price=24000.0 if strategy == StrategyName.TREND_PULLBACK else None,
+        underlying_entry_price=(
+            24000.0
+            if strategy in {
+                StrategyName.TREND_PULLBACK,
+                StrategyName.DI_CONTINUATION,
+            }
+            else None
+        ),
         structural_stop=23950.0,
         r_points=50.0,
         derivatives_score=0.0,
@@ -131,6 +138,42 @@ def test_exact_signal_snapshot_reruns_production_contract_selector():
     assert decision.entry_price_basis == "POINT_IN_TIME_ASK"
     assert decision.entry_reference_price == 100.0
     assert decision.unsupported_evidence == ()
+
+
+def test_strategy_c_exact_snapshot_uses_delta_aware_production_selector():
+    signal = _signal(
+        signal_id="SIG-C-EXACT",
+        strategy=StrategyName.DI_CONTINUATION,
+    )
+    provider = HistoricalContractSelectionProvider(
+        historical_service=None,
+        strategy_repository=None,
+        option_config=OptionSelectionConfig(),
+    )
+    provider.date_str = "2026-09-17"
+    provider.snapshots = [
+        _snapshot(
+            signal.signal_id,
+            [
+                _candidate(23950.0, 0.20, "OPT-C-BAD"),
+                _candidate(24000.0, 0.62, "OPT-C-GOOD"),
+            ],
+            strategy=StrategyName.DI_CONTINUATION,
+        )
+    ]
+
+    decision = asyncio.run(provider.select_contract(signal))
+
+    assert decision.production_rules_applied is True
+    assert decision.selected_contract is not None
+    assert decision.selected_contract.instrument_id == "OPT-C-GOOD"
+    rejected = {
+        row["instrument_id"]: row["status"]
+        for row in decision.inspected_candidates
+    }
+    assert rejected["OPT-C-BAD"] == (
+        "REJECTED_DELTA_UNAVAILABLE_OR_OUT_OF_RANGE"
+    )
 
 
 def test_snapshot_with_mismatched_signal_timestamp_is_not_claimed_exact():

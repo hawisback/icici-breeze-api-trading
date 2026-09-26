@@ -26,6 +26,34 @@ from services.strategy.models import (
     TradeDirection,
 )
 from services.strategy.replay_manifest import ReplayManifestRecord, ReplayManifestRecorder
+from services.historical.strategy_c_candidate_manifest import (
+    CANDIDATE_ID as STRATEGY_C_CANDIDATE_ID,
+    _spec_fingerprint as strategy_c_spec_fingerprint,
+)
+from services.historical.strategy_c_forward_validation import (
+    FREEZE_DATE as STRATEGY_C_FREEZE_DATE,
+)
+from services.historical.strategy_c_shadow_observer import (
+    replay_strategy_c_to_as_of,
+)
+from services.historical.strategy_d_candidate_manifest import (
+    CANDIDATE_ID as STRATEGY_D_CANDIDATE_ID,
+    FREEZE_DATE as STRATEGY_D_FREEZE_DATE,
+    spec_fingerprint as strategy_d_spec_fingerprint,
+)
+from services.strategy.strategies.candidate_runtime import (
+    strategy_c_signal_from_status,
+    strategy_d_signal_from_status,
+    strategy_d_signal_id,
+)
+from services.strategy.strategies.pivot_vwap_scalp import (
+    PivotVwapScalpStrategy,
+)
+from services.strategy.strategies.sr_momentum_breakout import (
+    StrategyDConfig,
+    evaluate_strategy_d_signal,
+    previous_session_levels,
+)
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
 
@@ -63,6 +91,8 @@ class ReplayBarContext:
     spot_candles_5m: Sequence[Candle]
     spot_candles_15m: Sequence[Candle]
     futures_candles: Sequence[Candle]
+    active_futures_candles_5m: Sequence[Candle] = ()
+    futures_candles_1m: Sequence[Candle] = ()
 
 
 @dataclass
@@ -458,6 +488,547 @@ class VolatilityBreakoutReplayAdapter:
         self.strategy.reset(at)
 
 
+class DiContinuationReplayAdapter:
+    """Replay the frozen Strategy C observer used by production promotion."""
+
+    def __init__(self, tunables: StrategyTunablesConfig) -> None:
+        self.tunables = tunables
+        self._consumed_signal_ids: set[str] = set()
+
+    def strategy_metadata(self) -> ReplayStrategyMetadata:
+        return ReplayStrategyMetadata(
+            registry_key="di_continuation",
+            strategy=StrategyName.DI_CONTINUATION,
+            display_name="Strategy C · DI Continuation",
+            priority=30,
+            enabled=self.tunables.di_continuation_enabled,
+            evaluation_start="09:45",
+            evaluation_end="14:45",
+            entry_start="09:45",
+            entry_end="14:45",
+            timeline_phase_key="strategy_c_phase",
+        )
+
+    def prepare_session(self, context: ReplaySessionContext) -> None:
+        self._consumed_signal_ids.clear()
+
+    def evaluate_completed_bar(
+        self,
+        context: ReplayBarContext,
+        *,
+        allow_evaluation: bool,
+    ) -> ReplayStrategyEvaluation:
+        meta = self.strategy_metadata()
+        if not meta.enabled:
+            return ReplayStrategyEvaluation(meta, phase="DISABLED")
+        local_day = context.bar.end_time.astimezone(IST).date()
+        if local_day <= STRATEGY_C_FREEZE_DATE:
+            return ReplayStrategyEvaluation(
+                meta,
+                phase="WAITING_FOR_POST_FREEZE_SESSION",
+            )
+        if (
+            not context.active_futures_candles_5m
+            or not context.futures_candles_1m
+        ):
+            return ReplayStrategyEvaluation(
+                meta,
+                phase="NATIVE_FUTURES_HISTORY_UNAVAILABLE",
+            )
+
+        report = replay_strategy_c_to_as_of(
+            context.active_futures_candles_5m,
+            context.futures_candles_1m,
+            as_of=context.bar.end_time,
+        )
+        eligible_candidates: list[tuple[datetime, dict[str, Any]]] = []
+        for row in report.get("candidate_entries") or []:
+            signal_id = str(row.get("candidate_signal_id") or "")
+            if not signal_id or signal_id in self._consumed_signal_ids:
+                continue
+            try:
+                entry_time = datetime.fromisoformat(
+                    str(row["entry_time"]).replace("Z", "+00:00")
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            age = (context.bar.end_time - entry_time).total_seconds()
+            if -5.0 <= age <= 300.0:
+                eligible_candidates.append((entry_time, row))
+
+        signal = None
+        if allow_evaluation and eligible_candidates:
+            entry_time, candidate = min(
+                eligible_candidates,
+                key=lambda item: item[0],
+            )
+            actual_lifecycle = dict(candidate.get("lifecycle") or {})
+            entry_view = {
+                **candidate,
+                "lifecycle": {
+                    **actual_lifecycle,
+                    "status": "OPEN",
+                },
+            }
+            status = {
+                "status": report.get("status"),
+                "candidate_id": STRATEGY_C_CANDIDATE_ID,
+                "candidate_spec_fingerprint": (
+                    strategy_c_spec_fingerprint()
+                ),
+                "active_candidate_trade": entry_view,
+            }
+            signal = strategy_c_signal_from_status(
+                status,
+                as_of=context.bar.end_time,
+            )
+            if signal is not None:
+                signal = signal.model_copy(update={
+                    "features_snapshot": {
+                        **signal.features_snapshot,
+                        "candidate_lifecycle": actual_lifecycle,
+                        "replay_observed_at": (
+                            context.bar.end_time.isoformat()
+                        ),
+                        "replay_observation_latency_seconds": round(
+                            (context.bar.end_time - entry_time).total_seconds(),
+                            3,
+                        ),
+                    }
+                })
+        return ReplayStrategyEvaluation(
+            meta,
+            signal=signal,
+            phase=str(report.get("status") or "WAITING"),
+            audit_records=[{
+                "timestamp": context.bar.end_time.isoformat(),
+                "strategy": StrategyName.DI_CONTINUATION.value,
+                "phase_state": str(report.get("status") or "WAITING"),
+                "raw_entries_today": len(report.get("raw_entries") or []),
+                "candidate_entries_today": len(
+                    report.get("candidate_entries") or []
+                ),
+                "native_futures_5m": len(
+                    context.active_futures_candles_5m
+                ),
+                "native_futures_1m": len(context.futures_candles_1m),
+            }],
+        )
+
+    def on_entry_confirmed(
+        self,
+        signal: StrategySignal,
+        context: ReplayBarContext,
+    ) -> ReplayManifestRecord:
+        self._consumed_signal_ids.add(signal.signal_id)
+        snapshot = dict(signal.features_snapshot)
+        research = dict(snapshot.get("research_features") or {})
+        atr = float(research.get("setup_atr") or 0.0)
+        entry = float(
+            signal.underlying_entry_price or signal.spot_reference_price
+        )
+        setup_end = snapshot.get("setup_end") or signal.timestamp.isoformat()
+        return context.session.recorder.record_entry(
+            signal=signal,
+            trading_date=context.session.trading_date,
+            trigger_source_candle_timestamp=setup_end,
+            trigger_level=entry,
+            simulated_entry_timestamp=signal.timestamp,
+            simulated_entry_price=entry,
+            entry_5m_candle_timestamp=context.bar.end_time,
+            entry_occurred_intrabar=False,
+            entry_features={
+                **snapshot,
+                "underlying_entry_price": entry,
+                "futures_contract": (
+                    context.active_futures_candles_5m[-1].instrument_id
+                    if context.active_futures_candles_5m
+                    else None
+                ),
+            },
+            setup_id=str(setup_end),
+            pullback_swing_low=None,
+            pullback_swing_high=None,
+            impulse_low=None,
+            impulse_high=None,
+            atr_at_entry=atr,
+            initial_structural_stop=float(signal.structural_stop),
+            initial_risk_points=float(signal.r_points),
+            initial_risk_atr=(
+                float(signal.r_points) / atr if atr > 0 else 0.0
+            ),
+            current_trailing_stop=float(signal.structural_stop),
+            current_r=0.0,
+            highest_favorable_price=entry,
+            lowest_favorable_price=entry,
+            peak_r=0.0,
+            protected_breakeven_active=False,
+            profit_lock_active=False,
+            runner_mode_active=False,
+            current_ladder_stage="C_FROZEN_LIFECYCLE",
+            reversal_score=0,
+            adverse_health_counters={},
+            entry_bar_timestamp=context.bar.end_time,
+            last_managed_completed_bar_timestamp=None,
+        )
+
+    def on_exit(self, direction: TradeDirection, at: datetime) -> None:
+        return None
+
+    def on_execution_rejected(
+        self,
+        signal: StrategySignal,
+        reason: str,
+    ) -> None:
+        self._consumed_signal_ids.add(signal.signal_id)
+
+    def reset(self, at: datetime) -> None:
+        return None
+
+
+class SRMomentumBreakoutReplayAdapter:
+    """Replay the frozen Strategy D V2 signal contract."""
+
+    def __init__(self, tunables: StrategyTunablesConfig) -> None:
+        self.tunables = tunables
+        self.config = StrategyDConfig.v2_candidate()
+        self._consumed_signal_ids: set[str] = set()
+        self._used_level_keys: set[str] = set()
+        self._pending_signal: StrategySignal | None = None
+
+    def strategy_metadata(self) -> ReplayStrategyMetadata:
+        return ReplayStrategyMetadata(
+            registry_key="sr_momentum_breakout",
+            strategy=StrategyName.SR_MOMENTUM_BREAKOUT,
+            display_name="Strategy D · S&R Momentum",
+            priority=40,
+            enabled=self.tunables.sr_momentum_breakout_enabled,
+            evaluation_start=self.config.entry_start,
+            evaluation_end=self.config.entry_end,
+            entry_start=self.config.entry_start,
+            entry_end=self.config.entry_end,
+            timeline_phase_key="strategy_d_phase",
+        )
+
+    def prepare_session(self, context: ReplaySessionContext) -> None:
+        self._consumed_signal_ids.clear()
+        self._used_level_keys.clear()
+        self._pending_signal = None
+
+    def evaluate_completed_bar(
+        self,
+        context: ReplayBarContext,
+        *,
+        allow_evaluation: bool,
+    ) -> ReplayStrategyEvaluation:
+        meta = self.strategy_metadata()
+        if not meta.enabled:
+            return ReplayStrategyEvaluation(meta, phase="DISABLED")
+        local_day = context.bar.end_time.astimezone(IST).date()
+        if local_day < STRATEGY_D_FREEZE_DATE:
+            return ReplayStrategyEvaluation(
+                meta,
+                phase="WAITING_FOR_FREEZE_DATE",
+            )
+        levels = previous_session_levels(
+            context.spot_candles_5m,
+            local_day,
+        )
+        if levels is None or not context.active_futures_candles_5m:
+            return ReplayStrategyEvaluation(
+                meta,
+                phase="MARKET_DATA_UNAVAILABLE",
+            )
+        raw_signal = evaluate_strategy_d_signal(
+            context.spot_candles_5m,
+            context.active_futures_candles_5m,
+            levels,
+            self.config,
+        )
+        if raw_signal is not None:
+            signal_id = strategy_d_signal_id(raw_signal)
+            level_key = (
+                f"{local_day.isoformat()}|{raw_signal.option_type}|"
+                f"{raw_signal.breakout_level_name}"
+            )
+            if (
+                level_key not in self._used_level_keys
+                and signal_id not in self._consumed_signal_ids
+            ):
+                status = {
+                    "candidate_id": STRATEGY_D_CANDIDATE_ID,
+                    "candidate_spec_fingerprint": (
+                        strategy_d_spec_fingerprint()
+                    ),
+                    "execution_signal": raw_signal.to_dict(),
+                    "execution_signal_id": signal_id,
+                }
+                pending = strategy_d_signal_from_status(
+                    status,
+                    as_of=context.bar.end_time,
+                )
+                if pending is not None:
+                    self._pending_signal = pending.model_copy(update={
+                        "features_snapshot": {
+                            **pending.features_snapshot,
+                            "strategy_d_signal": raw_signal.to_dict(),
+                        }
+                    })
+                    # The paper monitor freezes the level as soon as the
+                    # candidate is captured, before StrategyService gates.
+                    self._used_level_keys.add(level_key)
+
+        if self._pending_signal is not None:
+            age = (
+                context.bar.end_time - self._pending_signal.timestamp
+            ).total_seconds()
+            if (
+                age < -5.0
+                or age > 300.0
+                or self._pending_signal.signal_id
+                in self._consumed_signal_ids
+            ):
+                self._pending_signal = None
+
+        signal = self._pending_signal if allow_evaluation else None
+        phase = (
+            "SIGNAL_READY"
+            if signal is not None
+            else (
+                "SIGNAL_HELD_BY_HIGHER_PRIORITY_OR_RISK_GATE"
+                if self._pending_signal is not None
+                else "MONITORING"
+            )
+        )
+        return ReplayStrategyEvaluation(
+            meta,
+            signal=signal,
+            phase=phase,
+            audit_records=[{
+                "timestamp": context.bar.end_time.isoformat(),
+                "strategy": StrategyName.SR_MOMENTUM_BREAKOUT.value,
+                "phase_state": phase,
+                "candidate_id": STRATEGY_D_CANDIDATE_ID,
+                "levels": levels.to_dict(),
+                "used_level_keys": sorted(self._used_level_keys),
+                "pending_signal_id": (
+                    self._pending_signal.signal_id
+                    if self._pending_signal is not None
+                    else None
+                ),
+            }],
+        )
+
+    def on_entry_confirmed(
+        self,
+        signal: StrategySignal,
+        context: ReplayBarContext,
+    ) -> ReplayManifestRecord:
+        self._consumed_signal_ids.add(signal.signal_id)
+        if (
+            self._pending_signal is not None
+            and self._pending_signal.signal_id == signal.signal_id
+        ):
+            self._pending_signal = None
+        snapshot = dict(signal.features_snapshot)
+        raw = dict(snapshot.get("strategy_d_signal") or {})
+        entry = float(signal.spot_reference_price)
+        atr = float(raw.get("atr_5m") or snapshot.get("atr_5m") or 0.0)
+        return context.session.recorder.record_entry(
+            signal=signal,
+            trading_date=context.session.trading_date,
+            trigger_source_candle_timestamp=signal.timestamp,
+            trigger_level=float(
+                raw.get("breakout_level")
+                or snapshot.get("breakout_level")
+                or entry
+            ),
+            simulated_entry_timestamp=signal.timestamp,
+            simulated_entry_price=entry,
+            entry_5m_candle_timestamp=context.bar.end_time,
+            entry_occurred_intrabar=False,
+            entry_features={
+                **snapshot,
+                "underlying_entry_price": entry,
+            },
+            setup_id=(
+                f"{raw.get('breakout_level_name', 'LEVEL')}:"
+                f"{signal.timestamp.isoformat()}"
+            ),
+            pullback_swing_low=None,
+            pullback_swing_high=None,
+            impulse_low=None,
+            impulse_high=None,
+            atr_at_entry=atr,
+            initial_structural_stop=float(signal.structural_stop),
+            initial_risk_points=float(signal.r_points),
+            initial_risk_atr=(
+                float(signal.r_points) / atr if atr > 0 else 0.0
+            ),
+            current_trailing_stop=float(signal.structural_stop),
+            current_r=0.0,
+            highest_favorable_price=entry,
+            lowest_favorable_price=entry,
+            peak_r=0.0,
+            protected_breakeven_active=False,
+            profit_lock_active=False,
+            runner_mode_active=False,
+            current_ladder_stage="D_PRE_SCALE",
+            reversal_score=0,
+            adverse_health_counters={},
+            entry_bar_timestamp=context.bar.end_time,
+            last_managed_completed_bar_timestamp=None,
+        )
+
+    def on_exit(self, direction: TradeDirection, at: datetime) -> None:
+        return None
+
+    def on_execution_rejected(
+        self,
+        signal: StrategySignal,
+        reason: str,
+    ) -> None:
+        self._consumed_signal_ids.add(signal.signal_id)
+        if (
+            self._pending_signal is not None
+            and self._pending_signal.signal_id == signal.signal_id
+        ):
+            self._pending_signal = None
+
+    def reset(self, at: datetime) -> None:
+        # Production's frozen D paper monitor is observed before main entry
+        # gates and retains used-level/pending state across blocked cycles.
+        return None
+
+
+class PivotVwapScalpReplayAdapter:
+    """Replay adapter for the production Strategy E signal engine."""
+
+    def __init__(self, tunables: StrategyTunablesConfig) -> None:
+        self.tunables = tunables
+        self.strategy = PivotVwapScalpStrategy(tunables)
+
+    def strategy_metadata(self) -> ReplayStrategyMetadata:
+        return ReplayStrategyMetadata(
+            registry_key="pivot_vwap_scalp",
+            strategy=StrategyName.PIVOT_VWAP_SCALP,
+            display_name="Strategy E · Pivot/VWAP Scalp",
+            priority=50,
+            enabled=self.tunables.pivot_vwap_scalp_enabled,
+            evaluation_start=self.tunables.strategy_e_entry_start,
+            evaluation_end=self.tunables.strategy_e_entry_end,
+            entry_start=self.tunables.strategy_e_entry_start,
+            entry_end=self.tunables.strategy_e_entry_end,
+            timeline_phase_key="strategy_e_phase",
+        )
+
+    def prepare_session(self, context: ReplaySessionContext) -> None:
+        self.strategy.reset()
+
+    def evaluate_completed_bar(
+        self,
+        context: ReplayBarContext,
+        *,
+        allow_evaluation: bool,
+    ) -> ReplayStrategyEvaluation:
+        meta = self.strategy_metadata()
+        if not meta.enabled:
+            return ReplayStrategyEvaluation(meta, phase="DISABLED")
+        if not context.active_futures_candles_5m:
+            return ReplayStrategyEvaluation(
+                meta,
+                phase="FUTURES_5M_UNAVAILABLE",
+            )
+        if allow_evaluation:
+            decision = self.strategy.evaluate(
+                context.active_futures_candles_5m,
+                as_of=context.bar.end_time,
+                expected_completed_end=context.bar.end_time,
+            )
+        else:
+            decision = self.strategy.analyze_snapshot(
+                context.active_futures_candles_5m,
+                as_of=context.bar.end_time,
+                expected_completed_end=context.bar.end_time,
+            )
+        return ReplayStrategyEvaluation(
+            meta,
+            signal=decision.signal if allow_evaluation else None,
+            phase=decision.reason,
+            audit_records=[{
+                "timestamp": context.bar.end_time.isoformat(),
+                "strategy": StrategyName.PIVOT_VWAP_SCALP.value,
+                "phase_state": decision.reason,
+                "result": decision.result,
+                "metrics": dict(decision.metrics),
+            }],
+        )
+
+    def on_entry_confirmed(
+        self,
+        signal: StrategySignal,
+        context: ReplayBarContext,
+    ) -> ReplayManifestRecord:
+        snapshot = dict(signal.features_snapshot)
+        entry = float(
+            signal.underlying_entry_price or signal.spot_reference_price
+        )
+        target = snapshot.get("target_price")
+        return context.session.recorder.record_entry(
+            signal=signal,
+            trading_date=context.session.trading_date,
+            trigger_source_candle_timestamp=signal.timestamp,
+            trigger_level=entry,
+            simulated_entry_timestamp=signal.timestamp,
+            simulated_entry_price=entry,
+            entry_5m_candle_timestamp=context.bar.end_time,
+            entry_occurred_intrabar=False,
+            entry_features={
+                **snapshot,
+                "underlying_entry_price": entry,
+                "strategy_target_price": target,
+            },
+            setup_id=(
+                f"{snapshot.get('signal_type', 'STRATEGY_E')}:"
+                f"{signal.timestamp.isoformat()}"
+            ),
+            pullback_swing_low=None,
+            pullback_swing_high=None,
+            impulse_low=None,
+            impulse_high=None,
+            atr_at_entry=0.0,
+            initial_structural_stop=float(signal.structural_stop),
+            initial_risk_points=float(signal.r_points),
+            initial_risk_atr=0.0,
+            current_trailing_stop=float(signal.structural_stop),
+            current_r=0.0,
+            highest_favorable_price=entry,
+            lowest_favorable_price=entry,
+            peak_r=0.0,
+            protected_breakeven_active=False,
+            profit_lock_active=False,
+            runner_mode_active=False,
+            current_ladder_stage="E_FIXED_STOP_TARGET",
+            reversal_score=0,
+            adverse_health_counters={},
+            entry_bar_timestamp=context.bar.end_time,
+            last_managed_completed_bar_timestamp=None,
+        )
+
+    def on_exit(self, direction: TradeDirection, at: datetime) -> None:
+        return None
+
+    def on_execution_rejected(
+        self,
+        signal: StrategySignal,
+        reason: str,
+    ) -> None:
+        return None
+
+    def reset(self, at: datetime) -> None:
+        self.strategy.reset()
+
+
 class ReplayStrategyRegistry:
     """Ordered strategy adapter registry used by Day Replay orchestration."""
 
@@ -479,6 +1050,9 @@ class ReplayStrategyRegistry:
         return cls((
             TrendPullbackReplayAdapter(tunables),
             VolatilityBreakoutReplayAdapter(tunables, session),
+            DiContinuationReplayAdapter(tunables),
+            SRMomentumBreakoutReplayAdapter(tunables),
+            PivotVwapScalpReplayAdapter(tunables),
         ))
 
     def strategy_metadata(self) -> list[ReplayStrategyMetadata]:
@@ -559,14 +1133,21 @@ class ReplayStrategyRegistry:
         stop_after_signal: bool = False,
     ) -> list[ReplayStrategyEvaluation]:
         results: list[ReplayStrategyEvaluation] = []
+        winner_selected = False
         for adapter in self.adapters:
             result = adapter.evaluate_completed_bar(
                 context,
-                allow_evaluation=allow_evaluation,
+                allow_evaluation=(
+                    allow_evaluation and not winner_selected
+                ),
             )
             results.append(result)
-            if stop_after_signal and result.signal is not None:
-                break
+            if (
+                stop_after_signal
+                and result.signal is not None
+                and not winner_selected
+            ):
+                winner_selected = True
         return results
 
     def refresh_diagnostics(

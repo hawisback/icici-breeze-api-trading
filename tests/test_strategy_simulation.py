@@ -667,8 +667,13 @@ def test_replay_metadata_discloses_applied_and_ignored_controls():
     assert [item["strategy"] for item in registry_snapshot] == [
         "TREND_PULLBACK",
         "VOLATILITY_BREAKOUT",
+        "DI_CONTINUATION",
+        "SR_MOMENTUM_BREAKOUT",
+        "PIVOT_VWAP_SCALP",
     ]
-    assert registry_snapshot[0]["priority"] < registry_snapshot[1]["priority"]
+    assert [
+        item["priority"] for item in registry_snapshot
+    ] == sorted(item["priority"] for item in registry_snapshot)
     assert controls["applied_overrides"]["rvol_threshold"] == 1.4
     assert controls["applied_overrides"]["strat_b_min_confirmation"] == 4
     assert controls["applied_overrides"]["box_max_height_atr"] == 1.5
@@ -851,6 +856,73 @@ async def test_replay_fetches_exact_target_window_instead_of_days_back_from_now(
 
 
 @pytest.mark.asyncio
+async def test_replay_one_minute_loader_fetches_exact_target_day(tmp_path):
+    repository = HistoricalRepository(tmp_path / "historical_1m.db")
+    await repository.initialize()
+    target_start = datetime(
+        2026,
+        9,
+        24,
+        9,
+        15,
+        tzinfo=timezone(timedelta(hours=5, minutes=30)),
+    ).astimezone(timezone.utc)
+    candle = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-29",
+        interval="1m",
+        start_time=target_start,
+        end_time=target_start + timedelta(minutes=1),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=100,
+        source="BREEZE",
+    )
+    fetch = AsyncMock(return_value=[candle])
+    hist = SimpleNamespace(
+        repo=repository,
+        fetch_candles_from_provider_window=fetch,
+    )
+    engine = SimulationEngine(historical_service=hist)
+
+    rows = await engine._load_replay_one_minute_candles(
+        "2026-09-24",
+        candle.instrument_id,
+        HistoricalReplaySource.BREEZE,
+    )
+
+    assert rows == [candle]
+    kwargs = fetch.await_args.kwargs
+    assert kwargs["interval"] == "1m"
+    assert kwargs["requested_source"] == "BREEZE"
+    assert kwargs["start_time"].astimezone(
+        timezone(timedelta(hours=5, minutes=30))
+    ).strftime("%Y-%m-%d %H:%M") == "2026-09-24 09:15"
+    assert kwargs["end_time"].astimezone(
+        timezone(timedelta(hours=5, minutes=30))
+    ).strftime("%Y-%m-%d %H:%M") == "2026-09-24 15:30"
+
+
+def test_post_freeze_strategy_c_missing_1m_is_explicit_data_quality():
+    engine = SimulationEngine()
+    import asyncio
+
+    result = asyncio.run(
+        engine.run_day_simulation(
+            SimulationRequest(date="2026-09-24")
+        )
+    )
+
+    assert "strategy_c_futures_1m" in result.data_quality.missing_data
+    evidence = result.replay_metadata["strategy_data_evidence"][
+        "DI_CONTINUATION"
+    ]
+    assert evidence["required_for_this_session"] is True
+    assert evidence["futures_1m_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_replay_seeds_and_resolves_futures_for_target_date_not_today():
     future = SimpleNamespace(
         instrument_id="INST-NIFTY-FUT-2026-09-29", segment="FUTURES",
@@ -947,8 +1019,13 @@ def test_default_replay_registry_orders_a_before_b_and_owns_supported_overrides(
     assert [item.strategy.value for item in metadata] == [
         "TREND_PULLBACK",
         "VOLATILITY_BREAKOUT",
+        "DI_CONTINUATION",
+        "SR_MOMENTUM_BREAKOUT",
+        "PIVOT_VWAP_SCALP",
     ]
-    assert metadata[0].priority < metadata[1].priority
+    assert [item.priority for item in metadata] == sorted(
+        item.priority for item in metadata
+    )
     assert "adx_threshold" not in registry.supported_override_fields()
     assert "rvol_threshold" in registry.supported_override_fields()
     assert "strat_b_min_confirmation" in registry.supported_override_fields()
@@ -966,6 +1043,12 @@ def test_default_replay_registry_orders_a_before_b_and_owns_supported_overrides(
     assert snapshot[1]["strategy"] == "VOLATILITY_BREAKOUT"
     assert snapshot[1]["evaluation_window"]["start"] == "09:20"
     assert snapshot[1]["entry_window"]["start"] == "09:25"
+    assert snapshot[2]["strategy"] == "DI_CONTINUATION"
+    assert snapshot[2]["evaluation_window"]["start"] == "09:45"
+    assert snapshot[3]["strategy"] == "SR_MOMENTUM_BREAKOUT"
+    assert snapshot[3]["evaluation_window"]["start"] == "09:20"
+    assert snapshot[4]["strategy"] == "PIVOT_VWAP_SCALP"
+    assert snapshot[4]["entry_window"]["start"] == "09:25"
 
 
 def test_strategy_a_futures_coverage_reports_missing_entry_window_bar():
