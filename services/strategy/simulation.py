@@ -17,8 +17,11 @@ from services.historical.strategy_c_forward_validation import (
     FREEZE_DATE as STRATEGY_C_FREEZE_DATE,
 )
 from services.historical.strategy_d_candidate_manifest import (
+    CANDIDATE_ID as STRATEGY_D_CANDIDATE_ID,
     FREEZE_DATE as STRATEGY_D_FREEZE_DATE,
+    spec_fingerprint as strategy_d_spec_fingerprint,
 )
+from services.strategy.strategies.sr_momentum_breakout import StrategyDConfig
 from services.strategy.futures_signal import (
     FuturesContractResolver,
     aggregate_completed_15m,
