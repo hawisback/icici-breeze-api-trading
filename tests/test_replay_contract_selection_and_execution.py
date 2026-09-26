@@ -19,6 +19,7 @@ from services.strategy.replay_contract_selection import (
 )
 from services.strategy.replay_execution_model import (
     estimate_fill,
+    estimate_multi_exit_execution,
     estimate_round_trip_execution,
 )
 
@@ -447,3 +448,81 @@ def test_bid_ask_fill_and_mark_fallback_are_explicitly_different():
     assert fallback.executable_quote_equivalent is False
     assert fallback.method == "COMPLETED_MARK_PLUS_CONFIGURED_SLIPPAGE_ESTIMATE"
     assert "not an executable quote" in str(fallback.reason)
+
+
+def test_multi_exit_execution_prices_partial_and_final_legs_with_quantity_conservation():
+    risk = RiskConfig(
+        paper_slippage_points=1.0,
+        paper_brokerage_per_order=20.0,
+        paper_exchange_charge_rate=0.0,
+        paper_stt_sell_rate=0.0,
+        paper_gst_rate=0.0,
+        paper_sebi_charge_rate=0.0,
+        paper_stamp_buy_rate=0.0,
+    )
+    entry_time = datetime(2026, 9, 17, 4, 30, tzinfo=UTC)
+    entry = ReplayPriceEvidence(
+        status="AVAILABLE",
+        basis="POINT_IN_TIME_BID_ASK",
+        source="KITE",
+        event_timestamp=entry_time,
+        evidence_timestamp=entry_time,
+        bid=99.0,
+        ask=100.0,
+    )
+    partial = ReplayPriceEvidence(
+        status="AVAILABLE",
+        basis="POINT_IN_TIME_BID_ASK",
+        source="KITE",
+        event_timestamp=entry_time + timedelta(minutes=20),
+        evidence_timestamp=entry_time + timedelta(minutes=20),
+        bid=120.0,
+        ask=121.0,
+    )
+    final = ReplayPriceEvidence(
+        status="AVAILABLE",
+        basis="POINT_IN_TIME_BID_ASK",
+        source="KITE",
+        event_timestamp=entry_time + timedelta(minutes=40),
+        evidence_timestamp=entry_time + timedelta(minutes=40),
+        bid=110.0,
+        ask=111.0,
+    )
+
+    execution = estimate_multi_exit_execution(
+        entry_evidence=entry,
+        exit_legs=[(50, partial), (50, final)],
+        quantity=100,
+        risk_config=risk,
+    )
+
+    assert execution.gross_execution_pnl == 1300.0
+    assert execution.slippage_cost == 200.0
+    assert execution.brokerage == 60.0
+    assert execution.transaction_costs == 60.0
+    assert execution.net_execution_pnl == 1240.0
+
+
+def test_multi_exit_execution_fails_closed_when_exit_quantities_do_not_conserve_entry():
+    risk = RiskConfig(paper_slippage_points=0.0)
+    event = datetime(2026, 9, 17, 4, 30, tzinfo=UTC)
+    evidence = ReplayPriceEvidence(
+        status="AVAILABLE",
+        basis="POINT_IN_TIME_BID_ASK",
+        source="KITE",
+        event_timestamp=event,
+        evidence_timestamp=event,
+        bid=99.0,
+        ask=100.0,
+    )
+
+    execution = estimate_multi_exit_execution(
+        entry_evidence=evidence,
+        exit_legs=[(50, evidence)],
+        quantity=100,
+        risk_config=risk,
+    )
+
+    assert execution.gross_execution_pnl is None
+    assert execution.transaction_costs is None
+    assert execution.net_execution_pnl is None
