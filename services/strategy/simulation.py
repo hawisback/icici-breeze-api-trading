@@ -835,11 +835,15 @@ class SimulationEngine:
         instrument_id: str,
         historical_source: HistoricalReplaySource,
     ) -> list[Candle]:
-        """Load authoritative 1-minute candles used only for intrabar ordering."""
-        if not self.hist_svc or not hasattr(self.hist_svc, "repo"):
+        """Load authoritative native 1m history for intrabar/C replay.
+
+        Cache is preferred but the exact target-day provider window is fetched
+        when that capability exists. Synthetic candles are never accepted.
+        """
+        if not self.hist_svc:
             return []
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        start = datetime(
+        start_time = datetime(
             target_date.year,
             target_date.month,
             target_date.day,
@@ -847,7 +851,7 @@ class SimulationEngine:
             15,
             tzinfo=IST,
         ).astimezone(timezone.utc)
-        end = datetime(
+        session_end = datetime(
             target_date.year,
             target_date.month,
             target_date.day,
@@ -855,23 +859,87 @@ class SimulationEngine:
             30,
             tzinfo=IST,
         ).astimezone(timezone.utc)
-        try:
-            candles = await self.hist_svc.repo.get_candles(
-                instrument_id,
-                "1m",
-                start_time=start,
-                end_time=end,
-                limit=1000,
-            )
-        except Exception as exc:
-            logger.warning("Historical 1m replay query error: %s", exc)
-            return []
+        end_time = min(utc_now(), session_end)
+        all_candles: list[Candle] = []
+
+        repo = getattr(self.hist_svc, "repo", None)
+        if repo is not None:
+            try:
+                all_candles.extend(
+                    await repo.get_candles(
+                        instrument_id,
+                        "1m",
+                        start_time=start_time,
+                        end_time=session_end,
+                        limit=1000,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Historical 1m replay cache query failed for %s: %s",
+                    instrument_id,
+                    exc,
+                )
+
+        targeted_fetch = getattr(
+            self.hist_svc,
+            "fetch_candles_from_provider_window",
+            None,
+        )
+        if callable(targeted_fetch) and end_time >= start_time:
+            try:
+                all_candles.extend(
+                    await targeted_fetch(
+                        instrument_id,
+                        interval="1m",
+                        start_time=start_time,
+                        end_time=end_time,
+                        requested_source=historical_source.value,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Historical 1m replay provider fetch failed for %s: %s",
+                    instrument_id,
+                    exc,
+                )
+        elif repo is None:
+            try:
+                all_candles.extend(
+                    await self.hist_svc.get_candles(
+                        instrument_id=instrument_id,
+                        interval="1m",
+                        start_time=start_time,
+                        end_time=session_end,
+                        limit=1000,
+                        requested_source=historical_source.value,
+                        allow_provider_fallback=False,
+                        allow_synthetic_fallback=False,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Historical 1m replay query failed for %s: %s",
+                    instrument_id,
+                    exc,
+                )
+
         allowed = (
             {"BREEZE", "KITE", "LIVE"}
             if historical_source == HistoricalReplaySource.MIXED
             else {historical_source.value}
         )
-        return [candle for candle in candles if candle.source in allowed]
+        deduped = {
+            (candle.source, candle.start_time): candle
+            for candle in all_candles
+            if candle.source in allowed
+            and candle.interval == "1m"
+            and candle.end_time <= end_time
+        }
+        return sorted(
+            deduped.values(),
+            key=lambda candle: candle.start_time,
+        )
 
     async def run_day_simulation(self, request: SimulationRequest) -> SimulationResult:
         """Replay actual bars without inventing historical option fills or PnL."""
