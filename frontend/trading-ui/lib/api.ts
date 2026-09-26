@@ -1222,6 +1222,7 @@ export interface SimulatedTradeRecordData {
   simulated_exit_fill?: number | null;
   simulated_entry_fill_method?: string | null;
   simulated_exit_fill_method?: string | null;
+  simulated_fill_quote_equivalent: boolean;
   estimated_executable_gross_pnl?: number | null;
   estimated_slippage_cost?: number | null;
   estimated_transaction_costs?: number | null;

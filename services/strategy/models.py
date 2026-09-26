@@ -1013,6 +1013,7 @@ class SimulatedTradeRecord(BaseModel):
     simulated_exit_fill: float | None = None
     simulated_entry_fill_method: str | None = None
     simulated_exit_fill_method: str | None = None
+    simulated_fill_quote_equivalent: bool = False
     estimated_executable_gross_pnl: float | None = None
     estimated_slippage_cost: float | None = None
     estimated_transaction_costs: float | None = None

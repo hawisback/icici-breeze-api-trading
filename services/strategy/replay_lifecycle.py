@@ -1444,6 +1444,9 @@ def build_simulated_trade_records(records: Iterable[ReplayManifestRecord]) -> li
                 simulated_exit_fill_method=(
                     record.simulated_exit_fill_method
                 ),
+                simulated_fill_quote_equivalent=(
+                    record.simulated_fill_quote_equivalent
+                ),
                 estimated_executable_gross_pnl=(
                     record.simulated_gross_pnl
                 ),
