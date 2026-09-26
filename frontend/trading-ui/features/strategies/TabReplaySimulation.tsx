@@ -1190,8 +1190,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                               : "N/A"}
                             {t.simulated_entry_fill_method && (
                               <div className="mt-0.5 text-[9px] font-sans font-normal text-slate-500">
-                                {t.simulated_entry_fill_method.includes("BID_ASK")
-                                  && t.simulated_exit_fill_method?.includes("BID_ASK")
+                                {t.simulated_fill_quote_equivalent
                                   ? "bid/ask evidence"
                                   : "mark fallback"}
                               </div>
