@@ -175,7 +175,9 @@ def _number(row: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
-def _normalize_candles(\n    rows: list[dict[str, Any]], instrument: Instrument, interval_minutes: int = 5\n) -> list[Candle]:
+def _normalize_candles(
+    rows: list[dict[str, Any]], instrument: Instrument, interval_minutes: int = 5
+) -> list[Candle]:
     candles: list[Candle] = []
     for row in rows:
         ts = _to_exchange_bar_start(row["time"], interval_minutes)
