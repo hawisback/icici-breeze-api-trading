@@ -35,6 +35,7 @@ class ReplayConfigurationSnapshot(BaseModel):
     historical_source: HistoricalReplaySource
     bypass_entry_window: bool
     strategy_a_enabled: bool
+    selected_strategies: list[str] | None = None
     threshold_overrides: dict[str, Any]
     strategy_a: dict[str, Any]
     strategy_suite: dict[str, Any]
@@ -125,6 +126,7 @@ def build_configuration_snapshot(
     bypass_entry_window: bool,
     strategy_a_enabled: bool,
     overrides: ThresholdOverrides,
+    selected_strategies: list[str] | None = None,
     tunables: StrategyTunablesConfig,
     session: SessionTimersConfig,
     execution_parity: dict[str, Any] | None = None,
@@ -168,6 +170,9 @@ def build_configuration_snapshot(
         historical_source=historical_source,
         bypass_entry_window=bypass_entry_window,
         strategy_a_enabled=strategy_a_enabled,
+        selected_strategies=(
+            sorted(selected_strategies) if selected_strategies is not None else None
+        ),
         threshold_overrides=overrides.model_dump(mode="json"),
         strategy_a=strategy_a,
         strategy_suite={
