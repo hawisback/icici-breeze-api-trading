@@ -2178,6 +2178,25 @@ class SimulationEngine:
                 "unavailable for one or more resolved trades."
             )
         if (
+            cfg.di_continuation_enabled
+            and target_session_date > STRATEGY_C_FREEZE_DATE
+        ):
+            limitation += (
+                " Strategy C preserves its native 1-minute signal timestamp, "
+                "but the current Day Replay admission loop observes candidate "
+                "availability on completed 5-minute orchestration points; the "
+                "result records signal-to-observation latency explicitly."
+            )
+        if (
+            cfg.sr_momentum_breakout_enabled
+            and not one_minute_candles
+        ):
+            limitation += (
+                " Strategy D native spot 1-minute ordering was unavailable, "
+                "so its frozen lifecycle used the candidate's explicit "
+                "conservative 5-minute OHLC fallback."
+            )
+        if (
             chronological_executor is not None
             and chronological_executor.state.chronology_indeterminate
         ):
