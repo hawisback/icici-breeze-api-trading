@@ -21,6 +21,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from services.historical.yahoo_chart import YahooChartClient
+
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
 SESSION_START = time(9, 15)
@@ -310,6 +312,26 @@ def _rows_for_dates(candles: list[Candle], dates: set[date]) -> list[dict[str, A
     ]
 
 
+def _candles_from_yahoo(
+    rows: list[dict[str, Any]], symbol: str, instrument_type: str
+) -> list[Candle]:
+    return [
+        Candle(
+            timestamp=str(row["timestamp"]),
+            open=float(row["open"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            close=float(row["close"]),
+            volume=float(row["volume"]) if row.get("volume") is not None else None,
+            open_interest=None,
+            source="YAHOO_CHART",
+            instrument=symbol,
+            instrument_type=instrument_type,
+        )
+        for row in rows
+    ]
+
+
 def _resolve_vix(client: PublicNseChartClient) -> Instrument:
     candidates = ("INDIA VIX", "India VIX", "INDIAVIX")
     errors: list[str] = []
@@ -382,66 +404,183 @@ def build_research_dataset(sessions: int = 10, lookback_days: int = 30) -> dict[
     start = datetime.combine(now.date() - timedelta(days=lookback_days), time.min, tzinfo=IST)
     end = now
 
-    with PublicNseChartClient() as client:
-        nifty = client.resolve_exact("NIFTY 50", "IDX")
-        nifty_rows = client.history(nifty, start, end, 5)
-        dates = _last_complete_dates(nifty_rows, sessions)
-        if len(dates) != sessions:
-            diagnostics = {
-                "request": {
-                    "start": start.isoformat(),
-                    "end": end.isoformat(),
-                    "sessions": sessions,
-                    "lookback_days": lookback_days,
-                },
-                "history_response": client.last_history_debug,
-                "session_shape": _session_diagnostics(nifty_rows),
-            }
-            raise RuntimeError(
-                f"Only {len(dates)} complete NIFTY sessions found in {lookback_days} calendar days. "
-                f"Diagnostics: {json.dumps(diagnostics, separators=(',', ':'))}"
+    source_attempts: list[dict[str, Any]] = []
+    nifty_rows: list[Candle] = []
+    vix_rows: list[Candle] = []
+    futures_rows: list[Candle] = []
+    volume_proxy_rows: list[Candle] = []
+    contract_by_date: dict[str, list[str]] = {}
+    primary_source = ""
+    vix_status: dict[str, Any] = {"available": False}
+    futures_status: dict[str, Any] = {"available": False}
+    volume_proxy_status: dict[str, Any] = {"available": False}
+
+    # Prefer NSE's public chart endpoint, but tolerate its current behavior of
+    # returning status=true with an empty intraday data array.
+    try:
+        with PublicNseChartClient() as client:
+            nifty = client.resolve_exact("NIFTY 50", "IDX")
+            candidate_rows = client.history(nifty, start, end, 5)
+            candidate_dates = _last_complete_dates(candidate_rows, sessions)
+            source_attempts.append(
+                {
+                    "source": "NSE_PUBLIC_CHART",
+                    "history_response": client.last_history_debug,
+                    "complete_sessions": len(candidate_dates),
+                    "session_shape": _session_diagnostics(candidate_rows),
+                }
             )
-        wanted = set(dates)
+            if len(candidate_dates) == sessions:
+                primary_source = "NSE_PUBLIC_CHART"
+                nifty_rows = candidate_rows
 
-        vix_status: dict[str, Any]
-        vix_rows: list[Candle] = []
-        try:
-            vix = _resolve_vix(client)
-            vix_rows = client.history(vix, start, end, 5)
-            vix_status = {"available": True, "instrument": vix.symbol}
-        except (RuntimeError, httpx.HTTPError) as exc:
-            vix_status = {"available": False, "error": str(exc)}
+                try:
+                    vix = _resolve_vix(client)
+                    vix_rows = client.history(vix, start, end, 5)
+                    vix_status = {
+                        "available": bool(vix_rows),
+                        "instrument": vix.symbol,
+                        "source": "NSE_PUBLIC_CHART",
+                    }
+                except (RuntimeError, httpx.HTTPError) as exc:
+                    vix_status = {
+                        "available": False,
+                        "source": "NSE_PUBLIC_CHART",
+                        "error": str(exc),
+                    }
 
-        future_candidates = _future_candidates(client)
-        futures_rows, contract_by_date = _fetch_futures_covering_dates(
-            client, future_candidates, start, end, wanted
+                wanted = set(candidate_dates)
+                future_candidates = _future_candidates(client)
+                futures_rows, contract_by_date = _fetch_futures_covering_dates(
+                    client, future_candidates, start, end, wanted
+                )
+                futures_status = {
+                    "available": bool(futures_rows),
+                    "source": "NSE_PUBLIC_CHART",
+                }
+    except (RuntimeError, httpx.HTTPError) as exc:
+        source_attempts.append(
+            {
+                "source": "NSE_PUBLIC_CHART",
+                "error": str(exc),
+                "complete_sessions": 0,
+            }
         )
 
+    # Fallback: Yahoo recent intraday for NIFTY 50 and India VIX. NIFTYBEES is
+    # collected only as a traded-volume proxy; it is not futures volume.
+    if not primary_source:
+        with YahooChartClient() as client:
+            yahoo_nifty = _candles_from_yahoo(
+                client.history("^NSEI", start, end, 5), "^NSEI", "Index"
+            )
+            nifty_debug = dict(client.last_history_debug)
+            yahoo_dates = _last_complete_dates(yahoo_nifty, sessions)
+            source_attempts.append(
+                {
+                    "source": "YAHOO_CHART",
+                    "instrument": "^NSEI",
+                    "history_response": nifty_debug,
+                    "complete_sessions": len(yahoo_dates),
+                    "session_shape": _session_diagnostics(yahoo_nifty),
+                }
+            )
+            if len(yahoo_dates) == sessions:
+                primary_source = "YAHOO_CHART"
+                nifty_rows = yahoo_nifty
+
+                vix_rows = _candles_from_yahoo(
+                    client.history("^INDIAVIX", start, end, 5),
+                    "^INDIAVIX",
+                    "VolatilityIndex",
+                )
+                vix_debug = dict(client.last_history_debug)
+                vix_status = {
+                    "available": bool(vix_rows),
+                    "instrument": "^INDIAVIX",
+                    "source": "YAHOO_CHART",
+                    "diagnostics": vix_debug,
+                }
+
+                volume_proxy_rows = _candles_from_yahoo(
+                    client.history("NIFTYBEES.NS", start, end, 5),
+                    "NIFTYBEES.NS",
+                    "ETF",
+                )
+                proxy_debug = dict(client.last_history_debug)
+                volume_proxy_status = {
+                    "available": bool(volume_proxy_rows),
+                    "instrument": "NIFTYBEES.NS",
+                    "source": "YAHOO_CHART",
+                    "semantics": "ETF traded-volume proxy; not NIFTY futures volume",
+                    "diagnostics": proxy_debug,
+                }
+
+                futures_status = {
+                    "available": False,
+                    "source": None,
+                    "reason": (
+                        "No credential-free NIFTY futures intraday source has been "
+                        "validated in this run; futures volume/OI are not substituted."
+                    ),
+                }
+
+    dates = _last_complete_dates(nifty_rows, sessions)
+    if len(dates) != sessions:
+        diagnostics = {
+            "request": {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "sessions": sessions,
+                "lookback_days": lookback_days,
+            },
+            "source_attempts": source_attempts,
+        }
+        raise RuntimeError(
+            f"Only {len(dates)} complete NIFTY sessions found across available "
+            f"credential-free sources. Diagnostics: "
+            f"{json.dumps(diagnostics, separators=(',', ':'))}"
+        )
+
+    wanted = set(dates)
     index_selected = _rows_for_dates(nifty_rows, wanted)
     vix_selected = _rows_for_dates(vix_rows, wanted)
     futures_selected = _rows_for_dates(futures_rows, wanted)
+    volume_proxy_selected = _rows_for_dates(volume_proxy_rows, wanted)
 
     return {
         "research_type": "INDEPENDENT_NIFTY_MARKET_DATA",
         "research_only": True,
         "broker_sources_used": [],
-        "primary_source": "NSE_PUBLIC_CHART",
+        "primary_source": primary_source,
         "generated_at": now.isoformat(),
         "interval_minutes": 5,
         "session_dates": [day.isoformat() for day in dates],
+        "source_attempts": source_attempts,
         "provenance": {
-            "nifty_index": {"instrument": nifty.symbol, "volume_semantics": "not_used"},
+            "nifty_index": {
+                "instrument": "NIFTY 50" if primary_source == "NSE_PUBLIC_CHART" else "^NSEI",
+                "source": primary_source,
+                "volume_semantics": "not_used",
+            },
             "nifty_futures": {
-                "contract_selection": "highest observed session volume among returned NIFTY futures",
+                "contract_selection": (
+                    "highest observed session volume among returned NIFTY futures"
+                    if futures_rows
+                    else None
+                ),
                 "contracts_by_date": contract_by_date,
-                "volume_semantics": "traded futures volume",
+                "volume_semantics": "traded futures volume when available",
+                **futures_status,
             },
             "india_vix": vix_status,
+            "nifty_volume_proxy": volume_proxy_status,
         },
         "coverage": {
             "nifty_index_rows": len(index_selected),
             "nifty_futures_rows": len(futures_selected),
             "india_vix_rows": len(vix_selected),
+            "nifty_volume_proxy_rows": len(volume_proxy_selected),
             "futures_dates": sorted(
                 {
                     datetime.fromisoformat(row["timestamp"]).date().isoformat()
@@ -454,10 +593,17 @@ def build_research_dataset(sessions: int = 10, lookback_days: int = 30) -> dict[
                     for row in vix_selected
                 }
             ),
+            "volume_proxy_dates": sorted(
+                {
+                    datetime.fromisoformat(row["timestamp"]).date().isoformat()
+                    for row in volume_proxy_selected
+                }
+            ),
         },
         "nifty_index": index_selected,
         "nifty_futures": futures_selected,
         "india_vix": vix_selected,
+        "nifty_volume_proxy": volume_proxy_selected,
     }
 
 
