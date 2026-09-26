@@ -856,6 +856,73 @@ async def test_replay_fetches_exact_target_window_instead_of_days_back_from_now(
 
 
 @pytest.mark.asyncio
+async def test_replay_one_minute_loader_fetches_exact_target_day(tmp_path):
+    repository = HistoricalRepository(tmp_path / "historical_1m.db")
+    await repository.initialize()
+    target_start = datetime(
+        2026,
+        9,
+        24,
+        9,
+        15,
+        tzinfo=timezone(timedelta(hours=5, minutes=30)),
+    ).astimezone(timezone.utc)
+    candle = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-29",
+        interval="1m",
+        start_time=target_start,
+        end_time=target_start + timedelta(minutes=1),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=100,
+        source="BREEZE",
+    )
+    fetch = AsyncMock(return_value=[candle])
+    hist = SimpleNamespace(
+        repo=repository,
+        fetch_candles_from_provider_window=fetch,
+    )
+    engine = SimulationEngine(historical_service=hist)
+
+    rows = await engine._load_replay_one_minute_candles(
+        "2026-09-24",
+        candle.instrument_id,
+        HistoricalReplaySource.BREEZE,
+    )
+
+    assert rows == [candle]
+    kwargs = fetch.await_args.kwargs
+    assert kwargs["interval"] == "1m"
+    assert kwargs["requested_source"] == "BREEZE"
+    assert kwargs["start_time"].astimezone(
+        timezone(timedelta(hours=5, minutes=30))
+    ).strftime("%Y-%m-%d %H:%M") == "2026-09-24 09:15"
+    assert kwargs["end_time"].astimezone(
+        timezone(timedelta(hours=5, minutes=30))
+    ).strftime("%Y-%m-%d %H:%M") == "2026-09-24 15:30"
+
+
+def test_post_freeze_strategy_c_missing_1m_is_explicit_data_quality():
+    engine = SimulationEngine()
+    import asyncio
+
+    result = asyncio.run(
+        engine.run_day_simulation(
+            SimulationRequest(date="2026-09-24")
+        )
+    )
+
+    assert "strategy_c_futures_1m" in result.data_quality.missing_data
+    evidence = result.replay_metadata["strategy_data_evidence"][
+        "DI_CONTINUATION"
+    ]
+    assert evidence["required_for_this_session"] is True
+    assert evidence["futures_1m_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_replay_seeds_and_resolves_futures_for_target_date_not_today():
     future = SimpleNamespace(
         instrument_id="INST-NIFTY-FUT-2026-09-29", segment="FUTURES",
