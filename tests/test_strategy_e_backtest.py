@@ -8,12 +8,15 @@ from services.historical.strategy_e_pivot_vwap_backtest import (
     EXPERIMENT_ARMS,
     _advance_trade,
     _complete_candidate_dates,
+    _counterfactual_candidate,
     _is_complete_session,
+    _research_ledger_summary,
     _select_requested_session_dates,
     _start_trade,
     build_experiment,
     run_backtest,
 )
+from services.strategy.strategies.pivot_vwap_scalp import StrategyEDecision
 from services.strategy.models import (
     OptionType,
     StrategyName,
@@ -218,3 +221,100 @@ def test_strategy_e_experiment_replays_identical_complete_sessions():
         assert arm["signal_diagnostics"]["bars_evaluated"] == 75
         assert arm["incremental_vs_control"]["retained_control_trades"] == 0
         assert arm["incremental_vs_control"]["displaced_control_trades"] == 0
+
+
+
+def test_strategy_e_counterfactual_rejected_candidate_replays_lifecycle():
+    entry_end = datetime(2026, 9, 24, 10, 0, tzinfo=IST)
+    entry_bar = Candle(
+        instrument_id="INST-NIFTY-FUT-2026-09-29",
+        interval="5m",
+        start_time=entry_end - timedelta(minutes=5),
+        end_time=entry_end,
+        open=99.0,
+        high=101.0,
+        low=98.0,
+        close=100.0,
+        volume=1000,
+        open_interest=100000,
+        source="BREEZE",
+    )
+    target_bar = Candle(
+        instrument_id=entry_bar.instrument_id,
+        interval="5m",
+        start_time=entry_end,
+        end_time=entry_end + timedelta(minutes=5),
+        open=100.0,
+        high=111.0,
+        low=99.0,
+        close=110.0,
+        volume=1000,
+        open_interest=100000,
+        source="BREEZE",
+    )
+    decision = StrategyEDecision(
+        "NO_TRADE",
+        "INSUFFICIENT_REWARD_TO_RISK",
+        {
+            "candidate_signal_type": "TREND_LONG",
+            "candidate_direction": "BULLISH",
+            "entry_price": 100.0,
+            "stop": 95.0,
+            "target": 110.0,
+            "risk_points": 5.0,
+            "reward_points": 10.0,
+            "reward_risk": 2.0,
+            "pivot": 99.0,
+            "vwap": 99.5,
+        },
+    )
+
+    row = _counterfactual_candidate(
+        day=date(2026, 9, 24),
+        bar=entry_bar,
+        decision=decision,
+        future_bars=[target_bar],
+        minute_bars=[],
+        forced_exit_time="15:15",
+    )
+
+    assert row is not None
+    assert row["independent_counterfactual"] is True
+    assert row["rejection_reason"] == "INSUFFICIENT_REWARD_TO_RISK"
+    assert row["lifecycle_status"] == "RESOLVED"
+    assert row["exit_reason"] == "STRATEGY_E_TARGET"
+    assert row["realized_r"] == 2.0
+
+
+def test_strategy_e_research_ledger_summarizes_gate_and_rr_band():
+    rows = [
+        {
+            "rejection_reason": "INSUFFICIENT_REWARD_TO_RISK",
+            "signal_type": "COUNTER_LONG",
+            "direction": "BULLISH",
+            "reward_risk": 0.7,
+            "lifecycle_status": "RESOLVED",
+            "realized_r": 1.0,
+            "mfe_r": 1.4,
+            "mae_r": -0.2,
+        },
+        {
+            "rejection_reason": "INSUFFICIENT_REWARD_TO_RISK",
+            "signal_type": "COUNTER_LONG",
+            "direction": "BULLISH",
+            "reward_risk": 0.6,
+            "lifecycle_status": "RESOLVED",
+            "realized_r": -1.0,
+            "mfe_r": 0.3,
+            "mae_r": -1.0,
+        },
+    ]
+
+    summary = _research_ledger_summary(rows)
+
+    gate = summary["by_rejection_reason"]["INSUFFICIENT_REWARD_TO_RISK"]
+    assert gate["candidates"] == 2
+    assert gate["wins"] == 1
+    assert gate["losses"] == 1
+    assert gate["total_r"] == 0.0
+    assert summary["by_reward_risk_band"]["0_50_TO_0_74"]["candidates"] == 2
