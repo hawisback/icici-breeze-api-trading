@@ -1108,11 +1108,16 @@ class ReplayPortfolioMetrics(BaseModel):
     peak_premium_utilization_pct: float = 0.0
     peak_risk_budget_committed: float = 0.0
     peak_risk_budget_utilization_pct: float = 0.0
+    average_premium_utilization_pct: float = 0.0
+    capital_utilization_curve: list[dict[str, Any]] = Field(default_factory=list)
     rejected_opportunities: int = 0
+    rejected_opportunity_details: list[dict[str, Any]] = Field(default_factory=list)
     risk_gate_block_counts: dict[str, int] = Field(default_factory=dict)
+    daily_loss_trigger_events: list[dict[str, Any]] = Field(default_factory=list)
     daily_entries: int = 0
     daily_entries_by_strategy: dict[str, int] = Field(default_factory=dict)
     strategy_realized_r: dict[str, float] = Field(default_factory=dict)
+    strategy_r_statistics: dict[str, dict[str, Any]] = Field(default_factory=dict)
     equity_curve: list[dict[str, Any]] = Field(default_factory=list)
     limitation: str | None = (
         "Portfolio analytics require chronological EXECUTION_PARITY replay."

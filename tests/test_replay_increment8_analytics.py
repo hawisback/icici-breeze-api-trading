@@ -269,6 +269,19 @@ def test_portfolio_metrics_cover_all_strategies_and_overlapping_exposure():
         "PIVOT_VWAP_SCALP",
     }
     assert len(metrics.equity_curve) == 6
+    assert metrics.average_premium_utilization_pct > 0
+    assert len(metrics.capital_utilization_curve) == 11
+    assert metrics.capital_utilization_curve[0]["event"] == "SESSION_START"
+    assert len(metrics.rejected_opportunity_details) == 2
+    assert metrics.strategy_r_statistics["TREND_PULLBACK"] == {
+        "resolved_trades": 1,
+        "total_realized_r": 1.0,
+        "expectancy_r": 1.0,
+        "profit_factor_r": None,
+        "max_drawdown_r": 0.0,
+        "max_consecutive_wins": 1,
+        "max_consecutive_losses": 0,
+    }
 
 
 def test_incomplete_execution_pnl_never_builds_partial_equity_curve():
@@ -431,6 +444,37 @@ def test_execution_coordinator_blocks_second_simultaneous_entry_at_capacity():
 
     assert decision.allowed is False
     assert decision.status == "MAX_CONCURRENT_POSITIONS_REACHED"
+
+
+def test_execution_coordinator_records_daily_loss_trigger_once():
+    coordinator = ChronologicalReplayExecutor(
+        lifecycle_replayer=Mock(),
+        registry=Mock(),
+        risk_config=RiskConfig(
+            max_daily_loss_r=2.0,
+            max_daily_loss_pct=1.0,
+            account_equity=500000.0,
+        ),
+    )
+    coordinator.state.realized_r_total = -2.0
+    coordinator.state.realized_net_pnl_total = -6000.0
+    at = datetime(2026, 9, 24, 7, 0, tzinfo=UTC)
+
+    first = coordinator.global_entry_gate(at)
+    second = coordinator.global_entry_gate(at + timedelta(minutes=5))
+    metadata = coordinator.metadata()
+
+    assert first.allowed is False
+    assert second.allowed is False
+    assert first.status == "DAILY_LOSS_LIMIT_REACHED"
+    assert len(metadata["daily_loss_trigger_events"]) == 1
+    event = metadata["daily_loss_trigger_events"][0]
+    assert event["realized_r_total"] == -2.0
+    assert event["realized_net_pnl_total"] == -6000.0
+    assert set(event["details"]["reasons"]) == {
+        "MAX_DAILY_LOSS_R",
+        "MAX_DAILY_LOSS_PCT",
+    }
 
 
 def test_replay_comparison_reports_deltas_without_ranking():

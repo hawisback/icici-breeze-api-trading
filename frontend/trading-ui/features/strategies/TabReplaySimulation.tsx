@@ -881,7 +881,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                   <div className="text-[9px] uppercase tracking-wider text-slate-500">Exposure & Utilization</div>
                   <div className="mt-1 font-mono font-bold text-slate-200">{portfolio.exposure_pct}%</div>
                   <div className="text-[10px] text-slate-500">
-                    {portfolio.exposure_minutes}m · max {portfolio.max_concurrent_positions} concurrent
+                    {portfolio.exposure_minutes}m · max {portfolio.max_concurrent_positions} concurrent · avg capital {portfolio.average_premium_utilization_pct}%
                   </div>
                 </div>
               </div>
@@ -895,6 +895,7 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
                   <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Risk Triggers / Rejects</div>
                   <div className="text-slate-300">Rejected opportunities: {portfolio.rejected_opportunities}</div>
+                  <div className="text-slate-300">Daily-loss triggers: {portfolio.daily_loss_trigger_events?.length ?? 0}</div>
                   <div className="text-slate-500">
                     {Object.entries(portfolio.risk_gate_block_counts || {}).length > 0
                       ? Object.entries(portfolio.risk_gate_block_counts).map(([name, count]) => name + ": " + count).join(" · ")
@@ -904,8 +905,11 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                 <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
                   <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Strategy Realized R</div>
                   <div className="text-slate-300">
-                    {Object.entries(portfolio.strategy_realized_r || {}).length > 0
-                      ? Object.entries(portfolio.strategy_realized_r).map(([strategy, value]) => strategy + ": " + value + "R").join(" · ")
+                    {Object.entries(portfolio.strategy_r_statistics || {}).length > 0
+                      ? Object.entries(portfolio.strategy_r_statistics).map(([strategy, stats]) =>
+                          strategy + ": " + stats.total_realized_r + "R · E " + stats.expectancy_r +
+                          "R · PF " + (stats.profit_factor_r ?? "N/A") + " · DD " + stats.max_drawdown_r + "R"
+                        ).join(" | ")
                       : "No resolved strategy R."}
                   </div>
                 </div>
