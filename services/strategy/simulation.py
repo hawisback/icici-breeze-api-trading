@@ -13,6 +13,9 @@ from typing import Any, Optional
 from libs.contracts.models import Candle, utc_now
 from libs.market_time import IST
 from services.strategy.features import FeatureEngine
+from services.historical.strategy_c_forward_validation import (
+    FREEZE_DATE as STRATEGY_C_FREEZE_DATE,
+)
 from services.strategy.futures_signal import (
     FuturesContractResolver,
     aggregate_completed_15m,
@@ -1131,6 +1134,48 @@ class SimulationEngine:
             missing_data.append("spot")
         if source_diagnostics["futures"]["missing_selected_source"] or not strategy_a_futures_history:
             missing_data.append("futures")
+
+        one_minute_candles = await self._load_replay_one_minute_candles(
+            date_str,
+            request.instrument_id,
+            historical_source,
+        )
+        futures_one_minute_candles = (
+            await self._load_replay_one_minute_candles(
+                date_str,
+                active_instrument,
+                historical_source,
+            )
+            if active_instrument
+            else []
+        )
+        target_session_date = datetime.strptime(
+            date_str,
+            "%Y-%m-%d",
+        ).date()
+        if (
+            cfg.di_continuation_enabled
+            and target_session_date > STRATEGY_C_FREEZE_DATE
+            and not futures_one_minute_candles
+        ):
+            missing_data.append("strategy_c_futures_1m")
+        source_diagnostics["native_1m"] = {
+            "spot_1m_count": len(one_minute_candles),
+            "futures_1m_count": len(futures_one_minute_candles),
+            "strategy_c_required": bool(
+                cfg.di_continuation_enabled
+                and target_session_date > STRATEGY_C_FREEZE_DATE
+            ),
+            "strategy_c_available": bool(futures_one_minute_candles),
+            "strategy_d_intrabar_preferred": (
+                cfg.sr_momentum_breakout_enabled
+            ),
+            "strategy_d_fallback": (
+                "CONSERVATIVE_5M_OHLC"
+                if not one_minute_candles
+                else None
+            ),
+        }
         futures_coverage = self._strategy_a_futures_coverage(
             date_str,
             strategy_a_futures_history,
@@ -1202,6 +1247,8 @@ class SimulationEngine:
             source_diagnostics=source_diagnostics,
             futures_contracts=selected_contracts,
             missing_data=missing_data,
+            spot_one_minute_candles=one_minute_candles,
+            futures_one_minute_candles=futures_one_minute_candles,
         )
         replay_metadata = {
             "configuration_snapshot": config_snapshot.model_dump(mode="json"),
@@ -1212,6 +1259,37 @@ class SimulationEngine:
             "bypass_entry_window": bypass_entry_window,
             "missing_data": sorted(set(missing_data)),
             "strategy_registry": strategy_registry.metadata_snapshot(),
+            "strategy_data_evidence": {
+                "DI_CONTINUATION": {
+                    "signal_authority": (
+                        "FROZEN_STRATEGY_C_DI_CONTINUATION_V1"
+                    ),
+                    "required_native_futures_1m": True,
+                    "futures_1m_count": len(
+                        futures_one_minute_candles
+                    ),
+                    "replay_observation_cadence": (
+                        "5M_ORCHESTRATION_WITH_TRUE_1M_SIGNAL_TIMESTAMP"
+                    ),
+                    "freeze_date": STRATEGY_C_FREEZE_DATE.isoformat(),
+                },
+                "SR_MOMENTUM_BREAKOUT": {
+                    "signal_authority": "FROZEN_STRATEGY_D_V2",
+                    "spot_1m_count": len(one_minute_candles),
+                    "intrabar_ordering": (
+                        "NATIVE_SPOT_1M"
+                        if one_minute_candles
+                        else "CONSERVATIVE_5M_OHLC_FALLBACK"
+                    ),
+                },
+                "PIVOT_VWAP_SCALP": {
+                    "signal_authority": "PRODUCTION_STRATEGY_E",
+                    "lifecycle_authority": (
+                        "PRODUCTION_COMPLETED_FUTURES_5M_HELPER"
+                    ),
+                    "stop_target_same_bar_policy": "STOP_FIRST",
+                },
+            },
             "control_application": {
                 "applied_overrides": applied_overrides,
                 "conditionally_applied_overrides": conditional_overrides,
@@ -1263,20 +1341,6 @@ class SimulationEngine:
                 else None
             ),
         }
-        one_minute_candles = await self._load_replay_one_minute_candles(
-            date_str,
-            request.instrument_id,
-            historical_source,
-        )
-        futures_one_minute_candles = (
-            await self._load_replay_one_minute_candles(
-                date_str,
-                active_instrument,
-                historical_source,
-            )
-            if active_instrument
-            else []
-        )
         contract_provider = (
             HistoricalContractSelectionProvider(
                 historical_service=self.hist_svc,
