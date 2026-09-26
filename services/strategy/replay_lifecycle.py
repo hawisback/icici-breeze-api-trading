@@ -110,14 +110,18 @@ def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrad
             "consecutive_inside_box_closes": record.consecutive_inside_box_closes or 0,
         }
 
-    strategy_a_entry = (
+    underlying_entry = (
         float(record.entry_features.get("underlying_entry_price"))
-        if strategy == StrategyName.TREND_PULLBACK
-        and record.entry_features.get("underlying_entry_price") is not None
+        if record.entry_features.get("underlying_entry_price") is not None
         else record.simulated_entry_price
     )
-    strategy_a_stop = record.initial_structural_stop
-    strategy_a_r = record.initial_risk_points
+    structural_stop = record.initial_structural_stop
+    structural_r = record.initial_risk_points
+    futures_authoritative = strategy in {
+        StrategyName.TREND_PULLBACK,
+        StrategyName.DI_CONTINUATION,
+        StrategyName.PIVOT_VWAP_SCALP,
+    }
     return ActiveTrade(
         trade_id=record.replay_signal_id,
         mode=AutoTradingMode.PAPER,
@@ -133,9 +137,9 @@ def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrad
         lots=1,
         entry_time=record.simulated_entry_timestamp,
         entry_option_price=0.0,
-        entry_spot_price=strategy_a_entry,
-        initial_structural_stop=strategy_a_stop,
-        initial_r_points=strategy_a_r,
+        entry_spot_price=underlying_entry,
+        initial_structural_stop=structural_stop,
+        initial_r_points=structural_r,
         pullback_swing_low=record.pullback_swing_low,
         pullback_swing_high=record.pullback_swing_high,
         **strategy_b_state,
@@ -143,17 +147,29 @@ def _entry_trade(record: ReplayManifestRecord, instrument_id: str) -> ActiveTrad
         lowest_close_since_entry=record.lowest_favorable_price or record.simulated_entry_price,
         last_managed_bar=record.last_managed_completed_bar_timestamp,
         current_option_price=0.0,
-        current_spot_price=strategy_a_entry,
+        current_spot_price=underlying_entry,
         futures_contract_id=(
-            record.entry_features.get("futures_contract")
-            or record.entry_features.get("futures_contract_id")
-            if strategy == StrategyName.TREND_PULLBACK
+            (
+                record.entry_features.get("futures_contract")
+                or record.entry_features.get("futures_contract_id")
+            )
+            if futures_authoritative
             else None
         ),
-        underlying_entry_price=(strategy_a_entry if strategy == StrategyName.TREND_PULLBACK else None),
-        underlying_current_price=(strategy_a_entry if strategy == StrategyName.TREND_PULLBACK else None),
-        underlying_structural_stop=(strategy_a_stop if strategy == StrategyName.TREND_PULLBACK else None),
-        underlying_r=(strategy_a_r if strategy == StrategyName.TREND_PULLBACK else None),
+        underlying_entry_price=underlying_entry,
+        underlying_current_price=underlying_entry,
+        underlying_structural_stop=structural_stop,
+        underlying_r=structural_r,
+        strategy_signal_type=record.entry_features.get("signal_type"),
+        strategy_target_price=(
+            float(record.entry_features["strategy_target_price"])
+            if record.entry_features.get("strategy_target_price") is not None
+            else (
+                float(record.entry_features["target_price"])
+                if record.entry_features.get("target_price") is not None
+                else None
+            )
+        ),
         initial_quantity=1,
         remaining_quantity=1,
         current_trailing_stop=record.current_trailing_stop,
