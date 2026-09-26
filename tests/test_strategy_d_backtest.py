@@ -277,7 +277,7 @@ def test_exact_session_selector_rejects_invalid_or_insufficient_request():
             available,
             sessions=0,
         )
-    with pytest.raises(ValueError, match="only 2 candidate sessions"):
+    with pytest.raises(ValueError, match="only 2 complete candidate sessions"):
         _select_requested_session_dates(
             available,
             sessions=3,
