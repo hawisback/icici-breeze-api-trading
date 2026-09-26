@@ -16,6 +16,7 @@ from services.strategy.replay_lifecycle import HistoricalPositionManagerReplayer
 from services.strategy.replay_manifest import ReplayManifestRecorder
 from services.strategy.replay_metadata import (
     build_configuration_snapshot,
+    build_data_fingerprint,
     configuration_fingerprint,
 )
 from services.strategy.replay_registry import (
@@ -310,6 +311,43 @@ def test_five_strategy_configuration_changes_replay_fingerprint():
         configuration_fingerprint(base_snapshot)
         != configuration_fingerprint(e_snapshot)
     )
+
+
+def test_native_one_minute_evidence_changes_dataset_fingerprint():
+    end = datetime(2026, 9, 24, 10, 0, tzinfo=IST)
+    spot_5m = _bar(end)
+    future_5m = _bar(
+        end,
+        instrument_id="INST-NIFTY-FUT-2026-09-29",
+    )
+    future_1m = _bar(
+        end,
+        instrument_id=future_5m.instrument_id,
+        interval="1m",
+    )
+    kwargs = {
+        "source": HistoricalReplaySource.BREEZE,
+        "start_date": "2026-09-24",
+        "end_date": "2026-09-24",
+        "spot_candles": [spot_5m],
+        "futures_candles": [future_5m],
+        "source_diagnostics": {},
+        "futures_contracts": [{
+            "instrument_id": future_5m.instrument_id,
+            "expiry": "2026-09-29",
+        }],
+        "missing_data": [],
+    }
+
+    without_1m = build_data_fingerprint(**kwargs)
+    with_1m = build_data_fingerprint(
+        **kwargs,
+        futures_one_minute_candles=[future_1m],
+    )
+
+    assert without_1m.futures_one_minute_candle_count == 0
+    assert with_1m.futures_one_minute_candle_count == 1
+    assert without_1m.dataset_hash != with_1m.dataset_hash
 
 
 def test_default_registry_priority_matches_production_order():
