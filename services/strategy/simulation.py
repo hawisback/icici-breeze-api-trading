@@ -67,6 +67,7 @@ from services.strategy.replay_contract_selection import (
 )
 from services.strategy.replay_execution import ChronologicalReplayExecutor
 from services.strategy.replay_execution_model import (
+    REPLAY_EXECUTION_MODEL_VERSION,
     estimate_fill,
     estimate_multi_exit_execution,
     estimate_round_trip_execution,
@@ -2528,6 +2529,7 @@ class SimulationEngine:
             data_fingerprint=data_snapshot.dataset_hash,
             configuration_snapshot=config_snapshot.model_dump(mode="json"),
             cost_model_version=effective_risk_config.paper_cost_assumption_version,
+            execution_model_version=REPLAY_EXECUTION_MODEL_VERSION,
             contract_selection_policy=(
                 "PRODUCTION_CONTRACT_SELECTOR_WITH_EXPLICIT_APPROXIMATION"
                 if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY

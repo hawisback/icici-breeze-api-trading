@@ -16,10 +16,13 @@ from services.historical.strategy_d_candidate_manifest import (
     spec_fingerprint as strategy_d_spec_fingerprint,
 )
 from services.strategy.models import ReplayPortfolioMetrics, SimulationResult
+from services.strategy.replay_execution_model import (
+    REPLAY_EXECUTION_MODEL_VERSION,
+)
 from services.strategy.replay_manifest import ReplayManifestRecord
 
 
-REPLAY_ENGINE_REVISION = "day_replay_increment_8_v2"
+REPLAY_ENGINE_REVISION = "day_replay_increment_9_v1"
 
 
 def _round(value: float | None, digits: int = 4) -> float | None:
@@ -821,6 +824,7 @@ def build_replay_run_identity(
     cost_model_version: str,
     contract_selection_policy: str,
     historical_source: str,
+    execution_model_version: str = REPLAY_EXECUTION_MODEL_VERSION,
     data_provenance: dict[str, Any] | None = None,
     strategy_manifest: dict[str, Any] | None = None,
     contract_selection_evidence: dict[str, int] | None = None,
@@ -873,6 +877,7 @@ def build_replay_run_identity(
         "configuration_fingerprint": configuration_fingerprint,
         "data_fingerprint": data_fingerprint,
         "cost_model_version": cost_model_version,
+        "execution_model_version": execution_model_version,
         "contract_selection_policy": contract_selection_policy,
         "historical_source": historical_source,
         "strategy_versions": strategy_versions,
@@ -941,6 +946,7 @@ def compare_replay_results(
         "same_configuration_fingerprint": b_rep.get("configuration_fingerprint") == c_rep.get("configuration_fingerprint"),
         "same_data_fingerprint": b_rep.get("data_fingerprint") == c_rep.get("data_fingerprint"),
         "same_cost_model_version": b_rep.get("cost_model_version") == c_rep.get("cost_model_version"),
+        "same_execution_model_version": b_rep.get("execution_model_version") == c_rep.get("execution_model_version"),
         "same_contract_selection_policy": b_rep.get("contract_selection_policy") == c_rep.get("contract_selection_policy"),
         "same_replay_engine_revision": b_rep.get("replay_engine_revision") == c_rep.get("replay_engine_revision"),
         "same_strategy_manifest": b_rep.get("strategy_manifest") == c_rep.get("strategy_manifest"),

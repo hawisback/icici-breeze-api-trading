@@ -9,6 +9,9 @@ from services.strategy.models import RiskConfig
 from services.strategy.replay_contract_selection import ReplayPriceEvidence
 
 
+REPLAY_EXECUTION_MODEL_VERSION = "paper_options_multi_exit_v1"
+
+
 @dataclass(frozen=True)
 class ReplayFillEstimate:
     side: str
