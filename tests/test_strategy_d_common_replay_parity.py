@@ -274,7 +274,7 @@ def test_strategy_d_natural_signal_discovery_matches_dedicated_and_common_replay
     assert dedicated_trade["rsi_current"] > (
         cfg.long_rsi_cross + cfg.minimum_rsi_clearance_points
     )
-    assert dedicated_trade["breakout_level_name"] == "PDH"
+    assert dedicated_trade["breakout_level_name"] == "R1"
 
     recorder = ReplayManifestRecorder()
     registry = ReplayStrategyRegistry.default(
