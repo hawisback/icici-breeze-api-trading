@@ -144,15 +144,24 @@ class PublicNseChartClient:
         payload = response.json()
         if not payload.get("status"):
             return []
-        return _normalize_candles(payload.get("data") or [], instrument)
+        return _normalize_candles(payload.get("data") or [], instrument, interval_minutes)
 
 
-def _to_ist_timestamp(raw: Any) -> datetime:
+def _to_exchange_bar_start(raw: Any, interval_minutes: int) -> datetime:
+    """Normalize NSE chart timestamps to an IST bar-start timestamp.
+
+    The public chart feed encodes exchange wall-clock labels as epoch milliseconds.
+    Intraday labels are bar-end values such as 15:29:59 for the 15:25-15:30
+    five-minute candle. Treating that epoch as a real UTC instant shifts every
+    candle by +05:30, so decode the UTC fields as exchange wall time and floor the
+    label to the interval boundary.
+    """
     value = float(raw)
-    # Public chart responses use epoch milliseconds.
     if value > 10_000_000_000:
         value /= 1000.0
-    return datetime.fromtimestamp(value, tz=UTC).astimezone(IST)
+    wall = datetime.fromtimestamp(value, tz=UTC).replace(tzinfo=None)
+    minute = (wall.minute // interval_minutes) * interval_minutes
+    return wall.replace(minute=minute, second=0, microsecond=0, tzinfo=IST)
 
 
 def _number(row: dict[str, Any], *keys: str) -> float | None:
@@ -166,10 +175,10 @@ def _number(row: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
-def _normalize_candles(rows: list[dict[str, Any]], instrument: Instrument) -> list[Candle]:
+def _normalize_candles(\n    rows: list[dict[str, Any]], instrument: Instrument, interval_minutes: int = 5\n) -> list[Candle]:
     candles: list[Candle] = []
     for row in rows:
-        ts = _to_ist_timestamp(row["time"])
+        ts = _to_exchange_bar_start(row["time"], interval_minutes)
         if not (SESSION_START <= ts.time() < SESSION_END):
             continue
         candles.append(
