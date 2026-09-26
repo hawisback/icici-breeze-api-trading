@@ -18,8 +18,17 @@ from services.strategy.models import (
     TradeDirection,
     HistoricalReplaySource,
 )
-from services.strategy.replay_analytics import build_portfolio_metrics
-from services.strategy.replay_execution_model import estimate_round_trip_execution
+from services.strategy.replay_analytics import (
+    REPLAY_ENGINE_REVISION,
+    build_portfolio_metrics,
+    build_replay_run_identity,
+)
+from services.strategy.replay_execution_model import (
+    REPLAY_EXECUTION_MODEL_VERSION,
+    estimate_fill,
+    estimate_multi_exit_execution,
+    estimate_round_trip_execution,
+)
 from services.strategy.replay_intrabar import resolve_stop_target_order
 from services.strategy.replay_registry import ReplayStrategyRegistry
 from services.strategy.replay_sizing import calculate_replay_sizing
@@ -82,6 +91,27 @@ def test_golden_a_to_e_registry_binds_every_signal_family_to_one_replay_adapter(
     ]
     assert actual == GOLDEN["strategy_registry"]
     assert len({row[0] for row in actual}) == len(StrategyName)
+
+
+def test_golden_a_to_e_metadata_names_priorities_and_default_enablement():
+    registry = ReplayStrategyRegistry.default(
+        StrategyTunablesConfig(),
+        SessionTimersConfig(),
+    )
+    actual = [
+        {
+            "strategy": meta.strategy.value,
+            "display_name": meta.display_name,
+            "priority": meta.priority,
+            "default_enabled": meta.enabled,
+        }
+        for meta in registry.strategy_metadata()
+    ]
+
+    assert actual == GOLDEN["strategy_metadata"]
+    assert actual[0]["display_name"] == "Strategy A · Trend Pullback R5"
+    assert actual[-1]["strategy"] == StrategyName.PIVOT_VWAP_SCALP.value
+    assert actual[-1]["default_enabled"] is False
 
 
 @pytest.mark.parametrize(
@@ -202,6 +232,131 @@ def test_golden_transaction_cost_model_remains_exact():
     assert execution.gross_execution_pnl == GOLDEN["execution"]["gross_pnl"]
     assert execution.transaction_costs == GOLDEN["execution"]["transaction_costs"]
     assert execution.net_execution_pnl == GOLDEN["execution"]["net_pnl"]
+
+
+def test_golden_multi_exit_execution_is_quantity_conserving_and_exact():
+    risk = RiskConfig(paper_slippage_points=1.0)
+    event = datetime(2026, 9, 24, 5, 0, tzinfo=UTC)
+    entry = ReplayPriceEvidence(
+        status="AVAILABLE",
+        basis="POINT_IN_TIME_BID_ASK",
+        source="KITE",
+        event_timestamp=event,
+        evidence_timestamp=event,
+        bid=99.0,
+        ask=100.0,
+    )
+    exit_legs = [
+        (
+            25,
+            ReplayPriceEvidence(
+                status="AVAILABLE",
+                basis="POINT_IN_TIME_BID_ASK",
+                source="KITE",
+                event_timestamp=event + timedelta(minutes=15),
+                evidence_timestamp=event + timedelta(minutes=15),
+                bid=120.0,
+                ask=121.0,
+            ),
+        ),
+        (
+            25,
+            ReplayPriceEvidence(
+                status="AVAILABLE",
+                basis="POINT_IN_TIME_BID_ASK",
+                source="KITE",
+                event_timestamp=event + timedelta(minutes=30),
+                evidence_timestamp=event + timedelta(minutes=30),
+                bid=90.0,
+                ask=91.0,
+            ),
+        ),
+    ]
+
+    execution = estimate_multi_exit_execution(
+        entry_evidence=entry,
+        exit_legs=exit_legs,
+        quantity=50,
+        risk_config=risk,
+    )
+    expected = GOLDEN["execution"]["multi_exit"]
+
+    assert execution.quantity == expected["quantity"]
+    assert execution.gross_execution_pnl == expected["gross_pnl"]
+    assert execution.slippage_cost == expected["slippage_cost"]
+    assert execution.transaction_costs == expected["transaction_costs"]
+    assert execution.net_execution_pnl == expected["net_pnl"]
+    assert execution.entry.executable_quote_equivalent is expected[
+        "quote_equivalent"
+    ]
+    assert all(
+        estimate_fill(evidence, side="SELL", risk_config=risk)
+        .executable_quote_equivalent
+        is expected["quote_equivalent"]
+        for _, evidence in exit_legs
+    )
+
+    invalid = estimate_multi_exit_execution(
+        entry_evidence=entry,
+        exit_legs=exit_legs[:1],
+        quantity=50,
+        risk_config=risk,
+    )
+    assert invalid.gross_execution_pnl is None
+    assert invalid.transaction_costs is None
+    assert invalid.net_execution_pnl is None
+
+
+def test_golden_reproducibility_versions_are_fingerprinted():
+    expected = GOLDEN["reproducibility"]
+    risk = RiskConfig()
+
+    identity = build_replay_run_identity(
+        session_date="2026-09-24",
+        replay_mode="EXECUTION_PARITY",
+        configuration_fingerprint="cfg-golden",
+        data_fingerprint="data-golden",
+        configuration_snapshot={
+            "strategy_a": {"evaluator_version": "trend_pullback_r5"},
+            "strategy_suite": {"candidate_contracts": {}},
+        },
+        cost_model_version=risk.paper_cost_assumption_version,
+        contract_selection_policy=(
+            "PRODUCTION_CONTRACT_SELECTOR_WITH_EXPLICIT_APPROXIMATION"
+        ),
+        historical_source="BREEZE",
+    )
+    changed = build_replay_run_identity(
+        session_date="2026-09-24",
+        replay_mode="EXECUTION_PARITY",
+        configuration_fingerprint="cfg-golden",
+        data_fingerprint="data-golden",
+        configuration_snapshot={
+            "strategy_a": {"evaluator_version": "trend_pullback_r5"},
+            "strategy_suite": {"candidate_contracts": {}},
+        },
+        cost_model_version=risk.paper_cost_assumption_version,
+        execution_model_version=expected["execution_model_version"] + "_CHANGED",
+        contract_selection_policy=(
+            "PRODUCTION_CONTRACT_SELECTOR_WITH_EXPLICIT_APPROXIMATION"
+        ),
+        historical_source="BREEZE",
+    )
+
+    assert REPLAY_ENGINE_REVISION == expected["replay_engine_revision"]
+    assert (
+        REPLAY_EXECUTION_MODEL_VERSION
+        == expected["execution_model_version"]
+    )
+    assert risk.paper_cost_assumption_version == expected["cost_model_version"]
+    assert identity["replay_engine_revision"] == expected[
+        "replay_engine_revision"
+    ]
+    assert identity["execution_model_version"] == expected[
+        "execution_model_version"
+    ]
+    assert identity["cost_model_version"] == expected["cost_model_version"]
+    assert identity["run_fingerprint"] != changed["run_fingerprint"]
 
 
 def test_unsupported_control_cannot_become_metadata_only_without_classification():
