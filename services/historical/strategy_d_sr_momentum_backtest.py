@@ -60,6 +60,22 @@ def _session_date(candle: Candle) -> date:
     return candle.start_time.astimezone(IST).date()
 
 
+def _regular_session_5m(
+    candles: Sequence[Candle],
+) -> list[Candle]:
+    """Return one canonical 5m candle per instrument/start on the cash session."""
+    canonical: dict[tuple[str, datetime], Candle] = {}
+    for candle in candles:
+        if candle.interval != "5m" or candle.source not in REAL_SOURCES:
+            continue
+        local_start = candle.start_time.astimezone(IST)
+        local_time = local_start.time().replace(tzinfo=None)
+        if not SESSION_START <= local_time <= SESSION_LAST_5M_START:
+            continue
+        canonical[(candle.instrument_id, candle.start_time)] = candle
+    return sorted(canonical.values(), key=lambda item: item.start_time)
+
+
 def _group_by_day(
     candles: Sequence[Candle],
     *,
@@ -506,13 +522,14 @@ def run_backtest(
     cfg = config or StrategyDConfig.v1_control()
     if cfg.variant == "V2_CANDIDATE":
         validate_v2_config(cfg)
-    spot = sorted(spot_candles, key=lambda item: item.start_time)
+    spot = _regular_session_5m(spot_candles)
+    regular_futures = _regular_session_5m(futures_candles)
     spot_by_day = _group_by_day(spot, interval="5m")
     minute_by_day = _group_by_day(
         one_minute_spot_candles,
         interval="1m",
     )
-    futures_by_day = _active_futures_by_day(futures_candles)
+    futures_by_day = _active_futures_by_day(regular_futures)
     available_days = sorted(spot_by_day)
     if start_date is not None:
         available_days = [
@@ -557,6 +574,59 @@ def run_backtest(
         if day_minutes:
             usable_sessions_with_1m += 1
         levels_rows.append(levels.to_dict())
+        # Diagnostics intentionally evaluate every regular-session decision
+        # bar. They are independent of position replay so V1/V2 funnels remain
+        # directly comparable even when one variant enters more trades.
+        day_key = day.isoformat()
+        day_diag = diagnostic_sessions.setdefault(
+            day_key,
+            {
+                "bars_evaluated": 0,
+                "structural_breakouts": 0,
+                "qualified_signal_bars": 0,
+                "primary_blocker_counts": Counter(),
+            },
+        )
+        for bar in day_spot:
+            history = [
+                item for item in spot
+                if item.end_time <= bar.end_time
+            ]
+            futures_history = [
+                item for item in day_futures
+                if item.end_time <= bar.end_time
+            ]
+            diagnostic_signal = evaluate_strategy_d_signal(
+                history,
+                futures_history,
+                levels,
+                cfg,
+            )
+            diagnostic = _diagnose_strategy_d_bar(
+                spot_history=history,
+                futures_history=futures_history,
+                levels=levels,
+                config=cfg,
+                signal=diagnostic_signal,
+            )
+            diagnostic_bars_evaluated += 1
+            for name, passed in diagnostic["conditions"].items():
+                if passed:
+                    diagnostic_conditions[name] += 1
+            diagnostic_blockers[diagnostic["primary_blocker"]] += 1
+            if diagnostic["breakout_direction"] is not None:
+                diagnostic_breakouts[
+                    diagnostic["breakout_direction"]
+                ] += 1
+            day_diag["bars_evaluated"] += 1
+            if diagnostic["conditions"].get("structural_breakout"):
+                day_diag["structural_breakouts"] += 1
+            if diagnostic["qualified_signal"]:
+                day_diag["qualified_signal_bars"] += 1
+            day_diag["primary_blocker_counts"][
+                diagnostic["primary_blocker"]
+            ] += 1
+
         used_levels: set[tuple[str, str]] = set()
         index = 0
         while index < len(day_spot):
@@ -575,41 +645,6 @@ def run_backtest(
                 levels,
                 cfg,
             )
-            diagnostic = _diagnose_strategy_d_bar(
-                spot_history=history,
-                futures_history=futures_history,
-                levels=levels,
-                config=cfg,
-                signal=signal,
-            )
-            diagnostic_bars_evaluated += 1
-            for name, passed in diagnostic["conditions"].items():
-                if passed:
-                    diagnostic_conditions[name] += 1
-            diagnostic_blockers[diagnostic["primary_blocker"]] += 1
-            if diagnostic["breakout_direction"] is not None:
-                diagnostic_breakouts[
-                    diagnostic["breakout_direction"]
-                ] += 1
-            day_key = day.isoformat()
-            day_diag = diagnostic_sessions.setdefault(
-                day_key,
-                {
-                    "bars_evaluated": 0,
-                    "structural_breakouts": 0,
-                    "qualified_signal_bars": 0,
-                    "primary_blocker_counts": Counter(),
-                },
-            )
-            day_diag["bars_evaluated"] += 1
-            if diagnostic["conditions"].get("structural_breakout"):
-                day_diag["structural_breakouts"] += 1
-            if diagnostic["qualified_signal"]:
-                day_diag["qualified_signal_bars"] += 1
-            day_diag["primary_blocker_counts"][
-                diagnostic["primary_blocker"]
-            ] += 1
-
             signal_key = (
                 (signal.option_type, signal.breakout_level_name)
                 if signal
@@ -948,7 +983,9 @@ def _available_usable_session_dates(
         """,
         source_params,
     ).fetchall()
-    candles = [_row_to_candle(row) for row in rows]
+    candles = _regular_session_5m(
+        [_row_to_candle(row) for row in rows]
+    )
     spot_by_day = _group_by_day(
         [
             candle
