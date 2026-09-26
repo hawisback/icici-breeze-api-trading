@@ -17,8 +17,11 @@ from services.historical.strategy_c_forward_validation import (
     FREEZE_DATE as STRATEGY_C_FREEZE_DATE,
 )
 from services.historical.strategy_d_candidate_manifest import (
+    CANDIDATE_ID as STRATEGY_D_CANDIDATE_ID,
     FREEZE_DATE as STRATEGY_D_FREEZE_DATE,
+    spec_fingerprint as strategy_d_spec_fingerprint,
 )
+from services.strategy.strategies.sr_momentum_breakout import StrategyDConfig
 from services.strategy.futures_signal import (
     FuturesContractResolver,
     aggregate_completed_15m,
@@ -1313,6 +1316,16 @@ class SimulationEngine:
                 },
                 "SR_MOMENTUM_BREAKOUT": {
                     "signal_authority": "FROZEN_STRATEGY_D_V2",
+                    "active_variant": "V2_CANDIDATE",
+                    "candidate_id": STRATEGY_D_CANDIDATE_ID,
+                    "candidate_spec_fingerprint": strategy_d_spec_fingerprint(),
+                    "control_variant": "V1_CONTROL",
+                    "control_strategy_id": StrategyDConfig.v1_control().strategy_id,
+                    "candidate_strategy_id": StrategyDConfig.v2_candidate().strategy_id,
+                    "shared_signal_authority": (
+                        "previous_session_levels + evaluate_strategy_d_signal"
+                    ),
+                    "shared_lifecycle_authority": "StrategyDPositionManager",
                     "freeze_date": STRATEGY_D_FREEZE_DATE.isoformat(),
                     "paper_monitor_parallel_option_account_replayed": False,
                     "spot_1m_count": len(one_minute_candles),

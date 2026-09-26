@@ -700,7 +700,7 @@ class SRMomentumBreakoutReplayAdapter:
         return ReplayStrategyMetadata(
             registry_key="sr_momentum_breakout",
             strategy=StrategyName.SR_MOMENTUM_BREAKOUT,
-            display_name="Strategy D · S&R Momentum",
+            display_name="Strategy D · S&R Momentum V2 (Frozen Candidate)",
             priority=40,
             enabled=self.tunables.sr_momentum_breakout_enabled,
             evaluation_start=self.config.entry_start,
@@ -808,7 +808,12 @@ class SRMomentumBreakoutReplayAdapter:
                 "timestamp": context.bar.end_time.isoformat(),
                 "strategy": StrategyName.SR_MOMENTUM_BREAKOUT.value,
                 "phase_state": phase,
+                "variant": self.config.variant,
+                "strategy_id": self.config.strategy_id,
                 "candidate_id": STRATEGY_D_CANDIDATE_ID,
+                "candidate_spec_fingerprint": strategy_d_spec_fingerprint(),
+                "control_variant": "V1_CONTROL",
+                "control_strategy_id": StrategyDConfig.v1_control().strategy_id,
                 "levels": levels.to_dict(),
                 "used_level_keys": sorted(self._used_level_keys),
                 "pending_signal_id": (
