@@ -61,9 +61,9 @@ def _context(adapter):
     )
 
 
-def test_strategy_e_stays_production_disabled_but_explicit_day_selection_enables_replay():
+def test_strategy_e_is_enabled_for_production_and_common_day_replay_by_default():
     tunables = StrategyTunablesConfig()
-    assert tunables.pivot_vwap_scalp_enabled is False
+    assert tunables.pivot_vwap_scalp_enabled is True
 
     default_registry = ReplayStrategyRegistry.default(
         tunables,
@@ -73,7 +73,7 @@ def test_strategy_e_stays_production_disabled_but_explicit_day_selection_enables
         item for item in default_registry.strategy_metadata()
         if item.strategy == StrategyName.PIVOT_VWAP_SCALP
     )
-    assert default_e.enabled is False
+    assert default_e.enabled is True
 
     selected = ReplayStrategyRegistry.default(
         tunables,
@@ -84,7 +84,7 @@ def test_strategy_e_stays_production_disabled_but_explicit_day_selection_enables
         StrategyName.PIVOT_VWAP_SCALP
     ]
     assert selected.strategy_metadata()[0].enabled is True
-    assert tunables.pivot_vwap_scalp_enabled is False
+    assert tunables.pivot_vwap_scalp_enabled is True
 
 
 def test_strategy_e_replay_diagnostics_expose_setup_family_and_completed_5m_dedupe(monkeypatch):
@@ -138,7 +138,7 @@ def test_strategy_e_replay_diagnostics_expose_setup_family_and_completed_5m_dedu
     assert audit["setup_family"] == "COUNTERTREND"
     assert audit["completed_5m_candle_timestamp"] == context.bar.end_time.isoformat()
     assert audit["dedupe_state"]["last_processed_candle"] == context.bar.end_time.isoformat()
-    assert audit["production_enabled"] is False
+    assert audit["production_enabled"] is True
     assert audit["replay_selected"] is True
 
     second = adapter.evaluate_completed_bar(context, allow_evaluation=True)

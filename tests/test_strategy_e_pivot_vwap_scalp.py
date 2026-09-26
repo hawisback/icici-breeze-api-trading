@@ -95,9 +95,9 @@ def _strategy(**updates) -> PivotVwapScalpStrategy:
     return PivotVwapScalpStrategy(StrategyTunablesConfig(**values))
 
 
-def test_strategy_e_defaults_disabled_but_live_policy_is_promoted():
+def test_strategy_e_defaults_enabled_and_live_policy_is_promoted():
     config = StrategyTunablesConfig()
-    assert config.pivot_vwap_scalp_enabled is False
+    assert config.pivot_vwap_scalp_enabled is True
     assert config.strategy_e_max_signal_age_seconds == 180.0
 
     service = StrategyService(oms_service=Mock(), repository=Mock())
