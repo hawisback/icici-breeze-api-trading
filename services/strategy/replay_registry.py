@@ -543,29 +543,61 @@ class DiContinuationReplayAdapter:
             context.futures_candles_1m,
             as_of=context.bar.end_time,
         )
-        active_candidate = next(
-            (
-                row
-                for row in report.get("candidate_entries") or []
-                if (row.get("lifecycle") or {}).get("status") == "OPEN"
-            ),
-            None,
-        )
-        status = {
-            "status": report.get("status"),
-            "candidate_id": STRATEGY_C_CANDIDATE_ID,
-            "candidate_spec_fingerprint": strategy_c_spec_fingerprint(),
-            "active_candidate_trade": active_candidate,
-        }
-        signal = strategy_c_signal_from_status(
-            status,
-            as_of=context.bar.end_time,
-        )
-        if (
-            signal is not None
-            and signal.signal_id in self._consumed_signal_ids
-        ):
-            signal = None
+        eligible_candidates: list[tuple[datetime, dict[str, Any]]] = []
+        for row in report.get("candidate_entries") or []:
+            signal_id = str(row.get("candidate_signal_id") or "")
+            if not signal_id or signal_id in self._consumed_signal_ids:
+                continue
+            try:
+                entry_time = datetime.fromisoformat(
+                    str(row["entry_time"]).replace("Z", "+00:00")
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            age = (context.bar.end_time - entry_time).total_seconds()
+            if -5.0 <= age <= 300.0:
+                eligible_candidates.append((entry_time, row))
+
+        signal = None
+        if eligible_candidates:
+            entry_time, candidate = min(
+                eligible_candidates,
+                key=lambda item: item[0],
+            )
+            actual_lifecycle = dict(candidate.get("lifecycle") or {})
+            entry_view = {
+                **candidate,
+                "lifecycle": {
+                    **actual_lifecycle,
+                    "status": "OPEN",
+                },
+            }
+            status = {
+                "status": report.get("status"),
+                "candidate_id": STRATEGY_C_CANDIDATE_ID,
+                "candidate_spec_fingerprint": (
+                    strategy_c_spec_fingerprint()
+                ),
+                "active_candidate_trade": entry_view,
+            }
+            signal = strategy_c_signal_from_status(
+                status,
+                as_of=context.bar.end_time,
+            )
+            if signal is not None:
+                signal = signal.model_copy(update={
+                    "features_snapshot": {
+                        **signal.features_snapshot,
+                        "candidate_lifecycle": actual_lifecycle,
+                        "replay_observed_at": (
+                            context.bar.end_time.isoformat()
+                        ),
+                        "replay_observation_latency_seconds": round(
+                            (context.bar.end_time - entry_time).total_seconds(),
+                            3,
+                        ),
+                    }
+                })
         return ReplayStrategyEvaluation(
             meta,
             signal=signal,
