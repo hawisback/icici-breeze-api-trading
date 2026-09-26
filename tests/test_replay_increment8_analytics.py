@@ -301,6 +301,15 @@ def test_partial_exit_legs_update_equity_and_capital_at_t1_timestamp():
         "simulated_gross_pnl": -500.0,
         "simulated_transaction_costs": 100.0,
         "simulated_net_pnl": -600.0,
+        "simulated_cost_breakdown": {
+            "brokerage": 60.0,
+            "exchange_charges": 0.0,
+            "stt": 0.0,
+            "gst": 0.0,
+            "sebi_charges": 0.0,
+            "stamp_duty": 40.0,
+            "order_count": 3,
+        },
         "simulated_execution_provenance": {
             "exit_legs": [
                 {
@@ -338,17 +347,25 @@ def test_partial_exit_legs_update_equity_and_capital_at_t1_timestamp():
 
     # T1 cashflow is realized at its own historical timestamp rather than
     # being deferred into the final trade-exit event.
-    assert len(metrics.equity_curve) == 3
-    partial, final = metrics.equity_curve[1:]
+    assert len(metrics.equity_curve) == 4
+    entry_cost, partial, final = metrics.equity_curve[1:]
+    assert entry_cost["event"] == "ENTRY_COST"
+    assert entry_cost["timestamp"] == (
+        SESSION_START + timedelta(minutes=15)
+    ).isoformat()
+    assert entry_cost["allocated_transaction_costs"] == 60.0
+    assert entry_cost["net_pnl"] == -60.0
+    assert entry_cost["cumulative_net_pnl"] == -60.0
+
     assert partial["event"] == "PARTIAL_EXIT"
     assert partial["timestamp"] == (
         SESSION_START + timedelta(minutes=20)
     ).isoformat()
     assert partial["quantity"] == 50
     assert partial["gross_pnl"] == 1000.0
-    assert partial["allocated_transaction_costs"] == 50.0
-    assert partial["net_pnl"] == 950.0
-    assert partial["cumulative_net_pnl"] == 950.0
+    assert partial["allocated_transaction_costs"] == 20.0
+    assert partial["net_pnl"] == 980.0
+    assert partial["cumulative_net_pnl"] == 920.0
     assert partial["cumulative_r"] == 0.0
 
     assert final["event"] == "TRADE_EXIT"
@@ -357,15 +374,15 @@ def test_partial_exit_legs_update_equity_and_capital_at_t1_timestamp():
     ).isoformat()
     assert final["quantity"] == 50
     assert final["gross_pnl"] == -1500.0
-    assert final["allocated_transaction_costs"] == 50.0
-    assert final["net_pnl"] == -1550.0
+    assert final["allocated_transaction_costs"] == 20.0
+    assert final["net_pnl"] == -1520.0
     assert final["cumulative_net_pnl"] == -600.0
     assert final["cumulative_r"] == -0.5
 
     # Drawdown now observes the partial-exit equity peak before the losing
     # runner exits, rather than treating the trade as one -600 final event.
-    assert metrics.max_drawdown_pnl == -1550.0
-    assert metrics.max_drawdown_pct == -0.31
+    assert metrics.max_drawdown_pnl == -1520.0
+    assert metrics.max_drawdown_pct == -0.304
 
     # Premium commitment steps down at T1, but the position slot remains
     # occupied until the final leg closes.
