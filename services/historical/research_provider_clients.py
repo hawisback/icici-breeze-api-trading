@@ -248,6 +248,101 @@ class UpstoxHistoricalClient:
         return result
 
 
+class KiteHistoricalClient:
+    """Fetch current-contract futures or India VIX 5-minute candles via Kite."""
+
+    source = "KITE"
+
+    def __init__(
+        self,
+        api_key: str,
+        access_token: str,
+        kite_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.access_token = access_token
+        self._factory = kite_factory
+        self.last_history_debug: dict[str, Any] = {}
+
+    def _client(self) -> Any:
+        factory = self._factory
+        if factory is None:
+            from kiteconnect import KiteConnect
+
+            factory = KiteConnect
+        client = factory(api_key=self.api_key)
+        client.set_access_token(self.access_token)
+        return client
+
+    def history(
+        self,
+        instrument_token: str,
+        start: datetime,
+        end: datetime,
+        *,
+        instrument_name: str,
+        include_oi: bool,
+    ) -> list[dict[str, Any]]:
+        client = self._client()
+        raw = list(
+            client.historical_data(
+                int(instrument_token),
+                start,
+                end,
+                "5minute",
+                continuous=False,
+                oi=include_oi,
+            )
+            or []
+        )
+        rows: list[dict[str, Any]] = []
+        for item in raw:
+            raw_ts = item.get("date")
+            if isinstance(raw_ts, datetime):
+                ts = raw_ts
+            else:
+                try:
+                    ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=IST)
+            else:
+                ts = ts.astimezone(IST)
+            ts = ts.replace(second=0, microsecond=0)
+            if not _regular_session(ts) or ts < start or ts > end:
+                continue
+            values = [_float(item.get(key)) for key in ("open", "high", "low", "close")]
+            if any(value is None for value in values):
+                continue
+            rows.append(
+                {
+                    "timestamp": ts.isoformat(),
+                    "open": values[0],
+                    "high": values[1],
+                    "low": values[2],
+                    "close": values[3],
+                    "volume": _float(item.get("volume")),
+                    "open_interest": _float(item.get("oi")) if include_oi else None,
+                    "instrument": instrument_name,
+                    "source": self.source,
+                }
+            )
+
+        dedup = {(row["timestamp"], row["instrument"]): row for row in rows}
+        result = sorted(dedup.values(), key=lambda row: row["timestamp"])
+        self.last_history_debug = {
+            "instrument_token": str(instrument_token),
+            "instrument_name": instrument_name,
+            "include_oi": include_oi,
+            "raw_count": len(raw),
+            "normalized_count": len(result),
+            "normalized_first": result[0]["timestamp"] if result else None,
+            "normalized_last": result[-1]["timestamp"] if result else None,
+        }
+        return result
+
+
 class DhanHistoricalClient:
     """Fetch Dhan V2 NIFTY futures 5-minute OHLCV/OI."""
 
