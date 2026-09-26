@@ -74,6 +74,28 @@ def _resolved_manifest(index: int, realized_r: float) -> ReplayManifestRecord:
     )
 
 
+def test_trade_rows_preserve_authoritative_multi_leg_fill_evidence():
+    record = _resolved_manifest(0, 1.0).model_copy(update={
+        "simulated_entry_fill_price": 101.0,
+        "simulated_exit_fill_price": 114.0,
+        "simulated_entry_fill_method": (
+            "POINT_IN_TIME_BID_ASK_PLUS_CONFIGURED_SLIPPAGE"
+        ),
+        "simulated_exit_fill_method": "MULTI_LEG_WEIGHTED_EXIT",
+        "simulated_fill_quote_equivalent": True,
+        "simulated_gross_pnl": 1300.0,
+        "simulated_slippage_cost": 200.0,
+        "simulated_transaction_costs": 60.0,
+        "simulated_net_pnl": 1240.0,
+    })
+
+    trade = build_simulated_trade_records([record])[0]
+
+    assert trade.simulated_exit_fill_method == "MULTI_LEG_WEIGHTED_EXIT"
+    assert trade.simulated_fill_quote_equivalent is True
+    assert trade.model_dump()["simulated_fill_quote_equivalent"] is True
+
+
 def _canonical_sections(
     *,
     bars: int,
