@@ -14,6 +14,7 @@ from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from statistics import mean
+from types import SimpleNamespace
 from typing import Any, Sequence
 
 from libs.contracts.models import Candle
@@ -33,6 +34,13 @@ SESSION_START = time(9, 15)
 SESSION_END_EXCLUSIVE = time(15, 30)
 EXPECTED_5M_BARS = 75
 DEFAULT_WARMUP_CALENDAR_DAYS = 14
+CANDIDATE_REJECTION_REASONS = {
+    "STOP_TOO_WIDE",
+    "INSUFFICIENT_ROOM_TO_RESISTANCE",
+    "INSUFFICIENT_ROOM_TO_SUPPORT",
+    "INSUFFICIENT_COUNTERTREND_ROOM",
+    "INSUFFICIENT_REWARD_TO_RISK",
+}
 
 EXPERIMENT_ARMS: dict[str, dict[str, Any]] = {
     "CONTROL": {},
@@ -375,10 +383,175 @@ def _trade_row(
         "relative_volume": snapshot.get("relative_volume"),
         "volume_confirmed": snapshot.get("volume_confirmed"),
         "choppy": snapshot.get("choppy"),
+        "features_snapshot": snapshot,
         **{
             key: value.isoformat() if isinstance(value, datetime) else value
             for key, value in result.items()
         },
+    }
+
+
+
+def _counterfactual_candidate(
+    *,
+    day: date,
+    bar: Candle,
+    decision: StrategyEDecision,
+    future_bars: Sequence[Candle],
+    minute_bars: Sequence[Candle],
+    forced_exit_time: str,
+) -> dict[str, Any] | None:
+    metrics = dict(decision.metrics)
+    signal_type = metrics.get("candidate_signal_type")
+    risk = metrics.get("risk_points")
+    entry = metrics.get("entry_price")
+    stop = metrics.get("stop")
+    target = metrics.get("target")
+    if (
+        not signal_type
+        or risk is None
+        or entry is None
+        or stop is None
+        or target is None
+        or float(risk) <= 0
+    ):
+        return None
+
+    direction = (
+        TradeDirection.BULLISH
+        if str(signal_type) in {"TREND_LONG", "COUNTER_LONG"}
+        else TradeDirection.BEARISH
+    )
+    state = {
+        "signal": SimpleNamespace(
+            timestamp=bar.end_time,
+            direction=direction,
+        ),
+        "entry": float(entry),
+        "stop": float(stop),
+        "risk": float(risk),
+        "target": float(target),
+        "mfe_points": 0.0,
+        "mae_points": 0.0,
+    }
+    result: dict[str, Any] | None = None
+    for future_bar in future_bars:
+        result = _advance_trade(
+            state,
+            future_bar,
+            minute_bars,
+            forced_exit_time=forced_exit_time,
+        )
+        if result is not None:
+            break
+    if result is None:
+        result = {
+            "lifecycle_status": "UNRESOLVED",
+            "exit_time": None,
+            "exit_price": None,
+            "exit_reason": "SESSION_ENDED_WITH_OPEN_POSITION",
+            "realized_r": None,
+            "mfe_r": round(
+                float(state["mfe_points"]) / float(state["risk"]), 6
+            ),
+            "mae_r": round(
+                float(state["mae_points"]) / float(state["risk"]), 6
+            ),
+            "intrabar_resolution": "NONE",
+        }
+
+    return {
+        "date": day.isoformat(),
+        "entry_time": bar.end_time.isoformat(),
+        "rejection_reason": decision.reason,
+        "signal_type": str(signal_type),
+        "direction": direction.value,
+        "entry_price": float(entry),
+        "stop": float(stop),
+        "target": float(target),
+        "risk_points": float(risk),
+        "reward_points": metrics.get("reward_points"),
+        "reward_risk": metrics.get("reward_risk"),
+        "features": metrics,
+        "independent_counterfactual": True,
+        **{
+            key: value.isoformat() if isinstance(value, datetime) else value
+            for key, value in result.items()
+        },
+    }
+
+
+def _research_bucket(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    resolved = [
+        row for row in rows
+        if row.get("lifecycle_status") == "RESOLVED"
+        and row.get("realized_r") is not None
+    ]
+    values = [float(row["realized_r"]) for row in resolved]
+    wins = [value for value in values if value > 0]
+    losses = [value for value in values if value < 0]
+    return {
+        "candidates": len(rows),
+        "resolved": len(resolved),
+        "ambiguous": sum(
+            row.get("lifecycle_status") == "AMBIGUOUS" for row in rows
+        ),
+        "unresolved": sum(
+            row.get("lifecycle_status") == "UNRESOLVED" for row in rows
+        ),
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate_pct": (
+            round(100.0 * len(wins) / len(values), 2) if values else 0.0
+        ),
+        "total_r": round(sum(values), 6),
+        "mean_r": round(mean(values), 6) if values else None,
+        "mean_mfe_r": (
+            round(mean(float(row["mfe_r"]) for row in resolved), 6)
+            if resolved else None
+        ),
+        "mean_mae_r": (
+            round(mean(float(row["mae_r"]) for row in resolved), 6)
+            if resolved else None
+        ),
+    }
+
+
+def _rr_band(value: Any) -> str:
+    if value is None:
+        return "UNKNOWN"
+    rr = float(value)
+    if rr < 0.5:
+        return "LT_0_50"
+    if rr < 0.75:
+        return "0_50_TO_0_74"
+    if rr < 1.0:
+        return "0_75_TO_0_99"
+    return "GE_1_00"
+
+
+def _research_ledger_summary(
+    rows: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    def grouped(key_fn: Any) -> dict[str, Any]:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            groups.setdefault(str(key_fn(row)), []).append(row)
+        return {
+            key: _research_bucket(group)
+            for key, group in sorted(groups.items())
+        }
+
+    return {
+        "all_rejected_candidates": _research_bucket(rows),
+        "by_rejection_reason": grouped(
+            lambda row: row.get("rejection_reason")
+        ),
+        "by_signal_type": grouped(lambda row: row.get("signal_type")),
+        "by_direction": grouped(lambda row: row.get("direction")),
+        "by_reward_risk_band": grouped(
+            lambda row: _rr_band(row.get("reward_risk"))
+        ),
     }
 
 
@@ -563,6 +736,7 @@ def run_backtest(
     end_date: date | None = None,
     session_dates: Sequence[date] | None = None,
     config: StrategyTunablesConfig | None = None,
+    capture_rejected_candidates: bool = False,
 ) -> dict[str, Any]:
     cfg = config or StrategyTunablesConfig()
     grouped = _group_futures(futures_candles)
@@ -570,6 +744,7 @@ def run_backtest(
     market_days = sorted(grouped)
     requested = set(session_dates) if session_dates is not None else None
     trades: list[dict[str, Any]] = []
+    rejected_candidates: list[dict[str, Any]] = []
     usable_dates: list[date] = []
     skipped: Counter[str] = Counter()
     reason_counts: Counter[str] = Counter()
@@ -615,7 +790,7 @@ def run_backtest(
         day_trade_start = len(trades)
         day_qualified = day_blocked = 0
 
-        for bar in current:
+        for bar_index, bar in enumerate(current):
             if active is not None:
                 lifecycle = _advance_trade(
                     active, bar, minute_rows,
@@ -637,6 +812,21 @@ def run_backtest(
             day_reasons[decision.reason] += 1
             day_results[decision.result] += 1
             if decision.signal is None:
+                if (
+                    capture_rejected_candidates
+                    and decision.reason in CANDIDATE_REJECTION_REASONS
+                    and decision.metrics.get("candidate_signal_type")
+                ):
+                    candidate = _counterfactual_candidate(
+                        day=day,
+                        bar=bar,
+                        decision=decision,
+                        future_bars=current[bar_index + 1 :],
+                        minute_bars=minute_rows,
+                        forced_exit_time=cfg.strategy_e_forced_exit_time,
+                    )
+                    if candidate is not None:
+                        rejected_candidates.append(candidate)
                 continue
 
             qualified_signals += 1
@@ -760,6 +950,21 @@ def run_backtest(
         },
         "skipped_sessions_or_events": dict(skipped),
         "trades": trades,
+        "research_ledger": (
+            {
+                "method": (
+                    "Each rejected formed setup is replayed independently from "
+                    "the next completed 5m bar using the same Strategy E "
+                    "stop/target/forced-exit lifecycle. Counterfactual rows may "
+                    "overlap each other or actual positions and are diagnostic, "
+                    "not a portfolio P&L simulation."
+                ),
+                "candidate_rejections": rejected_candidates,
+                "summary": _research_ledger_summary(rejected_candidates),
+            }
+            if capture_rejected_candidates
+            else None
+        ),
     }
 
 
@@ -864,6 +1069,14 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--sessions", type=int)
     parser.add_argument(
+        "--research-ledger",
+        action="store_true",
+        help=(
+            "capture rejected formed setups and replay their independent "
+            "counterfactual lifecycle"
+        ),
+    )
+    parser.add_argument(
         "--experiment",
         action="store_true",
         help="run the research-only one-factor Strategy E gate ablation",
@@ -908,6 +1121,47 @@ def main() -> None:
         start_date=start_date,
         end_date=end_date,
     )
+    if args.experiment and args.research_ledger:
+        raise SystemExit("--experiment and --research-ledger are separate modes")
+
+    if args.research_ledger:
+        report = run_backtest(
+            futures_candles=futures,
+            one_minute_futures_candles=one_minute,
+            start_date=start_date,
+            end_date=end_date,
+            session_dates=selected_dates,
+            capture_rejected_candidates=True,
+        )
+        if args.sessions is not None and report["usable_sessions"] != args.sessions:
+            raise SystemExit(
+                f"requested {args.sessions} complete Strategy E sessions but "
+                f"research replay produced {report['usable_sessions']}"
+            )
+        output = (
+            args.output
+            if args.output != Path("data") / "strategy_e_pivot_vwap_backtest.json"
+            else Path("data") / "strategy_e_research_ledger.json"
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(json.dumps(
+            {
+                "strategy_id": report["strategy_id"],
+                "metrics": report["metrics"],
+                "session_summary": report["session_summary"],
+                "research_ledger_summary": report["research_ledger"]["summary"],
+                "intrabar_coverage": report["intrabar_coverage"],
+                "output": str(output),
+            },
+            indent=2,
+            sort_keys=True,
+        ))
+        return
+
     if args.experiment:
         experiment = build_experiment(
             futures_candles=futures,
