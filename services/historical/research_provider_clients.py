@@ -262,9 +262,12 @@ class KiteHistoricalClient:
         self.api_key = api_key
         self.access_token = access_token
         self._factory = kite_factory
+        self._kite_client: Any | None = None
         self.last_history_debug: dict[str, Any] = {}
 
     def _client(self) -> Any:
+        if self._kite_client is not None:
+            return self._kite_client
         factory = self._factory
         if factory is None:
             from kiteconnect import KiteConnect
@@ -272,7 +275,46 @@ class KiteHistoricalClient:
             factory = KiteConnect
         client = factory(api_key=self.api_key)
         client.set_access_token(self.access_token)
+        self._kite_client = client
         return client
+
+    @staticmethod
+    def _expiry_date(value: Any) -> date | None:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if value in (None, ""):
+            return None
+        try:
+            return datetime.fromisoformat(str(value)).date()
+        except ValueError:
+            return None
+
+    def resolve_india_vix_token(self) -> str:
+        rows = list(self._client().instruments("NSE") or [])
+        for row in rows:
+            if str(row.get("tradingsymbol", "")).upper() == "INDIA VIX":
+                return str(row["instrument_token"])
+        raise RuntimeError("Kite INDIA VIX instrument token not found in NSE instrument list")
+
+    def resolve_nifty_future_token(self, expiry_date: str) -> str:
+        wanted = datetime.fromisoformat(expiry_date).date()
+        matches: list[dict[str, Any]] = []
+        for row in list(self._client().instruments("NFO") or []):
+            if str(row.get("instrument_type", "")).upper() != "FUT":
+                continue
+            if str(row.get("name", "")).upper() != "NIFTY":
+                continue
+            if self._expiry_date(row.get("expiry")) != wanted:
+                continue
+            matches.append(row)
+        if len(matches) != 1:
+            symbols = [str(row.get("tradingsymbol")) for row in matches]
+            raise RuntimeError(
+                f"Expected one Kite NIFTY future for {wanted.isoformat()}, found {symbols}"
+            )
+        return str(matches[0]["instrument_token"])
 
     def history(
         self,
