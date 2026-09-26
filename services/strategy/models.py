@@ -968,6 +968,9 @@ class SimulationBarSnapshot(BaseModel):
     bb_width_percentile: float
     strategy_a_phase: str
     strategy_b_phase: str
+    strategy_c_phase: str = "WAITING"
+    strategy_d_phase: str = "WAITING"
+    strategy_e_phase: str = "WAITING"
     active_trade_id: Optional[str] = None
     event: Optional[str] = None
     event_details: Optional[str] = None
