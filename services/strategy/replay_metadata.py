@@ -279,6 +279,7 @@ def build_data_fingerprint(
             item.get("instrument_id") or "",
             item.get("expiry") or "",
         )),
+        "missing_data": sorted(set(missing_data)),
         "candles": rows,
     }
     dataset_hash = hashlib.sha256(

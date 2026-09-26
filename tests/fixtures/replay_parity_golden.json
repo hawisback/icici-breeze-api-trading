@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "strategy_registry": [
+    ["TREND_PULLBACK", "TrendPullbackReplayAdapter"],
+    ["VOLATILITY_BREAKOUT", "VolatilityBreakoutReplayAdapter"],
+    ["DI_CONTINUATION", "DiContinuationReplayAdapter"],
+    ["SR_MOMENTUM_BREAKOUT", "SRMomentumBreakoutReplayAdapter"],
+    ["PIVOT_VWAP_SCALP", "PivotVwapScalpReplayAdapter"]
+  ],
+  "risk": {
+    "cooldown_status": "IN_LOSS_COOLDOWN",
+    "daily_loss_status": "DAILY_LOSS_LIMIT_REACHED",
+    "daily_trade_status": "DAILY_TRADE_LIMIT_REACHED"
+  },
+  "sizing": {
+    "premium_method": "OPTION_HARD_STOP_PREMIUM_RISK",
+    "structural_method": "UNDERLYING_R_WITH_POINT_IN_TIME_DELTA",
+    "strategy_e_lot_cap": 2
+  },
+  "expiry_rollover": {
+    "before_expiry": "NIFTY-FUT-2026-09-24",
+    "after_expiry": "NIFTY-FUT-2026-10-29"
+  },
+  "intrabar": {
+    "same_minute_stop_target": "STILL_AMBIGUOUS"
+  },
+  "execution": {
+    "gross_pnl": 400.0,
+    "transaction_costs": 57.15,
+    "net_pnl": 342.85
+  }
+}
