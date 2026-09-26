@@ -1377,6 +1377,11 @@ export interface SimulationRequestData {
   bypass_entry_window?: boolean;
   historical_source?: "BREEZE" | "KITE" | "LIVE" | "MIXED";
   replay_mode?: "RESEARCH" | "EXECUTION_PARITY";
+  /** Optional strategy scope for Day Replay. Omit to run the enabled suite. */
+  selected_strategies?: Array<
+    "TREND_PULLBACK" | "VOLATILITY_BREAKOUT" | "DI_CONTINUATION" |
+    "SR_MOMENTUM_BREAKOUT" | "PIVOT_VWAP_SCALP"
+  >;
   /** Applied as the chronological daily-entry limit in EXECUTION_PARITY. */
   max_trades_per_day?: number;
 }
