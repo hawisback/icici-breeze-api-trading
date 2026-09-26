@@ -34,6 +34,14 @@ SESSION_END_EXCLUSIVE = time(15, 30)
 EXPECTED_5M_BARS = 75
 DEFAULT_WARMUP_CALENDAR_DAYS = 14
 
+EXPERIMENT_ARMS: dict[str, dict[str, Any]] = {
+    "CONTROL": {},
+    "MAX_STOP_40": {"strategy_e_max_stop_points": 40.0},
+    "MIN_RR_0_75": {"strategy_e_min_reward_risk": 0.75},
+    "MIN_ROOM_3": {"strategy_e_min_room_to_level_points": 3.0},
+    "CHOP_CROSS_3": {"strategy_e_chop_cross_threshold": 3},
+}
+
 
 def _session_date(candle: Candle) -> date:
     return candle.start_time.astimezone(IST).date()
@@ -400,6 +408,133 @@ def _config_snapshot(config: StrategyTunablesConfig) -> dict[str, Any]:
     return {field: getattr(config, field) for field in fields}
 
 
+
+def _trade_signature(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(row.get("date")),
+        str(row.get("entry_time")),
+        str(row.get("signal_type")),
+    )
+
+
+def build_experiment(
+    *,
+    futures_candles: Sequence[Candle],
+    one_minute_futures_candles: Sequence[Candle] = (),
+    start_date: date | None = None,
+    end_date: date | None = None,
+    session_dates: Sequence[date] | None = None,
+) -> dict[str, Any]:
+    """Run one-factor Strategy E research arms on identical historical data."""
+    base = StrategyTunablesConfig()
+    reports: dict[str, dict[str, Any]] = {}
+    for name, changes in EXPERIMENT_ARMS.items():
+        config = base.model_copy(update=changes)
+        reports[name] = run_backtest(
+            futures_candles=futures_candles,
+            one_minute_futures_candles=one_minute_futures_candles,
+            start_date=start_date,
+            end_date=end_date,
+            session_dates=session_dates,
+            config=config,
+        )
+
+    control = reports["CONTROL"]
+    control_signatures = {
+        _trade_signature(row) for row in control["trades"]
+    }
+    control_dates = control["session_summary"]["session_dates"]
+    arms: dict[str, Any] = {}
+    for name, report in reports.items():
+        if report["session_summary"]["session_dates"] != control_dates:
+            raise ValueError(
+                f"experiment arm {name} did not replay the control sessions"
+            )
+        incremental = [
+            row for row in report["trades"]
+            if _trade_signature(row) not in control_signatures
+        ]
+        diagnostics = report["signal_diagnostics"]
+        arms[name] = {
+            "config_changes": EXPERIMENT_ARMS[name],
+            "config": report["config"],
+            "metrics": report["metrics"],
+            "signal_diagnostics": {
+                "bars_evaluated": diagnostics["bars_evaluated"],
+                "qualified_signals": diagnostics["qualified_signals"],
+                "signals_blocked_position_open": (
+                    diagnostics["signals_blocked_position_open"]
+                ),
+                "decision_reason_counts": diagnostics["decision_reason_counts"],
+                "result_counts": diagnostics["result_counts"],
+                "signal_type_counts": diagnostics["signal_type_counts"],
+            },
+            "session_summary": report["session_summary"],
+            "intrabar_coverage": report["intrabar_coverage"],
+            "incremental_vs_control": {
+                "trades": len(incremental),
+                "resolved_trades": sum(
+                    row.get("lifecycle_status") == "RESOLVED"
+                    for row in incremental
+                ),
+                "total_r": round(
+                    sum(
+                        float(row["realized_r"])
+                        for row in incremental
+                        if row.get("realized_r") is not None
+                    ),
+                    6,
+                ),
+                "trade_rows": incremental,
+            },
+            "trades": report["trades"],
+        }
+
+    return {
+        "experiment_id": "STRATEGY_E_ONE_FACTOR_GATE_ABLATION_V1",
+        "research_only": True,
+        "production_defaults_changed": False,
+        "design": (
+            "Each non-control arm changes exactly one Strategy E tunable "
+            "while replaying the same complete sessions and lifecycle."
+        ),
+        "session_dates": control_dates,
+        "arms": arms,
+    }
+
+
+def _experiment_console_summary(experiment: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "experiment_id": experiment["experiment_id"],
+        "session_dates": experiment["session_dates"],
+        "arms": {
+            name: {
+                "config_changes": arm["config_changes"],
+                "trades": arm["metrics"]["trades"],
+                "resolved_trades": arm["metrics"]["resolved_trades"],
+                "ambiguous_trades": arm["metrics"]["ambiguous_trades"],
+                "total_r": arm["metrics"]["total_r"],
+                "mean_r": arm["metrics"]["mean_r"],
+                "win_rate_pct": arm["metrics"]["win_rate_pct"],
+                "max_drawdown_r": arm["metrics"]["max_drawdown_r"],
+                "qualified_signals": arm["signal_diagnostics"][
+                    "qualified_signals"
+                ],
+                "incremental_trades_vs_control": arm[
+                    "incremental_vs_control"
+                ]["trades"],
+                "incremental_total_r_vs_control": arm[
+                    "incremental_vs_control"
+                ]["total_r"],
+                "decision_reason_counts": arm["signal_diagnostics"][
+                    "decision_reason_counts"
+                ],
+            }
+            for name, arm in experiment["arms"].items()
+        },
+    }
+
+
 def run_backtest(
     *,
     futures_candles: Sequence[Candle],
@@ -708,6 +843,11 @@ def _parse_args() -> argparse.Namespace:
         choices=("BREEZE", "KITE", "LIVE", "MIXED"),
     )
     parser.add_argument("--sessions", type=int)
+    parser.add_argument(
+        "--experiment",
+        action="store_true",
+        help="run the research-only one-factor Strategy E gate ablation",
+    )
     parser.add_argument("--start-date", type=date.fromisoformat)
     parser.add_argument("--end-date", type=date.fromisoformat)
     parser.add_argument(
@@ -748,6 +888,39 @@ def main() -> None:
         start_date=start_date,
         end_date=end_date,
     )
+    if args.experiment:
+        experiment = build_experiment(
+            futures_candles=futures,
+            one_minute_futures_candles=one_minute,
+            start_date=start_date,
+            end_date=end_date,
+            session_dates=selected_dates,
+        )
+        control = experiment["arms"]["CONTROL"]
+        if (
+            args.sessions is not None
+            and control["metrics"]["usable_sessions"] != args.sessions
+        ):
+            raise SystemExit(
+                f"requested {args.sessions} complete Strategy E sessions but "
+                f"experiment replay produced "
+                f"{control['metrics']['usable_sessions']}; review data coverage"
+            )
+        output = (
+            args.output
+            if args.output != Path("data") / "strategy_e_pivot_vwap_backtest.json"
+            else Path("data") / "strategy_e_pivot_vwap_experiment.json"
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(experiment, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        summary = _experiment_console_summary(experiment)
+        summary["output"] = str(output)
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return
+
     report = run_backtest(
         futures_candles=futures,
         one_minute_futures_candles=one_minute,
