@@ -1200,6 +1200,15 @@ class SimulationEngine:
             request.instrument_id,
             historical_source,
         )
+        futures_one_minute_candles = (
+            await self._load_replay_one_minute_candles(
+                date_str,
+                active_instrument,
+                historical_source,
+            )
+            if active_instrument
+            else []
+        )
         contract_provider = (
             HistoricalContractSelectionProvider(
                 historical_service=self.hist_svc,
@@ -1242,6 +1251,7 @@ class SimulationEngine:
             session_candles=session,
             futures_candles=futures_history,
             one_minute_candles=one_minute_candles,
+            futures_one_minute_candles=futures_one_minute_candles,
         )
         chronological_executor = (
             ChronologicalReplayExecutor(
@@ -1258,6 +1268,11 @@ class SimulationEngine:
             running.append(bar)
             macro = self.resample_to_15m(running, request.instrument_id)
             futures = [c for c in futures_history if c.end_time <= bar.end_time]
+            futures_1m = [
+                c
+                for c in futures_one_minute_candles
+                if c.end_time <= bar.end_time
+            ]
             strategy_futures = [
                 c for c in strategy_a_futures_history if c.end_time <= bar.end_time
             ]
@@ -1288,6 +1303,8 @@ class SimulationEngine:
                 spot_candles_5m=running,
                 spot_candles_15m=macro,
                 futures_candles=strategy_futures,
+                active_futures_candles_5m=futures,
+                futures_candles_1m=futures_1m,
             )
 
             event, details = None, None
@@ -1718,6 +1735,9 @@ class SimulationEngine:
             lifecycle_resolver = {
                 "resolver": dict(sorted(lifecycle_replayer.stats.items())),
                 "one_minute_candles": len(one_minute_candles),
+                "futures_one_minute_candles": len(
+                    futures_one_minute_candles
+                ),
             }
         else:
             lifecycle_resolver = lifecycle_replayer.replay(
