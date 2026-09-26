@@ -2389,6 +2389,15 @@ class SimulationEngine:
                 else "RESEARCH_REPLAY_CONTRACT_APPROXIMATION"
             ),
             historical_source=request.historical_source.value,
+            data_provenance=data_snapshot.model_dump(mode="json"),
+            strategy_manifest={
+                item["strategy_id"]: {
+                    "revision": item.get("version"),
+                    "fingerprint": item.get("fingerprint"),
+                    "display_name": item.get("display_name"),
+                }
+                for item in strategy_registry.metadata_snapshot()
+            },
             contract_selection_evidence=(
                 data_quality.contract_selection_evidence_counts
             ),
