@@ -667,8 +667,13 @@ def test_replay_metadata_discloses_applied_and_ignored_controls():
     assert [item["strategy"] for item in registry_snapshot] == [
         "TREND_PULLBACK",
         "VOLATILITY_BREAKOUT",
+        "DI_CONTINUATION",
+        "SR_MOMENTUM_BREAKOUT",
+        "PIVOT_VWAP_SCALP",
     ]
-    assert registry_snapshot[0]["priority"] < registry_snapshot[1]["priority"]
+    assert [
+        item["priority"] for item in registry_snapshot
+    ] == sorted(item["priority"] for item in registry_snapshot)
     assert controls["applied_overrides"]["rvol_threshold"] == 1.4
     assert controls["applied_overrides"]["strat_b_min_confirmation"] == 4
     assert controls["applied_overrides"]["box_max_height_atr"] == 1.5
@@ -947,8 +952,13 @@ def test_default_replay_registry_orders_a_before_b_and_owns_supported_overrides(
     assert [item.strategy.value for item in metadata] == [
         "TREND_PULLBACK",
         "VOLATILITY_BREAKOUT",
+        "DI_CONTINUATION",
+        "SR_MOMENTUM_BREAKOUT",
+        "PIVOT_VWAP_SCALP",
     ]
-    assert metadata[0].priority < metadata[1].priority
+    assert [item.priority for item in metadata] == sorted(
+        item.priority for item in metadata
+    )
     assert "adx_threshold" not in registry.supported_override_fields()
     assert "rvol_threshold" in registry.supported_override_fields()
     assert "strat_b_min_confirmation" in registry.supported_override_fields()
@@ -966,6 +976,12 @@ def test_default_replay_registry_orders_a_before_b_and_owns_supported_overrides(
     assert snapshot[1]["strategy"] == "VOLATILITY_BREAKOUT"
     assert snapshot[1]["evaluation_window"]["start"] == "09:20"
     assert snapshot[1]["entry_window"]["start"] == "09:25"
+    assert snapshot[2]["strategy"] == "DI_CONTINUATION"
+    assert snapshot[2]["evaluation_window"]["start"] == "09:45"
+    assert snapshot[3]["strategy"] == "SR_MOMENTUM_BREAKOUT"
+    assert snapshot[3]["evaluation_window"]["start"] == "09:20"
+    assert snapshot[4]["strategy"] == "PIVOT_VWAP_SCALP"
+    assert snapshot[4]["entry_window"]["start"] == "09:25"
 
 
 def test_strategy_a_futures_coverage_reports_missing_entry_window_bar():
