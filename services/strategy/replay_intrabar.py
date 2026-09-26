@@ -189,3 +189,130 @@ def resolve_stop_order(
             exit_price=candle.open if gap else active_stop,
         )
     return IntrabarResolution(event="NO_STOP", ambiguous=False)
+
+
+def resolve_active_stop_transition(
+    direction: TradeDirection | str,
+    *,
+    active_stop: float,
+    transition_level: float,
+    transitioned_stop: float,
+    minute_candles: Iterable[object],
+) -> IntrabarResolution:
+    """Order a favorable transition against the stop it activates.
+
+    The old stop is authoritative until the favorable transition is known to
+    have occurred.  If a minute crosses the transition and the newly activated
+    stop, OHLC alone cannot order those post-open touches unless the opening
+    print already proves the transition was active first.
+    """
+    if min(active_stop, transition_level, transitioned_stop) <= 0:
+        raise ValueError("stop and transition levels must be positive")
+    call = _is_call(direction)
+    transitioned = False
+    for candle in sorted(minute_candles, key=lambda item: item.start_time):
+        old_stop_hit = candle.low <= active_stop if call else candle.high >= active_stop
+        transition_hit = candle.high >= transition_level if call else candle.low <= transition_level
+
+        if not transitioned:
+            if old_stop_hit and transition_hit:
+                if call and candle.open <= active_stop:
+                    return IntrabarResolution("STRUCTURAL_STOP", False, candle.start_time,
+                                              candle.open if candle.open <= active_stop else active_stop)
+                if not call and candle.open >= active_stop:
+                    return IntrabarResolution("STRUCTURAL_STOP", False, candle.start_time,
+                                              candle.open if candle.open >= active_stop else active_stop)
+                if (call and candle.open >= transition_level) or (
+                    not call and candle.open <= transition_level
+                ):
+                    transitioned = True
+                else:
+                    return IntrabarResolution(
+                        "STILL_AMBIGUOUS", True, candle.start_time,
+                        detail="transition and pre-transition stop crossed in one 1-minute candle",
+                    )
+            elif old_stop_hit:
+                gap = candle.open <= active_stop if call else candle.open >= active_stop
+                return IntrabarResolution(
+                    "STRUCTURAL_STOP", False, candle.start_time,
+                    candle.open if gap else active_stop,
+                )
+            elif transition_hit:
+                # If the transition was crossed after the open, any touch of
+                # the newly activated stop in this same minute has unknown
+                # chronology and must not be resolved optimistically.
+                new_stop_hit = (
+                    candle.low <= transitioned_stop
+                    if call else candle.high >= transitioned_stop
+                )
+                opened_through_transition = (
+                    candle.open >= transition_level
+                    if call else candle.open <= transition_level
+                )
+                if new_stop_hit and not opened_through_transition:
+                    return IntrabarResolution(
+                        "STILL_AMBIGUOUS", True, candle.start_time,
+                        detail="new stop was touched in the same minute it became active",
+                    )
+                transitioned = True
+                if new_stop_hit:
+                    gap = (
+                        candle.open <= transitioned_stop
+                        if call else candle.open >= transitioned_stop
+                    )
+                    return IntrabarResolution(
+                        "TRANSITION_THEN_STOP", False, candle.start_time,
+                        candle.open if gap else transitioned_stop,
+                    )
+                continue
+
+        new_stop_hit = candle.low <= transitioned_stop if call else candle.high >= transitioned_stop
+        if new_stop_hit:
+            gap = candle.open <= transitioned_stop if call else candle.open >= transitioned_stop
+            return IntrabarResolution(
+                "TRANSITION_THEN_STOP", False, candle.start_time,
+                candle.open if gap else transitioned_stop,
+            )
+
+    return IntrabarResolution(
+        "TRANSITION_AND_SURVIVE" if transitioned else "NO_EVENT",
+        False,
+    )
+
+
+def resolve_stop_target_order(
+    direction: TradeDirection | str,
+    *,
+    active_stop: float,
+    target: float,
+    minute_candles: Iterable[object],
+) -> IntrabarResolution:
+    """Resolve fixed stop/target chronology conservatively from 1-minute OHLC."""
+    if min(active_stop, target) <= 0:
+        raise ValueError("stop and target must be positive")
+    call = _is_call(direction)
+    for candle in sorted(minute_candles, key=lambda item: item.start_time):
+        stop_hit = candle.low <= active_stop if call else candle.high >= active_stop
+        target_hit = candle.high >= target if call else candle.low <= target
+        if not stop_hit and not target_hit:
+            continue
+        if stop_hit and target_hit:
+            if (call and candle.open <= active_stop) or (
+                not call and candle.open >= active_stop
+            ):
+                return IntrabarResolution("STRUCTURAL_STOP", False, candle.start_time,
+                                          candle.open if ((call and candle.open <= active_stop) or (not call and candle.open >= active_stop)) else active_stop)
+            if (call and candle.open >= target) or (
+                not call and candle.open <= target
+            ):
+                return IntrabarResolution("TARGET", False, candle.start_time, target)
+            return IntrabarResolution(
+                "STILL_AMBIGUOUS", True, candle.start_time,
+                detail="stop and target crossed in one 1-minute candle",
+            )
+        if stop_hit:
+            gap = candle.open <= active_stop if call else candle.open >= active_stop
+            return IntrabarResolution("STRUCTURAL_STOP", False, candle.start_time,
+                                      candle.open if gap else active_stop)
+        return IntrabarResolution("TARGET", False, candle.start_time, target)
+    return IntrabarResolution("NO_EVENT", False)
