@@ -1694,6 +1694,18 @@ class SimulationEngine:
                     bb_width_percentile=features.bb_width_percentile,
                     strategy_a_phase=phases.get("strategy_a_phase", "FLAT"),
                     strategy_b_phase=phases.get("strategy_b_phase", "RESET"),
+                    strategy_c_phase=phases.get(
+                        "strategy_c_phase",
+                        "WAITING",
+                    ),
+                    strategy_d_phase=phases.get(
+                        "strategy_d_phase",
+                        "WAITING",
+                    ),
+                    strategy_e_phase=phases.get(
+                        "strategy_e_phase",
+                        "WAITING",
+                    ),
                     active_trade_id=active_trade_id,
                     event=event,
                     event_details=details,
