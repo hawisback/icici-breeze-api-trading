@@ -22,7 +22,10 @@ from services.strategy.risk_gates import (
 
 
 def _signal(strategy: StrategyName) -> StrategySignal:
-    structural = strategy == StrategyName.TREND_PULLBACK
+    structural = strategy in {
+        StrategyName.TREND_PULLBACK,
+        StrategyName.DI_CONTINUATION,
+    }
     return StrategySignal(
         signal_id=f"SIG-{strategy.value}",
         strategy=strategy,
@@ -203,6 +206,56 @@ def test_strategy_a_replay_sizing_changes_with_capital_and_risk_budget():
     assert exact.entry_reference_price == 100.0
     assert exact.to_manifest_kwargs()["entry_mark"] is None
     assert exact.lots == 9
+
+
+def test_strategy_c_reuses_structural_delta_sizing():
+    decision = calculate_replay_sizing(
+        signal=_signal(StrategyName.DI_CONTINUATION),
+        contract=_contract(),
+        entry_reference_price=100.0,
+        risk_config=RiskConfig(
+            account_equity=500000.0,
+            risk_per_trade_pct_of_account=0.5,
+            max_trade_capital=50000.0,
+        ),
+        option_selection=OptionSelectionConfig(),
+        session_config=SessionTimersConfig(),
+        strategy_config=StrategyTunablesConfig(),
+        account_equity=500000.0,
+        option_delta=0.60,
+        option_delta_source="BROKER",
+        price_basis="POINT_IN_TIME_ASK",
+    )
+
+    assert decision.status == "APPLIED"
+    assert decision.method == "UNDERLYING_R_WITH_POINT_IN_TIME_DELTA"
+    assert decision.delta_proxy == 0.60
+    assert decision.delta_source == "BROKER"
+
+
+def test_strategy_e_replay_sizing_respects_production_lot_cap():
+    risk = RiskConfig(
+        account_equity=5000000.0,
+        risk_per_trade_pct_of_account=5.0,
+        max_trade_capital=5000000.0,
+        max_lots_per_trade=100,
+    )
+    tunables = StrategyTunablesConfig(strategy_e_lots=2)
+    decision = calculate_replay_sizing(
+        signal=_signal(StrategyName.PIVOT_VWAP_SCALP),
+        contract=_contract(),
+        entry_reference_price=50.0,
+        risk_config=risk,
+        option_selection=OptionSelectionConfig(),
+        session_config=SessionTimersConfig(),
+        strategy_config=tunables,
+        account_equity=risk.account_equity,
+    )
+
+    assert decision.status == "APPLIED"
+    assert decision.method == "OPTION_HARD_STOP_PREMIUM_RISK"
+    assert decision.lots == 2
+    assert decision.quantity == 100
 
 
 def test_daily_loss_pct_gate_uses_estimated_execution_pnl_when_available():
