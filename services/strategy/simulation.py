@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import logging
 import math
 from typing import Any, Optional
@@ -2391,10 +2393,21 @@ class SimulationEngine:
             historical_source=request.historical_source.value,
             data_provenance=data_snapshot.model_dump(mode="json"),
             strategy_manifest={
-                item["strategy_id"]: {
-                    "revision": item.get("version"),
-                    "fingerprint": item.get("fingerprint"),
-                    "display_name": item.get("display_name"),
+                item["strategy"]: {
+                    "revision": (
+                        item.get("audit_diagnostics", {}).get("version")
+                        or item.get("audit_diagnostics", {}).get("candidate_id")
+                        or item["display_name"]
+                    ),
+                    "fingerprint": hashlib.sha256(
+                        json.dumps(
+                            item,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            default=str,
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                    "display_name": item["display_name"],
                 }
                 for item in strategy_registry.metadata_snapshot()
             },
