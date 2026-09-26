@@ -26,8 +26,8 @@ def _raw(ts_ms: int, *, volume: int = 100, oi: int | None = None):
 
 
 def test_normalize_public_chart_candle_preserves_volume_oi_and_provenance():
-    # 2026-09-01 09:15 IST.
-    ts = int(datetime.fromisoformat("2026-09-01T03:45:00+00:00").timestamp() * 1000)
+    # NSE charting labels the 09:15-09:20 candle as exchange wall time 09:19:59.
+    ts = int(datetime.fromisoformat("2026-09-01T09:19:59+00:00").timestamp() * 1000)
     instrument = Instrument("NIFTY26SEPFUT", "123", "Futures", "FO")
 
     rows = _normalize_candles([_raw(ts, volume=4321, oi=9876)], instrument)
@@ -42,9 +42,9 @@ def test_normalize_public_chart_candle_preserves_volume_oi_and_provenance():
 
 
 def test_normalize_filters_outside_regular_session():
-    before = int(datetime.fromisoformat("2026-09-01T03:40:00+00:00").timestamp() * 1000)
-    inside = int(datetime.fromisoformat("2026-09-01T03:45:00+00:00").timestamp() * 1000)
-    after = int(datetime.fromisoformat("2026-09-01T10:00:00+00:00").timestamp() * 1000)
+    before = int(datetime.fromisoformat("2026-09-01T09:14:59+00:00").timestamp() * 1000)
+    inside = int(datetime.fromisoformat("2026-09-01T09:19:59+00:00").timestamp() * 1000)
+    after = int(datetime.fromisoformat("2026-09-01T15:34:59+00:00").timestamp() * 1000)
     instrument = Instrument("NIFTY 50", "26000", "Index", "IDX")
 
     rows = _normalize_candles([_raw(before), _raw(inside), _raw(after)], instrument)
@@ -101,7 +101,7 @@ def test_client_search_and_history_use_public_chart_protocol():
                 },
             )
         if request.url.path.endswith("symbolHistoricalData"):
-            ts = int(datetime.fromisoformat("2026-09-01T03:45:00+00:00").timestamp() * 1000)
+            ts = int(datetime.fromisoformat("2026-09-01T09:19:59+00:00").timestamp() * 1000)
             return httpx.Response(200, json={"status": True, "data": [_raw(ts, volume=0)]})
         raise AssertionError(str(request.url))
 
@@ -121,3 +121,13 @@ def test_client_search_and_history_use_public_chart_protocol():
     assert rows[0].volume == 0
     assert any(request.url.path.endswith("symbolsDynamic") for request in calls)
     assert any(request.url.path.endswith("symbolHistoricalData") for request in calls)
+
+
+def test_normalize_last_five_minute_bar_maps_152959_to_1525_start():
+    ts = int(datetime.fromisoformat("2026-09-01T15:29:59+00:00").timestamp() * 1000)
+    instrument = Instrument("NIFTY 50", "26000", "Index", "IDX")
+
+    rows = _normalize_candles([_raw(ts, volume=0)], instrument)
+
+    assert len(rows) == 1
+    assert rows[0].timestamp == "2026-09-01T15:25:00+05:30"
