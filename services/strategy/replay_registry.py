@@ -909,8 +909,14 @@ class SRMomentumBreakoutReplayAdapter:
 class PivotVwapScalpReplayAdapter:
     """Replay adapter for the production Strategy E signal engine."""
 
-    def __init__(self, tunables: StrategyTunablesConfig) -> None:
+    def __init__(
+        self,
+        tunables: StrategyTunablesConfig,
+        *,
+        replay_selected: bool = False,
+    ) -> None:
         self.tunables = tunables
+        self.replay_selected = replay_selected
         self.strategy = PivotVwapScalpStrategy(tunables)
 
     def strategy_metadata(self) -> ReplayStrategyMetadata:
@@ -919,7 +925,10 @@ class PivotVwapScalpReplayAdapter:
             strategy=StrategyName.PIVOT_VWAP_SCALP,
             display_name="Strategy E · Pivot/VWAP Scalp",
             priority=50,
-            enabled=self.tunables.pivot_vwap_scalp_enabled,
+            enabled=(
+                self.tunables.pivot_vwap_scalp_enabled
+                or self.replay_selected
+            ),
             evaluation_start=self.tunables.strategy_e_entry_start,
             evaluation_end=self.tunables.strategy_e_entry_end,
             entry_start=self.tunables.strategy_e_entry_start,
@@ -965,6 +974,29 @@ class PivotVwapScalpReplayAdapter:
                 "strategy": StrategyName.PIVOT_VWAP_SCALP.value,
                 "phase_state": decision.reason,
                 "result": decision.result,
+                "signal_type": (
+                    decision.signal.features_snapshot.get("signal_type")
+                    if decision.signal is not None
+                    else None
+                ),
+                "setup_family": (
+                    "COUNTERTREND"
+                    if decision.result.startswith("COUNTER_")
+                    else (
+                        "TREND"
+                        if decision.result.startswith("TREND_")
+                        else None
+                    )
+                ),
+                "completed_5m_candle_timestamp": (
+                    context.active_futures_candles_5m[-1]
+                    .end_time.isoformat()
+                ),
+                "dedupe_state": self.strategy.export_state(),
+                "production_enabled": (
+                    self.tunables.pivot_vwap_scalp_enabled
+                ),
+                "replay_selected": self.replay_selected,
                 "metrics": dict(decision.metrics),
             }],
         )
@@ -1058,7 +1090,14 @@ class ReplayStrategyRegistry:
             VolatilityBreakoutReplayAdapter(tunables, session),
             DiContinuationReplayAdapter(tunables),
             SRMomentumBreakoutReplayAdapter(tunables),
-            PivotVwapScalpReplayAdapter(tunables),
+            PivotVwapScalpReplayAdapter(
+                tunables,
+                replay_selected=(
+                    selected_strategies is not None
+                    and StrategyName.PIVOT_VWAP_SCALP
+                    in selected_strategies
+                ),
+            ),
         )
         if selected_strategies is not None:
             selected = set(selected_strategies)
