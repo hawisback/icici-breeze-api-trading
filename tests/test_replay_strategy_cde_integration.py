@@ -21,6 +21,7 @@ from services.strategy.replay_metadata import (
 )
 from services.strategy.replay_registry import (
     DiContinuationReplayAdapter,
+    SRMomentumBreakoutReplayAdapter,
     ReplayBarContext,
     ReplaySessionContext,
     ReplayStrategyRegistry,
@@ -31,6 +32,10 @@ from services.strategy.strategies.candidate_runtime import (
 )
 from services.strategy.strategies.pivot_vwap_scalp import (
     evaluate_strategy_e_lifecycle_bar,
+)
+from services.strategy.strategies.sr_momentum_breakout import (
+    PivotLevels,
+    StrategyDSignal,
 )
 
 
@@ -207,6 +212,128 @@ def test_strategy_c_adapter_respects_post_freeze_boundary():
 
     assert evaluation.signal is None
     assert evaluation.phase == "WAITING_FOR_POST_FREEZE_SESSION"
+
+
+def test_strategy_d_holds_fresh_signal_and_freezes_level_when_observe_only(
+    monkeypatch,
+):
+    day = datetime(2026, 9, 24, 10, 0, tzinfo=IST)
+    levels = PivotLevels(
+        session_date=day.date(),
+        source_session_date=(day - timedelta(days=1)).date(),
+        pdh=100.0,
+        pdl=90.0,
+        pdc=95.0,
+        pivot=95.0,
+        r1=100.0,
+        s1=90.0,
+        r2=105.0,
+        s2=85.0,
+    )
+    raw_signal = StrategyDSignal(
+        strategy_id="STRATEGY_D_SR_MOMENTUM_BREAKOUT_V2_CANDIDATE",
+        direction=TradeDirection.BULLISH,
+        option_type="CALL",
+        timestamp=day.astimezone(UTC),
+        breakout_level_name="PDH",
+        breakout_level=100.0,
+        entry_price=100.0,
+        initial_stop=95.0,
+        risk_points=5.0,
+        atr_5m=3.0,
+        rsi_previous=59.0,
+        rsi_current=63.0,
+        rsi_clearance_points=3.0,
+        previous_day_range_atr=3.0,
+        vwap_reference_price=101.0,
+        vwap=99.0,
+        vwap_source="ACTIVE_NIFTY_FUTURES_5M",
+        next_pivot_name="R2",
+        next_pivot_price=105.0,
+        levels=levels,
+    )
+    monkeypatch.setattr(
+        "services.strategy.replay_registry.previous_session_levels",
+        lambda *args, **kwargs: levels,
+    )
+    calls = {"count": 0}
+
+    def fake_evaluate(*args, **kwargs):
+        calls["count"] += 1
+        return raw_signal if calls["count"] == 1 else None
+
+    monkeypatch.setattr(
+        "services.strategy.replay_registry.evaluate_strategy_d_signal",
+        fake_evaluate,
+    )
+
+    adapter = SRMomentumBreakoutReplayAdapter(StrategyTunablesConfig())
+    recorder = ReplayManifestRecorder()
+    session = ReplaySessionContext(
+        trading_date="2026-09-24",
+        instrument_id="INST-NIFTY-INDEX",
+        overrides=ThresholdOverrides(),
+        recorder=recorder,
+    )
+    bar = _bar(day)
+    future = _bar(
+        day,
+        instrument_id="INST-NIFTY-FUT-2026-09-29",
+    )
+    context = ReplayBarContext(
+        session=session,
+        bar=bar,
+        features=__import__(
+            "services.strategy.models",
+            fromlist=["MarketFeatures"],
+        ).MarketFeatures(timestamp=bar.end_time, spot_price=bar.close),
+        spot_candles_5m=[bar],
+        spot_candles_15m=[],
+        futures_candles=[future],
+        active_futures_candles_5m=[future],
+    )
+    adapter.prepare_session(session)
+
+    observed = adapter.evaluate_completed_bar(
+        context,
+        allow_evaluation=False,
+    )
+
+    assert observed.signal is None
+    assert observed.phase == "SIGNAL_HELD_BY_HIGHER_PRIORITY_OR_RISK_GATE"
+    assert adapter._pending_signal is not None
+    assert len(adapter._used_level_keys) == 1
+
+    next_bar = _bar(day + timedelta(minutes=5))
+    next_future = _bar(
+        day + timedelta(minutes=5),
+        instrument_id=future.instrument_id,
+    )
+    next_context = ReplayBarContext(
+        session=session,
+        bar=next_bar,
+        features=__import__(
+            "services.strategy.models",
+            fromlist=["MarketFeatures"],
+        ).MarketFeatures(
+            timestamp=next_bar.end_time,
+            spot_price=next_bar.close,
+        ),
+        spot_candles_5m=[bar, next_bar],
+        spot_candles_15m=[],
+        futures_candles=[future, next_future],
+        active_futures_candles_5m=[future, next_future],
+    )
+    released = adapter.evaluate_completed_bar(
+        next_context,
+        allow_evaluation=True,
+    )
+
+    assert released.signal is not None
+    assert released.signal.signal_id == strategy_d_signal_id(raw_signal)
+    adapter.on_execution_rejected(released.signal, "TEST_REJECT")
+    assert adapter._pending_signal is None
+    assert len(adapter._used_level_keys) == 1
 
 
 def test_strategy_d_signal_identity_is_shared_with_runtime_adapter():
