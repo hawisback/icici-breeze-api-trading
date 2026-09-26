@@ -954,9 +954,21 @@ def build_research_dataset(
         kite_vix_instrument_token
         or os.getenv("RESEARCH_KITE_INDIA_VIX_INSTRUMENT_TOKEN")
     )
-    if kite_key and kite_access and (kite_futures_token or kite_vix_token):
+    if kite_key and kite_access:
         try:
             client = KiteHistoricalClient(kite_key, kite_access)
+            resolution_errors: list[str] = []
+            if not kite_vix_token:
+                try:
+                    kite_vix_token = client.resolve_india_vix_token()
+                except RuntimeError as exc:
+                    resolution_errors.append(str(exc))
+            if not kite_futures_token and breeze_expiry:
+                try:
+                    kite_futures_token = client.resolve_nifty_future_token(breeze_expiry)
+                except RuntimeError as exc:
+                    resolution_errors.append(str(exc))
+
             kite_futures: list[Candle] = []
             kite_vix: list[Candle] = []
             futures_debug: dict[str, Any] | None = None
@@ -989,6 +1001,7 @@ def build_research_dataset(
                 vix_debug = dict(client.last_history_debug)
                 if kite_vix:
                     vix_by_provider["KITE"] = kite_vix
+
             credentialed_status["KITE"] = {
                 "available": bool(kite_futures or kite_vix),
                 "series": [
@@ -999,6 +1012,7 @@ def build_research_dataset(
                 "vix_instrument_token": kite_vix_token,
                 "futures_diagnostics": futures_debug,
                 "vix_diagnostics": vix_debug,
+                "instrument_resolution_errors": resolution_errors,
             }
             if kite_futures or kite_vix:
                 broker_sources_used.append("KITE")
@@ -1009,18 +1023,11 @@ def build_research_dataset(
                 "error": f"{type(exc).__name__}: {exc}",
             }
     else:
-        missing = []
-        if not (kite_key and kite_access):
-            missing.append("KITE_API_KEY/KITE_ACCESS_TOKEN")
-        if not kite_futures_token:
-            missing.append("RESEARCH_KITE_NIFTY_FUT_INSTRUMENT_TOKEN")
-        if not kite_vix_token:
-            missing.append("RESEARCH_KITE_INDIA_VIX_INSTRUMENT_TOKEN")
         credentialed_status["KITE"] = {
             "available": False,
             "series": ["NIFTY_FUTURES", "INDIA_VIX"],
             "reason": "missing_configuration",
-            "missing": missing,
+            "missing": ["KITE_API_KEY/KITE_ACCESS_TOKEN"],
         }
 
     futures_source, futures_rows = _select_canonical_provider(
