@@ -1002,6 +1002,20 @@ export const TabReplaySimulation: React.FC<TabReplaySimulationProps> = ({
                         {currentBar.strategy_b_phase}
                       </span>
                     </div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {[
+                        ["C", currentBar.strategy_c_phase],
+                        ["D", currentBar.strategy_d_phase],
+                        ["E", currentBar.strategy_e_phase],
+                      ].map(([label, phase]) => (
+                        <div key={label}>
+                          <span className="text-[9px] text-slate-500 block">Strat {label}</span>
+                          <span className="block truncate px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-300 border border-slate-700" title={phase || "WAITING"}>
+                            {phase || "WAITING"}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 </div>
 
