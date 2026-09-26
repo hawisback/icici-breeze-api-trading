@@ -1,7 +1,12 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from services.strategy.replay_intrabar import resolve_entry_candle, resolve_stop_order
+from services.strategy.replay_intrabar import (
+    resolve_active_stop_transition,
+    resolve_entry_candle,
+    resolve_stop_order,
+    resolve_stop_target_order,
+)
 
 
 def bar(minute, *, open_price, high, low, close):
@@ -61,3 +66,74 @@ def test_favorable_threshold_and_stop_same_minute_remains_ambiguous():
     )
     assert result.event == "STILL_AMBIGUOUS"
     assert result.ambiguous
+
+
+
+def test_new_trailing_stop_cannot_use_earlier_same_minute_low():
+    result = resolve_active_stop_transition(
+        "CALL",
+        active_stop=95,
+        transition_level=105,
+        transitioned_stop=100,
+        minute_candles=[
+            bar(0, open_price=102, high=106, low=99, close=105),
+        ],
+    )
+    assert result.event == "STILL_AMBIGUOUS"
+    assert result.ambiguous
+
+
+def test_new_trailing_stop_is_usable_after_transition_in_prior_minute():
+    result = resolve_active_stop_transition(
+        "CALL",
+        active_stop=95,
+        transition_level=105,
+        transitioned_stop=100,
+        minute_candles=[
+            bar(0, open_price=102, high=106, low=101, close=105),
+            bar(1, open_price=104, high=104, low=99, close=100),
+        ],
+    )
+    assert result.event == "TRANSITION_THEN_STOP"
+    assert result.exit_price == 100
+
+
+def test_gap_open_proves_transition_before_new_stop_touch():
+    result = resolve_active_stop_transition(
+        "CALL",
+        active_stop=95,
+        transition_level=105,
+        transitioned_stop=100,
+        minute_candles=[
+            bar(0, open_price=106, high=107, low=99, close=101),
+        ],
+    )
+    assert result.event == "TRANSITION_THEN_STOP"
+    assert not result.ambiguous
+
+
+def test_same_minute_stop_and_target_remains_ambiguous():
+    result = resolve_stop_target_order(
+        "CALL",
+        active_stop=95,
+        target=105,
+        minute_candles=[
+            bar(0, open_price=100, high=106, low=94, close=101),
+        ],
+    )
+    assert result.event == "STILL_AMBIGUOUS"
+    assert result.ambiguous
+
+
+def test_target_then_stop_across_minutes_resolves_target_first():
+    result = resolve_stop_target_order(
+        "CALL",
+        active_stop=95,
+        target=105,
+        minute_candles=[
+            bar(0, open_price=100, high=106, low=99, close=105),
+            bar(1, open_price=104, high=104, low=94, close=95),
+        ],
+    )
+    assert result.event == "TARGET"
+    assert result.exit_price == 105
