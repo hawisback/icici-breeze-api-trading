@@ -292,6 +292,7 @@ def estimate_multi_exit_execution(
             basis="NO_EXIT_LEGS",
             source="REPLAY",
             event_timestamp=entry_evidence.event_timestamp,
+            evidence_timestamp=None,
             reason="NO_EXIT_LEGS",
         ),
         side="SELL",
