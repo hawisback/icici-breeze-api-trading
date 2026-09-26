@@ -169,24 +169,28 @@ class ChronologicalReplayExecutor:
                 daily_count=self.state.daily_entries,
             ),
         )
+        daily_loss_decision = decisions[2]
+        if (
+            not daily_loss_decision.allowed
+            and daily_loss_decision.status
+            not in self.state.daily_loss_trigger_statuses
+        ):
+            self.state.daily_loss_trigger_statuses.add(
+                daily_loss_decision.status
+            )
+            self.state.daily_loss_trigger_events.append({
+                "timestamp": at.isoformat(),
+                "status": daily_loss_decision.status,
+                "realized_r_total": round(self.state.realized_r_total, 4),
+                "realized_net_pnl_total": (
+                    round(self.state.realized_net_pnl_total, 2)
+                    if self.state.realized_net_pnl_complete
+                    else None
+                ),
+                "details": dict(daily_loss_decision.details or {}),
+            })
         for decision in decisions:
             if not decision.allowed:
-                if (
-                    decision.status.startswith("DAILY_LOSS")
-                    and decision.status not in self.state.daily_loss_trigger_statuses
-                ):
-                    self.state.daily_loss_trigger_statuses.add(decision.status)
-                    self.state.daily_loss_trigger_events.append({
-                        "timestamp": at.isoformat(),
-                        "status": decision.status,
-                        "realized_r_total": round(self.state.realized_r_total, 4),
-                        "realized_net_pnl_total": (
-                            round(self.state.realized_net_pnl_total, 2)
-                            if self.state.realized_net_pnl_complete
-                            else None
-                        ),
-                        "details": dict(decision.details or {}),
-                    })
                 return decision
         return RiskGateDecision(True)
 
