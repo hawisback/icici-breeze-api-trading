@@ -11,9 +11,15 @@ from services.api_gateway.main import app
 from services.api_gateway.service_container import initialize_services
 from services.historical.repository import HistoricalRepository
 from services.strategy.models import (
+    ReplayDataQuality,
+    ReplayOptionMarkMetrics,
+    ReplayPortfolioMetrics,
+    ReplaySignalMetrics,
+    ReplayUnderlyingLifecycleMetrics,
     SimulatedTradeRecord,
     SimulationRequest,
     SimulationResult,
+    HistoricalReplayMode,
     HistoricalReplaySource,
     RiskConfig,
     ThresholdOverrides,
@@ -21,10 +27,16 @@ from services.strategy.models import (
 from services.strategy.replay_lifecycle import (
     _historical_close_at,
     attach_historical_option_prices,
+    build_lifecycle_report,
     build_simulated_trade_records,
+    summarize_historical_option_marks,
     summarize_simulated_pnl,
 )
 from services.strategy.replay_manifest import ReplayManifestRecord
+from services.strategy.replay_registry import (
+    ReplayStrategyRegistry,
+    TrendPullbackReplayAdapter,
+)
 from services.strategy.simulation import SimulationEngine
 
 
@@ -62,22 +74,78 @@ def _resolved_manifest(index: int, realized_r: float) -> ReplayManifestRecord:
     )
 
 
+def _canonical_sections(
+    *,
+    bars: int,
+    qualified_signals: int,
+    resolved: int,
+    winners: int,
+    losers: int,
+    breakeven: int,
+    win_rate_pct: float,
+    total_r: float,
+    profit_factor_r: float | None,
+    max_drawdown_r: float,
+    gross_mark_pnl: float | None = None,
+    net_mark_pnl: float | None = None,
+) -> dict:
+    return {
+        "signal_metrics": ReplaySignalMetrics(
+            total_bars_evaluated=bars,
+            qualified_signals=qualified_signals,
+            ambiguous_signals=0,
+            unresolved_signals=max(qualified_signals - resolved, 0),
+        ),
+        "underlying_lifecycle_metrics": ReplayUnderlyingLifecycleMetrics(
+            resolved_trades=resolved,
+            winning_trades=winners,
+            losing_trades=losers,
+            breakeven_trades=breakeven,
+            win_rate_pct=win_rate_pct,
+            total_realized_r=total_r,
+            average_realized_r=round(total_r / resolved, 4) if resolved else 0.0,
+            median_realized_r=0.0,
+            average_winner_r=0.0,
+            average_loser_r=0.0,
+            profit_factor_r=profit_factor_r,
+            max_drawdown_r=max_drawdown_r,
+            max_consecutive_losses=0,
+        ),
+        "option_mark_metrics": ReplayOptionMarkMetrics(
+            priced_trades=0 if gross_mark_pnl is None else resolved,
+            unpriced_trades=resolved if gross_mark_pnl is None else 0,
+            all_resolved_trades_priced=resolved > 0 and gross_mark_pnl is not None,
+            gross_mark_pnl=gross_mark_pnl,
+            estimated_transaction_costs=(
+                None
+                if gross_mark_pnl is None or net_mark_pnl is None
+                else round(gross_mark_pnl - net_mark_pnl, 2)
+            ),
+            net_mark_pnl=net_mark_pnl,
+        ),
+        "portfolio_metrics": ReplayPortfolioMetrics(),
+        "data_quality": ReplayDataQuality(historical_source="BREEZE"),
+    }
+
+
 def test_simulation_result_trades_are_the_canonical_summary_rows():
     """Resolved lifecycle records populate the same rows the UI renders."""
     records = [_resolved_manifest(1, 0.2), _resolved_manifest(2, 0.1), _resolved_manifest(3, -0.1611)]
     trades = build_simulated_trade_records(records)
     result = SimulationResult(
         session_date="2026-09-17",
-        total_bars_evaluated=75,
-        total_trades=len(trades),
-        winning_trades=sum(t.realized_r > 0 for t in trades),
-        losing_trades=sum(t.realized_r < 0 for t in trades),
-        win_rate_pct=66.67,
-        total_pnl=None,
-        net_pnl=None,
-        total_realized_r=sum(t.realized_r for t in trades),
-        max_drawdown_pnl=None,
-        profit_factor=1.86,
+        **_canonical_sections(
+            bars=75,
+            qualified_signals=3,
+            resolved=3,
+            winners=2,
+            losers=1,
+            breakeven=0,
+            win_rate_pct=66.67,
+            total_r=sum(t.realized_r for t in trades),
+            profit_factor_r=1.86,
+            max_drawdown_r=-0.1611,
+        ),
         trades=trades,
     )
 
@@ -88,6 +156,11 @@ def test_simulation_result_trades_are_the_canonical_summary_rows():
     assert all(trade.net_pnl is None for trade in result.trades)
     assert summarize_simulated_pnl(result.trades) == (None, None)
     serialized = result.model_dump(mode="json")
+    assert serialized["signal_metrics"]["price_basis"] == "COMPLETED_UNDERLYING_SPOT_FUTURES_CANDLES"
+    assert serialized["underlying_lifecycle_metrics"]["profit_factor_r"] == 1.86
+    assert serialized["option_mark_metrics"]["net_mark_pnl"] is None
+    assert serialized["portfolio_metrics"]["available"] is False
+    assert serialized["data_quality"]["historical_source"] == "BREEZE"
     assert serialized["trades"][0]["realized_r"] == 0.2
     assert serialized["trades"][0]["entry_premium"] is None
     assert serialized["trades"][0]["net_pnl"] is None
@@ -104,19 +177,90 @@ def test_simulation_result_trades_are_the_canonical_summary_rows():
 
     empty_result = SimulationResult(
         session_date="2026-09-17",
-        total_bars_evaluated=75,
-        total_trades=0,
-        winning_trades=0,
-        losing_trades=0,
-        win_rate_pct=0.0,
-        total_pnl=0.0,
-        net_pnl=0.0,
-        total_realized_r=0.0,
-        max_drawdown_pnl=0.0,
-        profit_factor=0.0,
+        **_canonical_sections(
+            bars=75,
+            qualified_signals=0,
+            resolved=0,
+            winners=0,
+            losers=0,
+            breakeven=0,
+            win_rate_pct=0.0,
+            total_r=0.0,
+            profit_factor_r=None,
+            max_drawdown_r=0.0,
+            gross_mark_pnl=0.0,
+            net_mark_pnl=0.0,
+        ),
         trades=build_simulated_trade_records([]),
     )
     assert empty_result.total_trades == 0 == len(empty_result.trades)
+
+
+def test_legacy_metric_fields_are_projections_of_canonical_sections():
+    result = SimulationResult(
+        session_date="2026-09-17",
+        **_canonical_sections(
+            bars=42,
+            qualified_signals=4,
+            resolved=3,
+            winners=2,
+            losers=1,
+            breakeven=0,
+            win_rate_pct=66.67,
+            total_r=1.25,
+            profit_factor_r=2.5,
+            max_drawdown_r=-0.75,
+            gross_mark_pnl=2500.0,
+            net_mark_pnl=2200.0,
+        ),
+        total_bars_evaluated=999,
+        total_trades=999,
+        winning_trades=999,
+        losing_trades=999,
+        win_rate_pct=1.0,
+        total_pnl=999.0,
+        net_pnl=999.0,
+        total_realized_r=999.0,
+        max_drawdown_pnl=999.0,
+        profit_factor=999.0,
+        max_drawdown_r=999.0,
+    )
+
+    assert result.total_bars_evaluated == 42
+    assert result.total_trades == 3
+    assert result.winning_trades == 2
+    assert result.losing_trades == 1
+    assert result.win_rate_pct == 66.67
+    assert result.total_pnl == 2500.0
+    assert result.net_pnl == 2200.0
+    assert result.total_realized_r == 1.25
+    assert result.profit_factor == 2.5
+    assert result.max_drawdown_r == -0.75
+    assert result.max_drawdown_pnl is None
+
+
+def test_lifecycle_report_exposes_realized_r_profit_factor_and_drawdown():
+    records = [
+        _resolved_manifest(1, 1.0),
+        _resolved_manifest(2, -0.5),
+        _resolved_manifest(3, -0.75),
+        _resolved_manifest(4, 0.5),
+    ]
+
+    report = build_lifecycle_report(records, {"resolver": {}})
+
+    assert report["total_r"] == 0.25
+    assert report["profit_factor"] == 1.2
+    assert report["max_drawdown_r"] == -1.25
+
+
+def test_lifecycle_profit_factor_is_not_fabricated_without_losses():
+    records = [_resolved_manifest(1, 0.5), _resolved_manifest(2, 1.0)]
+
+    report = build_lifecycle_report(records, {"resolver": {}})
+
+    assert report["profit_factor"] is None
+    assert report["max_drawdown_r"] == 0.0
 
 
 def test_historical_option_candles_populate_net_pnl():
@@ -176,6 +320,129 @@ def test_historical_option_candles_populate_net_pnl():
     assert record.historical_option_provenance["entry"]["mark_age_seconds"] == 0.0
     assert record.historical_option_provenance["bid_ask_available"] is False
     assert record.historical_option_provenance["executable_fill_equivalent"] is False
+
+    # Execution-parity sizing must flow through to mark economics instead of
+    # silently reverting to one lot.
+    record.replay_lots = 2
+    record.replay_quantity = 50
+    attach_historical_option_prices(
+        [record],
+        [contract],
+        {contract.instrument_id: candles},
+        RiskConfig(),
+    )
+    sized_trade = build_simulated_trade_records([record])[0]
+    assert sized_trade.lots == 2
+    assert sized_trade.quantity == 50
+    assert sized_trade.gross_pnl == -500.0
+
+    mark_summary = summarize_historical_option_marks([record])
+    assert mark_summary["priced_trades"] == 1
+    assert mark_summary["unpriced_trades"] == 0
+    assert mark_summary["all_resolved_trades_priced"] is True
+    assert mark_summary["gross_mark_pnl"] == sized_trade.gross_pnl
+    assert mark_summary["estimated_transaction_costs"] == record.option_transaction_costs
+    assert mark_summary["net_mark_pnl"] == sized_trade.net_pnl
+
+
+def test_option_pricing_keeps_execution_parity_sizing_contract_locked():
+    record = _resolved_manifest(2, 1.0)
+    record.simulated_entry_price = 23306.0
+    record.sizing_contract_instrument_id = "OPT-SIZED-23300"
+    record.sizing_contract_symbol = "NIFTY23300CE"
+    record.sizing_contract_expiry = "2026-09-22"
+    record.sizing_contract_strike = 23300.0
+    record.sizing_contract_lot_size = 25
+    record.sizing_entry_mark = 100.0
+    record.replay_lots = 1
+    record.replay_quantity = 25
+
+    sized_contract = SimpleNamespace(
+        instrument_id="OPT-SIZED-23300",
+        stock_code="NIFTY23300CE",
+        expiry="2026-09-22",
+        strike=23300.0,
+        option_right=SimpleNamespace(value="CALL"),
+        lot_size=25,
+    )
+    closer_contract = SimpleNamespace(
+        instrument_id="OPT-CLOSER-23305",
+        stock_code="NIFTY23305CE",
+        expiry="2026-09-22",
+        strike=23305.0,
+        option_right=SimpleNamespace(value="CALL"),
+        lot_size=25,
+    )
+
+    def marks(contract_id: str, entry: float, exit_: float) -> list[Candle]:
+        return [
+            Candle(
+                instrument_id=contract_id,
+                interval="1m",
+                start_time=record.simulated_entry_timestamp - timedelta(minutes=1),
+                end_time=record.simulated_entry_timestamp,
+                open=entry,
+                high=entry,
+                low=entry,
+                close=entry,
+                volume=100,
+                source="BREEZE",
+            ),
+            Candle(
+                instrument_id=contract_id,
+                interval="1m",
+                start_time=record.exit_timestamp - timedelta(minutes=1),
+                end_time=record.exit_timestamp,
+                open=exit_,
+                high=exit_,
+                low=exit_,
+                close=exit_,
+                volume=100,
+                source="BREEZE",
+            ),
+        ]
+
+    attach_historical_option_prices(
+        [record],
+        [sized_contract, closer_contract],
+        {
+            sized_contract.instrument_id: marks(
+                sized_contract.instrument_id, 100.0, 110.0
+            ),
+            closer_contract.instrument_id: marks(
+                closer_contract.instrument_id, 200.0, 250.0
+            ),
+        },
+        RiskConfig(),
+    )
+
+    assert record.option_contract_instrument_id == sized_contract.instrument_id
+    assert record.option_entry_price == 100.0
+    assert record.option_exit_price == 110.0
+    assert record.option_gross_pnl == 250.0
+    assert record.historical_option_provenance["sizing_contract_locked"] is True
+
+
+def test_option_mark_summary_never_partially_aggregates_missing_marks():
+    priced = _resolved_manifest(1, 0.5)
+    priced.option_data_status = "AVAILABLE"
+    priced.option_gross_pnl = 100.0
+    priced.option_transaction_costs = 20.0
+    priced.option_net_pnl = 80.0
+
+    missing = _resolved_manifest(2, -0.5)
+    missing.option_data_status = "UNAVAILABLE"
+    missing.option_data_quality_reason = "Historical option candle missing"
+
+    summary = summarize_historical_option_marks([priced, missing])
+
+    assert summary["priced_trades"] == 1
+    assert summary["unpriced_trades"] == 1
+    assert summary["all_resolved_trades_priced"] is False
+    assert summary["gross_mark_pnl"] is None
+    assert summary["estimated_transaction_costs"] is None
+    assert summary["net_mark_pnl"] is None
+    assert summary["quality_reasons"] == {"Historical option candle missing": 1}
 
 
 def _option_candle(start: datetime, close: float) -> Candle:
@@ -296,10 +563,48 @@ def test_simulation_engine_missing_data():
     assert result.timeline == []
     assert result.replay_mode == "POSITION_MANAGER_REPLAY"
 
-    # Summary performance metrics
+    # Canonical sections remain explicit even when no market data is available.
+    assert result.signal_metrics.total_bars_evaluated == 0
+    assert result.signal_metrics.price_basis == "COMPLETED_UNDERLYING_SPOT_FUTURES_CANDLES"
+    assert result.underlying_lifecycle_metrics.resolved_trades == 0
+    assert result.option_mark_metrics.gross_mark_pnl == 0.0
+    assert result.portfolio_metrics.available is False
+    assert result.data_quality.missing_data == ["futures", "spot"]
+
+    # Compatibility fields are projections of canonical metrics.
     assert result.win_rate_pct >= 0.0
     assert result.total_trades == len(result.trades)
-    assert result.winning_trades + result.losing_trades == result.total_trades
+    assert result.total_trades == result.underlying_lifecycle_metrics.resolved_trades
+    assert result.total_pnl == result.option_mark_metrics.gross_mark_pnl
+    assert result.net_pnl == result.option_mark_metrics.net_mark_pnl
+
+
+def test_execution_parity_mode_is_explicit_and_chronological_on_empty_session():
+    engine = SimulationEngine()
+    request = SimulationRequest(
+        date="2026-09-17",
+        replay_mode=HistoricalReplayMode.EXECUTION_PARITY,
+        bypass_window=True,
+    )
+
+    import asyncio
+    result = asyncio.run(engine.run_day_simulation(request))
+
+    assert result.replay_mode == "EXECUTION_PARITY"
+    assert result.replay_metadata["requested_replay_mode"] == "EXECUTION_PARITY"
+    execution = result.replay_metadata["execution_parity"]
+    assert execution["daily_entries"] == 0
+    assert execution["completed_positions"] == 0
+    assert execution["entry_evaluation_suppressed_cycles"] == 0
+    assert execution["chronology_indeterminate"] is False
+    assert (
+        result.signal_metrics.calculation_basis
+        == "PRODUCTION_PRIORITY_SIGNAL_DISCOVERY_WITH_ACTIVE_POSITION_SUPPRESSION"
+    )
+    assert (
+        result.portfolio_metrics.calculation_basis
+        == "CHRONOLOGICAL_EXECUTION_AVAILABLE_PORTFOLIO_ANALYTICS_NOT_IMPLEMENTED"
+    )
 
 
 def test_simulation_overrides_cannot_bypass_missing_real_data():
@@ -337,6 +642,100 @@ def test_simulation_overrides_cannot_bypass_missing_real_data():
     assert res_relaxed.total_bars_evaluated == res_strict.total_bars_evaluated == 0
 
 
+def test_replay_metadata_discloses_applied_and_ignored_controls():
+    engine = SimulationEngine()
+
+    request = SimulationRequest(
+        date="2026-09-17",
+        capital=750000.0,
+        max_trades_per_day=2,
+        bypass_window=True,
+        overrides=ThresholdOverrides(
+            adx_threshold=30.0,
+            rvol_threshold=1.4,
+            strat_b_min_confirmation=4,
+            box_max_height_atr=1.5,
+            max_option_premium_cap=85.0,
+        ),
+    )
+
+    import asyncio
+    result = asyncio.run(engine.run_day_simulation(request))
+    controls = result.replay_metadata["control_application"]
+    registry_snapshot = result.replay_metadata["strategy_registry"]
+
+    assert [item["strategy"] for item in registry_snapshot] == [
+        "TREND_PULLBACK",
+        "VOLATILITY_BREAKOUT",
+    ]
+    assert registry_snapshot[0]["priority"] < registry_snapshot[1]["priority"]
+    assert controls["applied_overrides"]["rvol_threshold"] == 1.4
+    assert controls["applied_overrides"]["strat_b_min_confirmation"] == 4
+    assert controls["applied_overrides"]["box_max_height_atr"] == 1.5
+    assert controls["applied_overrides"]["bypass_entry_window"] is True
+    assert "adx_threshold" in controls["not_applied_overrides"]
+    assert "max_option_premium_cap" in controls["not_applied_overrides"]
+    assert controls["not_applied_request_controls"]["capital"]["value"] == 750000.0
+    assert controls["not_applied_request_controls"]["max_trades_per_day"]["value"] == 2
+
+    parity_request = request.model_copy(
+        update={
+            "replay_mode": HistoricalReplayMode.EXECUTION_PARITY,
+            "risk_per_trade_pct": 0.75,
+        }
+    )
+    parity_result = asyncio.run(engine.run_day_simulation(parity_request))
+    parity_controls = parity_result.replay_metadata["control_application"]
+    assert parity_controls["applied_request_controls"] == {
+        "capital": 750000.0,
+        "risk_per_trade_pct": 0.75,
+        "max_trades_per_day": 2,
+    }
+    assert parity_controls["not_applied_request_controls"] == {}
+    assert (
+        parity_controls["conditionally_applied_overrides"][
+            "max_option_premium_cap"
+        ]["value"]
+        == 85.0
+    )
+    assert (
+        "max_option_premium_cap"
+        not in parity_controls["not_applied_overrides"]
+    )
+    effective_risk = parity_result.replay_metadata["effective_risk_config"]
+    assert effective_risk["account_equity"] == 750000.0
+    assert effective_risk["risk_per_trade_pct_of_account"] == 0.75
+    assert effective_risk["max_trades_per_day"] == 2
+    authority_scope = parity_result.replay_metadata["execution_authority_scope"]
+    assert authority_scope["session_entry_windows"] == "APPLIED"
+    assert authority_scope["kill_switch"].startswith("NOT_REPLAYED_")
+    assert authority_scope["daily_loss_pct"].startswith(
+        "APPLIED_WHEN_ALL_PRIOR_RESOLVED_TRADES_HAVE_"
+    )
+    assert (
+        parity_result.replay_metadata["configuration_fingerprint"]
+        != result.replay_metadata["configuration_fingerprint"]
+    )
+
+    lower_capital = asyncio.run(
+        engine.run_day_simulation(
+            parity_request.model_copy(update={"capital": 250000.0})
+        )
+    )
+    assert (
+        lower_capital.replay_metadata["configuration_fingerprint"]
+        != parity_result.replay_metadata["configuration_fingerprint"]
+    )
+
+    snapshot_overrides = result.replay_metadata["configuration_snapshot"]["threshold_overrides"]
+    assert snapshot_overrides["rvol_threshold"] == 1.4
+    assert snapshot_overrides["strat_b_min_confirmation"] == 4
+    assert snapshot_overrides["box_max_height_atr"] == 1.5
+    assert snapshot_overrides["bypass_entry_window"] is True
+    assert snapshot_overrides.get("adx_threshold") is None
+    assert snapshot_overrides.get("max_option_premium_cap") is None
+
+
 def test_simulation_available_dates():
     """Validates discovery of available trading session dates."""
     engine = SimulationEngine()
@@ -372,13 +771,53 @@ async def test_simulation_rest_endpoints():
         assert res_sim.status_code == 200
         sim_json = res_sim.json()
 
+        assert "signal_metrics" in sim_json
+        assert "underlying_lifecycle_metrics" in sim_json
+        assert "option_mark_metrics" in sim_json
+        assert "portfolio_metrics" in sim_json
+        assert "data_quality" in sim_json
+        assert sim_json["signal_metrics"]["price_basis"]
+        assert sim_json["signal_metrics"]["calculation_basis"]
+        assert sim_json["underlying_lifecycle_metrics"]["price_basis"]
+        assert sim_json["underlying_lifecycle_metrics"]["calculation_basis"]
+        assert sim_json["option_mark_metrics"]["price_basis"]
+        assert sim_json["option_mark_metrics"]["calculation_basis"]
+        assert sim_json["portfolio_metrics"]["price_basis"]
+        assert sim_json["portfolio_metrics"]["calculation_basis"]
+        assert sim_json["data_quality"]["price_basis"]
+        assert sim_json["data_quality"]["calculation_basis"]
+
+        # Legacy fields remain available and are derived from canonical sections.
         assert "total_bars_evaluated" in sim_json
         assert "total_trades" in sim_json
         assert "win_rate_pct" in sim_json
         assert "timeline" in sim_json
         assert "trades" in sim_json
-        assert sim_json["replay_mode"] in {"SIGNALS_ONLY", "POSITION_MANAGER_REPLAY"}
+        assert sim_json["replay_mode"] == "POSITION_MANAGER_REPLAY"
+        assert sim_json["replay_metadata"]["requested_replay_mode"] == "RESEARCH"
+        assert sim_json["total_bars_evaluated"] == sim_json["signal_metrics"]["total_bars_evaluated"]
+        assert sim_json["total_trades"] == sim_json["underlying_lifecycle_metrics"]["resolved_trades"]
+        assert sim_json["win_rate_pct"] == sim_json["underlying_lifecycle_metrics"]["win_rate_pct"]
+        assert sim_json["total_pnl"] == sim_json["option_mark_metrics"]["gross_mark_pnl"]
+        assert sim_json["net_pnl"] == sim_json["option_mark_metrics"]["net_mark_pnl"]
+        assert sim_json["max_drawdown_pnl"] == sim_json["portfolio_metrics"]["max_drawdown_pnl"]
         assert sim_json["total_trades"] == len(sim_json["trades"])
+
+        parity_res = await client.post(
+            "/api/v1/strategies/simulate",
+            json={
+                **payload,
+                "replay_mode": "EXECUTION_PARITY",
+            },
+        )
+        assert parity_res.status_code == 200
+        parity_json = parity_res.json()
+        assert parity_json["replay_mode"] == "EXECUTION_PARITY"
+        assert (
+            parity_json["replay_metadata"]["requested_replay_mode"]
+            == "EXECUTION_PARITY"
+        )
+        assert "execution_parity" in parity_json["replay_metadata"]
 
     await container.strategy_svc.stop()
 
@@ -487,12 +926,46 @@ def test_nifty_monthly_expiry_fallback_respects_2025_weekday_transition():
     assert InstrumentService._monthly_expiry(2025, 9) == date(2025, 9, 30)
 
 
-def test_strategy_a_replay_adx_override_changes_effective_v2_config():
+def test_strategy_a_replay_adapter_keeps_legacy_hard_adx_override_inactive():
     engine = SimulationEngine()
+    adapter = TrendPullbackReplayAdapter(engine.tunables)
     overrides = ThresholdOverrides(adx_threshold=17.0)
-    config = engine._strategy_a_config_for_replay(overrides)
-    assert config.adx_threshold == 17.0
-    assert config.confirmation_min_body_ratio == engine.tunables.confirmation_min_body_ratio
+
+    assert "adx_threshold" not in adapter.strategy_metadata().supported_override_fields
+    assert adapter.strategy.config.adx_threshold == engine.tunables.adx_threshold
+    assert (
+        adapter.strategy.config.confirmation_min_body_ratio
+        == engine.tunables.confirmation_min_body_ratio
+    )
+
+
+def test_default_replay_registry_orders_a_before_b_and_owns_supported_overrides():
+    engine = SimulationEngine()
+    registry = ReplayStrategyRegistry.default(engine.tunables, engine.session_config)
+    metadata = registry.strategy_metadata()
+
+    assert [item.strategy.value for item in metadata] == [
+        "TREND_PULLBACK",
+        "VOLATILITY_BREAKOUT",
+    ]
+    assert metadata[0].priority < metadata[1].priority
+    assert "adx_threshold" not in registry.supported_override_fields()
+    assert "rvol_threshold" in registry.supported_override_fields()
+    assert "strat_b_min_confirmation" in registry.supported_override_fields()
+
+    # Preserve the pre-registry orchestration distinction: Strategy B is
+    # evaluated from the global 09:20 replay window, while its own production
+    # entry gate remains 09:25.
+    assert metadata[1].evaluation_start == engine.session_config.no_new_trade_before
+    assert metadata[1].entry_start == engine.session_config.strategy_b_no_new_trade_before
+    assert metadata[1].evaluation_start == "09:20"
+    assert metadata[1].entry_start == "09:25"
+
+    snapshot = registry.metadata_snapshot()
+    assert snapshot[0]["strategy"] == "TREND_PULLBACK"
+    assert snapshot[1]["strategy"] == "VOLATILITY_BREAKOUT"
+    assert snapshot[1]["evaluation_window"]["start"] == "09:20"
+    assert snapshot[1]["entry_window"]["start"] == "09:25"
 
 
 def test_strategy_a_futures_coverage_reports_missing_entry_window_bar():

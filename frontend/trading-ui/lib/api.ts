@@ -1213,12 +1213,98 @@ export interface SimulatedTradeRecordData {
   lots: number;
   gross_pnl?: number | null;
   net_pnl?: number | null;
+  entry_mark?: number | null;
+  exit_mark?: number | null;
+  simulated_entry_fill?: number | null;
+  simulated_exit_fill?: number | null;
+  simulated_entry_fill_method?: string | null;
+  simulated_exit_fill_method?: string | null;
+  estimated_executable_gross_pnl?: number | null;
+  estimated_slippage_cost?: number | null;
+  estimated_transaction_costs?: number | null;
+  estimated_executable_net_pnl?: number | null;
+  contract_selection_evidence_status?: string | null;
+  contract_selection_method?: string | null;
   hold_duration_mins: number;
 }
 
+export interface ReplaySignalMetricsData {
+  price_basis: string;
+  calculation_basis: string;
+  total_bars_evaluated: number;
+  qualified_signals: number;
+  ambiguous_signals: number;
+  unresolved_signals: number;
+}
+
+export interface ReplayUnderlyingLifecycleMetricsData {
+  price_basis: string;
+  calculation_basis: string;
+  resolved_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  breakeven_trades: number;
+  win_rate_pct: number;
+  total_realized_r: number;
+  average_realized_r: number;
+  median_realized_r: number;
+  average_winner_r: number;
+  average_loser_r: number;
+  profit_factor_r: number | null;
+  max_drawdown_r: number;
+  max_consecutive_losses: number;
+}
+
+export interface ReplayOptionMarkMetricsData {
+  price_basis: string;
+  calculation_basis: string;
+  priced_trades: number;
+  unpriced_trades: number;
+  all_resolved_trades_priced: boolean;
+  gross_mark_pnl: number | null;
+  estimated_transaction_costs: number | null;
+  net_mark_pnl: number | null;
+  execution_price_basis: string;
+  execution_estimated_trades: number;
+  execution_unavailable_trades: number;
+  bid_ask_supported_trades: number;
+  mark_fallback_fill_trades: number;
+  gross_estimated_executable_pnl: number | null;
+  estimated_slippage_costs: number | null;
+  estimated_execution_transaction_costs: number | null;
+  net_estimated_executable_pnl: number | null;
+}
+
+export interface ReplayPortfolioMetricsData {
+  price_basis: string;
+  calculation_basis: string;
+  available: boolean;
+  max_drawdown_pnl: number | null;
+  limitation: string;
+}
+
+export interface ReplayDataQualityData {
+  price_basis: string;
+  calculation_basis: string;
+  historical_source: string;
+  missing_data: string[];
+  underlying_issue_counts: Record<string, number>;
+  option_mark_available_trades: number;
+  option_mark_unavailable_trades: number;
+  option_mark_quality_reasons: Record<string, number>;
+  contract_selection_evidence_counts: Record<string, number>;
+  execution_fill_method_counts: Record<string, number>;
+}
+
 export interface SimulationResultData {
+  replay_mode: "POSITION_MANAGER_REPLAY" | "EXECUTION_PARITY" | string;
   limitation?: string;
   session_date: string;
+  signal_metrics: ReplaySignalMetricsData;
+  underlying_lifecycle_metrics: ReplayUnderlyingLifecycleMetricsData;
+  option_mark_metrics: ReplayOptionMarkMetricsData;
+  portfolio_metrics: ReplayPortfolioMetricsData;
+  data_quality: ReplayDataQualityData;
   total_bars_evaluated: number;
   total_trades: number;
   winning_trades: number;
@@ -1228,7 +1314,8 @@ export interface SimulationResultData {
   net_pnl: number | null;
   total_realized_r: number;
   max_drawdown_pnl: number | null;
-  profit_factor: number;
+  profit_factor: number | null;
+  max_drawdown_r?: number | null;
   trades: SimulatedTradeRecordData[];
   timeline: SimulationBarSnapshotData[];
   decision_logs: DecisionLogData[];
@@ -1241,10 +1328,15 @@ export interface SimulationRequestData {
   date?: string | null;
   instrument_id?: string;
   overrides?: Partial<ThresholdOverridesData>;
+  /** Applied as account equity for historical sizing in EXECUTION_PARITY. */
   capital?: number;
+  /** Optional EXECUTION_PARITY risk-budget override. */
+  risk_per_trade_pct?: number;
   bypass_window?: boolean;
   bypass_entry_window?: boolean;
   historical_source?: "BREEZE" | "KITE" | "LIVE" | "MIXED";
+  replay_mode?: "RESEARCH" | "EXECUTION_PARITY";
+  /** Applied as the chronological daily-entry limit in EXECUTION_PARITY. */
   max_trades_per_day?: number;
 }
 

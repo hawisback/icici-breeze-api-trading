@@ -558,14 +558,18 @@ def test_strategy_b_r1_defaults_agree_across_construction_paths(monkeypatch):
     engine = SimulationEngine(tunables=config)
     assert engine.tunables is config
 
-    # Exercise the production simulation construction call without running a
-    # historical replay.  Empty data is sufficient to reach construction.
-    import services.strategy.simulation as simulation_module
+    # Exercise the production replay-registry construction path without
+    # running a historical replay. Empty data is sufficient to reach adapter
+    # construction.
+    import services.strategy.replay_registry as replay_registry_module
     captured = {}
 
     class SpyVolatilityBreakout:
         def __init__(self, **kwargs):
             captured.update(kwargs)
+
+        def reset(self, at=None):
+            return None
 
     async def empty_fetch(date_str, instrument_id, historical_source, source_diagnostics, role):
         source_diagnostics[role] = {
@@ -577,7 +581,11 @@ def test_strategy_b_r1_defaults_agree_across_construction_paths(monkeypatch):
         }
         return [], []
 
-    monkeypatch.setattr(simulation_module, "VolatilityBreakoutStrategy", SpyVolatilityBreakout)
+    monkeypatch.setattr(
+        replay_registry_module,
+        "VolatilityBreakoutStrategy",
+        SpyVolatilityBreakout,
+    )
     monkeypatch.setattr(engine, "_fetch_session_candles", empty_fetch)
     from services.strategy.models import SimulationRequest
     import asyncio

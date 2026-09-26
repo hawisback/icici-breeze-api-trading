@@ -11,6 +11,7 @@ from services.strategy.models import (
     OptionType,
     RiskConfig,
     SetupInvalidationState,
+    STRATEGY_A_VERSION_ID,
     StrategyDirection,
     StrategyName,
     StrategySetup,
@@ -103,7 +104,7 @@ def test_structural_r_sizing_rejects_missing_delta_without_fallback():
 def test_replay_report_is_versioned_and_comparison_is_event_level():
     start = datetime(2026, 9, 20, 9, 15, tzinfo=UTC)
     report = StrategyAReplayEngine().replay([candle(start + timedelta(minutes=15 * i), 100 + i) for i in range(55)])
-    assert report.strategy_version == "trend_pullback_momentum_v3"
+    assert report.strategy_version == STRATEGY_A_VERSION_ID
     assert report.futures_contracts == ["INST-NIFTY-FUT-2026-09-24"]
     assert compare_replay_decisions(report.decisions, report.decisions) == []
 
@@ -187,7 +188,7 @@ def test_wilder_adx14_remains_unavailable_until_seed_is_complete():
     assert plus_di > minus_di
 
 
-def _v3_feature(
+def _r5_feature(
     timestamp: datetime,
     *,
     ema20: float,
@@ -218,16 +219,16 @@ def _v3_feature(
     )
 
 
-def test_strategy_a_v3_momentum_gate_replaces_hard_adx_floor(monkeypatch):
+def test_strategy_a_r5_momentum_gate_replaces_hard_adx_floor(monkeypatch):
     strategy = TrendPullbackStrategy()
     start = datetime(2026, 9, 21, 4, 45, tzinfo=UTC)
     raw = [
         candle(start + timedelta(minutes=15 * i), 100 + i, instrument="INST-NIFTY-FUT-2026-09-29")
         for i in range(3)
     ]
-    current = _v3_feature(raw[-1].end_time, ema20=100.2, adx=18.0)
-    previous = _v3_feature(raw[-2].end_time, ema20=100.0, adx=18.2)
-    previous2 = _v3_feature(raw[-3].end_time, ema20=99.9, adx=18.5)
+    current = _r5_feature(raw[-1].end_time, ema20=100.2, adx=18.0)
+    previous = _r5_feature(raw[-2].end_time, ema20=100.0, adx=18.2)
+    previous2 = _r5_feature(raw[-3].end_time, ema20=99.9, adx=18.5)
 
     def fake_build(_bars, *, as_of=None):
         if as_of == raw[-2].end_time:
@@ -254,7 +255,7 @@ def test_strategy_a_v3_momentum_gate_replaces_hard_adx_floor(monkeypatch):
     assert reason == "MOMENTUM_EMA_SLOPE_OUT_OF_BAND"
 
 
-def test_strategy_a_v3_momentum_config_rejects_inverted_slope_band():
+def test_strategy_a_r5_momentum_config_rejects_inverted_slope_band():
     with pytest.raises(ValidationError, match="momentum EMA20 slope band"):
         StrategyTunablesConfig(
             momentum_ema20_slope_min_atr=0.15,

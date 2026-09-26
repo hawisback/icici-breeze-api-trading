@@ -23,6 +23,8 @@ from services.strategy.futures_signal import (
     resolve_completed_futures_contract,
 )
 from services.strategy.models import (
+    STRATEGY_A_REVISION,
+    STRATEGY_A_VERSION_ID,
     OptionType,
     StrategyDirection,
     StrategyName,
@@ -545,10 +547,10 @@ class TrendPullbackStrategy:
                 "atr": feature.atr14, "vwap": feature.session_vwap,
                 "active_support": feature.support, "active_resistance": feature.resistance,
                 "rejection_reason": reason,
-                "active_evaluator_version": "trend_pullback_momentum_v3",
-                "strategy_a_v2": {
-                    "compatibility_envelope": True,
-                    "active_evaluator_version": "trend_pullback_momentum_v3",
+                "active_evaluator_version": STRATEGY_A_VERSION_ID,
+                "strategy_a_contract": {
+                    "revision": STRATEGY_A_REVISION,
+                    "active_evaluator_version": STRATEGY_A_VERSION_ID,
                     "data": {
                         "contract": feature.contract_id,
                         "completed_candle_timestamp": feature.candle_timestamp.isoformat(),

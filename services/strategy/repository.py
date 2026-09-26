@@ -563,7 +563,12 @@ class StrategyRepository:
                     "chain_candidates": json.loads(r["chain_candidates_json"]),
                     "selected_contract": json.loads(r["selected_contract_json"]) if r["selected_contract_json"] else None,
                     "rejection_reason": r["rejection_reason"], "strategy": r["strategy"],
-                    "execution_mode": r["execution_mode"], "chain_snapshot_timestamp": r["chain_snapshot_timestamp"],
+                    "execution_mode": r["execution_mode"],
+                    "selector_timestamp": r["selector_timestamp"],
+                    "signal_timestamp": r["signal_timestamp"],
+                    "direction": r["direction"],
+                    "selector_result": r["selector_result"],
+                    "chain_snapshot_timestamp": r["chain_snapshot_timestamp"],
                 }
                 for r in rows
             ]

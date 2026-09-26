@@ -142,6 +142,56 @@ class ReplayManifestRecord(BaseModel):
     mfe_r: float | None = None
     mae_r: float | None = None
     ambiguous: bool = False
+
+    # Execution-parity sizing. These fields describe the quantity decision
+    # made from historical evidence; they never imply an executable fill.
+    sizing_status: str = "NOT_APPLIED"
+    sizing_method: str | None = None
+    sizing_price_basis: str | None = None
+    sizing_account_equity: float | None = None
+    sizing_risk_per_trade_pct: float | None = None
+    sizing_risk_budget: float | None = None
+    sizing_option_loss_per_lot: float | None = None
+    sizing_delta_proxy: float | None = None
+    sizing_delta_source: str | None = None
+    sizing_contract_instrument_id: str | None = None
+    sizing_contract_symbol: str | None = None
+    sizing_contract_expiry: str | None = None
+    sizing_contract_strike: float | None = None
+    sizing_contract_lot_size: int | None = None
+    sizing_entry_reference_price: float | None = None
+    sizing_entry_mark: float | None = None
+    replay_lots: int | None = None
+    replay_quantity: int | None = None
+    sizing_rejection_reason: str | None = None
+
+    # Contract selection evidence. Exact production-rule parity is claimed only
+    # when an exact point-in-time chain snapshot supported the decision.
+    contract_selection_desired_method: str | None = None
+    contract_selection_actual_method: str | None = None
+    contract_selection_evidence_status: str | None = None
+    contract_selection_production_rules_applied: bool = False
+    contract_selection_snapshot_id: str | None = None
+    contract_selection_snapshot_timestamp: datetime | None = None
+    contract_selection_unsupported_evidence: list[str] = Field(default_factory=list)
+    contract_selection_rejection_reason: str | None = None
+    contract_selection_provenance: dict[str, Any] = Field(default_factory=dict)
+
+    # Historical marks remain separate from estimated executable fills.
+    simulated_entry_fill_price: float | None = None
+    simulated_exit_fill_price: float | None = None
+    simulated_entry_fill_method: str | None = None
+    simulated_exit_fill_method: str | None = None
+    simulated_entry_fill_basis: str | None = None
+    simulated_exit_fill_basis: str | None = None
+    simulated_fill_quote_equivalent: bool = False
+    simulated_gross_pnl: float | None = None
+    simulated_slippage_cost: float | None = None
+    simulated_transaction_costs: float | None = None
+    simulated_net_pnl: float | None = None
+    simulated_cost_breakdown: dict[str, Any] = Field(default_factory=dict)
+    simulated_execution_provenance: dict[str, Any] = Field(default_factory=dict)
+
     option_data_status: str = "UNAVAILABLE"
     option_contract_instrument_id: str | None = None
     option_contract_symbol: str | None = None
@@ -276,6 +326,116 @@ class ReplayManifestRecorder:
             )
         )
         self._records[signal.signal_id] = record
+        return record
+
+    def set_contract_selection_result(
+        self,
+        signal_id: str,
+        *,
+        desired_method: str,
+        actual_method: str,
+        evidence_status: str,
+        production_rules_applied: bool,
+        snapshot_id: str | None,
+        snapshot_timestamp: datetime | None,
+        unsupported_evidence: list[str],
+        rejection_reason: str | None,
+        provenance: dict[str, Any],
+    ) -> ReplayManifestRecord:
+        record = self._records[signal_id]
+        record.contract_selection_desired_method = desired_method
+        record.contract_selection_actual_method = actual_method
+        record.contract_selection_evidence_status = evidence_status
+        record.contract_selection_production_rules_applied = (
+            production_rules_applied
+        )
+        record.contract_selection_snapshot_id = snapshot_id
+        record.contract_selection_snapshot_timestamp = snapshot_timestamp
+        record.contract_selection_unsupported_evidence = list(
+            unsupported_evidence
+        )
+        record.contract_selection_rejection_reason = rejection_reason
+        record.contract_selection_provenance = dict(provenance)
+        return record
+
+    def set_execution_estimate(
+        self,
+        signal_id: str,
+        *,
+        entry_fill_price: float | None,
+        exit_fill_price: float | None,
+        entry_method: str | None,
+        exit_method: str | None,
+        entry_basis: str | None,
+        exit_basis: str | None,
+        quote_equivalent: bool,
+        gross_pnl: float | None,
+        slippage_cost: float | None,
+        transaction_costs: float | None,
+        net_pnl: float | None,
+        cost_breakdown: dict[str, Any],
+        provenance: dict[str, Any],
+    ) -> ReplayManifestRecord:
+        record = self._records[signal_id]
+        record.simulated_entry_fill_price = entry_fill_price
+        record.simulated_exit_fill_price = exit_fill_price
+        record.simulated_entry_fill_method = entry_method
+        record.simulated_exit_fill_method = exit_method
+        record.simulated_entry_fill_basis = entry_basis
+        record.simulated_exit_fill_basis = exit_basis
+        record.simulated_fill_quote_equivalent = quote_equivalent
+        record.simulated_gross_pnl = gross_pnl
+        record.simulated_slippage_cost = slippage_cost
+        record.simulated_transaction_costs = transaction_costs
+        record.simulated_net_pnl = net_pnl
+        record.simulated_cost_breakdown = dict(cost_breakdown)
+        record.simulated_execution_provenance = dict(provenance)
+        return record
+
+    def set_sizing_result(
+        self,
+        signal_id: str,
+        *,
+        status: str,
+        method: str | None,
+        price_basis: str | None,
+        account_equity: float | None,
+        risk_per_trade_pct: float | None,
+        risk_budget: float | None,
+        option_loss_per_lot: float | None,
+        delta_proxy: float | None,
+        delta_source: str | None,
+        contract_instrument_id: str | None,
+        contract_symbol: str | None,
+        contract_expiry: str | None,
+        contract_strike: float | None,
+        contract_lot_size: int | None,
+        entry_reference_price: float | None,
+        entry_mark: float | None,
+        lots: int | None,
+        quantity: int | None,
+        rejection_reason: str | None = None,
+    ) -> ReplayManifestRecord:
+        record = self._records[signal_id]
+        record.sizing_status = status
+        record.sizing_method = method
+        record.sizing_price_basis = price_basis
+        record.sizing_account_equity = account_equity
+        record.sizing_risk_per_trade_pct = risk_per_trade_pct
+        record.sizing_risk_budget = risk_budget
+        record.sizing_option_loss_per_lot = option_loss_per_lot
+        record.sizing_delta_proxy = delta_proxy
+        record.sizing_delta_source = delta_source
+        record.sizing_contract_instrument_id = contract_instrument_id
+        record.sizing_contract_symbol = contract_symbol
+        record.sizing_contract_expiry = contract_expiry
+        record.sizing_contract_strike = contract_strike
+        record.sizing_contract_lot_size = contract_lot_size
+        record.sizing_entry_reference_price = entry_reference_price
+        record.sizing_entry_mark = entry_mark
+        record.replay_lots = lots
+        record.replay_quantity = quantity
+        record.sizing_rejection_reason = rejection_reason
         return record
 
     def set_lifecycle_result(

@@ -12,7 +12,6 @@ from typing import Any, Optional
 
 from libs.contracts.models import Candle, utc_now
 from libs.market_time import IST
-from services.strategy.contract_selector import ContractSelector
 from services.strategy.features import FeatureEngine
 from services.strategy.futures_signal import (
     FuturesContractResolver,
@@ -25,11 +24,17 @@ from services.strategy.models import (
     ActiveTrade,
     AutoTradingMode,
     DecisionLogEntry,
+    HistoricalReplayMode,
     HistoricalReplaySource,
     MarketFeatures,
     OptionSelectionConfig,
     OptionType,
     RiskConfig,
+    ReplayDataQuality,
+    ReplayOptionMarkMetrics,
+    ReplayPortfolioMetrics,
+    ReplaySignalMetrics,
+    ReplayUnderlyingLifecycleMetrics,
     SessionTimersConfig,
     SimulatedTradeRecord,
     SimulationBarSnapshot,
@@ -45,85 +50,30 @@ from services.strategy.replay_metadata import (
     build_data_fingerprint,
     configuration_fingerprint,
 )
-from services.strategy.position_manager import PositionManager
+from services.strategy.replay_contract_selection import (
+    HistoricalContractSelectionProvider,
+    ReplayContractSelectionDecision,
+)
+from services.strategy.replay_execution import ChronologicalReplayExecutor
+from services.strategy.replay_execution_model import (
+    estimate_round_trip_execution,
+)
+from services.strategy.replay_lifecycle import (
+    HistoricalPositionManagerReplayer,
+    attach_historical_option_prices,
+    build_lifecycle_report,
+    build_simulated_trade_records,
+    summarize_historical_option_marks,
+)
 from services.strategy.replay_manifest import ReplayManifestRecorder
-from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
-from services.strategy.strategies.volatility_breakout import VolatilityBreakoutStrategy
+from services.strategy.replay_registry import (
+    ReplayBarContext,
+    ReplaySessionContext,
+    ReplayStrategyRegistry,
+)
+from services.strategy.replay_sizing import calculate_replay_sizing
 
 logger = logging.getLogger(__name__)
-
-def _record_strategy_b_manifest(
-    recorder: ReplayManifestRecorder,
-    signal: Any,
-    *,
-    trading_date: str,
-    breakout_candle: Candle,
-) -> None:
-    """Record one completed-candle Strategy B signal for lifecycle replay."""
-    if signal.strategy != StrategyName.VOLATILITY_BREAKOUT:
-        raise ValueError("Strategy B manifest helper received a non-Strategy-B signal")
-    if signal.timestamp != breakout_candle.end_time:
-        raise ValueError("Strategy B replay entry must use the completed breakout candle end time")
-
-    snapshot = signal.features_snapshot
-    required = ("box_high", "box_low", "atr_at_lock", "breakout_trigger_price")
-    missing = [key for key in required if snapshot.get(key) is None]
-    if missing:
-        raise ValueError(
-            f"Strategy B signal {signal.signal_id} is missing replay state: {', '.join(missing)}"
-        )
-
-    box_high = float(snapshot["box_high"])
-    box_low = float(snapshot["box_low"])
-    atr_at_lock = float(snapshot["atr_at_lock"])
-    if atr_at_lock <= 0 or box_high <= box_low:
-        raise ValueError(f"Invalid Strategy B replay state for {signal.signal_id}")
-
-    recorder.record_entry(
-        signal=signal,
-        trading_date=trading_date,
-        trigger_source_candle_timestamp=signal.timestamp,
-        trigger_level=float(snapshot["breakout_trigger_price"]),
-        simulated_entry_timestamp=signal.timestamp,
-        simulated_entry_price=float(signal.spot_reference_price),
-        entry_5m_candle_timestamp=breakout_candle.start_time,
-        entry_occurred_intrabar=False,
-        entry_features={
-            **snapshot,
-            "entry_reference_spot": float(signal.spot_reference_price),
-            "entry_bar_timestamp": breakout_candle.start_time.isoformat(),
-        },
-        setup_id=(
-            f"VOLATILITY_BREAKOUT:{snapshot.get('box_created_time', 'UNKNOWN')}"
-            f"->{signal.timestamp.isoformat()}"
-        ),
-        pullback_swing_low=None,
-        pullback_swing_high=None,
-        impulse_low=None,
-        impulse_high=None,
-        atr_at_entry=atr_at_lock,
-        initial_structural_stop=float(signal.structural_stop),
-        initial_risk_points=float(signal.r_points),
-        initial_risk_atr=round(float(signal.r_points) / atr_at_lock, 2),
-        box_high=box_high,
-        box_low=box_low,
-        atr_at_lock=atr_at_lock,
-        consecutive_inside_box_closes=0,
-        current_trailing_stop=float(signal.structural_stop),
-        current_r=0.0,
-        highest_favorable_price=float(signal.spot_reference_price),
-        lowest_favorable_price=float(signal.spot_reference_price),
-        peak_r=0.0,
-        protected_breakeven_active=False,
-        profit_lock_active=False,
-        runner_mode_active=False,
-        current_ladder_stage="OPEN_INITIAL_RISK",
-        reversal_score=0,
-        adverse_health_counters={},
-        entry_bar_timestamp=breakout_candle.start_time,
-        last_managed_completed_bar_timestamp=None,
-    )
-
 
 class SimulationEngine:
     """Replays historical 5m candles bar-by-bar to simulate intraday trading."""
@@ -134,14 +84,190 @@ class SimulationEngine:
         risk_config: Optional[RiskConfig] = None,
         session_config: Optional[SessionTimersConfig] = None,
         tunables=None,
+        option_selection_config: Optional[OptionSelectionConfig] = None,
+        strategy_repository: Optional[Any] = None,
         replay_manifest_recorder: Optional[ReplayManifestRecorder] = None,
     ) -> None:
         self.hist_svc = historical_service
+        self.strategy_repo = strategy_repository
         self.risk_config = risk_config or RiskConfig()
         self.session_config = session_config or SessionTimersConfig()
+        self.option_selection_config = (
+            option_selection_config or OptionSelectionConfig()
+        )
         from services.strategy.models import StrategyTunablesConfig
         self.tunables = tunables or StrategyTunablesConfig()
         self.replay_manifest_recorder = replay_manifest_recorder
+
+    async def _attach_execution_parity_economics(
+        self,
+        *,
+        record: Any,
+        provider: HistoricalContractSelectionProvider,
+        risk_config: RiskConfig,
+        selection: ReplayContractSelectionDecision | None,
+        recorder: ReplayManifestRecorder,
+    ) -> None:
+        if (
+            record.lifecycle_status != "RESOLVED"
+            or record.exit_timestamp is None
+        ):
+            return
+        instrument_id = str(
+            record.sizing_contract_instrument_id
+            or record.option_contract_instrument_id
+            or ""
+        )
+        quantity = int(record.replay_quantity or 0)
+        if not instrument_id or quantity <= 0:
+            record.option_data_quality_reason = (
+                "Historical selected contract or replay quantity unavailable"
+            )
+            return
+
+        record.option_contract_instrument_id = instrument_id
+        record.option_contract_symbol = record.sizing_contract_symbol
+        record.option_expiry = record.sizing_contract_expiry
+        record.option_strike = record.sizing_contract_strike
+        record.option_lot_size = record.sizing_contract_lot_size
+
+        mark_entry = await provider.completed_mark_evidence(
+            instrument_id=instrument_id,
+            event_time=record.simulated_entry_timestamp,
+        )
+        mark_exit = await provider.completed_mark_evidence(
+            instrument_id=instrument_id,
+            event_time=record.exit_timestamp,
+        )
+        mark_risk = risk_config.model_copy(
+            update={"paper_slippage_points": 0.0}
+        )
+        mark_round_trip = estimate_round_trip_execution(
+            entry_evidence=mark_entry,
+            exit_evidence=mark_exit,
+            quantity=quantity,
+            risk_config=mark_risk,
+        )
+        if (
+            mark_entry.mark_price is not None
+            and mark_exit.mark_price is not None
+            and mark_round_trip.gross_execution_pnl is not None
+        ):
+            record.option_entry_price = round(
+                float(mark_entry.mark_price),
+                2,
+            )
+            record.option_exit_price = round(
+                float(mark_exit.mark_price),
+                2,
+            )
+            record.option_gross_pnl = mark_round_trip.gross_execution_pnl
+            record.option_transaction_costs = (
+                mark_round_trip.transaction_costs
+            )
+            record.option_net_pnl = mark_round_trip.net_execution_pnl
+            record.option_price_source = (
+                "HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARK"
+            )
+            record.option_data_status = "AVAILABLE"
+            record.option_data_quality_reason = None
+        else:
+            record.option_data_status = "UNAVAILABLE"
+            record.option_data_quality_reason = (
+                "Historical option completed mark unavailable at entry or exit"
+            )
+
+        entry_evidence = await provider.price_evidence(
+            instrument_id=instrument_id,
+            signal_id=record.replay_signal_id,
+            event_time=record.simulated_entry_timestamp,
+            side="BUY",
+            selection=selection,
+        )
+        exit_evidence = await provider.price_evidence(
+            instrument_id=instrument_id,
+            signal_id=record.replay_signal_id,
+            event_time=record.exit_timestamp,
+            side="SELL",
+            selection=None,
+        )
+        execution = estimate_round_trip_execution(
+            entry_evidence=entry_evidence,
+            exit_evidence=exit_evidence,
+            quantity=quantity,
+            risk_config=risk_config,
+        )
+        recorder.set_execution_estimate(
+            record.replay_signal_id,
+            entry_fill_price=execution.entry.executable_price,
+            exit_fill_price=execution.exit.executable_price,
+            entry_method=execution.entry.method,
+            exit_method=execution.exit.method,
+            entry_basis=execution.entry.evidence_basis,
+            exit_basis=execution.exit.evidence_basis,
+            quote_equivalent=(
+                execution.entry.executable_quote_equivalent
+                and execution.exit.executable_quote_equivalent
+            ),
+            gross_pnl=execution.gross_execution_pnl,
+            slippage_cost=execution.slippage_cost,
+            transaction_costs=execution.transaction_costs,
+            net_pnl=execution.net_execution_pnl,
+            cost_breakdown={
+                "brokerage": execution.brokerage,
+                "exchange_charges": execution.exchange_charges,
+                "stt": execution.stt,
+                "gst": execution.gst,
+                "sebi_charges": execution.sebi_charges,
+                "stamp_duty": execution.stamp_duty,
+                "cost_assumption_version": (
+                    execution.cost_assumption_version
+                ),
+            },
+            provenance={
+                "entry": execution.entry.to_dict(),
+                "exit": execution.exit.to_dict(),
+                "partial_option_exits_modeled": False,
+                "limitation": (
+                    "Execution estimate currently models one option entry and "
+                    "the final option exit; partial option exits remain deferred."
+                ),
+            },
+        )
+        record.historical_option_provenance = {
+            "contract_selection": (
+                selection.to_manifest_metadata()
+                if selection is not None
+                else {}
+            ),
+            "mark_entry": {
+                "basis": mark_entry.basis,
+                "source": mark_entry.source,
+                "evidence_timestamp": (
+                    mark_entry.evidence_timestamp.isoformat()
+                    if mark_entry.evidence_timestamp
+                    else None
+                ),
+                "mark_price": mark_entry.mark_price,
+                "freshness_seconds": mark_entry.freshness_seconds,
+            },
+            "mark_exit": {
+                "basis": mark_exit.basis,
+                "source": mark_exit.source,
+                "evidence_timestamp": (
+                    mark_exit.evidence_timestamp.isoformat()
+                    if mark_exit.evidence_timestamp
+                    else None
+                ),
+                "mark_price": mark_exit.mark_price,
+                "freshness_seconds": mark_exit.freshness_seconds,
+            },
+            "execution_estimate": execution.to_dict(),
+            "bid_ask_available_for_both_fills": (
+                record.simulated_fill_quote_equivalent
+            ),
+            "historical_marks_are_executable_fills": False,
+        }
 
     async def _fetch_replay_option_candles(
         self,
@@ -171,17 +297,48 @@ class SimulationEngine:
             and getattr(instrument, "option_right", None)
         ]
         selected: dict[str, Any] = {}
+        option_by_id = {
+            str(instrument.instrument_id): instrument
+            for instrument in option_instruments
+        }
+        sizing_locked_contracts = 0
         for record in records:
+            sizing_contract_id = str(
+                getattr(record, "sizing_contract_instrument_id", "") or ""
+            )
+            if sizing_contract_id:
+                locked = option_by_id.get(sizing_contract_id)
+                if locked is not None:
+                    selected[sizing_contract_id] = locked
+                    sizing_locked_contracts += 1
+                    continue
+
             direction = "CALL" if record.direction == "CALL" else "PUT"
             candidates = [
                 instrument for instrument in option_instruments
-                if str(getattr(getattr(instrument, "option_right", None), "value", "")).upper() in {direction, "CE" if direction == "CALL" else "PE"}
+                if str(
+                    getattr(
+                        getattr(instrument, "option_right", None),
+                        "value",
+                        "",
+                    )
+                ).upper()
+                in {direction, "CE" if direction == "CALL" else "PE"}
             ]
             if not candidates:
                 continue
             expiry = min(str(instrument.expiry) for instrument in candidates)
-            same_expiry = [instrument for instrument in candidates if str(instrument.expiry) == expiry]
-            contract = min(same_expiry, key=lambda instrument: abs(float(instrument.strike) - record.simulated_entry_price))
+            same_expiry = [
+                instrument
+                for instrument in candidates
+                if str(instrument.expiry) == expiry
+            ]
+            contract = min(
+                same_expiry,
+                key=lambda instrument: abs(
+                    float(instrument.strike) - record.simulated_entry_price
+                ),
+            )
             selected[contract.instrument_id] = contract
 
         candles_by_instrument: dict[str, list[Candle]] = {}
@@ -226,7 +383,11 @@ class SimulationEngine:
             "pricing_field": "completed_candle_close",
             "bid_ask_available": False,
             "executable_fill_equivalent": False,
-            "selection": "nearest_strike_first_expiry_on_or_after_replay_date",
+            "selection": (
+                "sizing_locked_contract_when_available_else_"
+                "nearest_strike_first_expiry_on_or_after_replay_date"
+            ),
+            "sizing_locked_contracts": sizing_locked_contracts,
         }
 
     @staticmethod
@@ -625,19 +786,6 @@ class SimulationEngine:
         }] if active_instrument and contract else []
         return active_instrument, selected
 
-    def _strategy_a_config_for_replay(self, overrides: ThresholdOverrides) -> Any:
-        """Apply only Strategy A V2 overrides that the replay actually supports.
-
-        This keeps the replay configuration snapshot honest: an ADX override
-        shown in the UI must affect the Strategy A evaluator, not just metadata.
-        Legacy confirmation-score knobs are intentionally not mapped onto the
-        V2 candle-confirmation contract.
-        """
-        updates: dict[str, Any] = {}
-        if overrides.adx_threshold is not None:
-            updates["adx_threshold"] = float(overrides.adx_threshold)
-        return self.tunables.model_copy(update=updates) if updates else self.tunables
-
     def _strategy_a_futures_coverage(
         self,
         date_str: str,
@@ -680,6 +828,50 @@ class SimulationEngine:
             "coverage_pct": round((len(expected) - len(missing)) / len(expected) * 100, 2) if expected else 100.0,
             "missing_15m_bar_ends_ist": [value.isoformat() for value in missing],
         }
+
+    async def _load_replay_one_minute_candles(
+        self,
+        date_str: str,
+        instrument_id: str,
+        historical_source: HistoricalReplaySource,
+    ) -> list[Candle]:
+        """Load authoritative 1-minute candles used only for intrabar ordering."""
+        if not self.hist_svc or not hasattr(self.hist_svc, "repo"):
+            return []
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        start = datetime(
+            target_date.year,
+            target_date.month,
+            target_date.day,
+            9,
+            15,
+            tzinfo=IST,
+        ).astimezone(timezone.utc)
+        end = datetime(
+            target_date.year,
+            target_date.month,
+            target_date.day,
+            15,
+            30,
+            tzinfo=IST,
+        ).astimezone(timezone.utc)
+        try:
+            candles = await self.hist_svc.repo.get_candles(
+                instrument_id,
+                "1m",
+                start_time=start,
+                end_time=end,
+                limit=1000,
+            )
+        except Exception as exc:
+            logger.warning("Historical 1m replay query error: %s", exc)
+            return []
+        allowed = (
+            {"BREEZE", "KITE", "LIVE"}
+            if historical_source == HistoricalReplaySource.MIXED
+            else {historical_source.value}
+        )
+        return [candle for candle in candles if candle.source in allowed]
 
     async def run_day_simulation(self, request: SimulationRequest) -> SimulationResult:
         """Replay actual bars without inventing historical option fills or PnL."""
@@ -758,19 +950,114 @@ class SimulationEngine:
         overrides = request.overrides or ThresholdOverrides()
         if bypass_entry_window:
             overrides = overrides.model_copy(update={"bypass_entry_window": True})
+
         cfg = self.tunables
-        strategy_a_cfg = self._strategy_a_config_for_replay(overrides)
-        strat_a = TrendPullbackStrategy(config=strategy_a_cfg, allow_session_bypass=True)
-        strat_b = VolatilityBreakoutStrategy(rvol_threshold=cfg.rvol_threshold, adx_threshold=cfg.strategy_b_adx_threshold,
-                                             min_confirmation_score=cfg.strat_b_min_confirmation,
-                                             box_max_height_atr=cfg.box_max_height_atr,
-                                             bb_width_percentile_threshold=cfg.bb_width_percentile_threshold,
-                                             lookback_bars=cfg.compression_lookback_bars,
-                                             max_age_bars=cfg.box_max_age_bars,
-                                             breakout_buffer_atr=cfg.breakout_buffer_atr,
-                                             max_extension_atr=cfg.breakout_max_extension_atr,
-                                             entry_start=self.session_config.strategy_b_no_new_trade_before,
-                                             entry_end=self.session_config.no_new_trade_after)
+        strategy_registry = ReplayStrategyRegistry.default(
+            cfg,
+            self.session_config,
+        )
+        override_values = overrides.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude_defaults=True,
+        )
+        supported_replay_overrides = strategy_registry.supported_override_fields()
+        applied_overrides = {
+            name: value
+            for name, value in override_values.items()
+            if name in supported_replay_overrides
+        }
+        if bypass_entry_window:
+            applied_overrides["bypass_entry_window"] = True
+
+        def replay_override_reason(name: str) -> str:
+            if name == "adx_threshold":
+                return (
+                    "Strategy A uses momentum-health gates (ADX change and EMA20 slope), "
+                    "not a hard ADX floor."
+                )
+            if "premium" in name:
+                return (
+                    "Research replay does not apply option contract-selection "
+                    "overrides."
+                    if request.replay_mode == HistoricalReplayMode.RESEARCH
+                    else (
+                        "Execution Parity applies this override only when an "
+                        "exact point-in-time chain snapshot supports the "
+                        "production ContractSelector; APPROXIMATED_SELECTION "
+                        "cannot prove the premium/liquidity rule."
+                    )
+                )
+            return "Current A/B Day Replay does not consume this override."
+
+        conditional_overrides = {
+            name: {
+                "value": value,
+                "reason": replay_override_reason(name),
+            }
+            for name, value in override_values.items()
+            if (
+                request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+                and "premium" in name
+            )
+        }
+        not_applied_overrides = {
+            name: {
+                "value": value,
+                "reason": replay_override_reason(name),
+            }
+            for name, value in override_values.items()
+            if name not in supported_replay_overrides
+            and name != "bypass_entry_window"
+            and name not in conditional_overrides
+        }
+        effective_overrides = ThresholdOverrides.model_validate(applied_overrides)
+
+        risk_updates: dict[str, Any] = {}
+        applied_request_controls: dict[str, Any] = {}
+        not_applied_request_controls: dict[str, Any] = {}
+        if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY:
+            if "capital" in request.model_fields_set:
+                risk_updates["account_equity"] = request.capital
+                applied_request_controls["capital"] = request.capital
+            if request.risk_per_trade_pct is not None:
+                risk_updates["risk_per_trade_pct_of_account"] = (
+                    request.risk_per_trade_pct
+                )
+                applied_request_controls["risk_per_trade_pct"] = (
+                    request.risk_per_trade_pct
+                )
+            if "max_trades_per_day" in request.model_fields_set:
+                risk_updates["max_trades_per_day"] = request.max_trades_per_day
+                applied_request_controls["max_trades_per_day"] = (
+                    request.max_trades_per_day
+                )
+        else:
+            not_applied_request_controls = {
+                "capital": {
+                    "value": request.capital,
+                    "reason": (
+                        "Research replay does not apply portfolio sizing."
+                    ),
+                },
+                "risk_per_trade_pct": {
+                    "value": request.risk_per_trade_pct,
+                    "reason": (
+                        "Research replay does not apply portfolio sizing."
+                    ),
+                },
+                "max_trades_per_day": {
+                    "value": request.max_trades_per_day,
+                    "reason": (
+                        "Research replay intentionally does not apply "
+                        "chronological daily trade gates."
+                    ),
+                },
+            }
+        effective_risk_config = self.risk_config.model_copy(
+            update=risk_updates
+        )
+
         missing_data: list[str] = []
         if source_diagnostics["spot"]["missing_selected_source"] or not session:
             missing_data.append("spot")
@@ -789,9 +1076,53 @@ class SimulationEngine:
             historical_source=historical_source,
             bypass_entry_window=bypass_entry_window,
             strategy_a_enabled=cfg.trend_pullback_enabled,
-            overrides=overrides,
+            overrides=effective_overrides,
             tunables=cfg,
             session=self.session_config,
+            execution_parity=(
+                {
+                    "mode": request.replay_mode.value,
+                    "risk": effective_risk_config.model_dump(mode="json"),
+                    "contract_selection": {
+                        "desired_method": "PRODUCTION_CONTRACT_SELECTOR",
+                        "exact_evidence": (
+                            "EXACT_STRATEGY_SIGNAL_ID_POINT_IN_TIME_CHAIN_SNAPSHOT"
+                        ),
+                        "fallback": "APPROXIMATED_SELECTION",
+                        "premium_cap_override": (
+                            overrides.max_option_premium_cap
+                            or overrides.max_option_premium
+                        ),
+                    },
+                    "sizing": {
+                        "strategy_a_fallback_delta_proxy": (
+                            self.option_selection_config.preferred_delta_min
+                            + self.option_selection_config.preferred_delta_max
+                        )
+                        / 2.0,
+                        "exact_selection_price_basis": "POINT_IN_TIME_ASK",
+                        "approximate_selection_price_basis": (
+                            "HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARK"
+                        ),
+                    },
+                    "execution_model": {
+                        "entry": (
+                            "ask_plus_slippage_when_bid_ask_available_else_"
+                            "completed_mark_plus_slippage_estimate"
+                        ),
+                        "exit": (
+                            "bid_minus_slippage_when_bid_ask_available_else_"
+                            "completed_mark_minus_slippage_estimate"
+                        ),
+                        "cost_assumptions": (
+                            effective_risk_config.model_dump(mode="json")
+                        ),
+                    },
+                }
+                if request.replay_mode
+                == HistoricalReplayMode.EXECUTION_PARITY
+                else None
+            ),
         )
         config_hash = configuration_fingerprint(config_snapshot)
         data_snapshot = build_data_fingerprint(
@@ -809,189 +1140,100 @@ class SimulationEngine:
             "configuration_fingerprint": config_hash,
             "data_fingerprint": data_snapshot.model_dump(mode="json"),
             "historical_source": historical_source.value,
+            "requested_replay_mode": request.replay_mode.value,
             "bypass_entry_window": bypass_entry_window,
             "missing_data": sorted(set(missing_data)),
+            "strategy_registry": strategy_registry.metadata_snapshot(),
+            "control_application": {
+                "applied_overrides": applied_overrides,
+                "conditionally_applied_overrides": conditional_overrides,
+                "not_applied_overrides": not_applied_overrides,
+                "applied_request_controls": applied_request_controls,
+                "not_applied_request_controls": not_applied_request_controls,
+            },
+            "effective_risk_config": {
+                "account_equity": effective_risk_config.account_equity,
+                "risk_per_trade_pct_of_account": (
+                    effective_risk_config.risk_per_trade_pct_of_account
+                ),
+                "max_trade_capital": effective_risk_config.max_trade_capital,
+                "max_lots_per_trade": effective_risk_config.max_lots_per_trade,
+                "max_trades_per_day": effective_risk_config.max_trades_per_day,
+                "max_trades_per_strategy_per_day": (
+                    effective_risk_config.max_trades_per_strategy_per_day
+                ),
+                "max_failed_trades_per_strategy": (
+                    effective_risk_config.max_failed_trades_per_strategy
+                ),
+                "max_concurrent_positions": (
+                    effective_risk_config.max_concurrent_positions
+                ),
+                "cooldown_after_loss_min": (
+                    effective_risk_config.cooldown_after_loss_min
+                ),
+                "max_daily_loss_r": effective_risk_config.max_daily_loss_r,
+            },
+            "execution_authority_scope": (
+                {
+                    "session_entry_windows": "APPLIED",
+                    "kill_switch": (
+                        "NOT_REPLAYED_POINT_IN_TIME_OPERATIONAL_STATE_UNAVAILABLE"
+                    ),
+                    "auto_trade_enabled": (
+                        "NOT_REPLAYED_POINT_IN_TIME_OPERATIONAL_STATE_UNAVAILABLE"
+                    ),
+                    "live_system_armed": (
+                        "NOT_APPLICABLE_TO_HISTORICAL_EXECUTION_PARITY"
+                    ),
+                    "daily_loss_pct": (
+                        "APPLIED_WHEN_ALL_PRIOR_RESOLVED_TRADES_HAVE_"
+                        "ESTIMATED_EXECUTABLE_NET_PNL"
+                    ),
+                }
+                if request.replay_mode
+                == HistoricalReplayMode.EXECUTION_PARITY
+                else None
+            ),
         }
+        one_minute_candles = await self._load_replay_one_minute_candles(
+            date_str,
+            request.instrument_id,
+            historical_source,
+        )
+        contract_provider = (
+            HistoricalContractSelectionProvider(
+                historical_service=self.hist_svc,
+                strategy_repository=self.strategy_repo,
+                option_config=self.option_selection_config,
+            )
+            if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+            else None
+        )
+        if contract_provider is not None:
+            await contract_provider.prepare_session(
+                date_str=date_str,
+                historical_source=historical_source,
+            )
+        replay_selection_decisions: dict[
+            str, ReplayContractSelectionDecision
+        ] = {}
+        execution_economics_applied: set[str] = set()
         timeline, logs = [], []
         replay_trigger_diagnostics: list[dict[str, Any]] = []
-        replay_diagnostic_keys: set[tuple[str, str]] = set()
-        strategy_a_event_keys: set[tuple[str, str, str | None]] = set()
-        strategy_a_event_counts: Counter[str] = Counter()
+        replay_diagnostic_keys: set[tuple[str, str, str]] = set()
+        replay_event_keys: dict[StrategyName, set[tuple[str, str, str | None]]] = {}
+        replay_event_counts: dict[StrategyName, Counter[str]] = {}
         replay_manifest_recorder = self.replay_manifest_recorder or ReplayManifestRecorder()
         replay_manifest_recorder.set_replay_metadata(replay_metadata)
-        running = list(warmup)
-        for idx, bar in enumerate(session):
-            running.append(bar)
-            macro = self.resample_to_15m(running, request.instrument_id)
-            futures = [c for c in futures_history if c.end_time <= bar.end_time]
-            strategy_a_futures = [
-                c for c in strategy_a_futures_history if c.end_time <= bar.end_time
-            ]
-            features = FeatureEngine.compute_all_features(running, macro, futures,
-                                                          spot_price=bar.close, as_of=bar.end_time)
-            diags_a = strat_a.diagnose(
-                features,
-                running,
-                macro,
-                overrides=overrides,
-                futures_candles=strategy_a_futures,
-            )
-            diags_b = strat_b.diagnose(features, running, overrides=overrides)
-            clock = bar.end_time.astimezone(IST)
-            minutes = clock.hour*60+clock.minute
-            a_start_h, a_start_m = map(int, self.tunables.entry_session_start.split(":"))
-            a_end_h, a_end_m = map(int, self.tunables.entry_session_end.split(":"))
-            b_start_h, b_start_m = map(int, self.session_config.no_new_trade_before.split(":"))
-            b_end_h, b_end_m = map(int, self.session_config.no_new_trade_after.split(":"))
-            a_window = a_start_h * 60 + a_start_m <= minutes <= a_end_h * 60 + a_end_m
-            b_window = b_start_h * 60 + b_start_m <= minutes <= b_end_h * 60 + b_end_m
-            in_window = bypass_entry_window or (
-                (self.tunables.trend_pullback_enabled and a_window)
-                or (self.tunables.volatility_breakout_enabled and b_window)
-            )
-            event, details = None, None
-            effective_diags_a = diags_a
-            sig_a = None
-            strategy_a_event = None
-            if (strategy_a_futures and in_window) or (features.data_ready or features.breakout_data_ready) and in_window:
-                if cfg.trend_pullback_enabled and strategy_a_futures:
-                    # Strategy A replay calls the exact production state
-                    # machine over the canonical multi-contract futures stream.
-                    # There is no replay-only trigger evaluator.
-                    sig_a = strat_a.evaluate(
-                        features,
-                        running,
-                        macro,
-                        strategy_a_futures,
-                        overrides,
-                    )
-                    strategy_a_event = strat_a.last_event
-                    effective_diags_a = strat_a.diagnose(
-                        features,
-                        running,
-                        macro,
-                        overrides=overrides,
-                        futures_candles=strategy_a_futures,
-                    )
-                    if sig_a is not None:
-                        snapshot = sig_a.features_snapshot
-                        replay_manifest_recorder.record_entry(
-                            signal=sig_a, trading_date=date_str,
-                            trigger_source_candle_timestamp=bar.end_time,
-                            trigger_level=float(snapshot.get("trigger", sig_a.underlying_entry_price or sig_a.spot_reference_price)),
-                            simulated_entry_timestamp=bar.end_time,
-                            simulated_entry_price=float(snapshot.get("entry_price", sig_a.underlying_entry_price or sig_a.spot_reference_price)),
-                            entry_5m_candle_timestamp=bar.end_time,
-                            entry_occurred_intrabar=False, entry_features=snapshot,
-                            setup_id=sig_a.signal_id,
-                            pullback_swing_low=None, pullback_swing_high=None,
-                            impulse_low=None, impulse_high=None,
-                            atr_at_entry=float(snapshot.get("atr14", 0.0)),
-                            initial_structural_stop=float(sig_a.structural_stop),
-                            initial_risk_points=float(sig_a.r_points),
-                            initial_risk_atr=(float(sig_a.r_points) / float(snapshot.get("atr14", 1.0))) if snapshot.get("atr14") else 0.0,
-                            current_trailing_stop=float(sig_a.structural_stop), current_r=0.0,
-                            highest_favorable_price=float(sig_a.underlying_entry_price or sig_a.spot_reference_price),
-                            lowest_favorable_price=float(sig_a.underlying_entry_price or sig_a.spot_reference_price),
-                            peak_r=0.0, protected_breakeven_active=False, profit_lock_active=False,
-                            runner_mode_active=False, current_ladder_stage="OPEN_INITIAL_RISK", reversal_score=0,
-                            adverse_health_counters={}, entry_bar_timestamp=bar.end_time,
-                            last_managed_completed_bar_timestamp=None,
-                        )
-                        strat_a.confirm_entry(sig_a.timestamp)
-                        effective_diags_a = strat_a.diagnose(
-                            features,
-                            running,
-                            macro,
-                            overrides=overrides,
-                            futures_candles=strategy_a_futures,
-                        )
-                sig_b = strat_b.evaluate(features, running, overrides=overrides) if cfg.volatility_breakout_enabled else None
-                if sig_b is not None:
-                    _record_strategy_b_manifest(
-                        replay_manifest_recorder,
-                        sig_b,
-                        trading_date=date_str,
-                        breakout_candle=bar,
-                    )
-                signal = sig_a or sig_b
-                if signal:
-                    event, details = "SIGNAL_ONLY", "Qualified signal; historical executable option quotes unavailable"
-                    logs.append(DecisionLogEntry(id=f"SIM-{idx}", timestamp=bar.end_time, category="SETUP",
-                                                 strategy=signal.strategy.value, message=details,
-                                                 details=signal.model_dump(mode="json")))
-            else:
-                strat_a.reset(bar.end_time)
-                strat_b.reset(bar.end_time)
-                details = features.data_reason if not features.data_ready else "Outside entry window"
-            strategy_a_summary_window = bypass_entry_window or a_window
-            if strategy_a_summary_window:
-                if strategy_a_event is not None and strategy_a_event.event != "DUPLICATE_IGNORED":
-                    event_key = (
-                        strategy_a_event.event,
-                        strategy_a_event.timestamp.isoformat(),
-                        strategy_a_event.reason,
-                    )
-                    if event_key not in strategy_a_event_keys:
-                        strategy_a_event_keys.add(event_key)
-                        strategy_a_event_counts[strategy_a_event.event] += 1
-                for diag in effective_diags_a:
-                    completed_ts = str((diag.phase_summary or {}).get("completed_candle_timestamp") or bar.end_time.isoformat())
-                    key = (diag.direction.value, completed_ts)
-                    if key in replay_diagnostic_keys:
-                        continue
-                    replay_diagnostic_keys.add(key)
-                    replay_trigger_diagnostics.append({
-                        "timestamp": bar.end_time.isoformat(),
-                        "completed_futures_candle": completed_ts,
-                        "strategy": diag.strategy.value,
-                        "direction": diag.direction.value,
-                        "option_type": diag.option_type.value,
-                        "phase_state": diag.phase_state,
-                        "key_blocker": diag.key_blocker,
-                        "passed_count": diag.passed_count,
-                        "total_count": diag.total_count,
-                        "ready_pct": diag.ready_pct,
-                        "conditions": [item.model_dump(mode="json") for item in diag.conditions],
-                        "strategy_a_v2": (diag.phase_summary or {}).get("strategy_a_v2", {}),
-                    })
-            timeline.append(SimulationBarSnapshot(
-                bar_index=idx, timestamp=bar.end_time.isoformat(), ist_time=clock.strftime("%H:%M"),
-                open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, spot=bar.close,
-                ema9_5m=features.ema9_5m, ema20_5m=features.ema20_5m,
-                supertrend=features.supertrend_direction, adx_15m=features.adx_15m,
-                rvol_5m=features.rvol_5m, bb_width_percentile=features.bb_width_percentile,
-                strategy_a_phase=(max(effective_diags_a, key=lambda d: d.passed_count).phase_state if effective_diags_a else strat_a.snapshot.state.value),
-                strategy_b_phase=max(diags_b, key=lambda d: d.passed_count).phase_state,
-                event=event, event_details=details))
-
-        # Replay-only lifecycle pass.  It consumes the frozen signal manifests
-        # after signal generation has completed, so PositionManager state can
-        # never suppress or alter Strategy A signal discovery.
-        one_minute_candles: list[Candle] = []
-        if self.hist_svc and hasattr(self.hist_svc, "repo"):
-            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            one_minute_start = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST).astimezone(timezone.utc)
-            one_minute_end = datetime(target_date.year, target_date.month, target_date.day, 15, 30, tzinfo=IST).astimezone(timezone.utc)
-            try:
-                one_minute_candles = await self.hist_svc.repo.get_candles(
-                    request.instrument_id, "1m", start_time=one_minute_start,
-                    end_time=one_minute_end, limit=1000,
-                )
-                allowed = {"BREEZE", "KITE", "LIVE"} if historical_source == HistoricalReplaySource.MIXED else {historical_source.value}
-                one_minute_candles = [c for c in one_minute_candles if c.source in allowed]
-            except Exception as ex:
-                logger.warning("Historical 1m replay query error: %s", ex)
-
-        from services.strategy.replay_lifecycle import (
-            HistoricalPositionManagerReplayer,
-            attach_historical_option_prices,
-            build_lifecycle_report,
-            build_simulated_trade_records,
-            summarize_simulated_pnl,
+        replay_session = ReplaySessionContext(
+            trading_date=date_str,
+            instrument_id=request.instrument_id,
+            overrides=effective_overrides,
+            recorder=replay_manifest_recorder,
         )
+        strategy_registry.prepare_session(replay_session)
         lifecycle_replayer = HistoricalPositionManagerReplayer(
-            risk_config=self.risk_config,
+            risk_config=effective_risk_config,
             session_config=self.session_config,
             strategy_config=self.tunables,
             recorder=replay_manifest_recorder,
@@ -1001,34 +1243,567 @@ class SimulationEngine:
             futures_candles=futures_history,
             one_minute_candles=one_minute_candles,
         )
-        lifecycle_resolver = lifecycle_replayer.replay(replay_manifest_recorder.records())
+        chronological_executor = (
+            ChronologicalReplayExecutor(
+                lifecycle_replayer=lifecycle_replayer,
+                registry=strategy_registry,
+                risk_config=effective_risk_config,
+            )
+            if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+            else None
+        )
+
+        running = list(warmup)
+        for idx, bar in enumerate(session):
+            running.append(bar)
+            macro = self.resample_to_15m(running, request.instrument_id)
+            futures = [c for c in futures_history if c.end_time <= bar.end_time]
+            strategy_futures = [
+                c for c in strategy_a_futures_history if c.end_time <= bar.end_time
+            ]
+            features = FeatureEngine.compute_all_features(
+                running,
+                macro,
+                futures,
+                spot_price=bar.close,
+                as_of=bar.end_time,
+            )
+            clock = bar.end_time.astimezone(IST)
+            in_window = strategy_registry.any_evaluation_window_active(
+                bar.end_time,
+                bypass_entry_window=bypass_entry_window,
+            )
+            base_allow_evaluation = bool(
+                in_window
+                and (
+                    strategy_futures
+                    or features.data_ready
+                    or features.breakout_data_ready
+                )
+            )
+            bar_context = ReplayBarContext(
+                session=replay_session,
+                bar=bar,
+                features=features,
+                spot_candles_5m=running,
+                spot_candles_15m=macro,
+                futures_candles=strategy_futures,
+            )
+
+            event, details = None, None
+            evaluations = []
+            signal = None
+
+            if chronological_executor is not None:
+                closed_records = chronological_executor.manage_completed_bar(
+                    bar,
+                    running,
+                )
+                if contract_provider is not None:
+                    for closed_record in closed_records:
+                        await self._attach_execution_parity_economics(
+                            record=closed_record,
+                            provider=contract_provider,
+                            risk_config=effective_risk_config,
+                            selection=replay_selection_decisions.get(
+                                closed_record.replay_signal_id
+                            ),
+                            recorder=replay_manifest_recorder,
+                        )
+                        chronological_executor.apply_execution_economics(
+                            closed_record
+                        )
+                        execution_economics_applied.add(
+                            closed_record.replay_signal_id
+                        )
+                global_gate = chronological_executor.global_entry_gate(
+                    bar.end_time
+                )
+                if not global_gate.allowed:
+                    strategy_registry.reset_all(bar.end_time)
+                    chronological_executor.note_entry_evaluation_suppressed(
+                        global_gate.status
+                    )
+                    evaluations = strategy_registry.evaluate_completed_bar(
+                        bar_context,
+                        allow_evaluation=False,
+                    )
+                    event = global_gate.status
+                    details = (
+                        "New entry evaluation suppressed by execution-parity "
+                        f"risk gate: {global_gate.status}."
+                    )
+                else:
+                    evaluations = strategy_registry.evaluate_completed_bar(
+                        bar_context,
+                        allow_evaluation=base_allow_evaluation,
+                        stop_after_signal=True,
+                    )
+                    signal = strategy_registry.first_signal(evaluations)
+                    if signal is not None:
+                        strategy_gate = (
+                            chronological_executor.strategy_entry_gate(signal)
+                        )
+                        if not strategy_gate.allowed:
+                            chronological_executor.record_rejection(
+                                at=bar.end_time,
+                                status=strategy_gate.status,
+                                strategy=signal.strategy,
+                                signal_id=signal.signal_id,
+                                details=strategy_gate.details,
+                            )
+                            event = "ENTRY_REJECTED_RISK"
+                            details = strategy_gate.status
+                            logs.append(
+                                DecisionLogEntry(
+                                    id=f"SIM-{idx}",
+                                    timestamp=bar.end_time,
+                                    category="RISK",
+                                    strategy=signal.strategy.value,
+                                    message=details,
+                                    details={
+                                        **signal.model_dump(mode="json"),
+                                        "risk_gate": (
+                                            strategy_gate.details or {}
+                                        ),
+                                    },
+                                )
+                            )
+                        else:
+                            if contract_provider is None:
+                                raise RuntimeError(
+                                    "execution-parity contract provider missing"
+                                )
+                            selection = await contract_provider.select_contract(
+                                signal,
+                                override_premium_cap=(
+                                    overrides.max_option_premium_cap
+                                    or overrides.max_option_premium
+                                ),
+                            )
+                            selection_meta = (
+                                selection.to_manifest_metadata()
+                            )
+                            if (
+                                not selection.selected
+                                or selection.entry_reference_price is None
+                            ):
+                                status = (
+                                    selection.rejection_reason
+                                    or "CONTRACT_SELECTION_FAILED"
+                                )
+                                chronological_executor.record_rejection(
+                                    at=bar.end_time,
+                                    status="CONTRACT_SELECTION_REJECTED",
+                                    strategy=signal.strategy,
+                                    signal_id=signal.signal_id,
+                                    details=selection_meta,
+                                )
+                                strategy_registry.notify_execution_rejected(
+                                    signal,
+                                    (
+                                        "EXECUTION_REJECTED_CONTRACT_SELECTION:"
+                                        f"{status}"
+                                    ),
+                                )
+                                event = "ENTRY_REJECTED_CONTRACT_SELECTION"
+                                details = status
+                                logs.append(
+                                    DecisionLogEntry(
+                                        id=f"SIM-{idx}",
+                                        timestamp=bar.end_time,
+                                        category="CONTRACT_SELECTION",
+                                        strategy=signal.strategy.value,
+                                        message=status,
+                                        details=selection_meta,
+                                    )
+                                )
+                            else:
+                                contract = selection.selected_contract
+                                option_delta = getattr(
+                                    contract,
+                                    "delta",
+                                    None,
+                                )
+                                option_delta_source = getattr(
+                                    contract,
+                                    "greek_source",
+                                    None,
+                                )
+                                sizing = calculate_replay_sizing(
+                                    signal=signal,
+                                    contract=contract,
+                                    entry_reference_price=float(
+                                        selection.entry_reference_price
+                                    ),
+                                    risk_config=effective_risk_config,
+                                    option_selection=(
+                                        self.option_selection_config
+                                    ),
+                                    session_config=self.session_config,
+                                    strategy_config=self.tunables,
+                                    account_equity=(
+                                        effective_risk_config.account_equity
+                                    ),
+                                    option_delta=option_delta,
+                                    option_delta_source=option_delta_source,
+                                    price_basis=selection.entry_price_basis,
+                                )
+                                if sizing.status != "APPLIED":
+                                    status = (
+                                        sizing.rejection_reason
+                                        or "INSUFFICIENT_CAPITAL_OR_RISK_BUDGET"
+                                    )
+                                    chronological_executor.record_rejection(
+                                        at=bar.end_time,
+                                        status="SIZING_REJECTED",
+                                        strategy=signal.strategy,
+                                        signal_id=signal.signal_id,
+                                        details={
+                                            "reason": status,
+                                            "lots": sizing.lots,
+                                            "quantity": sizing.quantity,
+                                            "method": sizing.method,
+                                            "contract_selection": (
+                                                selection_meta
+                                            ),
+                                        },
+                                    )
+                                    strategy_registry.notify_execution_rejected(
+                                        signal,
+                                        (
+                                            "EXECUTION_REJECTED_SIZING:"
+                                            f"{status}"
+                                        ),
+                                    )
+                                    event = "ENTRY_REJECTED_SIZING"
+                                    details = status
+                                else:
+                                    replay_selection_decisions[
+                                        signal.signal_id
+                                    ] = selection
+                                    record = (
+                                        chronological_executor.accept_signal(
+                                            signal,
+                                            bar_context,
+                                            sizing=sizing,
+                                            selection=selection,
+                                        )
+                                    )
+                                    evaluations = (
+                                        strategy_registry.refresh_diagnostics(
+                                            evaluations,
+                                            bar_context,
+                                        )
+                                    )
+                                    event = "ENTRY_ACCEPTED"
+                                    details = (
+                                        "Qualified signal accepted into "
+                                        "execution-parity replay using "
+                                        f"{selection.evidence_status}; "
+                                        f"{sizing.lots} lot(s) / "
+                                        f"{sizing.quantity} quantity."
+                                    )
+                                    if record.lifecycle_status != "PENDING":
+                                        event = "ENTRY_RESOLUTION"
+                                        details = (
+                                            "Signal entry was resolved on its "
+                                            "entry candle: "
+                                            f"{record.lifecycle_status}."
+                                        )
+                                        await self._attach_execution_parity_economics(
+                                            record=record,
+                                            provider=contract_provider,
+                                            risk_config=effective_risk_config,
+                                            selection=selection,
+                                            recorder=replay_manifest_recorder,
+                                        )
+                                        chronological_executor.apply_execution_economics(
+                                            record
+                                        )
+                                        execution_economics_applied.add(
+                                            record.replay_signal_id
+                                        )
+                                    logs.append(
+                                        DecisionLogEntry(
+                                            id=f"SIM-{idx}",
+                                            timestamp=bar.end_time,
+                                            category="SETUP",
+                                            strategy=signal.strategy.value,
+                                            message=details,
+                                            details={
+                                                **signal.model_dump(
+                                                    mode="json"
+                                                ),
+                                                "contract_selection": (
+                                                    selection_meta
+                                                ),
+                                                "sizing": {
+                                                    "method": sizing.method,
+                                                    "lots": sizing.lots,
+                                                    "quantity": (
+                                                        sizing.quantity
+                                                    ),
+                                                    "risk_budget": (
+                                                        sizing.risk_budget
+                                                    ),
+                                                    "price_basis": (
+                                                        sizing.price_basis
+                                                    ),
+                                                },
+                                            },
+                                        )
+                                    )
+                    elif not base_allow_evaluation:
+                        strategy_registry.reset_all(bar.end_time)
+                        details = (
+                            features.data_reason
+                            if not features.data_ready
+                            else "Outside entry window"
+                        )
+            else:
+                evaluations = strategy_registry.evaluate_completed_bar(
+                    bar_context,
+                    allow_evaluation=base_allow_evaluation,
+                )
+                qualified_signals = [
+                    item.signal
+                    for item in evaluations
+                    if item.signal is not None
+                ]
+                for qualified_signal in qualified_signals:
+                    strategy_registry.confirm_entry(
+                        qualified_signal,
+                        bar_context,
+                    )
+                if qualified_signals:
+                    evaluations = strategy_registry.refresh_diagnostics(
+                        evaluations,
+                        bar_context,
+                    )
+                    signal = qualified_signals[0]
+                    event = "SIGNAL_ONLY"
+                    details = (
+                        "Qualified signal; historical executable option quotes unavailable"
+                    )
+                    logs.append(
+                        DecisionLogEntry(
+                            id=f"SIM-{idx}",
+                            timestamp=bar.end_time,
+                            category="SETUP",
+                            strategy=signal.strategy.value,
+                            message=details,
+                            details=signal.model_dump(mode="json"),
+                        )
+                    )
+                elif not base_allow_evaluation:
+                    strategy_registry.reset_all(bar.end_time)
+                    details = (
+                        features.data_reason
+                        if not features.data_ready
+                        else "Outside entry window"
+                    )
+
+            for evaluation in evaluations:
+                metadata = evaluation.metadata
+                in_strategy_window = strategy_registry.evaluation_window_active(
+                    metadata,
+                    bar.end_time,
+                    bypass_entry_window=bypass_entry_window,
+                )
+                if not in_strategy_window:
+                    continue
+
+                if (
+                    metadata.audit_events
+                    and evaluation.event is not None
+                    and evaluation.event.event != "DUPLICATE_IGNORED"
+                ):
+                    event_keys = replay_event_keys.setdefault(
+                        metadata.strategy,
+                        set(),
+                    )
+                    event_counts = replay_event_counts.setdefault(
+                        metadata.strategy,
+                        Counter(),
+                    )
+                    event_key = (
+                        evaluation.event.event,
+                        evaluation.event.timestamp.isoformat(),
+                        evaluation.event.reason,
+                    )
+                    if event_key not in event_keys:
+                        event_keys.add(event_key)
+                        event_counts[str(evaluation.event.event)] += 1
+
+                if metadata.audit_diagnostics:
+                    for row in evaluation.audit_records:
+                        key = (
+                            str(row.get("strategy") or metadata.strategy.value),
+                            str(row.get("direction") or ""),
+                            str(row.get("completed_futures_candle") or ""),
+                        )
+                        if key in replay_diagnostic_keys:
+                            continue
+                        replay_diagnostic_keys.add(key)
+                        replay_trigger_diagnostics.append(row)
+
+            phases = strategy_registry.timeline_phases(evaluations)
+            active_trade_id = None
+            if (
+                chronological_executor is not None
+                and chronological_executor.state.active_positions
+            ):
+                active_trade_id = (
+                    chronological_executor.state.active_positions[0]
+                    .trade.trade_id
+                )
+            timeline.append(
+                SimulationBarSnapshot(
+                    bar_index=idx,
+                    timestamp=bar.end_time.isoformat(),
+                    ist_time=clock.strftime("%H:%M"),
+                    open=bar.open,
+                    high=bar.high,
+                    low=bar.low,
+                    close=bar.close,
+                    volume=bar.volume,
+                    spot=bar.close,
+                    ema9_5m=features.ema9_5m,
+                    ema20_5m=features.ema20_5m,
+                    supertrend=features.supertrend_direction,
+                    adx_15m=features.adx_15m,
+                    rvol_5m=features.rvol_5m,
+                    bb_width_percentile=features.bb_width_percentile,
+                    strategy_a_phase=phases.get("strategy_a_phase", "FLAT"),
+                    strategy_b_phase=phases.get("strategy_b_phase", "RESET"),
+                    active_trade_id=active_trade_id,
+                    event=event,
+                    event_details=details,
+                )
+            )
+
+        strategy_a_event_counts = replay_event_counts.get(
+            StrategyName.TREND_PULLBACK,
+            Counter(),
+        )
+
+        if chronological_executor is not None:
+            chronological_executor.finalize_session()
+            if contract_provider is not None:
+                for record in replay_manifest_recorder.records():
+                    if (
+                        record.lifecycle_status == "RESOLVED"
+                        and record.replay_signal_id
+                        not in execution_economics_applied
+                    ):
+                        await self._attach_execution_parity_economics(
+                            record=record,
+                            provider=contract_provider,
+                            risk_config=effective_risk_config,
+                            selection=replay_selection_decisions.get(
+                                record.replay_signal_id
+                            ),
+                            recorder=replay_manifest_recorder,
+                        )
+                        chronological_executor.apply_execution_economics(
+                            record
+                        )
+                        execution_economics_applied.add(
+                            record.replay_signal_id
+                        )
+            replay_metadata["execution_parity"] = (
+                chronological_executor.metadata()
+            )
+            lifecycle_resolver = {
+                "resolver": dict(sorted(lifecycle_replayer.stats.items())),
+                "one_minute_candles": len(one_minute_candles),
+            }
+        else:
+            lifecycle_resolver = lifecycle_replayer.replay(
+                replay_manifest_recorder.records()
+            )
         lifecycle_report = build_lifecycle_report(replay_manifest_recorder.records(), lifecycle_resolver)
-        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        option_session_start = datetime(target_date.year, target_date.month, target_date.day, 9, 15, tzinfo=IST).astimezone(timezone.utc)
-        option_session_end = datetime(target_date.year, target_date.month, target_date.day, 15, 30, tzinfo=IST).astimezone(timezone.utc)
-        option_contracts, option_candles, option_data = await self._fetch_replay_option_candles(
-            replay_manifest_recorder.records(),
-            date_str,
-            option_session_start,
-            option_session_end,
-            historical_source,
-        )
-        attach_historical_option_prices(
-            replay_manifest_recorder.records(),
-            option_contracts,
-            option_candles,
-            self.risk_config,
-        )
+        if contract_provider is not None:
+            option_data = {
+                "status": "EVIDENCE_AWARE_EXECUTION_PARITY",
+                "desired_selection_method": "PRODUCTION_CONTRACT_SELECTOR",
+                "point_in_time_chain_snapshots": len(
+                    contract_provider.snapshots
+                ),
+                "point_in_time_option_quotes": len(
+                    contract_provider.quotes
+                ),
+                "option_contract_metadata_count": len(
+                    contract_provider.option_universe
+                ),
+                "contract_selection_fallback": "APPROXIMATED_SELECTION",
+                "mark_policy": "latest_completed_candle_close_at_event",
+                "fill_policy": (
+                    "point_in_time_bid_ask_plus_slippage_when_available_"
+                    "else_completed_mark_plus_slippage_estimate"
+                ),
+                "partial_option_exits_modeled": False,
+            }
+        else:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            option_session_start = datetime(
+                target_date.year,
+                target_date.month,
+                target_date.day,
+                9,
+                15,
+                tzinfo=IST,
+            ).astimezone(timezone.utc)
+            option_session_end = datetime(
+                target_date.year,
+                target_date.month,
+                target_date.day,
+                15,
+                30,
+                tzinfo=IST,
+            ).astimezone(timezone.utc)
+            option_contracts, option_candles, option_data = (
+                await self._fetch_replay_option_candles(
+                    replay_manifest_recorder.records(),
+                    date_str,
+                    option_session_start,
+                    option_session_end,
+                    historical_source,
+                )
+            )
+            attach_historical_option_prices(
+                replay_manifest_recorder.records(),
+                option_contracts,
+                option_candles,
+                effective_risk_config,
+            )
         replay_metadata["historical_option_data"] = option_data
         trades = build_simulated_trade_records(replay_manifest_recorder.records())
-        total_pnl, net_pnl = summarize_simulated_pnl(trades)
+        option_mark_summary = summarize_historical_option_marks(
+            replay_manifest_recorder.records()
+        )
         resolved_records = [
             record for record in replay_manifest_recorder.records()
             if record.lifecycle_status == "RESOLVED" and record.realized_r is not None
         ]
-        option_complete = bool(resolved_records) and all(
-            record.option_data_status == "AVAILABLE" for record in resolved_records
+        option_complete = bool(resolved_records) and bool(
+            option_mark_summary["all_resolved_trades_priced"]
         )
+        selection_evidence_counts = Counter(
+            record.contract_selection_evidence_status or "NOT_APPLIED"
+            for record in resolved_records
+        )
+        fill_method_counts = Counter()
+        for record in resolved_records:
+            if record.simulated_entry_fill_method:
+                fill_method_counts[
+                    f"ENTRY:{record.simulated_entry_fill_method}"
+                ] += 1
+            if record.simulated_exit_fill_method:
+                fill_method_counts[
+                    f"EXIT:{record.simulated_exit_fill_method}"
+                ] += 1
         data_quality_reasons = {"STALE_FUTURES_DATA", "FUTURES_DATA_UNAVAILABLE", "INCOMPLETE_FUTURES_DATA"}
         blocker_counts = Counter(
             item["key_blocker"]
@@ -1068,7 +1843,7 @@ class SimulationEngine:
 
         component_funnel: dict[str, dict[str, float | int]] = {}
         for item in replay_trigger_diagnostics:
-            payload = item.get("strategy_a_v2") or {}
+            payload = item.get("strategy_a_contract") or {}
             for section in ("trend", "confirmation", "confluence"):
                 for name, value in (payload.get(section, {}).get("components") or {}).items():
                     key = f"{section}.{name}"
@@ -1135,6 +1910,19 @@ class SimulationEngine:
                 f"{len(replay_manifest_recorder.records())} signal(s) were identified, but no lifecycle "
                 "could be resolved from the available post-entry historical bars."
             )
+        elif (
+            request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+            and option_complete
+        ):
+            limitation = (
+                "Historical option completed-candle marks are reported separately "
+                "from estimated executable fills. Contract selection uses the "
+                "production selector only for exact point-in-time signal snapshots; "
+                "otherwise it is explicitly APPROXIMATED_SELECTION. Estimated fills "
+                "use point-in-time bid/ask plus configured slippage when available, "
+                "otherwise completed-mark +/- slippage. Partial option exits are not "
+                "modeled in this increment."
+            )
         elif option_complete:
             limitation = (
                 "Real historical option OHLC completed-candle close marks used for entry/exit PNL; "
@@ -1146,16 +1934,129 @@ class SimulationEngine:
                 "Real completed spot/futures candles used. Historical completed option candles were "
                 "unavailable for one or more resolved trades."
             )
+        if (
+            chronological_executor is not None
+            and chronological_executor.state.chronology_indeterminate
+        ):
+            limitation = (
+                limitation
+                + " Execution-parity entry evaluation was halted after chronology "
+                "became indeterminate; no optimistic later entries were assumed."
+            )
         lifecycle_report["manifest_validation"] = replay_manifest_recorder.validate_complete(expected_count=len(replay_manifest_recorder.records()))
         replay_lifecycle = lifecycle_report
+
+        signal_metrics = ReplaySignalMetrics(
+            calculation_basis=(
+                "PRODUCTION_PRIORITY_SIGNAL_DISCOVERY_WITH_ACTIVE_POSITION_SUPPRESSION"
+                if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+                else "STRATEGY_SIGNAL_DISCOVERY_ON_COMPLETED_HISTORICAL_BARS"
+            ),
+            total_bars_evaluated=len(session),
+            qualified_signals=lifecycle_report["total_signals"],
+            ambiguous_signals=lifecycle_report["ambiguous"],
+            unresolved_signals=lifecycle_report["unresolved"],
+        )
+        underlying_lifecycle_metrics = ReplayUnderlyingLifecycleMetrics(
+            resolved_trades=lifecycle_report["resolved"],
+            winning_trades=lifecycle_report["winners"],
+            losing_trades=lifecycle_report["losers"],
+            breakeven_trades=lifecycle_report["breakeven"],
+            win_rate_pct=lifecycle_report["win_rate_pct"],
+            total_realized_r=lifecycle_report["total_r"],
+            average_realized_r=lifecycle_report["average_r"],
+            median_realized_r=lifecycle_report["median_r"],
+            average_winner_r=lifecycle_report["average_winner_r"],
+            average_loser_r=lifecycle_report["average_loser_r"],
+            profit_factor_r=lifecycle_report["profit_factor"],
+            max_drawdown_r=lifecycle_report["max_drawdown_r"],
+            max_consecutive_losses=lifecycle_report["max_consecutive_losses"],
+        )
+        option_mark_metrics = ReplayOptionMarkMetrics(
+            calculation_basis=(
+                "SEPARATE_HISTORICAL_MARK_AND_ESTIMATED_EXECUTABLE_ECONOMICS"
+                if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+                else (
+                    "REPLAY_QUANTITY_USING_REPLAY_CONTRACT_APPROXIMATION_"
+                    "AND_PAPER_COST_SCHEDULE"
+                )
+            ),
+            priced_trades=option_mark_summary["priced_trades"],
+            unpriced_trades=option_mark_summary["unpriced_trades"],
+            all_resolved_trades_priced=option_mark_summary[
+                "all_resolved_trades_priced"
+            ],
+            gross_mark_pnl=option_mark_summary["gross_mark_pnl"],
+            estimated_transaction_costs=option_mark_summary[
+                "estimated_transaction_costs"
+            ],
+            net_mark_pnl=option_mark_summary["net_mark_pnl"],
+            execution_estimated_trades=option_mark_summary[
+                "execution_estimated_trades"
+            ],
+            execution_unavailable_trades=option_mark_summary[
+                "execution_unavailable_trades"
+            ],
+            bid_ask_supported_trades=option_mark_summary[
+                "bid_ask_supported_trades"
+            ],
+            mark_fallback_fill_trades=option_mark_summary[
+                "mark_fallback_fill_trades"
+            ],
+            gross_estimated_executable_pnl=option_mark_summary[
+                "gross_estimated_executable_pnl"
+            ],
+            estimated_slippage_costs=option_mark_summary[
+                "estimated_slippage_costs"
+            ],
+            estimated_execution_transaction_costs=option_mark_summary[
+                "estimated_execution_transaction_costs"
+            ],
+            net_estimated_executable_pnl=option_mark_summary[
+                "net_estimated_executable_pnl"
+            ],
+        )
+        portfolio_metrics = (
+            ReplayPortfolioMetrics(
+                calculation_basis=(
+                    "CHRONOLOGICAL_EXECUTION_AVAILABLE_PORTFOLIO_ANALYTICS_NOT_IMPLEMENTED"
+                ),
+                limitation=(
+                    "Execution-parity replay is chronological, but portfolio equity, "
+                    "capital utilisation and portfolio drawdown reporting are deferred "
+                    "to the portfolio-analytics increment."
+                ),
+            )
+            if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+            else ReplayPortfolioMetrics()
+        )
+        data_quality = ReplayDataQuality(
+            historical_source=historical_source.value,
+            missing_data=sorted(set(missing_data)),
+            underlying_issue_counts=dict(data_quality_counts.most_common()),
+            option_mark_available_trades=option_mark_summary["priced_trades"],
+            option_mark_unavailable_trades=option_mark_summary["unpriced_trades"],
+            option_mark_quality_reasons=option_mark_summary["quality_reasons"],
+            contract_selection_evidence_counts=dict(
+                selection_evidence_counts
+            ),
+            execution_fill_method_counts=dict(fill_method_counts),
+        )
+
         return SimulationResult(
-            replay_mode="POSITION_MANAGER_REPLAY",
+            replay_mode=(
+                "EXECUTION_PARITY"
+                if request.replay_mode == HistoricalReplayMode.EXECUTION_PARITY
+                else "POSITION_MANAGER_REPLAY"
+            ),
             limitation=limitation,
-            session_date=date_str, total_bars_evaluated=len(session), total_trades=lifecycle_report["resolved"],
-            winning_trades=lifecycle_report["winners"], losing_trades=lifecycle_report["losers"],
-            win_rate_pct=lifecycle_report["win_rate_pct"], total_pnl=total_pnl, net_pnl=net_pnl,
-            total_realized_r=lifecycle_report["average_r"] * lifecycle_report["resolved"],
-            max_drawdown_pnl=None, profit_factor=0, trades=trades, timeline=timeline, decision_logs=logs,
+            session_date=date_str,
+            signal_metrics=signal_metrics,
+            underlying_lifecycle_metrics=underlying_lifecycle_metrics,
+            option_mark_metrics=option_mark_metrics,
+            portfolio_metrics=portfolio_metrics,
+            data_quality=data_quality,
+            trades=trades, timeline=timeline, decision_logs=logs,
             replay_trigger_diagnostics=replay_trigger_diagnostics,
             replay_manifests=[record.model_dump(mode="json") for record in replay_manifest_recorder.records()],
             replay_metadata=replay_metadata,

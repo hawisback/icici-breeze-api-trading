@@ -8,7 +8,8 @@ to decide when an intrabar event is chronologically usable.
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
+from dataclasses import dataclass
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from statistics import median
@@ -186,8 +187,19 @@ def _event_name_for_level(level: float) -> str:
     return {1.0: "+1R", 1.5: "+1.5R", 2.0: "+2R"}.get(level, "FAVORABLE_THRESHOLD")
 
 
+@dataclass
+class HistoricalManagedReplayPosition:
+    """One active lifecycle cursor advanced by completed bars."""
+
+    record: ReplayManifestRecord
+    trade: ActiveTrade
+    entry_bar: Candle
+    manager: PositionManager
+    managed_bars: int = 0
+
+
 class HistoricalPositionManagerReplayer:
-    """Run one independent production PositionManager lifecycle per signal."""
+    """Run production PositionManager lifecycles independently or incrementally."""
 
     def __init__(
         self,
@@ -377,172 +389,230 @@ class HistoricalPositionManagerReplayer:
         hit = bar.high >= price if trade.direction == TradeDirection.BULLISH else bar.low <= price
         return (level, price) if hit else (None, None)
 
-    def replay_record(self, record: ReplayManifestRecord) -> None:
-        entry_bar, bars = self._bars_after(record)
+    def start_record(
+        self,
+        record: ReplayManifestRecord,
+    ) -> HistoricalManagedReplayPosition | None:
+        """Create a lifecycle cursor without scanning future bars."""
+        entry_bar, _ = self._bars_after(record)
         trade = _entry_trade(record, self.instrument_id)
         if entry_bar is None:
-            self._finish(record, trade, status="UNRESOLVED", reason="ENTRY_CANDLE_NOT_FOUND")
-            return
-        if record.entry_occurred_intrabar and not self._entry_resolution(record, trade, entry_bar):
-            return
+            self._finish(
+                record,
+                trade,
+                status="UNRESOLVED",
+                reason="ENTRY_CANDLE_NOT_FOUND",
+            )
+            return None
+        if (
+            record.entry_occurred_intrabar
+            and not self._entry_resolution(record, trade, entry_bar)
+        ):
+            return None
+        return HistoricalManagedReplayPosition(
+            record=record,
+            trade=trade,
+            entry_bar=entry_bar,
+            manager=PositionManager(
+                self.risk_config,
+                self.session_config,
+                strategy_config=self.strategy_config,
+            ),
+        )
 
-        pm = PositionManager(self.risk_config, self.session_config, strategy_config=self.strategy_config)
+    def advance_record(
+        self,
+        position: HistoricalManagedReplayPosition,
+        bar: Candle,
+        running: list[Candle],
+    ) -> bool:
+        """Advance one active lifecycle using only this completed bar."""
+        record = position.record
+        trade = position.trade
+        pm = position.manager
+        if bar.start_time < position.entry_bar.end_time:
+            return True
+
+        price_bar = self._underlying_bar(record, bar)
+        if price_bar is None:
+            self._finish(
+                record,
+                trade,
+                status="UNRESOLVED",
+                reason=(
+                    "FUTURES_CANDLE_NOT_FOUND"
+                    if record.strategy_id == StrategyName.TREND_PULLBACK.value
+                    else "SESSION_CANDLE_NOT_FOUND"
+                ),
+                timestamp=bar.end_time,
+            )
+            return False
+        features = self._features(bar, running)
+        before = _state_snapshot(trade, bar.start_time)
+
+        # Replay excursions on the same authoritative price series used by
+        # the strategy.  Strategy A is futures-authoritative; Strategy B
+        # remains spot-authoritative.
+        if trade.direction == TradeDirection.BULLISH:
+            trade.mfe_points = max(
+                trade.mfe_points,
+                price_bar.high - trade.entry_spot_price,
+            )
+            trade.mae_points = min(
+                trade.mae_points,
+                price_bar.low - trade.entry_spot_price,
+            )
+        else:
+            trade.mfe_points = max(
+                trade.mfe_points,
+                trade.entry_spot_price - price_bar.low,
+            )
+            trade.mae_points = min(
+                trade.mae_points,
+                trade.entry_spot_price - price_bar.high,
+            )
+
+        active_stop = trade.current_trailing_stop
+        stop_decision = evaluate_replay_candle(
+            record.direction, candle_open=price_bar.open, candle_high=price_bar.high,
+            candle_low=price_bar.low, active_stop=active_stop,
+        )
+        level, favorable_price = self._next_favorable_level(trade, price_bar)
+        resolution = None
+        if stop_decision.crossed and level is not None:
+            minutes = self._minutes(
+                price_bar.start_time,
+                price_bar.end_time,
+                instrument_id=price_bar.instrument_id,
+            )
+            if not minutes:
+                self.stats["trailing_unavailable"] += 1
+                self._record_event(record, event="AMBIGUOUS", timestamp=bar.end_time, price=None, trade=trade,
+                                   source=price_bar.start_time, details={"reason": "1-minute data unavailable", "active_stop": active_stop, "favorable_level": favorable_price})
+                self._finish(record, trade, status="AMBIGUOUS", reason="AMBIGUOUS_INTRABAR_ORDER", timestamp=bar.end_time, ambiguous=True)
+                return False
+            resolution = resolve_stop_order(record.direction, active_stop=active_stop, minute_candles=minutes, favorable_level=favorable_price)
+            if resolution.ambiguous:
+                self.stats["trailing_still_ambiguous"] += 1
+                self._record_event(record, event="AMBIGUOUS", timestamp=resolution.event_time or bar.end_time, price=None, trade=trade,
+                                   source=price_bar.start_time, details={"reason": resolution.detail, "active_stop": active_stop, "favorable_level": favorable_price})
+                self._finish(record, trade, status="AMBIGUOUS", reason="AMBIGUOUS_INTRABAR_ORDER", timestamp=resolution.event_time or bar.end_time, ambiguous=True)
+                return False
+
+        if stop_decision.crossed and (resolution is None or resolution.event == "STRUCTURAL_STOP"):
+            exit_price = stop_decision.exit_price or active_stop
+            event_time = resolution.event_time if resolution else price_bar.start_time
+            stop_features = _feature_at(features, spot=exit_price, timestamp=event_time, completed=False)
+            trade, reason = pm.update_position(trade, 0.0, stop_features, as_of=event_time)
+            after = _state_snapshot(trade, event_time)
+            label = _exit_label(reason or "STRUCTURAL_SPOT_STOP_BREACHED", trade.state)
+            event = ReplayEvent(event=label, timestamp=event_time, reference_price=exit_price,
+                                active_stop=active_stop, r_multiple=_r_for(trade.direction, trade.entry_spot_price, exit_price, trade.initial_r_points),
+                                source_candle=price_bar.start_time, details={"manager_reason": reason, "active_stop_at_bar_start": active_stop})
+            self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after, exit_event=event)
+            self._finish(record, trade, status="RESOLVED", reason=label, timestamp=event_time, price=exit_price)
+            self.stats["structural_stop"] += 1
+            return False
+
+        if resolution is not None and resolution.event == "FAVORABLE_THEN_STOP":
+            fav_time = resolution.event_time or price_bar.start_time
+            trade, _ = pm.update_position(trade, 0.0, _feature_at(features, spot=favorable_price or features.spot_price, timestamp=fav_time, completed=False), as_of=fav_time)
+            self._record_event(record, event=_event_name_for_level(level or 0.0), timestamp=fav_time,
+                               price=favorable_price, trade=trade, source=price_bar.start_time)
+            exit_price = resolution.exit_price or active_stop
+            stop_time = fav_time
+            trade, reason = pm.update_position(trade, 0.0, _feature_at(features, spot=exit_price, timestamp=stop_time, completed=False), as_of=stop_time)
+            after = _state_snapshot(trade, stop_time)
+            label = _exit_label(reason or "STRUCTURAL_SPOT_STOP_BREACHED", trade.state)
+            event = ReplayEvent(event=label, timestamp=stop_time, reference_price=exit_price, active_stop=active_stop,
+                                r_multiple=_r_for(trade.direction, trade.entry_spot_price, exit_price, trade.initial_r_points), source_candle=price_bar.start_time,
+                                details={"manager_reason": reason, "favorable_before_stop": True, "active_stop_at_bar_start": active_stop})
+            self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after, exit_event=event)
+            self._finish(record, trade, status="RESOLVED", reason=label, timestamp=stop_time, price=exit_price)
+            self.stats["trailing_then_stop"] += 1
+            return False
+
+        if level is not None and favorable_price is not None:
+            # The bar high/low is only known once this completed candle
+            # ends.  Without minute-level ordering, do not timestamp a
+            # favorable event at the start of a candle whose future range
+            # was used to detect it.
+            event_time = bar.end_time
+            trade, _ = pm.update_position(trade, 0.0, _feature_at(features, spot=favorable_price, timestamp=event_time, completed=False), as_of=event_time)
+            self._record_event(record, event=_event_name_for_level(level), timestamp=event_time, price=favorable_price, trade=trade, source=price_bar.start_time)
+
+        trade, reason = pm.update_position(trade, 0.0, features, as_of=bar.end_time)
+        after = _state_snapshot(trade, bar.end_time)
+        if after.active_stop != before.active_stop:
+            self._record_event(record, event="TRAILING_STOP_UPDATE", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time,
+                               details={"previous_stop": before.active_stop, "new_stop": after.active_stop})
+        if after.protected_breakeven_active and not before.protected_breakeven_active:
+            self._record_event(record, event="BREAKEVEN_PROTECTION", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time)
+        if after.profit_lock_active and not before.profit_lock_active:
+            self._record_event(record, event="PROFIT_LOCK", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time)
+        if after.runner_mode_active and not before.runner_mode_active:
+            self._record_event(record, event="RUNNER_MODE", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time)
+        if reason in ("T1_PARTIAL_EXIT", "T1_REACHED_NO_PARTIAL_ONE_LOT"):
+            self._record_event(
+                record,
+                event=reason,
+                timestamp=bar.end_time,
+                price=features.futures_price,
+                trade=trade,
+                source=price_bar.start_time,
+                details={"remaining_quantity": trade.remaining_quantity, "t1_exit_quantity": trade.t1_exit_quantity},
+            )
+            self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after)
+            position.trade = trade
+            position.managed_bars += 1
+            return True
+        if reason:
+            label = _exit_label(reason, trade.state)
+            price = features.futures_price if record.strategy_id == StrategyName.TREND_PULLBACK.value else features.spot_price
+            exit_event = ReplayEvent(event=label, timestamp=bar.end_time, reference_price=price, active_stop=before.active_stop,
+                                     r_multiple=trade.current_r, source_candle=price_bar.start_time, details={"manager_reason": reason})
+            self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after, exit_event=exit_event)
+            self._finish(record, trade, status="RESOLVED", reason=label, timestamp=bar.end_time, price=price)
+            self.stats[label.lower()] += 1
+            return False
+        self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after)
+
+        position.trade = trade
+        position.managed_bars += 1
+        return True
+
+    def finalize_record(
+        self,
+        position: HistoricalManagedReplayPosition,
+    ) -> None:
+        """Close an unresolved cursor at the end of available history."""
+        if position.record.lifecycle_status != "PENDING":
+            return
+        if position.managed_bars:
+            self.stats["unresolved_at_session_end"] += 1
+            reason = "SESSION_END_WITHOUT_EXIT"
+        else:
+            reason = "NO_POST_ENTRY_CANDLES"
+        self._finish(
+            position.record,
+            position.trade,
+            status="UNRESOLVED",
+            reason=reason,
+        )
+
+    def replay_record(self, record: ReplayManifestRecord) -> None:
+        """Compatibility path: replay one signal independently to completion."""
+        position = self.start_record(record)
+        if position is None:
+            return
         running = list(self.warmup)
-        entry_seen = False
         for bar in self.session:
             running.append(bar)
-            if bar.start_time <= entry_bar.start_time:
+            if bar.start_time < position.entry_bar.end_time:
                 continue
-            if bar not in bars:
-                continue
-            entry_seen = True
-            price_bar = self._underlying_bar(record, bar)
-            if price_bar is None:
-                self._finish(
-                    record,
-                    trade,
-                    status="UNRESOLVED",
-                    reason=(
-                        "FUTURES_CANDLE_NOT_FOUND"
-                        if record.strategy_id == StrategyName.TREND_PULLBACK.value
-                        else "SESSION_CANDLE_NOT_FOUND"
-                    ),
-                    timestamp=bar.end_time,
-                )
+            if not self.advance_record(position, bar, running):
                 return
-            features = self._features(bar, running)
-            before = _state_snapshot(trade, bar.start_time)
-
-            # Replay excursions on the same authoritative price series used by
-            # the strategy.  Strategy A is futures-authoritative; Strategy B
-            # remains spot-authoritative.
-            if trade.direction == TradeDirection.BULLISH:
-                trade.mfe_points = max(
-                    trade.mfe_points,
-                    price_bar.high - trade.entry_spot_price,
-                )
-                trade.mae_points = min(
-                    trade.mae_points,
-                    price_bar.low - trade.entry_spot_price,
-                )
-            else:
-                trade.mfe_points = max(
-                    trade.mfe_points,
-                    trade.entry_spot_price - price_bar.low,
-                )
-                trade.mae_points = min(
-                    trade.mae_points,
-                    trade.entry_spot_price - price_bar.high,
-                )
-
-            active_stop = trade.current_trailing_stop
-            stop_decision = evaluate_replay_candle(
-                record.direction, candle_open=price_bar.open, candle_high=price_bar.high,
-                candle_low=price_bar.low, active_stop=active_stop,
-            )
-            level, favorable_price = self._next_favorable_level(trade, price_bar)
-            resolution = None
-            if stop_decision.crossed and level is not None:
-                minutes = self._minutes(
-                    price_bar.start_time,
-                    price_bar.end_time,
-                    instrument_id=price_bar.instrument_id,
-                )
-                if not minutes:
-                    self.stats["trailing_unavailable"] += 1
-                    self._record_event(record, event="AMBIGUOUS", timestamp=bar.end_time, price=None, trade=trade,
-                                       source=price_bar.start_time, details={"reason": "1-minute data unavailable", "active_stop": active_stop, "favorable_level": favorable_price})
-                    self._finish(record, trade, status="AMBIGUOUS", reason="AMBIGUOUS_INTRABAR_ORDER", timestamp=bar.end_time, ambiguous=True)
-                    return
-                resolution = resolve_stop_order(record.direction, active_stop=active_stop, minute_candles=minutes, favorable_level=favorable_price)
-                if resolution.ambiguous:
-                    self.stats["trailing_still_ambiguous"] += 1
-                    self._record_event(record, event="AMBIGUOUS", timestamp=resolution.event_time or bar.end_time, price=None, trade=trade,
-                                       source=price_bar.start_time, details={"reason": resolution.detail, "active_stop": active_stop, "favorable_level": favorable_price})
-                    self._finish(record, trade, status="AMBIGUOUS", reason="AMBIGUOUS_INTRABAR_ORDER", timestamp=resolution.event_time or bar.end_time, ambiguous=True)
-                    return
-
-            if stop_decision.crossed and (resolution is None or resolution.event == "STRUCTURAL_STOP"):
-                exit_price = stop_decision.exit_price or active_stop
-                event_time = resolution.event_time if resolution else price_bar.start_time
-                stop_features = _feature_at(features, spot=exit_price, timestamp=event_time, completed=False)
-                trade, reason = pm.update_position(trade, 0.0, stop_features, as_of=event_time)
-                after = _state_snapshot(trade, event_time)
-                label = _exit_label(reason or "STRUCTURAL_SPOT_STOP_BREACHED", trade.state)
-                event = ReplayEvent(event=label, timestamp=event_time, reference_price=exit_price,
-                                    active_stop=active_stop, r_multiple=_r_for(trade.direction, trade.entry_spot_price, exit_price, trade.initial_r_points),
-                                    source_candle=price_bar.start_time, details={"manager_reason": reason, "active_stop_at_bar_start": active_stop})
-                self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after, exit_event=event)
-                self._finish(record, trade, status="RESOLVED", reason=label, timestamp=event_time, price=exit_price)
-                self.stats["structural_stop"] += 1
-                return
-
-            if resolution is not None and resolution.event == "FAVORABLE_THEN_STOP":
-                fav_time = resolution.event_time or price_bar.start_time
-                trade, _ = pm.update_position(trade, 0.0, _feature_at(features, spot=favorable_price or features.spot_price, timestamp=fav_time, completed=False), as_of=fav_time)
-                self._record_event(record, event=_event_name_for_level(level or 0.0), timestamp=fav_time,
-                                   price=favorable_price, trade=trade, source=price_bar.start_time)
-                exit_price = resolution.exit_price or active_stop
-                stop_time = fav_time
-                trade, reason = pm.update_position(trade, 0.0, _feature_at(features, spot=exit_price, timestamp=stop_time, completed=False), as_of=stop_time)
-                after = _state_snapshot(trade, stop_time)
-                label = _exit_label(reason or "STRUCTURAL_SPOT_STOP_BREACHED", trade.state)
-                event = ReplayEvent(event=label, timestamp=stop_time, reference_price=exit_price, active_stop=active_stop,
-                                    r_multiple=_r_for(trade.direction, trade.entry_spot_price, exit_price, trade.initial_r_points), source_candle=price_bar.start_time,
-                                    details={"manager_reason": reason, "favorable_before_stop": True, "active_stop_at_bar_start": active_stop})
-                self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after, exit_event=event)
-                self._finish(record, trade, status="RESOLVED", reason=label, timestamp=stop_time, price=exit_price)
-                self.stats["trailing_then_stop"] += 1
-                return
-
-            if level is not None and favorable_price is not None:
-                # The bar high/low is only known once this completed candle
-                # ends.  Without minute-level ordering, do not timestamp a
-                # favorable event at the start of a candle whose future range
-                # was used to detect it.
-                event_time = bar.end_time
-                trade, _ = pm.update_position(trade, 0.0, _feature_at(features, spot=favorable_price, timestamp=event_time, completed=False), as_of=event_time)
-                self._record_event(record, event=_event_name_for_level(level), timestamp=event_time, price=favorable_price, trade=trade, source=price_bar.start_time)
-
-            trade, reason = pm.update_position(trade, 0.0, features, as_of=bar.end_time)
-            after = _state_snapshot(trade, bar.end_time)
-            if after.active_stop != before.active_stop:
-                self._record_event(record, event="TRAILING_STOP_UPDATE", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time,
-                                   details={"previous_stop": before.active_stop, "new_stop": after.active_stop})
-            if after.protected_breakeven_active and not before.protected_breakeven_active:
-                self._record_event(record, event="BREAKEVEN_PROTECTION", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time)
-            if after.profit_lock_active and not before.profit_lock_active:
-                self._record_event(record, event="PROFIT_LOCK", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time)
-            if after.runner_mode_active and not before.runner_mode_active:
-                self._record_event(record, event="RUNNER_MODE", timestamp=bar.end_time, price=after.active_stop, trade=trade, source=price_bar.start_time)
-            if reason in ("T1_PARTIAL_EXIT", "T1_REACHED_NO_PARTIAL_ONE_LOT"):
-                self._record_event(
-                    record,
-                    event=reason,
-                    timestamp=bar.end_time,
-                    price=features.futures_price,
-                    trade=trade,
-                    source=price_bar.start_time,
-                    details={"remaining_quantity": trade.remaining_quantity, "t1_exit_quantity": trade.t1_exit_quantity},
-                )
-                self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after)
-                continue
-            if reason:
-                label = _exit_label(reason, trade.state)
-                price = features.futures_price if record.strategy_id == StrategyName.TREND_PULLBACK.value else features.spot_price
-                exit_event = ReplayEvent(event=label, timestamp=bar.end_time, reference_price=price, active_stop=before.active_stop,
-                                         r_multiple=trade.current_r, source_candle=price_bar.start_time, details={"manager_reason": reason})
-                self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after, exit_event=exit_event)
-                self._finish(record, trade, status="RESOLVED", reason=label, timestamp=bar.end_time, price=price)
-                self.stats[label.lower()] += 1
-                return
-            self.recorder.record_state_timeline(record.replay_signal_id, before=before, after=after)
-
-        if entry_seen:
-            self.stats["unresolved_at_session_end"] += 1
-            self._finish(record, trade, status="UNRESOLVED", reason="SESSION_END_WITHOUT_EXIT")
-        else:
-            self._finish(record, trade, status="UNRESOLVED", reason="NO_POST_ENTRY_CANDLES")
+        self.finalize_record(position)
 
     def replay(self, records: Iterable[ReplayManifestRecord]) -> dict[str, Any]:
         for record in records:
@@ -656,23 +726,56 @@ def attach_historical_option_prices(
             "pricing_field": "completed_candle_close",
             "mark_policy": "latest_completed_candle_close_at_event",
             "contract_selection_method": "nearest_strike_first_expiry_on_or_after_replay_date",
+            "sizing_status": record.sizing_status,
+            "sizing_method": record.sizing_method,
+            "sizing_price_basis": record.sizing_price_basis,
             "bid_ask_available": False,
             "executable_fill_equivalent": False,
             "entry": _historical_mark_provenance(None, record.simulated_entry_timestamp),
             "exit": _historical_mark_provenance(None, record.exit_timestamp),
         }
-        direction = "CALL" if record.direction == "CALL" else "PUT"
-        candidates = [
-            item for item in normalized
-            if item["right"] in {direction, "CE" if direction == "CALL" else "PE"}
-            and item["expiry"] >= record.trading_date
-        ]
-        if not candidates:
-            record.option_data_quality_reason = "No historical contract metadata for replay date"
-            continue
-        expiry = min(item["expiry"] for item in candidates)
-        candidates = [item for item in candidates if item["expiry"] == expiry]
-        selected = min(candidates, key=lambda item: abs(item["strike"] - record.simulated_entry_price))
+        sizing_contract_id = record.sizing_contract_instrument_id
+        if sizing_contract_id:
+            selected = next(
+                (
+                    item
+                    for item in normalized
+                    if item["instrument_id"] == sizing_contract_id
+                ),
+                None,
+            )
+            record.historical_option_provenance["sizing_contract_locked"] = True
+            if selected is None:
+                record.option_data_quality_reason = (
+                    "Historical sizing contract metadata unavailable"
+                )
+                continue
+        else:
+            record.historical_option_provenance["sizing_contract_locked"] = False
+            direction = "CALL" if record.direction == "CALL" else "PUT"
+            candidates = [
+                item for item in normalized
+                if item["right"] in {
+                    direction,
+                    "CE" if direction == "CALL" else "PE",
+                }
+                and item["expiry"] >= record.trading_date
+            ]
+            if not candidates:
+                record.option_data_quality_reason = (
+                    "No historical contract metadata for replay date"
+                )
+                continue
+            expiry = min(item["expiry"] for item in candidates)
+            candidates = [
+                item for item in candidates if item["expiry"] == expiry
+            ]
+            selected = min(
+                candidates,
+                key=lambda item: abs(
+                    item["strike"] - record.simulated_entry_price
+                ),
+            )
         record.option_contract_instrument_id = selected["instrument_id"]
         record.option_contract_symbol = selected["symbol"]
         record.option_expiry = selected["expiry"]
@@ -697,7 +800,7 @@ def attach_historical_option_prices(
             record.option_data_quality_reason = "Breeze historical option candle unavailable at entry or exit"
             continue
 
-        quantity = selected["lot_size"]
+        quantity = int(record.replay_quantity or selected["lot_size"])
         gross = round((exit_price - entry_price) * quantity, 2)
         turnover = (entry_price + exit_price) * quantity
         buy_turnover = entry_price * quantity
@@ -754,10 +857,40 @@ def build_simulated_trade_records(records: Iterable[ReplayManifestRecord]) -> li
                 initial_r_points=record.initial_risk_points,
                 peak_r=record.mfe_r if record.mfe_r is not None else record.peak_r,
                 realized_r=float(record.realized_r),
-                quantity=int(record.option_lot_size or 1),
-                lots=1,
+                quantity=int(
+                    record.replay_quantity
+                    or record.option_lot_size
+                    or 1
+                ),
+                lots=int(record.replay_lots or 1),
                 gross_pnl=record.option_gross_pnl,
                 net_pnl=record.option_net_pnl,
+                entry_mark=record.option_entry_price,
+                exit_mark=record.option_exit_price,
+                simulated_entry_fill=record.simulated_entry_fill_price,
+                simulated_exit_fill=record.simulated_exit_fill_price,
+                simulated_entry_fill_method=(
+                    record.simulated_entry_fill_method
+                ),
+                simulated_exit_fill_method=(
+                    record.simulated_exit_fill_method
+                ),
+                estimated_executable_gross_pnl=(
+                    record.simulated_gross_pnl
+                ),
+                estimated_slippage_cost=record.simulated_slippage_cost,
+                estimated_transaction_costs=(
+                    record.simulated_transaction_costs
+                ),
+                estimated_executable_net_pnl=(
+                    record.simulated_net_pnl
+                ),
+                contract_selection_evidence_status=(
+                    record.contract_selection_evidence_status
+                ),
+                contract_selection_method=(
+                    record.contract_selection_actual_method
+                ),
                 hold_duration_mins=hold_duration_mins,
             )
         )
@@ -779,19 +912,161 @@ def summarize_simulated_pnl(
     )
 
 
+def summarize_historical_option_marks(
+    records: Iterable[ReplayManifestRecord],
+) -> dict[str, Any]:
+    """Summarize historical option marks without implying fill availability."""
+    rows = _trade_rows(records)
+    available = [
+        row for row in rows
+        if row.option_data_status == "AVAILABLE"
+        and row.option_gross_pnl is not None
+        and row.option_net_pnl is not None
+        and row.option_transaction_costs is not None
+    ]
+    unavailable = [row for row in rows if row not in available]
+    reasons = Counter(
+        row.option_data_quality_reason or row.option_data_status or "UNKNOWN"
+        for row in unavailable
+    )
+    complete = bool(rows) and len(available) == len(rows)
+    if not rows:
+        gross_mark_pnl: float | None = 0.0
+        transaction_costs: float | None = 0.0
+        net_mark_pnl: float | None = 0.0
+    elif complete:
+        gross_mark_pnl = round(sum(float(row.option_gross_pnl or 0.0) for row in available), 2)
+        transaction_costs = round(
+            sum(float(row.option_transaction_costs or 0.0) for row in available),
+            2,
+        )
+        net_mark_pnl = round(sum(float(row.option_net_pnl or 0.0) for row in available), 2)
+    else:
+        gross_mark_pnl = None
+        transaction_costs = None
+        net_mark_pnl = None
+    execution_available = [
+        row
+        for row in rows
+        if row.simulated_gross_pnl is not None
+        and row.simulated_transaction_costs is not None
+        and row.simulated_net_pnl is not None
+    ]
+    execution_unavailable = [
+        row for row in rows if row not in execution_available
+    ]
+    execution_complete = (
+        bool(rows) and len(execution_available) == len(rows)
+    )
+    if not rows:
+        gross_execution_pnl: float | None = 0.0
+        execution_transaction_costs: float | None = 0.0
+        slippage_costs: float | None = 0.0
+        net_execution_pnl: float | None = 0.0
+    elif execution_complete:
+        gross_execution_pnl = round(
+            sum(
+                float(row.simulated_gross_pnl or 0.0)
+                for row in execution_available
+            ),
+            2,
+        )
+        execution_transaction_costs = round(
+            sum(
+                float(row.simulated_transaction_costs or 0.0)
+                for row in execution_available
+            ),
+            2,
+        )
+        slippage_costs = round(
+            sum(
+                float(row.simulated_slippage_cost or 0.0)
+                for row in execution_available
+            ),
+            2,
+        )
+        net_execution_pnl = round(
+            sum(
+                float(row.simulated_net_pnl or 0.0)
+                for row in execution_available
+            ),
+            2,
+        )
+    else:
+        gross_execution_pnl = None
+        execution_transaction_costs = None
+        slippage_costs = None
+        net_execution_pnl = None
+
+    bid_ask_supported = sum(
+        1
+        for row in execution_available
+        if row.simulated_fill_quote_equivalent
+    )
+    mark_fallback = sum(
+        1
+        for row in execution_available
+        if not row.simulated_fill_quote_equivalent
+    )
+
+    return {
+        "priced_trades": len(available),
+        "unpriced_trades": len(unavailable),
+        "all_resolved_trades_priced": complete,
+        "gross_mark_pnl": gross_mark_pnl,
+        "estimated_transaction_costs": transaction_costs,
+        "net_mark_pnl": net_mark_pnl,
+        "execution_estimated_trades": len(execution_available),
+        "execution_unavailable_trades": len(execution_unavailable),
+        "bid_ask_supported_trades": bid_ask_supported,
+        "mark_fallback_fill_trades": mark_fallback,
+        "gross_estimated_executable_pnl": gross_execution_pnl,
+        "estimated_slippage_costs": slippage_costs,
+        "estimated_execution_transaction_costs": (
+            execution_transaction_costs
+        ),
+        "net_estimated_executable_pnl": net_execution_pnl,
+        "quality_reasons": dict(reasons.most_common()),
+    }
+
+
+def _max_drawdown_r(rs: list[float]) -> float:
+    """Return peak-to-trough drawdown for a realized-R sequence."""
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for value in rs:
+        equity += value
+        peak = max(peak, equity)
+        max_drawdown = min(max_drawdown, equity - peak)
+    return round(max_drawdown, 4)
+
+
 def _basic(rows: list[ReplayManifestRecord]) -> dict[str, Any]:
-    rs = [float(r.realized_r) for r in rows]
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            row.exit_timestamp or row.simulated_entry_timestamp,
+            row.simulated_entry_timestamp,
+            row.replay_signal_id,
+        ),
+    )
+    rs = [float(r.realized_r) for r in ordered]
     winners = [r for r in rs if r > 0]
     losers = [r for r in rs if r < 0]
+    raw_total_r = sum(rs)
+    total_r = round(raw_total_r, 4)
     return {
-        "trades": len(rows), "winners": len(winners), "losers": len(losers),
+        "trades": len(ordered), "winners": len(winners), "losers": len(losers),
         "breakeven": sum(1 for r in rs if r == 0),
         "win_rate_pct": round(len(winners) / len(rs) * 100, 2) if rs else 0.0,
         "average_winner_r": round(sum(winners) / len(winners), 4) if winners else 0.0,
         "average_loser_r": round(sum(losers) / len(losers), 4) if losers else 0.0,
-        "average_r": round(sum(rs) / len(rs), 4) if rs else 0.0,
+        "average_r": round(raw_total_r / len(rs), 4) if rs else 0.0,
         "median_r": round(float(median(rs)), 4) if rs else 0.0,
-        "profit_factor": round(sum(winners) / abs(sum(losers)), 4) if losers else 0.0,
+        "total_r": total_r,
+        "profit_factor": round(sum(winners) / abs(sum(losers)), 4) if losers else None,
+        "max_drawdown_r": _max_drawdown_r(rs),
         "max_consecutive_losses": _max_consecutive_losses(rs),
     }
 

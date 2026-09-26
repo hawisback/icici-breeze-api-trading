@@ -1,8 +1,8 @@
-"""Read-only Strategy A V3 rule-funnel audit over cached historical data.
+"""Read-only Strategy A R5 rule-funnel audit over cached historical data.
 
 This module:
 - opens the replay SQLite database in read-only mode,
-- uses the authoritative Strategy A V3 defaults,
+- uses the authoritative Strategy A R5 defaults,
 - evaluates only completed 15-minute NIFTY futures bars in the entry window,
 - never calls a broker, writes candles, changes thresholds, or persists trades.
 
@@ -60,9 +60,9 @@ def _condition_map(diag: Any) -> dict[str, Any]:
     return {condition.id: condition for condition in diag.conditions}
 
 
-def _v2_payload(diag: Any) -> dict[str, Any]:
+def _r5_payload(diag: Any) -> dict[str, Any]:
     phase_summary = diag.phase_summary or {}
-    return phase_summary.get("strategy_a_v2") or {}
+    return phase_summary.get("strategy_a_contract") or {}
 
 
 def _new_counter_row() -> dict[str, int]:
@@ -165,7 +165,7 @@ def _audit_session(conn: Any, day: date, *, source: str, config: StrategyTunable
             elif blocker and blocker != "READY":
                 blocker_counts[blocker] += 1
 
-            payload = _v2_payload(diag)
+            payload = _r5_payload(diag)
             data_payload = payload.get("data") or {}
             completed_ts = data_payload.get("completed_candle_timestamp")
             if completed_ts:
@@ -344,7 +344,7 @@ def audit_rule_funnel(
     }
 
     return {
-        "audit_type": "STRATEGY_A_V3_RULE_FUNNEL_READ_ONLY",
+        "audit_type": "STRATEGY_A_R5_RULE_FUNNEL_READ_ONLY",
         "db_path": str(db_path.resolve()),
         "source": source.upper(),
         "sessions_requested": sessions,
@@ -387,7 +387,7 @@ def audit_rule_funnel(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Read-only Strategy A V2 rule-funnel audit over cached historical data"
+        description="Read-only Strategy A R5 rule-funnel audit over cached historical data"
     )
     parser.add_argument("--db-path", type=Path, default=_default_db_path())
     parser.add_argument("--sessions", type=int, default=10)

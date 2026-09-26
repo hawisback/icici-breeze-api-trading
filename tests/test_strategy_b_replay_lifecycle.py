@@ -10,14 +10,23 @@ from services.strategy.models import (
     SessionTimersConfig,
     StrategyName,
     StrategySignal,
+    StrategyTunablesConfig,
+    ThresholdOverrides,
     TradeDirection,
 )
+from services.strategy.replay_execution import ChronologicalReplayExecutor
 from services.strategy.replay_lifecycle import (
     HistoricalPositionManagerReplayer,
     _entry_trade,
 )
 from services.strategy.replay_manifest import ReplayManifestRecorder
-from services.strategy.simulation import _record_strategy_b_manifest
+from services.strategy.replay_registry import (
+    ReplayBarContext,
+    ReplaySessionContext,
+    ReplayStrategyRegistry,
+    VolatilityBreakoutReplayAdapter,
+)
+from services.strategy.replay_sizing import ReplaySizingDecision
 
 
 UTC = timezone.utc
@@ -70,12 +79,24 @@ def _recorded_b_record() -> tuple[ReplayManifestRecorder, object, Candle]:
     recorder = ReplayManifestRecorder()
     candle = _breakout_candle(datetime(2026, 7, 1, 4, 0, tzinfo=UTC))
     signal = _signal(candle.end_time)
-    _record_strategy_b_manifest(
-        recorder,
-        signal,
-        trading_date="2026-07-01",
-        breakout_candle=candle,
+    adapter = VolatilityBreakoutReplayAdapter(
+        StrategyTunablesConfig(),
+        SessionTimersConfig(),
     )
+    context = ReplayBarContext(
+        session=ReplaySessionContext(
+            trading_date="2026-07-01",
+            instrument_id="INDEX",
+            overrides=ThresholdOverrides(),
+            recorder=recorder,
+        ),
+        bar=candle,
+        features=MarketFeatures(spot_price=101.0),
+        spot_candles_5m=[candle],
+        spot_candles_15m=[],
+        futures_candles=[],
+    )
+    adapter.on_entry_confirmed(signal, context)
     return recorder, recorder.records()[0], candle
 
 
@@ -101,12 +122,273 @@ def test_strategy_b_manifest_entry_preserves_completed_bar_state_and_deduplicate
     assert record.effective_confirmation_score == 3
     assert record.oi_wall_penalty == 1
     with pytest.raises(ValueError, match="duplicate replay manifest signal"):
-        _record_strategy_b_manifest(
-            recorder,
-            _signal(candle.end_time),
-            trading_date="2026-07-01",
-            breakout_candle=candle,
+        adapter = VolatilityBreakoutReplayAdapter(
+            StrategyTunablesConfig(),
+            SessionTimersConfig(),
         )
+        context = ReplayBarContext(
+            session=ReplaySessionContext(
+                trading_date="2026-07-01",
+                instrument_id="INDEX",
+                overrides=ThresholdOverrides(),
+                recorder=recorder,
+            ),
+            bar=candle,
+            features=MarketFeatures(spot_price=101.0),
+            spot_candles_5m=[candle],
+            spot_candles_15m=[],
+            futures_candles=[],
+        )
+        adapter.on_entry_confirmed(_signal(candle.end_time), context)
+
+
+def test_strategy_b_adapter_rejects_wrong_strategy_and_noncompleted_timestamp():
+    recorder = ReplayManifestRecorder()
+    candle = _breakout_candle(datetime(2026, 7, 1, 4, 0, tzinfo=UTC))
+    adapter = VolatilityBreakoutReplayAdapter(
+        StrategyTunablesConfig(),
+        SessionTimersConfig(),
+    )
+    context = ReplayBarContext(
+        session=ReplaySessionContext(
+            trading_date="2026-07-01",
+            instrument_id="INDEX",
+            overrides=ThresholdOverrides(),
+            recorder=recorder,
+        ),
+        bar=candle,
+        features=MarketFeatures(spot_price=101.0),
+        spot_candles_5m=[candle],
+        spot_candles_15m=[],
+        futures_candles=[],
+    )
+
+    wrong_strategy = _signal(candle.end_time).model_copy(
+        update={"strategy": StrategyName.TREND_PULLBACK}
+    )
+    with pytest.raises(ValueError, match="non-Strategy-B"):
+        adapter.on_entry_confirmed(wrong_strategy, context)
+
+    wrong_time = _signal(candle.end_time - timedelta(seconds=1))
+    with pytest.raises(ValueError, match="completed breakout candle end time"):
+        adapter.on_entry_confirmed(wrong_time, context)
+
+
+def test_chronological_executor_does_not_scan_future_and_blocks_capacity():
+    entry_bar = _breakout_candle(datetime(2026, 7, 1, 4, 0, tzinfo=UTC))
+    second_bar = entry_bar.model_copy(update={
+        "start_time": entry_bar.end_time,
+        "end_time": entry_bar.end_time + timedelta(minutes=5),
+        "open": 101.0,
+        "high": 101.4,
+        "low": 100.6,
+        "close": 101.2,
+    })
+    stop_bar = second_bar.model_copy(update={
+        "start_time": second_bar.end_time,
+        "end_time": second_bar.end_time + timedelta(minutes=5),
+        "open": 101.0,
+        "high": 101.2,
+        "low": 99.0,
+        "close": 99.4,
+    })
+    recorder = ReplayManifestRecorder()
+    tunables = StrategyTunablesConfig()
+    session = SessionTimersConfig()
+    registry = ReplayStrategyRegistry.default(tunables, session)
+    replay_session = ReplaySessionContext(
+        trading_date="2026-07-01",
+        instrument_id="INDEX",
+        overrides=ThresholdOverrides(),
+        recorder=recorder,
+    )
+    registry.prepare_session(replay_session)
+    context = ReplayBarContext(
+        session=replay_session,
+        bar=entry_bar,
+        features=MarketFeatures(spot_price=101.0),
+        spot_candles_5m=[entry_bar],
+        spot_candles_15m=[],
+        futures_candles=[],
+    )
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=RiskConfig(max_concurrent_positions=1),
+        session_config=session,
+        recorder=recorder,
+        instrument_id="INDEX",
+        warmup_candles=[],
+        session_candles=[entry_bar, second_bar, stop_bar],
+        futures_candles=[],
+    )
+    executor = ChronologicalReplayExecutor(
+        lifecycle_replayer=replayer,
+        registry=registry,
+        risk_config=RiskConfig(max_concurrent_positions=1),
+    )
+
+    sizing = ReplaySizingDecision(
+        status="APPLIED",
+        method="OPTION_HARD_STOP_PREMIUM_RISK",
+        price_basis="HISTORICAL_OPTION_COMPLETED_CANDLE_CLOSE_MARK",
+        account_equity=500000.0,
+        risk_per_trade_pct=0.5,
+        risk_budget=2500.0,
+        option_loss_per_lot=1250.0,
+        delta_proxy=None,
+        delta_source=None,
+        lots=2,
+        quantity=100,
+        rejection_reason=None,
+        contract_instrument_id="OPT-TEST",
+        contract_symbol="OPT-TEST",
+        contract_expiry="2026-07-02",
+        contract_strike=100.0,
+        lot_size=50,
+        entry_reference_price=100.0,
+    )
+    record = executor.accept_signal(
+        _signal(entry_bar.end_time),
+        context,
+        sizing=sizing,
+    )
+
+    # Future stop data already exists in the replay dataset, but accepting the
+    # signal must not resolve it ahead of chronological time.
+    assert record.lifecycle_status == "PENDING"
+    assert record.sizing_status == "APPLIED"
+    assert record.sizing_contract_instrument_id == "OPT-TEST"
+    assert record.sizing_contract_lot_size == 50
+    assert record.sizing_entry_reference_price == 100.0
+    assert record.sizing_entry_mark == 100.0
+    assert record.replay_lots == 2
+    assert record.replay_quantity == 100
+    assert executor.state.daily_entries == 1
+    assert executor.can_accept_entry() is False
+
+    executor.manage_completed_bar(second_bar, [entry_bar, second_bar])
+    assert record.lifecycle_status == "PENDING"
+    assert executor.can_accept_entry() is False
+
+    executor.manage_completed_bar(
+        stop_bar,
+        [entry_bar, second_bar, stop_bar],
+    )
+    assert record.lifecycle_status == "RESOLVED"
+    assert executor.state.completed_positions == 1
+    assert executor.state.daily_entries_by_strategy == {
+        StrategyName.VOLATILITY_BREAKOUT.value: 1
+    }
+    assert executor.state.realized_r_total < 0
+    assert executor.state.last_loss_exit_time is None
+    assert executor.state.loss_cooldown_until is None
+
+    record.simulated_gross_pnl = -100.0
+    record.simulated_net_pnl = -125.0
+    executor.apply_execution_economics(record)
+    executor.apply_execution_economics(record)  # idempotent
+
+    assert executor.state.last_loss_exit_time == record.exit_timestamp
+    assert executor.state.loss_cooldown_until is not None
+    assert executor.state.realized_net_pnl_total == -125.0
+    assert executor.state.failed_entries_by_strategy == {
+        StrategyName.VOLATILITY_BREAKOUT.value: 1
+    }
+    assert executor.can_accept_entry() is True
+
+
+def test_chronological_executor_enforces_daily_and_strategy_risk_gates():
+    recorder = ReplayManifestRecorder()
+    session = SessionTimersConfig()
+    risk = RiskConfig(
+        max_trades_per_day=2,
+        max_trades_per_strategy_per_day=1,
+        max_failed_trades_per_strategy=1,
+        max_daily_loss_r=2.0,
+        cooldown_after_loss_min=10,
+    )
+    registry = ReplayStrategyRegistry.default(StrategyTunablesConfig(), session)
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=risk,
+        session_config=session,
+        recorder=recorder,
+        instrument_id="INDEX",
+        warmup_candles=[],
+        session_candles=[],
+        futures_candles=[],
+    )
+    executor = ChronologicalReplayExecutor(
+        lifecycle_replayer=replayer,
+        registry=registry,
+        risk_config=risk,
+    )
+    now = datetime(2026, 7, 1, 6, 0, tzinfo=UTC)
+
+    executor.state.daily_entries = 2
+    assert executor.global_entry_gate(now).status == "DAILY_TRADE_LIMIT_REACHED"
+
+    executor.state.daily_entries = 0
+    executor.state.realized_r_total = -2.0
+    assert executor.global_entry_gate(now).status == "DAILY_LOSS_LIMIT_REACHED"
+
+    executor.state.realized_r_total = 0.0
+    executor.state.last_loss_exit_time = now - timedelta(minutes=5)
+    assert executor.global_entry_gate(now).status == "IN_LOSS_COOLDOWN"
+
+    executor.state.last_loss_exit_time = None
+    executor.state.daily_entries_by_strategy[
+        StrategyName.VOLATILITY_BREAKOUT.value
+    ] = 1
+    gate = executor.strategy_entry_gate(_signal(now))
+    assert gate.status == "STRATEGY_DAILY_TRADE_LIMIT_REACHED"
+
+    executor.state.daily_entries_by_strategy.clear()
+    executor.state.failed_entries_by_strategy[
+        StrategyName.VOLATILITY_BREAKOUT.value
+    ] = 1
+    gate = executor.strategy_entry_gate(_signal(now))
+    assert gate.status == "STRATEGY_FAILURE_LIMIT_REACHED"
+
+
+def test_chronological_executor_daily_pct_gate_uses_execution_estimate():
+    recorder = ReplayManifestRecorder()
+    session = SessionTimersConfig()
+    risk = RiskConfig(
+        account_equity=100000.0,
+        max_daily_loss_r=10.0,
+        max_daily_loss_pct=1.5,
+        cooldown_after_loss_min=0,
+    )
+    registry = ReplayStrategyRegistry.default(
+        StrategyTunablesConfig(),
+        session,
+    )
+    replayer = HistoricalPositionManagerReplayer(
+        risk_config=risk,
+        session_config=session,
+        recorder=recorder,
+        instrument_id="INDEX",
+        warmup_candles=[],
+        session_candles=[],
+        futures_candles=[],
+    )
+    executor = ChronologicalReplayExecutor(
+        lifecycle_replayer=replayer,
+        registry=registry,
+        risk_config=risk,
+    )
+    _, record, _ = _recorded_b_record()
+    record.lifecycle_status = "RESOLVED"
+    record.simulated_net_pnl = -1600.0
+
+    executor.apply_execution_economics(record)
+
+    gate = executor.global_entry_gate(
+        datetime(2026, 7, 1, 6, 0, tzinfo=UTC)
+    )
+    assert gate.status == "DAILY_LOSS_LIMIT_REACHED"
+    assert gate.details["reasons"] == ["MAX_DAILY_LOSS_PCT"]
+    assert executor.state.realized_net_pnl_total == -1600.0
+    assert executor.state.realized_net_pnl_complete is True
 
 
 def test_strategy_b_manifest_hydrates_strategy_specific_active_trade():

@@ -44,6 +44,7 @@ from services.strategy.models import (
     OptionType,
     SimulationRequest,
     SimulationResult,
+    STRATEGY_A_DISPLAY_LABEL,
     StrategyName,
     StrategySignal,
     StrategyState,
@@ -55,6 +56,13 @@ from services.strategy.models import (
     TriggerDiagnosticsResponse,
 )
 from services.strategy.position_manager import PositionManager, UnderlyingRiskSizer, calculate_realized_trade_r, underlying_r_for_price
+from services.strategy.risk_gates import (
+    check_daily_loss_limits,
+    check_daily_trade_limit,
+    check_loss_cooldown,
+    check_position_capacity,
+    check_strategy_trade_limits,
+)
 from services.strategy.reason_codes import (
     BROKER_PROTECTIVE_STOP_UNAVAILABLE,
     OPTION_EMERGENCY_STOP,
@@ -150,6 +158,8 @@ class StrategyService:
             risk_config=self.config.risk,
             session_config=self.config.session,
             tunables=self.config.tunables,
+            option_selection_config=self.config.option_selection,
+            strategy_repository=self.repo,
         )
 
         self._loop_task: Optional[asyncio.Task] = None
@@ -1328,10 +1338,14 @@ class StrategyService:
             return {"status": "DATA_UNAVAILABLE", "reason": features.data_reason}
 
         # 4. If active positions reached limit, do not seek new entries
-        if len(self._active_trades_cache) >= self.config.risk.max_concurrent_positions:
+        capacity_gate = check_position_capacity(
+            self.config.risk,
+            active_count=len(self._active_trades_cache),
+        )
+        if not capacity_gate.allowed:
             self._reset_setups(now)
             await self._save_runtime()
-            return {"status": "MAX_CONCURRENT_POSITIONS_REACHED", "active_count": len(self._active_trades_cache)}
+            return capacity_gate.as_result()
 
         # 5. Check if Auto Trade is enabled
         if not self.config.auto_trade_enabled or self.config.mode == AutoTradingMode.DISABLED:
@@ -1363,15 +1377,15 @@ class StrategyService:
             return {"status": "OUTSIDE_ENTRY_WINDOW"}
 
         # 7. Check Cooldown after loss
-        if self._last_loss_exit_time:
-            mins_since_loss = (now - self._last_loss_exit_time).total_seconds() / 60.0
-            if mins_since_loss < self.config.risk.cooldown_after_loss_min:
-                self._reset_setups(now)
-                await self._save_runtime()
-                return {
-                    "status": "IN_LOSS_COOLDOWN",
-                    "cooldown_remaining_min": round(self.config.risk.cooldown_after_loss_min - mins_since_loss, 1),
-                }
+        cooldown_gate = check_loss_cooldown(
+            self.config.risk,
+            at=now,
+            last_loss_exit_time=self._last_loss_exit_time,
+        )
+        if not cooldown_gate.allowed:
+            self._reset_setups(now)
+            await self._save_runtime()
+            return cooldown_gate.as_result()
 
         # 8. Check Daily Trade Count Limit
         today_trades = await self.repo.list_trades(limit=1000)
@@ -1381,21 +1395,35 @@ class StrategyService:
         today_count = len(today_trades)
         loss_r = sum(t.realized_r or 0 for t in today_trades)
         pnl = sum(t.net_pnl or 0 for t in today_trades)
-        if loss_r <= -self.config.risk.max_daily_loss_r or pnl <= -self.config.risk.account_equity*self.config.risk.max_daily_loss_pct/100:
+        daily_loss_gate = check_daily_loss_limits(
+            self.config.risk,
+            realized_r_total=loss_r,
+            net_pnl_total=pnl,
+            account_equity=self.config.risk.account_equity,
+        )
+        if not daily_loss_gate.allowed:
             self._reset_setups(now)
             await self._save_runtime()
-            return {"status": "DAILY_LOSS_LIMIT_REACHED"}
+            return daily_loss_gate.as_result()
         losses = [t for t in today_trades if t.exit_time and (t.net_pnl or 0) < 0]
         if losses:
-            last_loss = max(t.exit_time for t in losses)
-            if (now-last_loss).total_seconds() < 60*self.config.risk.cooldown_after_loss_min:
+            repository_cooldown_gate = check_loss_cooldown(
+                self.config.risk,
+                at=now,
+                last_loss_exit_time=max(t.exit_time for t in losses),
+            )
+            if not repository_cooldown_gate.allowed:
                 self._reset_setups(now)
                 await self._save_runtime()
-                return {"status": "IN_LOSS_COOLDOWN"}
-        if today_count >= self.config.risk.max_trades_per_day:
+                return repository_cooldown_gate.as_result()
+        daily_trade_gate = check_daily_trade_limit(
+            self.config.risk,
+            daily_count=today_count,
+        )
+        if not daily_trade_gate.allowed:
             self._reset_setups(now)
             await self._save_runtime()
-            return {"status": "DAILY_TRADE_LIMIT_REACHED", "today_trades": today_count}
+            return daily_trade_gate.as_result()
 
         if self.config.mode == AutoTradingMode.LIVE and not self.config.system_armed:
             self._reset_setups(now)
@@ -1614,12 +1642,22 @@ class StrategyService:
         ):
             return {"status": "STRATEGY_E_POSITION_ALREADY_OPEN"}
 
-        if sum(t.strategy == signal.strategy for t in today_trades) >= self.config.risk.max_trades_per_strategy_per_day:
-            return {"status":"STRATEGY_DAILY_TRADE_LIMIT_REACHED"}
-
-        failures = sum(t.strategy == signal.strategy and t.exit_time is not None and (t.net_pnl or 0) < 0 for t in today_trades)
-        if failures >= self.config.risk.max_failed_trades_per_strategy:
-            return {"status": "STRATEGY_FAILURE_LIMIT_REACHED"}
+        strategy_trade_count = sum(
+            t.strategy == signal.strategy for t in today_trades
+        )
+        failures = sum(
+            t.strategy == signal.strategy
+            and t.exit_time is not None
+            and (t.net_pnl or 0) < 0
+            for t in today_trades
+        )
+        strategy_gate = check_strategy_trade_limits(
+            self.config.risk,
+            strategy_trade_count=strategy_trade_count,
+            strategy_failure_count=failures,
+        )
+        if not strategy_gate.allowed:
+            return strategy_gate.as_result()
 
         # Persist deterministic C/D/E signals once while allowing the same
         # fresh signal to retry transient downstream failures until a trade
@@ -5351,7 +5389,7 @@ class StrategyService:
             "strategies": {
                 "trend_pullback": {
                     "enabled": self.config.tunables.trend_pullback_enabled,
-                    "label": "Strategy A · Trend Pullback V3",
+                    "label": STRATEGY_A_DISPLAY_LABEL,
                     "state": (
                         strategy_a_trade.state.value
                         if strategy_a_trade is not None

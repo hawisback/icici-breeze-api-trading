@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from libs.contracts.models import Candle
 from services.strategy.futures_signal import canonical_active_futures_stream_with_diagnostics, completed_futures_candles
-from services.strategy.models import ActiveTrade, AutoTradingMode, OptionType, StrategyName, StrategySignal, StrategyTunablesConfig, TradeDirection, TradeLifecycleState
+from services.strategy.models import ActiveTrade, AutoTradingMode, OptionType, STRATEGY_A_VERSION_ID, StrategyName, StrategySignal, StrategyTunablesConfig, TradeDirection, TradeLifecycleState
 from services.strategy.position_manager import PositionManager, calculate_realized_trade_r
 from services.strategy.strategies.trend_pullback import TrendPullbackStrategy
 
@@ -32,7 +32,7 @@ class ReplayDecision(BaseModel):
 
 class StrategyAReplayReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    strategy_version: str = "trend_pullback_momentum_v3"
+    strategy_version: str = STRATEGY_A_VERSION_ID
     config_fingerprint: str
     data_range: dict[str, str | None]
     futures_contracts: list[str]
