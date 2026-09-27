@@ -287,3 +287,100 @@ OPTIONS_BLIND_08_09_COMBINED_EVALUATION = {
     "implementation_allowed": False,
     "retune_from_blind_allowed": False,
 }
+
+
+OPTIONS_BLIND_10_O2 = {
+    "candidate_id": "O2_DISTRIBUTED_OPTIONS_PARTICIPATION_EXPANSION",
+    "source": {
+        "filename": "independent_nifty_options_research_blind_10.json",
+        "sha256": "e15b86efac489802eb5a8fca20f30d05f5fb88cd77dcc75e893332a812da136c",
+        "start_date": "2026-01-08",
+        "end_date": "2026-01-22",
+        "sessions": 10,
+        "underlying_rows": 750,
+        "raw_option_rows": 31800,
+        "dynamic_option_rows": 13500,
+        "dynamic_contracts_per_timestamp": 18,
+        "failed_requests": 0,
+    },
+    "scoring": {
+        "threshold_source": "frozen OPTIONS_BEHAVIOR_V2 DEVELOPMENT_CORPUS only",
+        "development_sha256": "5d640d90e03f4cfb6bfe7c1ba2b2a0c44525b8ab01b4ea4ac62abd350dd9991c",
+        "development_reproduction": {
+            "episode_starts": 75,
+            "primary_matched_episodes": 67,
+            "primary_mean_matched_residual_bps": 3.000264888969547,
+            "primary_median_matched_residual_bps": 1.762765094075469,
+        },
+        "threshold_changes": False,
+        "candidate_definition_changes": False,
+        "control_matching_changes": False,
+        "directional_claim": False,
+        "matching": "same blind block, same DTE, same 30-minute time bucket",
+        "unmatched_episode_policy": "unscorable; no broader-control fallback",
+    },
+    "episode_counts": {
+        "state_bars": 15,
+        "episode_starts": 15,
+        "sessions_with_episode_starts": 6,
+    },
+    "primary_30m": {
+        "episode_starts_with_full_horizon": 15,
+        "matched_scorable_episodes": 10,
+        "sessions_with_matched_episodes": 5,
+        "matching_coverage_pct": 66.66666666666667,
+        "episode_mean_excursion_bps": 20.41751673211212,
+        "average_matched_control_mean_excursion_bps": 20.279016735853038,
+        "mean_matched_residual_bps": 0.1384999962590804,
+        "median_matched_residual_bps": -0.7385012198385388,
+        "episodes_positive_vs_matched_control_mean": 5,
+        "episodes_positive_vs_matched_control_median": 5,
+    },
+    "secondary_15m": {
+        "matched_scorable_episodes": 10,
+        "mean_matched_residual_bps": 2.620883874676701,
+        "median_matched_residual_bps": 2.8221201863740113,
+    },
+    "secondary_60m": {
+        "matched_scorable_episodes": 10,
+        "mean_matched_residual_bps": -7.449686747669782,
+        "median_matched_residual_bps": -1.359341765959087,
+    },
+    "post_blind_evaluation_diagnostics": {
+        "purpose": "Diagnostics after frozen scoring only; not eligible for retuning O2.",
+        "primary_by_dte": {
+            "0": {"episodes": 2, "mean_residual_bps": -0.29767073864111393, "median_residual_bps": 3.641630713270491},
+            "1": {"episodes": 2, "mean_residual_bps": 3.4394293226602513, "median_residual_bps": 3.494120774726221},
+            "4": {"episodes": 2, "mean_residual_bps": 1.1682766538382844, "median_residual_bps": 0.4982784797932267},
+            "6": {"episodes": 4, "mean_residual_bps": -1.8087676727925216, "median_residual_bps": -1.280431326954118},
+        },
+        "unmatched_primary_episodes": 5,
+        "development_primary_matching_coverage_pct": 95.71428571428572,
+        "session_bootstrap_30m": {
+            "seed": 123,
+            "resamples": 20000,
+            "valid_resamples": 19903,
+            "mean_residual_95pct_interval_bps": [-6.41879236, 3.1654348],
+            "median_residual_95pct_interval_bps": [-10.42205492, 5.38166512],
+            "mean_residual_positive_resample_fraction": 0.4155654926393006,
+            "median_residual_positive_resample_fraction": 0.27935487112495605,
+        },
+        "leave_one_session_out_30m": {
+            "positive_mean_omissions": 6,
+            "negative_mean_omissions": 4,
+            "positive_median_omissions": 1,
+            "negative_median_omissions": 9,
+            "interpretation": "The near-zero aggregate mean is unstable to single-session removal; the median remains negative in most omissions.",
+        },
+    },
+    "interpretation": (
+        "Blind10 does not reproduce the development-sized O2 primary effect. The matched 30-minute "
+        "mean residual is approximately zero and the median residual is negative. The 15-minute "
+        "secondary result is positive while the 60-minute result is negative, and exact matching "
+        "coverage is materially lower than in development. Preserve the frozen result without "
+        "retuning or broadening controls."
+    ),
+    "candidate_status_after_blind": "FROZEN_RESEARCH_ONLY_FIRST_FRESH_BLIND_WEAK_OR_CONFLICTING",
+    "implementation_allowed": False,
+    "retune_from_blind_allowed": False,
+}
