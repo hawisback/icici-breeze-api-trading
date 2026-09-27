@@ -426,9 +426,15 @@ def _near_month_expiry_for_day(day: date, expiries: list[date]) -> date:
     # session date. This prevents a missing monthly expiry from silently turning
     # a farther contract into the supposed near-month contract.
     if any(expiry < day for expiry in same_month):
-        for expiry in expiries:
-            if expiry > day:
-                return expiry
+        next_year = day.year + (1 if day.month == 12 else 0)
+        next_month = 1 if day.month == 12 else day.month + 1
+        following_month = [
+            expiry
+            for expiry in expiries
+            if expiry.year == next_year and expiry.month == next_month
+        ]
+        if following_month:
+            return min(following_month)
 
     raise ValueError(
         f"No verified near-month expiry supplied for session {day.isoformat()}; "
@@ -948,7 +954,9 @@ def build_research_dataset(
                     {
                         "source": "BREEZE",
                         "series": "SESSION_DATE_DISCOVERY",
-                        "expiry_date": breeze_expiry_for_dates,
+                        "expiry_date": (
+                            None if breeze_near_month_expiries else breeze_expiry_for_dates
+                        ),
                         "near_month_expiries": breeze_near_month_expiries or [],
                         "complete_sessions": len(dates),
                         "session_shape": _session_diagnostics(discovery_rows),
@@ -960,7 +968,9 @@ def build_research_dataset(
                     {
                         "source": "BREEZE",
                         "series": "SESSION_DATE_DISCOVERY",
-                        "expiry_date": breeze_expiry_for_dates,
+                        "expiry_date": (
+                            None if breeze_near_month_expiries else breeze_expiry_for_dates
+                        ),
                         "near_month_expiries": breeze_near_month_expiries or [],
                         "error": f"{type(exc).__name__}: {exc}",
                         "complete_sessions": 0,
@@ -1057,7 +1067,7 @@ def build_research_dataset(
     breeze_contract_by_date = {
         day.isoformat(): expiry for day, expiry in sorted(breeze_plan.items())
     }
-    multi_expiry_breeze_roll = len(set(breeze_plan.values())) > 1
+    roll_aware_breeze_mode = bool(breeze_near_month_expiries)
     if breeze_key and breeze_secret and breeze_session and breeze_plan:
         try:
             client = BreezeFuturesClient(breeze_key, breeze_secret, breeze_session)
@@ -1121,7 +1131,7 @@ def build_research_dataset(
 
                 upstox_futures: list[Candle] = []
                 futures_debug: dict[str, Any] | None = None
-                if upstox_key and not multi_expiry_breeze_roll:
+                if upstox_key and not roll_aware_breeze_mode:
                     upstox_futures = _candles_from_provider_rows(
                         client.history(upstox_key, query_start, query_end),
                         "Futures",
@@ -1136,7 +1146,7 @@ def build_research_dataset(
                         "INDIA_VIX",
                         *(
                             ["NIFTY_FUTURES"]
-                            if upstox_key and not multi_expiry_breeze_roll
+                            if upstox_key and not roll_aware_breeze_mode
                             else []
                         ),
                     ],
@@ -1145,8 +1155,8 @@ def build_research_dataset(
                     "futures_diagnostics": futures_debug,
                     "futures_configuration_missing": not bool(upstox_key),
                     "futures_skipped_reason": (
-                        "multi_expiry_roll_requires_contract_aware_provider"
-                        if upstox_key and multi_expiry_breeze_roll
+                        "roll_aware_mode_requires_contract_aware_provider"
+                        if upstox_key and roll_aware_breeze_mode
                         else None
                     ),
                 }
@@ -1169,12 +1179,12 @@ def build_research_dataset(
         dhan_futures_security_id
         or os.getenv("RESEARCH_DHAN_NIFTY_FUT_SECURITY_ID")
     )
-    if dhan_token and dhan_security_id and multi_expiry_breeze_roll:
+    if dhan_token and dhan_security_id and roll_aware_breeze_mode:
         credentialed_status["DHAN"] = {
             "available": False,
             "series": [],
             "security_id": dhan_security_id,
-            "reason": "multi_expiry_roll_requires_contract_aware_provider",
+            "reason": "roll_aware_mode_requires_contract_aware_provider",
         }
     elif dhan_token and dhan_security_id:
         try:
@@ -1232,7 +1242,7 @@ def build_research_dataset(
                 except RuntimeError as exc:
                     resolution_errors.append(str(exc))
             if (
-                not multi_expiry_breeze_roll
+                not roll_aware_breeze_mode
                 and not kite_futures_token
                 and breeze_expiry
             ):
@@ -1245,7 +1255,7 @@ def build_research_dataset(
             kite_vix: list[Candle] = []
             futures_debug: dict[str, Any] | None = None
             vix_debug: dict[str, Any] | None = None
-            if kite_futures_token and not multi_expiry_breeze_roll:
+            if kite_futures_token and not roll_aware_breeze_mode:
                 kite_futures = _candles_from_provider_rows(
                     client.history(
                         kite_futures_token,
@@ -1279,7 +1289,7 @@ def build_research_dataset(
                 "series": [
                     *(
                         ["NIFTY_FUTURES"]
-                        if kite_futures_token and not multi_expiry_breeze_roll
+                        if kite_futures_token and not roll_aware_breeze_mode
                         else []
                     ),
                     *(["INDIA_VIX"] if kite_vix_token else []),
@@ -1290,8 +1300,8 @@ def build_research_dataset(
                 "vix_diagnostics": vix_debug,
                 "instrument_resolution_errors": resolution_errors,
                 "futures_skipped_reason": (
-                    "multi_expiry_roll_requires_contract_aware_provider"
-                    if kite_futures_token and multi_expiry_breeze_roll
+                    "roll_aware_mode_requires_contract_aware_provider"
+                    if kite_futures_token and roll_aware_breeze_mode
                     else None
                 ),
             }
@@ -1365,6 +1375,15 @@ def build_research_dataset(
             for source, rows in sorted(vix_by_provider.items())
         },
     }
+    futures_provider_quality = _provider_quality(
+        futures_by_provider, wanted, futures_source
+    )
+    if breeze_near_month_expiries:
+        futures_provider_quality["selection_policy"] = (
+            "Roll-aware mode requires the complete Breeze series built from the "
+            "explicit near-month expiry schedule; other futures sources cannot "
+            "replace the canonical series."
+        )
 
     return {
         "research_type": "INDEPENDENT_NIFTY_MARKET_DATA",
@@ -1385,7 +1404,7 @@ def build_research_dataset(
             "raw_provider_series_preserved": True,
             "canonical_series_never_backfilled_from_secondary_provider": True,
             "contract_identifiers_explicit": True,
-            "single_contract_futures_excluded_from_multi_expiry_roll": True,
+            "single_contract_futures_excluded_from_roll_aware_mode": True,
             "roll_aware_canonical_futures_requires_breeze": True,
             "niftybees_is_only_a_volume_proxy": True,
         },
@@ -1449,9 +1468,7 @@ def build_research_dataset(
             ),
         },
         "provider_quality": {
-            "nifty_futures": _provider_quality(
-                futures_by_provider, wanted, futures_source
-            ),
+            "nifty_futures": futures_provider_quality,
             "india_vix": _provider_quality(vix_by_provider, wanted, vix_source),
         },
         "canonical_market_rows": _canonical_rows(
