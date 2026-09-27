@@ -219,3 +219,56 @@ BLIND_VALIDATION_PROTOCOL = {
     "directional_score": None,
     "production_implementation_from_freeze": False,
 }
+
+
+BLIND11_VALIDATION_PROTOCOL = {
+    "candidate": "O2_DISTRIBUTED_OPTIONS_PARTICIPATION_EXPANSION",
+    "working_name": "OPTIONS_BLIND_11",
+    "purpose": "second and final fresh blind test of the unchanged O2 candidate",
+    "sessions": 10,
+    "frozen_window": {
+        "start_date": "2025-12-24",
+        "end_date": "2026-01-07",
+        "expected_sessions": [
+            "2025-12-24",
+            "2025-12-26",
+            "2025-12-29",
+            "2025-12-30",
+            "2025-12-31",
+            "2026-01-01",
+            "2026-01-02",
+            "2026-01-05",
+            "2026-01-06",
+            "2026-01-07",
+        ],
+        "known_exchange_holiday_inside_calendar_window": "2025-12-25",
+        "breeze_near_month_expiries": ["2025-12-30", "2026-01-27"],
+        "option_expiries": ["2025-12-30", "2026-01-06", "2026-01-13"],
+    },
+    "ineligible_for_validation": [
+        "OPTIONS_BLIND_08",
+        "OPTIONS_BLIND_09",
+        "OPTIONS_BLIND_10",
+        "all development sessions 2026-05-19 through 2026-09-09",
+    ],
+    "threshold_source": "unchanged OPTIONS_BEHAVIOR_V2 DEVELOPMENT_CORPUS only",
+    "parameter_changes_before_scoring": False,
+    "candidate_definition_changes_before_scoring": False,
+    "control_matching_changes_before_scoring": False,
+    "primary_score": "30m matched residual versus same-DTE same-30m-bucket frozen-protocol controls",
+    "secondary_scores": ["15m matched residual", "60m matched residual"],
+    "unmatched_episode_policy": "unscorable; no broader-control fallback",
+    "prospective_decision_after_blind11": {
+        "if_primary_again_weak_or_negative": (
+            "retire O2 as an independent predictive movement-regime candidate; preserve only as descriptive research behavior"
+        ),
+        "if_primary_materially_positive": (
+            "pool Blind10 and Blind11 without retuning, evaluate sample size and robustness, and keep research-only pending that review"
+        ),
+        "no_rescue_filters": True,
+        "no_primary_horizon_switch": True,
+        "no_hhi_threshold_change": True,
+        "no_dte_subset_selection": True,
+        "implementation_allowed_directly_from_blind11": False,
+    },
+}
