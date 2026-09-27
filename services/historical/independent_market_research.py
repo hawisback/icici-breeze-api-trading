@@ -736,54 +736,120 @@ def build_research_dataset(
         )
 
     if not primary_source:
-        with YahooChartClient() as client:
-            yahoo_nifty = _candles_from_yahoo(
-                client.history("^NSEI", start, end, 5), "^NSEI", "Index"
-            )
-            nifty_debug = dict(client.last_history_debug)
-            yahoo_dates = _last_complete_dates(yahoo_nifty, sessions)
+        try:
+            with YahooChartClient() as client:
+                yahoo_nifty = _candles_from_yahoo(
+                    client.history("^NSEI", start, end, 5), "^NSEI", "Index"
+                )
+                nifty_debug = dict(client.last_history_debug)
+                yahoo_dates = _last_complete_dates(yahoo_nifty, sessions)
+                source_attempts.append(
+                    {
+                        "source": "YAHOO_CHART",
+                        "series": "NIFTY_INDEX",
+                        "instrument": "^NSEI",
+                        "history_response": nifty_debug,
+                        "complete_sessions": len(yahoo_dates),
+                        "session_shape": _session_diagnostics(yahoo_nifty),
+                    }
+                )
+                if len(yahoo_dates) == sessions:
+                    primary_source = "YAHOO_CHART"
+                    nifty_rows = yahoo_nifty
+
+                    public_vix_rows = _candles_from_yahoo(
+                        client.history("^INDIAVIX", start, end, 5),
+                        "^INDIAVIX",
+                        "VolatilityIndex",
+                    )
+                    vix_debug = dict(client.last_history_debug)
+                    vix_status = {
+                        "available": bool(public_vix_rows),
+                        "instrument": "^INDIAVIX",
+                        "source": "YAHOO_CHART",
+                        "diagnostics": vix_debug,
+                    }
+
+                    volume_proxy_rows = _candles_from_yahoo(
+                        client.history("NIFTYBEES.NS", start, end, 5),
+                        "NIFTYBEES.NS",
+                        "ETF",
+                    )
+                    proxy_debug = dict(client.last_history_debug)
+                    volume_proxy_status = {
+                        "available": bool(volume_proxy_rows),
+                        "instrument": "NIFTYBEES.NS",
+                        "source": "YAHOO_CHART",
+                        "semantics": "ETF traded-volume proxy; not NIFTY futures volume",
+                        "diagnostics": proxy_debug,
+                    }
+        except httpx.HTTPError as exc:
             source_attempts.append(
                 {
                     "source": "YAHOO_CHART",
                     "series": "NIFTY_INDEX",
-                    "instrument": "^NSEI",
-                    "history_response": nifty_debug,
-                    "complete_sessions": len(yahoo_dates),
-                    "session_shape": _session_diagnostics(yahoo_nifty),
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "complete_sessions": 0,
                 }
             )
-            if len(yahoo_dates) == sessions:
-                primary_source = "YAHOO_CHART"
-                nifty_rows = yahoo_nifty
-
-                public_vix_rows = _candles_from_yahoo(
-                    client.history("^INDIAVIX", start, end, 5),
-                    "^INDIAVIX",
-                    "VolatilityIndex",
-                )
-                vix_debug = dict(client.last_history_debug)
-                vix_status = {
-                    "available": bool(public_vix_rows),
-                    "instrument": "^INDIAVIX",
-                    "source": "YAHOO_CHART",
-                    "diagnostics": vix_debug,
-                }
-
-                volume_proxy_rows = _candles_from_yahoo(
-                    client.history("NIFTYBEES.NS", start, end, 5),
-                    "NIFTYBEES.NS",
-                    "ETF",
-                )
-                proxy_debug = dict(client.last_history_debug)
-                volume_proxy_status = {
-                    "available": bool(volume_proxy_rows),
-                    "instrument": "NIFTYBEES.NS",
-                    "source": "YAHOO_CHART",
-                    "semantics": "ETF traded-volume proxy; not NIFTY futures volume",
-                    "diagnostics": proxy_debug,
-                }
 
     dates = _last_complete_dates(nifty_rows, sessions)
+
+    # Yahoo limits 5-minute history to a recent window. For older blind blocks,
+    # use Kite futures only to discover complete market dates. The research
+    # instrument is futures anyway; this does not substitute spot into signals.
+    if len(dates) != sessions:
+        kite_key_for_dates = _usable_secret("KITE_API_KEY")
+        kite_access_for_dates = _usable_secret("KITE_ACCESS_TOKEN")
+        kite_token_for_dates = (
+            kite_futures_instrument_token
+            or os.getenv("RESEARCH_KITE_NIFTY_FUT_INSTRUMENT_TOKEN")
+        )
+        breeze_expiry_for_dates = (
+            breeze_futures_expiry
+            or os.getenv("RESEARCH_BREEZE_NIFTY_FUT_EXPIRY")
+            or os.getenv("RESEARCH_NIFTY_FUT_EXPIRY")
+        )
+        if kite_key_for_dates and kite_access_for_dates:
+            try:
+                kite_dates_client = KiteHistoricalClient(
+                    kite_key_for_dates, kite_access_for_dates
+                )
+                if not kite_token_for_dates and breeze_expiry_for_dates:
+                    kite_token_for_dates = kite_dates_client.resolve_nifty_future_token(
+                        breeze_expiry_for_dates
+                    )
+                if kite_token_for_dates:
+                    discovery_rows = _candles_from_provider_rows(
+                        kite_dates_client.history(
+                            kite_token_for_dates,
+                            start,
+                            end,
+                            instrument_name=f"KITE:{kite_token_for_dates}",
+                            include_oi=True,
+                        ),
+                        "Futures",
+                    )
+                    dates = _last_complete_dates(discovery_rows, sessions)
+                    source_attempts.append(
+                        {
+                            "source": "KITE",
+                            "series": "SESSION_DATE_DISCOVERY",
+                            "instrument_token": kite_token_for_dates,
+                            "complete_sessions": len(dates),
+                            "session_shape": _session_diagnostics(discovery_rows),
+                        }
+                    )
+            except Exception as exc:
+                source_attempts.append(
+                    {
+                        "source": "KITE",
+                        "series": "SESSION_DATE_DISCOVERY",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "complete_sessions": 0,
+                    }
+                )
+
     if len(dates) != sessions:
         diagnostics = {
             "request": {
@@ -795,9 +861,8 @@ def build_research_dataset(
             "source_attempts": source_attempts,
         }
         raise RuntimeError(
-            f"Only {len(dates)} complete NIFTY sessions found across available "
-            f"credential-free sources. Diagnostics: "
-            f"{json.dumps(diagnostics, separators=(',', ':'))}"
+            f"Only {len(dates)} complete sessions found across available sources. "
+            f"Diagnostics: {json.dumps(diagnostics, separators=(',', ':'))}"
         )
 
     wanted = set(dates)
