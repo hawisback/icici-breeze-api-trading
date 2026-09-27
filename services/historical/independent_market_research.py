@@ -836,13 +836,29 @@ def build_research_dataset(
                     if day.weekday() < 5
                 ]
                 candidate_days.sort()
-                discovery_rows = _candles_from_provider_rows(
-                    breeze_dates_client.history(
-                        candidate_days,
-                        breeze_expiry_for_dates,
-                    ),
-                    "Futures",
-                )
+                # Fetch discovery dates one session at a time. A month-long
+                # Breeze response can be several MB and occasionally terminates
+                # early with IncompleteRead; one failed transport response should
+                # not erase every otherwise complete session in the lookback.
+                discovery_rows: list[Candle] = []
+                discovery_errors: list[dict[str, str]] = []
+                for candidate_day in candidate_days:
+                    try:
+                        day_rows = _candles_from_provider_rows(
+                            breeze_dates_client.history(
+                                [candidate_day],
+                                breeze_expiry_for_dates,
+                            ),
+                            "Futures",
+                        )
+                        discovery_rows.extend(day_rows)
+                    except Exception as exc:
+                        discovery_errors.append(
+                            {
+                                "date": candidate_day.isoformat(),
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
                 dates = _last_complete_dates(discovery_rows, sessions)
                 source_attempts.append(
                     {
@@ -851,6 +867,7 @@ def build_research_dataset(
                         "expiry_date": breeze_expiry_for_dates,
                         "complete_sessions": len(dates),
                         "session_shape": _session_diagnostics(discovery_rows),
+                        "request_errors": discovery_errors,
                     }
                 )
             except Exception as exc:
