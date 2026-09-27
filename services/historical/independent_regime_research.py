@@ -22,7 +22,7 @@ from collections import defaultdict
 from datetime import datetime, time
 from pathlib import Path
 from statistics import median
-from typing import Any, Callable
+from typing import Any
 
 ENTRY_START = time(9, 30)
 ENTRY_END = time(14, 45)
