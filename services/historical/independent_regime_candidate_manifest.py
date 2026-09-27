@@ -273,3 +273,70 @@ BLIND_VALIDATION_04_PROTOCOL = {
         "filter before recording the predeclared results."
     ),
 }
+
+
+BLIND_VALIDATION_04 = {
+    "session_dates": [
+        "2026-07-15", "2026-07-16", "2026-07-17", "2026-07-20",
+        "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24",
+        "2026-07-27", "2026-07-28",
+    ],
+    "futures_expiry": "2026-07-28",
+    "IR-H5-DOWN-OI-OUTSIDE-OR15": {
+        "episodes": 25,
+        "active_days": 8,
+        "total_r": -1.285176,
+        "mean_r": -0.051407,
+        "win_rate": 0.44,
+        "profit_factor": 0.890277,
+        "max_drawdown_r": -3.572295,
+        "mean_directional_30m_atr": 0.020180,
+        "day_cluster_bootstrap_mean_r_95pct": [-0.442864, 0.285714],
+        "result": "FAIL_CONFIRMATION",
+    },
+    "IR-H2-DOWN-OI-ABOVE-VWAP": {
+        "episodes": 23,
+        "active_days": 8,
+        "total_r": -3.673455,
+        "mean_r": -0.159715,
+        "win_rate": 0.434783,
+        "profit_factor": 0.647465,
+        "max_drawdown_r": -5.259358,
+        "mean_directional_30m_atr": -0.045721,
+        "day_cluster_bootstrap_mean_r_95pct": [-0.363612, 0.024166],
+        "result": "FAIL_CONFIRMATION",
+    },
+    "IR-H3-UP-IMPULSE-REVERSAL": {
+        "episodes": 53,
+        "active_days": 10,
+        "total_r": 8.015170,
+        "mean_r": 0.151230,
+        "win_rate": 0.584906,
+        "profit_factor": 1.439007,
+        "max_drawdown_r": -3.119494,
+        "mean_directional_30m_atr": 0.180298,
+        "day_cluster_bootstrap_mean_r_95pct": [-0.028009, 0.341163],
+        "result": "SECONDARY_CONTROL_POSITIVE_NOT_PROMOTED_POST_HOC",
+    },
+    "ambiguous_intrabar_events": 0,
+    "post_hoc_observation_not_a_candidate": (
+        "H1 OR15 subgroups reversed relative to Blind 03: BELOW_OR15 was mildly "
+        "positive while ABOVE_OR15 was negative. This reinforces that neither "
+        "post-hoc subgroup should be promoted from these inspected blocks."
+    ),
+}
+
+REGIME_RESEARCH_DECISION_AFTER_BLIND_04 = {
+    "IR-H5-DOWN-OI-OUTSIDE-OR15": "DO_NOT_IMPLEMENT; failed confirmation block",
+    "IR-H2-DOWN-OI-ABOVE-VWAP": "DO_NOT_IMPLEMENT; failed confirmation block",
+    "IR-H6-DOWN-OI-BELOW-OR15": "RETIRED; failed Blind 03",
+    "IR-H3-UP-IMPULSE-REVERSAL": (
+        "RESEARCH_ONLY; positive Blind 04 secondary control, but do not promote "
+        "based on a block where it was not a primary candidate"
+    ),
+    "next_step": (
+        "Return to strategy-independent feature/regime discovery using the now "
+        "larger historical corpus. Any new hypothesis requires a new freeze and "
+        "a later untouched validation block before implementation."
+    ),
+}
