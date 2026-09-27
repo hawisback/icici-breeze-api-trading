@@ -802,9 +802,70 @@ def build_research_dataset(
 
     dates = _last_complete_dates(nifty_rows, sessions)
 
-    # Yahoo limits 5-minute history to a recent window. For older blind blocks,
-    # use Kite futures only to discover complete market dates. The research
-    # instrument is futures anyway; this does not substitute spot into signals.
+    # Yahoo limits 5-minute history to a recent window. For older blind
+    # blocks, prefer Breeze for session-date discovery when an explicit expiry
+    # was supplied: Breeze can query expired contracts historically, whereas
+    # Kite's current instrument master no longer lists expired futures.
+    if len(dates) != sessions:
+        breeze_key_for_dates = _usable_secret("BREEZE_API_KEY")
+        breeze_secret_for_dates = _usable_secret("BREEZE_SECRET_KEY")
+        breeze_session_for_dates = _usable_secret("BREEZE_SESSION_TOKEN")
+        breeze_expiry_for_dates = (
+            breeze_futures_expiry
+            or os.getenv("RESEARCH_BREEZE_NIFTY_FUT_EXPIRY")
+            or os.getenv("RESEARCH_NIFTY_FUT_EXPIRY")
+        )
+        if (
+            breeze_key_for_dates
+            and breeze_secret_for_dates
+            and breeze_session_for_dates
+            and breeze_expiry_for_dates
+        ):
+            try:
+                breeze_dates_client = BreezeFuturesClient(
+                    breeze_key_for_dates,
+                    breeze_secret_for_dates,
+                    breeze_session_for_dates,
+                )
+                candidate_days = [
+                    day
+                    for day in (
+                        window_end_date - timedelta(days=offset)
+                        for offset in range(lookback_days + 1)
+                    )
+                    if day.weekday() < 5
+                ]
+                candidate_days.sort()
+                discovery_rows = _candles_from_provider_rows(
+                    breeze_dates_client.history(
+                        candidate_days,
+                        breeze_expiry_for_dates,
+                    ),
+                    "Futures",
+                )
+                dates = _last_complete_dates(discovery_rows, sessions)
+                source_attempts.append(
+                    {
+                        "source": "BREEZE",
+                        "series": "SESSION_DATE_DISCOVERY",
+                        "expiry_date": breeze_expiry_for_dates,
+                        "complete_sessions": len(dates),
+                        "session_shape": _session_diagnostics(discovery_rows),
+                    }
+                )
+            except Exception as exc:
+                source_attempts.append(
+                    {
+                        "source": "BREEZE",
+                        "series": "SESSION_DATE_DISCOVERY",
+                        "expiry_date": breeze_expiry_for_dates,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "complete_sessions": 0,
+                    }
+                )
+
+    # Kite remains a useful fallback for live/current contracts. Do not require
+    # it to resolve an expired contract from the current instrument master.
     if len(dates) != sessions:
         kite_key_for_dates = _usable_secret("KITE_API_KEY")
         kite_access_for_dates = _usable_secret("KITE_ACCESS_TOKEN")
@@ -812,41 +873,31 @@ def build_research_dataset(
             kite_futures_instrument_token
             or os.getenv("RESEARCH_KITE_NIFTY_FUT_INSTRUMENT_TOKEN")
         )
-        breeze_expiry_for_dates = (
-            breeze_futures_expiry
-            or os.getenv("RESEARCH_BREEZE_NIFTY_FUT_EXPIRY")
-            or os.getenv("RESEARCH_NIFTY_FUT_EXPIRY")
-        )
-        if kite_key_for_dates and kite_access_for_dates:
+        if kite_key_for_dates and kite_access_for_dates and kite_token_for_dates:
             try:
                 kite_dates_client = KiteHistoricalClient(
                     kite_key_for_dates, kite_access_for_dates
                 )
-                if not kite_token_for_dates and breeze_expiry_for_dates:
-                    kite_token_for_dates = kite_dates_client.resolve_nifty_future_token(
-                        breeze_expiry_for_dates
-                    )
-                if kite_token_for_dates:
-                    discovery_rows = _candles_from_provider_rows(
-                        kite_dates_client.history(
-                            kite_token_for_dates,
-                            start,
-                            end,
-                            instrument_name=f"KITE:{kite_token_for_dates}",
-                            include_oi=True,
-                        ),
-                        "Futures",
-                    )
-                    dates = _last_complete_dates(discovery_rows, sessions)
-                    source_attempts.append(
-                        {
-                            "source": "KITE",
-                            "series": "SESSION_DATE_DISCOVERY",
-                            "instrument_token": kite_token_for_dates,
-                            "complete_sessions": len(dates),
-                            "session_shape": _session_diagnostics(discovery_rows),
-                        }
-                    )
+                discovery_rows = _candles_from_provider_rows(
+                    kite_dates_client.history(
+                        kite_token_for_dates,
+                        start,
+                        end,
+                        instrument_name=f"KITE:{kite_token_for_dates}",
+                        include_oi=True,
+                    ),
+                    "Futures",
+                )
+                dates = _last_complete_dates(discovery_rows, sessions)
+                source_attempts.append(
+                    {
+                        "source": "KITE",
+                        "series": "SESSION_DATE_DISCOVERY",
+                        "instrument_token": kite_token_for_dates,
+                        "complete_sessions": len(dates),
+                        "session_shape": _session_diagnostics(discovery_rows),
+                    }
+                )
             except Exception as exc:
                 source_attempts.append(
                     {
