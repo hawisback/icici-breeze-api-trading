@@ -406,6 +406,61 @@ def _fetch_futures_covering_dates(
     return selected, contract_by_date
 
 
+def _parse_expiry_schedule(values: list[str] | None) -> list[date]:
+    expiries = sorted({date.fromisoformat(value) for value in (values or [])})
+    return expiries
+
+
+def _near_month_expiry_for_day(day: date, expiries: list[date]) -> date:
+    for expiry in expiries:
+        if day <= expiry:
+            return expiry
+    raise ValueError(
+        f"No near-month expiry supplied for session {day.isoformat()}; "
+        "add an expiry on or after that session date."
+    )
+
+
+def _breeze_contract_plan(
+    session_dates: list[date],
+    fixed_expiry: str | None,
+    near_month_expiries: list[str] | None,
+) -> dict[date, str]:
+    if fixed_expiry and near_month_expiries:
+        raise ValueError(
+            "Use either fixed Breeze expiry or near-month expiry schedule, not both."
+        )
+    if fixed_expiry:
+        expiry = date.fromisoformat(fixed_expiry).isoformat()
+        return {day: expiry for day in session_dates}
+    expiries = _parse_expiry_schedule(near_month_expiries)
+    if not expiries:
+        return {}
+    return {
+        day: _near_month_expiry_for_day(day, expiries).isoformat()
+        for day in session_dates
+    }
+
+
+def _fetch_breeze_contract_plan(
+    client: BreezeFuturesClient,
+    plan: dict[date, str],
+) -> tuple[list[Candle], dict[str, Any]]:
+    grouped: dict[str, list[date]] = {}
+    for day, expiry in sorted(plan.items()):
+        grouped.setdefault(expiry, []).append(day)
+
+    rows: list[Candle] = []
+    diagnostics: dict[str, Any] = {}
+    for expiry, days in grouped.items():
+        rows.extend(
+            _candles_from_provider_rows(client.history(days, expiry), "Futures")
+        )
+        diagnostics[expiry] = dict(client.last_history_debug)
+    rows.sort(key=lambda row: row.timestamp)
+    return rows, diagnostics
+
+
 def _candles_from_provider_rows(
     rows: list[dict[str, Any]],
     instrument_type: str,
@@ -638,6 +693,7 @@ def _canonical_rows(
                 "futures_close": future.close if future else None,
                 "futures_volume": future.volume if future else None,
                 "futures_open_interest": future.open_interest if future else None,
+                "futures_instrument": future.instrument if future else None,
                 "futures_basis_points": (
                     future.close - spot_row.close
                     if future and spot_row
@@ -660,6 +716,7 @@ def build_research_dataset(
     lookback_days: int = 30,
     *,
     breeze_futures_expiry: str | None = None,
+    breeze_near_month_expiries: list[str] | None = None,
     upstox_futures_key: str | None = None,
     dhan_futures_security_id: str | None = None,
     kite_futures_instrument_token: str | None = None,
@@ -668,6 +725,11 @@ def build_research_dataset(
 ) -> dict[str, Any]:
     if sessions <= 0:
         raise ValueError("sessions must be positive")
+    if breeze_futures_expiry and breeze_near_month_expiries:
+        raise ValueError(
+            "Use either --breeze-futures-expiry or --breeze-near-month-expiry, not both."
+        )
+    _parse_expiry_schedule(breeze_near_month_expiries)
 
     _load_local_env()
     generated_at = datetime.now(IST)
@@ -815,11 +877,14 @@ def build_research_dataset(
             or os.getenv("RESEARCH_BREEZE_NIFTY_FUT_EXPIRY")
             or os.getenv("RESEARCH_NIFTY_FUT_EXPIRY")
         )
+        has_breeze_contract_config = bool(
+            breeze_near_month_expiries or breeze_expiry_for_dates
+        )
         if (
             breeze_key_for_dates
             and breeze_secret_for_dates
             and breeze_session_for_dates
-            and breeze_expiry_for_dates
+            and has_breeze_contract_config
         ):
             try:
                 breeze_dates_client = BreezeFuturesClient(
@@ -835,23 +900,26 @@ def build_research_dataset(
                     )
                     if day.weekday() < 5
                 ]
-                candidate_days.sort()
-                # Fetch discovery dates one session at a time. A month-long
-                # Breeze response can be several MB and occasionally terminates
-                # early with IncompleteRead; one failed transport response should
-                # not erase every otherwise complete session in the lookback.
+                # Search backwards and stop as soon as enough complete sessions
+                # are found. In roll-aware mode each day uses its actual
+                # near-month contract from the explicit expiry schedule.
                 discovery_rows: list[Candle] = []
                 discovery_errors: list[dict[str, str]] = []
                 for candidate_day in candidate_days:
                     try:
+                        plan = _breeze_contract_plan(
+                            [candidate_day],
+                            breeze_expiry_for_dates if not breeze_near_month_expiries else None,
+                            breeze_near_month_expiries,
+                        )
+                        day_expiry = plan[candidate_day]
                         day_rows = _candles_from_provider_rows(
-                            breeze_dates_client.history(
-                                [candidate_day],
-                                breeze_expiry_for_dates,
-                            ),
+                            breeze_dates_client.history([candidate_day], day_expiry),
                             "Futures",
                         )
                         discovery_rows.extend(day_rows)
+                        if len(_last_complete_dates(discovery_rows, sessions)) >= sessions:
+                            break
                     except Exception as exc:
                         discovery_errors.append(
                             {
@@ -865,6 +933,7 @@ def build_research_dataset(
                         "source": "BREEZE",
                         "series": "SESSION_DATE_DISCOVERY",
                         "expiry_date": breeze_expiry_for_dates,
+                        "near_month_expiries": breeze_near_month_expiries or [],
                         "complete_sessions": len(dates),
                         "session_shape": _session_diagnostics(discovery_rows),
                         "request_errors": discovery_errors,
@@ -876,6 +945,7 @@ def build_research_dataset(
                         "source": "BREEZE",
                         "series": "SESSION_DATE_DISCOVERY",
                         "expiry_date": breeze_expiry_for_dates,
+                        "near_month_expiries": breeze_near_month_expiries or [],
                         "error": f"{type(exc).__name__}: {exc}",
                         "complete_sessions": 0,
                     }
@@ -963,19 +1033,29 @@ def build_research_dataset(
         or os.getenv("RESEARCH_BREEZE_NIFTY_FUT_EXPIRY")
         or os.getenv("RESEARCH_NIFTY_FUT_EXPIRY")
     )
-    if breeze_key and breeze_secret and breeze_session and breeze_expiry:
+    breeze_plan = _breeze_contract_plan(
+        dates,
+        breeze_expiry if not breeze_near_month_expiries else None,
+        breeze_near_month_expiries,
+    )
+    breeze_contract_by_date = {
+        day.isoformat(): expiry for day, expiry in sorted(breeze_plan.items())
+    }
+    if breeze_key and breeze_secret and breeze_session and breeze_plan:
         try:
             client = BreezeFuturesClient(breeze_key, breeze_secret, breeze_session)
-            rows = _candles_from_provider_rows(
-                client.history(dates, breeze_expiry),
-                "Futures",
-            )
+            rows, breeze_diagnostics = _fetch_breeze_contract_plan(client, breeze_plan)
             futures_by_provider["BREEZE"] = rows
             credentialed_status["BREEZE"] = {
                 "available": bool(rows),
                 "series": ["NIFTY_FUTURES"],
-                "instrument_config": {"expiry_date": breeze_expiry},
-                "diagnostics": client.last_history_debug,
+                "instrument_config": {
+                    "mode": "near_month_schedule" if breeze_near_month_expiries else "fixed_expiry",
+                    "expiry_date": breeze_expiry if not breeze_near_month_expiries else None,
+                    "near_month_expiries": breeze_near_month_expiries or [],
+                    "contract_by_date": breeze_contract_by_date,
+                },
+                "diagnostics_by_expiry": breeze_diagnostics,
             }
             if rows:
                 broker_sources_used.append("BREEZE")
@@ -989,8 +1069,8 @@ def build_research_dataset(
         missing = []
         if not (breeze_key and breeze_secret and breeze_session):
             missing.append("BREEZE_API_KEY/BREEZE_SECRET_KEY/BREEZE_SESSION_TOKEN")
-        if not breeze_expiry:
-            missing.append("RESEARCH_BREEZE_NIFTY_FUT_EXPIRY")
+        if not breeze_plan:
+            missing.append("Breeze futures expiry configuration")
         credentialed_status["BREEZE"] = {
             "available": False,
             "series": ["NIFTY_FUTURES"],
@@ -1252,7 +1332,12 @@ def build_research_dataset(
             "nifty_futures": {
                 "canonical_source": futures_source,
                 "available": bool(futures_selected),
-                "contract_selection": "explicit provider contract identifier",
+                "contract_selection": (
+                    "explicit near-month expiry schedule"
+                    if breeze_near_month_expiries
+                    else "explicit provider contract identifier"
+                ),
+                "breeze_contract_by_date": breeze_contract_by_date,
                 "public_contracts_by_date": contract_by_date,
                 "volume_semantics": "actual futures traded volume",
                 "open_interest_semantics": "provider-reported futures open interest",
@@ -1325,6 +1410,16 @@ def main() -> None:
         help="Explicit NIFTY futures expiry YYYY-MM-DD; overrides env config.",
     )
     parser.add_argument(
+        "--breeze-near-month-expiry",
+        action="append",
+        default=[],
+        help=(
+            "Verified NIFTY monthly expiry YYYY-MM-DD; repeat to define a "
+            "roll-aware near-month schedule. Mutually exclusive with "
+            "--breeze-futures-expiry."
+        ),
+    )
+    parser.add_argument(
         "--upstox-futures-key",
         help="Explicit Upstox NIFTY futures instrument_key; overrides env config.",
     )
@@ -1346,6 +1441,7 @@ def main() -> None:
         args.sessions,
         args.lookback_days,
         breeze_futures_expiry=args.breeze_futures_expiry,
+        breeze_near_month_expiries=args.breeze_near_month_expiry,
         upstox_futures_key=args.upstox_futures_key,
         dhan_futures_security_id=args.dhan_futures_security_id,
         kite_futures_instrument_token=args.kite_futures_instrument_token,
