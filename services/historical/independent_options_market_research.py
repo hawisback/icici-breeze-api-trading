@@ -11,6 +11,7 @@ import argparse
 import json
 import math
 import os
+import time as clock
 from collections import defaultdict
 from datetime import date, datetime, time
 from pathlib import Path
@@ -157,12 +158,17 @@ class BreezeOptionsClient:
         api_secret: str,
         session_token: str,
         breeze_factory: Any | None = None,
+        calls_per_minute: int = 80,
     ) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
         self.session_token = session_token
         self._factory = breeze_factory
+        if calls_per_minute <= 0:
+            raise ValueError("calls_per_minute must be positive")
         self._sdk: Any | None = None
+        self._min_request_interval = 60.0 / calls_per_minute
+        self._last_request_at: float | None = None
         self.request_diagnostics: list[dict[str, Any]] = []
 
     def _client(self) -> Any:
@@ -177,6 +183,14 @@ class BreezeOptionsClient:
         sdk.generate_session(api_secret=self.api_secret, session_token=self.session_token)
         self._sdk = sdk
         return sdk
+
+    def _throttle(self) -> None:
+        if self._last_request_at is not None:
+            elapsed = clock.monotonic() - self._last_request_at
+            remaining = self._min_request_interval - elapsed
+            if remaining > 0:
+                clock.sleep(remaining)
+        self._last_request_at = clock.monotonic()
 
     @staticmethod
     def _request_chunks(session_dates: list[date], max_span_days: int = 9) -> list[list[date]]:
@@ -209,6 +223,7 @@ class BreezeOptionsClient:
 
         for chunk in self._request_chunks(session_dates):
             first, last = min(chunk), max(chunk)
+            self._throttle()
             response = sdk.get_historical_data_v2(
                 interval="5minute",
                 from_date=f"{first.isoformat()}T09:15:00.000Z",
@@ -391,6 +406,10 @@ def build_options_dataset(
     diagnostics = getattr(client, "request_diagnostics", None)
     if diagnostics is not None:
         result["request_diagnostics"] = diagnostics
+        result["quality"]["failed_requests"] = sum(
+            bool(row.get("error")) or row.get("status") not in (None, 200)
+            for row in diagnostics
+        )
     return result
 
 
