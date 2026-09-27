@@ -2,6 +2,7 @@ from services.historical.independent_options_behavior_blind_results import (
     OPTIONS_BLIND_08,
     OPTIONS_BLIND_09,
     OPTIONS_BLIND_08_09_COMBINED_EVALUATION,
+    OPTIONS_BLIND_10_O2,
 )
 
 
@@ -43,3 +44,18 @@ def test_combined_blind_evaluation_preserves_research_only_status():
     assert combined["composition_checks"]["mean_residual_after_matching_dte_and_time_bucket_bps"] < 1.0
     assert combined["implementation_allowed"] is False
     assert combined["retune_from_blind_allowed"] is False
+
+
+def test_options_blind_10_records_o2_conflict_without_retuning():
+    result = OPTIONS_BLIND_10_O2
+    assert result["candidate_id"] == "O2_DISTRIBUTED_OPTIONS_PARTICIPATION_EXPANSION"
+    assert result["scoring"]["development_reproduction"]["primary_matched_episodes"] == 67
+    assert result["scoring"]["threshold_changes"] is False
+    assert result["scoring"]["candidate_definition_changes"] is False
+    assert result["scoring"]["control_matching_changes"] is False
+    assert result["primary_30m"]["matched_scorable_episodes"] == 10
+    assert result["primary_30m"]["mean_matched_residual_bps"] < 1.0
+    assert result["primary_30m"]["median_matched_residual_bps"] < 0.0
+    assert result["candidate_status_after_blind"] == "FROZEN_RESEARCH_ONLY_FIRST_FRESH_BLIND_WEAK_OR_CONFLICTING"
+    assert result["implementation_allowed"] is False
+    assert result["retune_from_blind_allowed"] is False
