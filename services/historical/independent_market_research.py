@@ -412,12 +412,28 @@ def _parse_expiry_schedule(values: list[str] | None) -> list[date]:
 
 
 def _near_month_expiry_for_day(day: date, expiries: list[date]) -> date:
-    for expiry in expiries:
-        if day <= expiry:
-            return expiry
+    same_month = [
+        expiry
+        for expiry in expiries
+        if expiry.year == day.year and expiry.month == day.month
+    ]
+    same_month_on_or_after = [expiry for expiry in same_month if expiry >= day]
+    if same_month_on_or_after:
+        return min(same_month_on_or_after)
+
+    # Rolling to the next month is only valid when the schedule explicitly
+    # contains the current month's expiry and that expiry is already behind the
+    # session date. This prevents a missing monthly expiry from silently turning
+    # a farther contract into the supposed near-month contract.
+    if any(expiry < day for expiry in same_month):
+        for expiry in expiries:
+            if expiry > day:
+                return expiry
+
     raise ValueError(
-        f"No near-month expiry supplied for session {day.isoformat()}; "
-        "add an expiry on or after that session date."
+        f"No verified near-month expiry supplied for session {day.isoformat()}; "
+        f"include the expiry for {day:%Y-%m} and the following expiry when the "
+        "session is after that month's roll."
     )
 
 
@@ -1305,6 +1321,15 @@ def build_research_dataset(
         wanted,
         ["UPSTOX", "KITE", "YAHOO_CHART", "NSE_PUBLIC_CHART"],
     )
+
+    if breeze_near_month_expiries:
+        complete_futures = set(_last_complete_dates(futures_rows, len(wanted)))
+        if not wanted.issubset(complete_futures):
+            missing_days = sorted(day.isoformat() for day in wanted - complete_futures)
+            raise RuntimeError(
+                "Roll-aware futures collection did not produce complete canonical "
+                f"sessions for: {missing_days}. Refusing to emit a partial dataset."
+            )
 
     index_selected_candles = [
         row for row in nifty_rows if datetime.fromisoformat(row.timestamp).date() in wanted
