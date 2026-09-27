@@ -25,6 +25,10 @@ def test_o2_blind_protocol_forbids_reuse_and_retuning():
     assert "OPTIONS_BLIND_08" in protocol["ineligible_for_validation"]
     assert "OPTIONS_BLIND_09" in protocol["ineligible_for_validation"]
     assert protocol["exact_window_must_be_frozen_before_collection"] is True
+    assert protocol["frozen_window"]["start_date"] == "2026-01-08"
+    assert protocol["frozen_window"]["end_date"] == "2026-01-22"
+    assert protocol["frozen_window"]["breeze_futures_expiry"] == "2026-01-27"
+    assert protocol["frozen_window"]["option_expiries"] == ["2026-01-13", "2026-01-20", "2026-01-27"]
     assert protocol["parameter_changes_before_scoring"] is False
     assert protocol["mine_blind_for_new_rules"] is False
     assert protocol["thresholds_from_blind"] is False
