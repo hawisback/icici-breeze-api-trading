@@ -610,23 +610,28 @@ def _canonical_rows(
     futures_source: str | None,
     vix_source: str | None,
 ) -> list[dict[str, Any]]:
+    spot = {row.timestamp: row for row in index_rows}
     futures = {row.timestamp: row for row in futures_rows}
     vix = {row.timestamp: row for row in vix_rows}
     proxy = {row.timestamp: row for row in proxy_rows}
     result: list[dict[str, Any]] = []
 
-    for spot in sorted(index_rows, key=lambda row: row.timestamp):
-        future = futures.get(spot.timestamp)
-        vix_row = vix.get(spot.timestamp)
-        proxy_row = proxy.get(spot.timestamp)
+    # Futures are the research instrument. Anchor canonical rows to futures when
+    # credential-free spot has aged out; otherwise retain the spot timeline.
+    timestamps = sorted(spot) if spot else sorted(futures)
+    for ts in timestamps:
+        spot_row = spot.get(ts)
+        future = futures.get(ts)
+        vix_row = vix.get(ts)
+        proxy_row = proxy.get(ts)
         result.append(
             {
-                "timestamp": spot.timestamp,
-                "spot_open": spot.open,
-                "spot_high": spot.high,
-                "spot_low": spot.low,
-                "spot_close": spot.close,
-                "spot_source": spot.source,
+                "timestamp": ts,
+                "spot_open": spot_row.open if spot_row else None,
+                "spot_high": spot_row.high if spot_row else None,
+                "spot_low": spot_row.low if spot_row else None,
+                "spot_close": spot_row.close if spot_row else None,
+                "spot_source": spot_row.source if spot_row else None,
                 "futures_open": future.open if future else None,
                 "futures_high": future.high if future else None,
                 "futures_low": future.low if future else None,
@@ -634,7 +639,9 @@ def _canonical_rows(
                 "futures_volume": future.volume if future else None,
                 "futures_open_interest": future.open_interest if future else None,
                 "futures_basis_points": (
-                    future.close - spot.close if future else None
+                    future.close - spot_row.close
+                    if future and spot_row
+                    else None
                 ),
                 "futures_source": futures_source if future else None,
                 "vix_open": vix_row.open if vix_row else None,
@@ -1165,10 +1172,13 @@ def build_research_dataset(
         },
         "provenance": {
             "nifty_index": {
+                "available": bool(index_selected_candles),
                 "instrument": (
-                    "NIFTY 50" if primary_source == "NSE_PUBLIC_CHART" else "^NSEI"
+                    "NIFTY 50"
+                    if primary_source == "NSE_PUBLIC_CHART"
+                    else ("^NSEI" if primary_source == "YAHOO_CHART" else None)
                 ),
-                "source": primary_source,
+                "source": primary_source or None,
                 "volume_semantics": "not_used",
             },
             "nifty_futures": {
