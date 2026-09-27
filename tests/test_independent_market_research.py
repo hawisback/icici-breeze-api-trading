@@ -346,9 +346,32 @@ def test_breeze_contract_plan_rejects_incomplete_near_month_schedule():
             ["2026-05-26", "2026-06-30"],
         )
     except ValueError as exc:
-        assert "No near-month expiry supplied for session 2026-07-01" in str(exc)
+        assert "No verified near-month expiry supplied for session 2026-07-01" in str(exc)
     else:
         raise AssertionError("Expected incomplete expiry schedule to fail")
+
+
+def test_breeze_contract_plan_rejects_missing_session_month_expiry():
+    try:
+        _breeze_contract_plan(
+            [date(2026, 5, 18)],
+            None,
+            ["2026-06-30"],
+        )
+    except ValueError as exc:
+        assert "include the expiry for 2026-05" in str(exc)
+    else:
+        raise AssertionError("Expected missing May expiry to fail")
+
+
+def test_breeze_contract_plan_allows_roll_only_after_supplied_month_expiry():
+    plan = _breeze_contract_plan(
+        [date(2026, 5, 27)],
+        None,
+        ["2026-05-26", "2026-06-30"],
+    )
+
+    assert plan == {date(2026, 5, 27): "2026-06-30"}
 
 
 def test_breeze_contract_plan_rejects_fixed_and_roll_modes_together():
