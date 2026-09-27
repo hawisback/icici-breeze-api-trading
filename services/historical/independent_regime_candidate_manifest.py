@@ -79,7 +79,7 @@ COMMON_EXECUTION = {
 
 REGIME_CANDIDATES = {
     "IR-H5-DOWN-OI-OUTSIDE-OR15": {
-        "status": "FROZEN_FOR_NEXT_BLIND_VALIDATION",
+        "status": "PASSED_BLIND_03_RETAIN_FOR_CONFIRMATION",
         "side": "SHORT",
         "base_event": ["MOM3 < 0", "OI3 < 0", "H1 false->true"],
         "signal_gate": "FUTURES_CLOSE < OR15_LOW OR FUTURES_CLOSE > OR15_HIGH",
@@ -120,7 +120,7 @@ REGIME_CANDIDATES = {
         },
     },
     "IR-H6-DOWN-OI-BELOW-OR15": {
-        "status": "FROZEN_SECONDARY_FOR_NEXT_BLIND_VALIDATION",
+        "status": "FAILED_BLIND_03_DO_NOT_IMPLEMENT",
         "side": "SHORT",
         "base_event": ["MOM3 < 0", "OI3 < 0", "H1 false->true"],
         "signal_gate": "FUTURES_CLOSE < OR15_LOW",
@@ -187,5 +187,69 @@ REJECTED_REGIME_IDEAS = {
     "H1_PLUS_RVOL_FILTERS": (
         "Not frozen: relative-volume filters were not directionally stable "
         "across all three blocks."
+    ),
+}
+
+
+BLIND_VALIDATION_03 = {
+    "session_dates": [
+        "2026-07-29", "2026-07-30", "2026-07-31", "2026-08-03",
+        "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07",
+        "2026-08-10", "2026-08-11",
+    ],
+    "futures_expiry": "2026-08-25",
+    "IR-H5-DOWN-OI-OUTSIDE-OR15": {
+        "episodes": 30,
+        "active_days": 8,
+        "total_r": 5.983758,
+        "mean_r": 0.199459,
+        "win_rate": 0.566667,
+        "profit_factor": 1.554530,
+        "max_drawdown_r": -3.026756,
+        "mean_directional_30m_atr": 0.137112,
+        "day_cluster_bootstrap_mean_r_95pct": [-0.153846, 0.589620],
+        "result": "PASS_DIRECTION_AND_SIMULATED_R_BUT_CI_CROSSES_ZERO",
+    },
+    "IR-H6-DOWN-OI-BELOW-OR15": {
+        "episodes": 9,
+        "active_days": 2,
+        "total_r": -4.0,
+        "mean_r": -0.444444,
+        "win_rate": 0.222222,
+        "profit_factor": 0.333333,
+        "max_drawdown_r": -4.0,
+        "mean_directional_30m_atr": -0.146735,
+        "day_cluster_bootstrap_mean_r_95pct": [-0.5, -0.333333],
+        "result": "FAIL",
+    },
+    "IR-H2-DOWN-OI-ABOVE-VWAP": {
+        "episodes": 29,
+        "active_days": 7,
+        "total_r": 9.983758,
+        "mean_r": 0.344268,
+        "win_rate": 0.655172,
+        "profit_factor": 2.135721,
+        "max_drawdown_r": -2.026756,
+        "mean_directional_30m_atr": 0.189477,
+        "day_cluster_bootstrap_mean_r_95pct": [0.032936, 0.689833],
+        "result": "PASS_UNCHANGED_CONTROL",
+    },
+    "IR-H3-UP-IMPULSE-REVERSAL": {
+        "episodes": 57,
+        "active_days": 10,
+        "total_r": 7.088505,
+        "mean_r": 0.124360,
+        "win_rate": 0.526316,
+        "profit_factor": 1.350779,
+        "max_drawdown_r": -7.822368,
+        "mean_directional_30m_atr": 0.025402,
+        "day_cluster_bootstrap_mean_r_95pct": [-0.207749, 0.450680],
+        "result": "POSITIVE_SIMULATED_R_WEAK_DIRECTIONAL_EFFECT",
+    },
+    "post_hoc_observation_not_a_candidate": (
+        "Within H5, ABOVE_OR15 contributed +9.983758R on 21 episodes while "
+        "BELOW_OR15 contributed -4.0R on 9 episodes. This was observed only "
+        "after opening Blind 03 and must not be promoted without a new freeze "
+        "and another untouched block."
     ),
 }
