@@ -104,6 +104,26 @@ def _underlying_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _filter_rows_by_date(
+    rows: list[dict[str, Any]],
+    start_date: date | None,
+    end_date: date | None,
+) -> list[dict[str, Any]]:
+    if start_date and end_date and end_date < start_date:
+        raise ValueError("end date must not precede start date")
+    filtered = []
+    for row in rows:
+        day = datetime.fromisoformat(str(row["timestamp"])).date()
+        if start_date and day < start_date:
+            continue
+        if end_date and day > end_date:
+            continue
+        filtered.append(row)
+    if not filtered:
+        raise ValueError("date filter selected no underlying rows")
+    return filtered
+
+
 def _selection_plan(
     rows: list[dict[str, Any]],
     expiries: list[date],
@@ -348,8 +368,10 @@ def build_options_dataset(
     client: OptionHistoryClient,
     strike_step: int = DEFAULT_STRIKE_STEP,
     strike_radius: int = DEFAULT_STRIKE_RADIUS,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> dict[str, Any]:
-    rows = _underlying_rows(underlying_payload)
+    rows = _filter_rows_by_date(_underlying_rows(underlying_payload), start_date, end_date)
     expiries = _parse_expiries(option_expiries)
     contract_by_date, strikes_by_expiry, dates_by_expiry = _selection_plan(
         rows,
@@ -419,6 +441,8 @@ def main() -> None:
     )
     parser.add_argument("--underlying-input", type=Path, required=True)
     parser.add_argument("--option-expiry", action="append", default=[], required=True)
+    parser.add_argument("--start-date", type=date.fromisoformat)
+    parser.add_argument("--end-date", type=date.fromisoformat)
     parser.add_argument("--strike-step", type=int, default=DEFAULT_STRIKE_STEP)
     parser.add_argument("--strike-radius", type=int, default=DEFAULT_STRIKE_RADIUS)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -440,6 +464,8 @@ def main() -> None:
         client=BreezeOptionsClient(key, secret, token),
         strike_step=args.strike_step,
         strike_radius=args.strike_radius,
+        start_date=args.start_date,
+        end_date=args.end_date,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
