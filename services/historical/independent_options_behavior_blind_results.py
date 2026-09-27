@@ -120,3 +120,170 @@ OPTIONS_BLIND_08 = {
     "implementation_allowed": False,
     "retune_from_blind_allowed": False,
 }
+
+
+OPTIONS_BLIND_09 = {
+    "candidate_id": "O1_LATENT_OPTIONS_PARTICIPATION_EXPANSION",
+    "source": {
+        "filename": "independent_nifty_options_research_blind_09.json",
+        "sha256": "74a3d3ef1745c92de92193485074eda4bce1a3950c0fa2092962909a501c250f",
+        "start_date": "2026-01-23",
+        "end_date": "2026-02-06",
+        "sessions": 10,
+        "underlying_rows": 750,
+        "raw_option_rows": 36600,
+        "dynamic_option_rows": 13500,
+        "dynamic_contracts_per_timestamp": 18,
+        "failed_requests": 0,
+    },
+    "scoring": {
+        "threshold_source": "frozen DEVELOPMENT_CORPUS only",
+        "threshold_changes": False,
+        "candidate_definition_changes": False,
+        "directional_claim": False,
+        "episode_rule": "false-to-true state transition within a session",
+        "excursion_semantics": (
+            "maximum absolute excursion from signal-bar futures close using future futures "
+            "high/low over the full horizon; signal bar excluded"
+        ),
+    },
+    "primary_30m": {
+        "scorable_episodes": 7,
+        "sessions_with_episodes": 3,
+        "control_bars": 72,
+        "episode_mean_excursion_bps": 27.049839159406535,
+        "control_mean_excursion_bps": 22.01515362924854,
+        "mean_lift_bps": 5.034685530157994,
+        "episode_median_excursion_bps": 23.11284978643625,
+        "control_median_excursion_bps": 20.43698400476152,
+        "median_lift_bps": 2.67586578167473,
+        "pre_specified_direction_matched_mean": True,
+        "pre_specified_direction_matched_median": True,
+    },
+    "secondary_15m": {
+        "scorable_episodes": 7,
+        "control_bars": 79,
+        "mean_lift_bps": 5.442707813823933,
+        "median_lift_bps": 7.368976275515399,
+    },
+    "secondary_60m": {
+        "scorable_episodes": 7,
+        "control_bars": 64,
+        "mean_lift_bps": 2.790800971529407,
+        "median_lift_bps": 0.26621573131378895,
+    },
+    "post_blind_evaluation_diagnostics": {
+        "episode_distribution": {
+            "dte_4_episodes": 6,
+            "dte_1_episodes": 1,
+            "sessions": {
+                "2026-01-23": 3,
+                "2026-02-02": 1,
+                "2026-02-06": 3,
+            },
+        },
+        "common_language_effect_probability": 0.5952380952380952,
+        "session_cluster_bootstrap_30m": {
+            "seed": 123,
+            "resamples": 20000,
+            "valid_resamples": 19446,
+            "mean_lift_95pct_interval_bps": [-6.459693932848486, 17.45956329902188],
+            "median_lift_95pct_interval_bps": [-1.9385158934303277, 18.47550792246493],
+            "mean_lift_positive_resample_fraction": 0.695361513936028,
+            "median_lift_positive_resample_fraction": 0.8447495628921114,
+            "interpretation": "Very wide intervals reflect only seven episodes concentrated in three sessions.",
+        },
+        "leave_one_session_out_30m": {
+            "mean_lift_positive_for_all_10_omissions": False,
+            "median_lift_positive_for_all_10_omissions": True,
+            "jan_23_removed_mean_lift_bps": -3.1249076512694707,
+            "jan_23_removed_median_lift_bps": 1.1041508960043878,
+            "interpretation": "The positive mean result is materially helped by 2026-01-23; the median is less fragile.",
+        },
+        "composition_checks": {
+            "mean_residual_after_matching_dte_only_bps": 2.75803992890462,
+            "mean_residual_after_matching_time_bucket_only_bps": 6.7860187053701235,
+            "mean_residual_after_matching_dte_and_time_bucket_bps": 5.727672201816212,
+            "exact_match_scorable_episodes": 6,
+            "warning": "Positive matched residuals are encouraging but based on only six exactly matched episodes.",
+        },
+        "large_move_diagnostic": {
+            "development_control_q75_30m_excursion_bps": 17.003605789770184,
+            "blind_episode_fraction_above_development_control_q75": 0.7142857142857143,
+            "blind_control_fraction_above_development_control_q75": 0.5833333333333334,
+        },
+    },
+    "interpretation": (
+        "The frozen primary 30-minute score is positive for a second blind block, but Blind09 "
+        "contains only seven scorable episodes across three sessions and the mean result is "
+        "sensitive to removing 2026-01-23. This is support with substantial sampling uncertainty."
+    ),
+    "candidate_status_after_blind": "FROZEN_RESEARCH_ONLY_SECOND_BLIND_SUPPORT_SPARSE",
+    "implementation_allowed": False,
+    "retune_from_blind_allowed": False,
+}
+
+
+OPTIONS_BLIND_08_09_COMBINED_EVALUATION = {
+    "candidate_id": "O1_LATENT_OPTIONS_PARTICIPATION_EXPANSION",
+    "blind_blocks": ["OPTIONS_BLIND_08", "OPTIONS_BLIND_09"],
+    "sessions": 20,
+    "primary_30m": {
+        "scorable_episodes": 22,
+        "sessions_with_episodes": 11,
+        "control_bars": 213,
+        "episode_mean_excursion_bps": 18.296115814373163,
+        "control_mean_excursion_bps": 15.966669382156311,
+        "mean_lift_bps": 2.3294464322168515,
+        "episode_median_excursion_bps": 13.209277216286257,
+        "control_median_excursion_bps": 12.44363937072931,
+        "median_lift_bps": 0.765637845556947,
+        "positive_frozen_primary_blocks_mean": "2/2",
+        "positive_frozen_primary_blocks_median": "2/2",
+        "common_language_effect_probability": 0.5729833546734955,
+    },
+    "secondary_15m": {
+        "scorable_episodes": 22,
+        "control_bars": 223,
+        "mean_lift_bps": 3.112893642737509,
+        "median_lift_bps": 1.125641911431659,
+    },
+    "secondary_60m": {
+        "scorable_episodes": 21,
+        "control_bars": 192,
+        "mean_lift_bps": 0.9307693313257843,
+        "median_lift_bps": -3.8008168144632606,
+    },
+    "session_cluster_bootstrap_30m": {
+        "seed": 123,
+        "resamples": 20000,
+        "mean_lift_95pct_interval_bps": [-2.9053551946341436, 8.72899343185486],
+        "median_lift_95pct_interval_bps": [-2.0460439902486955, 8.012666560040039],
+        "mean_lift_positive_resample_fraction": 0.7484,
+        "median_lift_positive_resample_fraction": 0.75905,
+    },
+    "composition_checks": {
+        "mean_residual_after_matching_dte_only_bps": 1.1534500008221078,
+        "mean_residual_after_matching_time_bucket_only_bps": 2.3109092307282935,
+        "mean_residual_after_matching_dte_and_time_bucket_bps": 0.23080188285661893,
+        "median_residual_after_matching_dte_and_time_bucket_bps": -3.7624505393238703,
+        "interpretation": (
+            "The pooled frozen headline score remains positive, but exact DTE x time-bucket "
+            "matching removes most of the mean lift and leaves a negative median residual. This "
+            "weakens any claim that O1 adds much incremental information beyond regime composition."
+        ),
+    },
+    "large_move_diagnostic": {
+        "development_control_q75_30m_excursion_bps": 17.003605789770184,
+        "episode_fraction_above_threshold": 0.4090909090909091,
+        "control_fraction_above_threshold": 0.3474178403755869,
+    },
+    "research_conclusion": (
+        "Two blind blocks support the frozen aggregate near-term expansion association, but the "
+        "combined sample is small, bootstrap intervals cross zero, and composition-adjusted "
+        "incremental lift is weak. Preserve O1 as a descriptive research regime; do not promote "
+        "it to strategy logic or retune it from blind data."
+    ),
+    "implementation_allowed": False,
+    "retune_from_blind_allowed": False,
+}
