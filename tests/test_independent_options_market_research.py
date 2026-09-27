@@ -3,6 +3,7 @@ from datetime import date
 from services.historical.independent_options_market_research import (
     BreezeOptionsClient,
     _atm_strike,
+    _filter_rows_by_date,
     _nearest_expiry_for_day,
     _selection_plan,
     _strike_band,
@@ -130,3 +131,13 @@ def test_breeze_options_client_uses_options_call_put_and_explicit_strike():
     assert calls[0]["expiry_date"] == "2026-05-26T07:00:00.000Z"
     assert calls[0]["right"] == "call"
     assert calls[0]["strike_price"] == "23800"
+
+
+def test_date_filter_supports_small_data_quality_pilots():
+    rows = [
+        _underlying("2026-08-26T09:15:00+05:30", 24000),
+        _underlying("2026-08-27T09:15:00+05:30", 24050),
+        _underlying("2026-09-09T09:15:00+05:30", 24500),
+    ]
+    filtered = _filter_rows_by_date(rows, date(2026, 8, 27), date(2026, 9, 9))
+    assert [row["timestamp"][:10] for row in filtered] == ["2026-08-27", "2026-09-09"]
