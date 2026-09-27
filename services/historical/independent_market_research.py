@@ -1041,6 +1041,7 @@ def build_research_dataset(
     breeze_contract_by_date = {
         day.isoformat(): expiry for day, expiry in sorted(breeze_plan.items())
     }
+    multi_expiry_breeze_roll = len(set(breeze_plan.values())) > 1
     if breeze_key and breeze_secret and breeze_session and breeze_plan:
         try:
             client = BreezeFuturesClient(breeze_key, breeze_secret, breeze_session)
@@ -1055,6 +1056,11 @@ def build_research_dataset(
                     "near_month_expiries": breeze_near_month_expiries or [],
                     "contract_by_date": breeze_contract_by_date,
                 },
+                "diagnostics": (
+                    next(iter(breeze_diagnostics.values()))
+                    if len(breeze_diagnostics) == 1
+                    else None
+                ),
                 "diagnostics_by_expiry": breeze_diagnostics,
             }
             if rows:
@@ -1099,7 +1105,7 @@ def build_research_dataset(
 
                 upstox_futures: list[Candle] = []
                 futures_debug: dict[str, Any] | None = None
-                if upstox_key:
+                if upstox_key and not multi_expiry_breeze_roll:
                     upstox_futures = _candles_from_provider_rows(
                         client.history(upstox_key, query_start, query_end),
                         "Futures",
@@ -1112,12 +1118,21 @@ def build_research_dataset(
                     "available": bool(upstox_vix or upstox_futures),
                     "series": [
                         "INDIA_VIX",
-                        *(["NIFTY_FUTURES"] if upstox_key else []),
+                        *(
+                            ["NIFTY_FUTURES"]
+                            if upstox_key and not multi_expiry_breeze_roll
+                            else []
+                        ),
                     ],
                     "vix_diagnostics": vix_debug,
                     "futures_instrument_key": upstox_key,
                     "futures_diagnostics": futures_debug,
                     "futures_configuration_missing": not bool(upstox_key),
+                    "futures_skipped_reason": (
+                        "multi_expiry_roll_requires_contract_aware_provider"
+                        if upstox_key and multi_expiry_breeze_roll
+                        else None
+                    ),
                 }
         except (RuntimeError, httpx.HTTPError) as exc:
             credentialed_status["UPSTOX"] = {
@@ -1138,7 +1153,14 @@ def build_research_dataset(
         dhan_futures_security_id
         or os.getenv("RESEARCH_DHAN_NIFTY_FUT_SECURITY_ID")
     )
-    if dhan_token and dhan_security_id:
+    if dhan_token and dhan_security_id and multi_expiry_breeze_roll:
+        credentialed_status["DHAN"] = {
+            "available": False,
+            "series": [],
+            "security_id": dhan_security_id,
+            "reason": "multi_expiry_roll_requires_contract_aware_provider",
+        }
+    elif dhan_token and dhan_security_id:
         try:
             with DhanHistoricalClient(dhan_token) as client:
                 rows = _candles_from_provider_rows(
@@ -1193,7 +1215,11 @@ def build_research_dataset(
                     kite_vix_token = client.resolve_india_vix_token()
                 except RuntimeError as exc:
                     resolution_errors.append(str(exc))
-            if not kite_futures_token and breeze_expiry:
+            if (
+                not multi_expiry_breeze_roll
+                and not kite_futures_token
+                and breeze_expiry
+            ):
                 try:
                     kite_futures_token = client.resolve_nifty_future_token(breeze_expiry)
                 except RuntimeError as exc:
@@ -1203,7 +1229,7 @@ def build_research_dataset(
             kite_vix: list[Candle] = []
             futures_debug: dict[str, Any] | None = None
             vix_debug: dict[str, Any] | None = None
-            if kite_futures_token:
+            if kite_futures_token and not multi_expiry_breeze_roll:
                 kite_futures = _candles_from_provider_rows(
                     client.history(
                         kite_futures_token,
@@ -1235,7 +1261,11 @@ def build_research_dataset(
             credentialed_status["KITE"] = {
                 "available": bool(kite_futures or kite_vix),
                 "series": [
-                    *(["NIFTY_FUTURES"] if kite_futures_token else []),
+                    *(
+                        ["NIFTY_FUTURES"]
+                        if kite_futures_token and not multi_expiry_breeze_roll
+                        else []
+                    ),
                     *(["INDIA_VIX"] if kite_vix_token else []),
                 ],
                 "futures_instrument_token": kite_futures_token,
@@ -1243,6 +1273,11 @@ def build_research_dataset(
                 "futures_diagnostics": futures_debug,
                 "vix_diagnostics": vix_debug,
                 "instrument_resolution_errors": resolution_errors,
+                "futures_skipped_reason": (
+                    "multi_expiry_roll_requires_contract_aware_provider"
+                    if kite_futures_token and multi_expiry_breeze_roll
+                    else None
+                ),
             }
             if kite_futures or kite_vix:
                 broker_sources_used.append("KITE")
@@ -1316,6 +1351,7 @@ def build_research_dataset(
             "raw_provider_series_preserved": True,
             "canonical_series_never_backfilled_from_secondary_provider": True,
             "contract_identifiers_explicit": True,
+            "single_contract_futures_excluded_from_multi_expiry_roll": True,
             "niftybees_is_only_a_volume_proxy": True,
         },
         "provenance": {
@@ -1334,8 +1370,12 @@ def build_research_dataset(
                 "available": bool(futures_selected),
                 "contract_selection": (
                     "explicit near-month expiry schedule"
-                    if breeze_near_month_expiries
-                    else "explicit provider contract identifier"
+                    if futures_source == "BREEZE" and breeze_near_month_expiries
+                    else (
+                        "highest-volume public contract by date"
+                        if futures_source == "NSE_PUBLIC_CHART"
+                        else "explicit provider contract identifier"
+                    )
                 ),
                 "breeze_contract_by_date": breeze_contract_by_date,
                 "public_contracts_by_date": contract_by_date,
