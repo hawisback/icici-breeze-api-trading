@@ -253,3 +253,23 @@ BLIND_VALIDATION_03 = {
         "and another untouched block."
     ),
 }
+
+
+BLIND_VALIDATION_04_PROTOCOL = {
+    "status": "FROZEN_BEFORE_DATA_COLLECTION",
+    "end_date": "2026-07-28",
+    "sessions": 10,
+    "futures_expiry": "2026-07-28",
+    "primary_candidates": [
+        "IR-H5-DOWN-OI-OUTSIDE-OR15",
+        "IR-H2-DOWN-OI-ABOVE-VWAP",
+    ],
+    "secondary_control": "IR-H3-UP-IMPULSE-REVERSAL",
+    "retired": ["IR-H6-DOWN-OI-BELOW-OR15"],
+    "prohibited_post_hoc_gate": "H1_ABOVE_OR15",
+    "execution": COMMON_EXECUTION,
+    "decision_rule": (
+        "Score the frozen candidates unchanged. Do not mine Blind 04 for a new "
+        "filter before recording the predeclared results."
+    ),
+}
