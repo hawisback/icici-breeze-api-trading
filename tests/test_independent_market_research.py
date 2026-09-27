@@ -271,3 +271,31 @@ def test_canonical_rows_align_on_spot_timestamps_and_compute_basis():
     assert rows[0]["vix_close"] == 12.5
     assert rows[0]["futures_source"] == "BREEZE"
     assert rows[0]["vix_source"] == "UPSTOX"
+
+
+def test_canonical_rows_can_be_anchored_to_futures_without_spot():
+    ts = "2026-08-26T09:15:00+05:30"
+    future = _candle(ts, 105, source="BREEZE", volume=500, oi=9000)
+    vix = Candle(
+        timestamp=ts,
+        open=12,
+        high=13,
+        low=11,
+        close=12.5,
+        volume=0,
+        open_interest=None,
+        source="KITE",
+        instrument="NSE:INDIA VIX",
+        instrument_type="VolatilityIndex",
+    )
+
+    rows = _canonical_rows([], [future], [vix], [], "BREEZE", "KITE")
+
+    assert len(rows) == 1
+    assert rows[0]["timestamp"] == ts
+    assert rows[0]["spot_close"] is None
+    assert rows[0]["futures_close"] == 105
+    assert rows[0]["futures_volume"] == 500
+    assert rows[0]["futures_open_interest"] == 9000
+    assert rows[0]["futures_basis_points"] is None
+    assert rows[0]["vix_close"] == 12.5
