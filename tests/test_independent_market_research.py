@@ -6,6 +6,7 @@ from services.historical.independent_market_research import (
     Candle,
     Instrument,
     PublicNseChartClient,
+    _breeze_contract_plan,
     _canonical_rows,
     _compare_provider_pair,
     _last_complete_dates,
@@ -299,3 +300,85 @@ def test_canonical_rows_can_be_anchored_to_futures_without_spot():
     assert rows[0]["futures_open_interest"] == 9000
     assert rows[0]["futures_basis_points"] is None
     assert rows[0]["vix_close"] == 12.5
+
+
+
+def test_breeze_contract_plan_rolls_after_expiry_day():
+    days = [
+        date(2026, 5, 25),
+        date(2026, 5, 26),
+        date(2026, 5, 27),
+        date(2026, 6, 30),
+        date(2026, 7, 1),
+    ]
+
+    plan = _breeze_contract_plan(
+        days,
+        None,
+        ["2026-05-26", "2026-06-30", "2026-07-28"],
+    )
+
+    assert plan == {
+        date(2026, 5, 25): "2026-05-26",
+        date(2026, 5, 26): "2026-05-26",
+        date(2026, 5, 27): "2026-06-30",
+        date(2026, 6, 30): "2026-06-30",
+        date(2026, 7, 1): "2026-07-28",
+    }
+
+
+def test_breeze_contract_plan_preserves_fixed_expiry_mode():
+    days = [date(2026, 5, 25), date(2026, 6, 15)]
+
+    plan = _breeze_contract_plan(days, "2026-07-28", None)
+
+    assert plan == {
+        date(2026, 5, 25): "2026-07-28",
+        date(2026, 6, 15): "2026-07-28",
+    }
+
+
+def test_breeze_contract_plan_rejects_incomplete_near_month_schedule():
+    try:
+        _breeze_contract_plan(
+            [date(2026, 7, 1)],
+            None,
+            ["2026-05-26", "2026-06-30"],
+        )
+    except ValueError as exc:
+        assert "No near-month expiry supplied for session 2026-07-01" in str(exc)
+    else:
+        raise AssertionError("Expected incomplete expiry schedule to fail")
+
+
+def test_breeze_contract_plan_rejects_fixed_and_roll_modes_together():
+    try:
+        _breeze_contract_plan(
+            [date(2026, 6, 15)],
+            "2026-06-30",
+            ["2026-06-30"],
+        )
+    except ValueError as exc:
+        assert "either fixed Breeze expiry or near-month expiry schedule" in str(exc)
+    else:
+        raise AssertionError("Expected mutually exclusive modes to fail")
+
+
+def test_canonical_rows_preserve_futures_instrument():
+    ts = "2026-05-27T09:15:00+05:30"
+    future = Candle(
+        timestamp=ts,
+        open=100,
+        high=102,
+        low=99,
+        close=101,
+        volume=500,
+        open_interest=9000,
+        source="BREEZE",
+        instrument="NIFTY FUT 2026-06-30",
+        instrument_type="Futures",
+    )
+
+    rows = _canonical_rows([], [future], [], [], "BREEZE", None)
+
+    assert rows[0]["futures_instrument"] == "NIFTY FUT 2026-06-30"
