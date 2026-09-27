@@ -1311,11 +1311,20 @@ def build_research_dataset(
             "missing": ["KITE_API_KEY/KITE_ACCESS_TOKEN"],
         }
 
-    futures_source, futures_rows = _select_canonical_provider(
-        futures_by_provider,
-        wanted,
-        ["BREEZE", "UPSTOX", "KITE", "DHAN", "NSE_PUBLIC_CHART"],
-    )
+    if breeze_near_month_expiries:
+        futures_source = "BREEZE" if futures_by_provider.get("BREEZE") else None
+        futures_rows = [
+            row
+            for row in futures_by_provider.get("BREEZE", [])
+            if datetime.fromisoformat(row.timestamp).date() in wanted
+        ]
+        futures_rows.sort(key=lambda row: row.timestamp)
+    else:
+        futures_source, futures_rows = _select_canonical_provider(
+            futures_by_provider,
+            wanted,
+            ["BREEZE", "UPSTOX", "KITE", "DHAN", "NSE_PUBLIC_CHART"],
+        )
     vix_source, vix_rows = _select_canonical_provider(
         vix_by_provider,
         wanted,
@@ -1377,6 +1386,7 @@ def build_research_dataset(
             "canonical_series_never_backfilled_from_secondary_provider": True,
             "contract_identifiers_explicit": True,
             "single_contract_futures_excluded_from_multi_expiry_roll": True,
+            "roll_aware_canonical_futures_requires_breeze": True,
             "niftybees_is_only_a_volume_proxy": True,
         },
         "provenance": {
