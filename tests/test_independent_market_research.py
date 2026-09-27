@@ -374,6 +374,19 @@ def test_breeze_contract_plan_allows_roll_only_after_supplied_month_expiry():
     assert plan == {date(2026, 5, 27): "2026-06-30"}
 
 
+def test_breeze_contract_plan_rejects_skipped_following_month():
+    try:
+        _breeze_contract_plan(
+            [date(2026, 5, 27)],
+            None,
+            ["2026-05-26", "2026-07-28"],
+        )
+    except ValueError as exc:
+        assert "following expiry" in str(exc)
+    else:
+        raise AssertionError("Expected missing June expiry to fail")
+
+
 def test_breeze_contract_plan_rejects_fixed_and_roll_modes_together():
     try:
         _breeze_contract_plan(
