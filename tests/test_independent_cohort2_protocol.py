@@ -41,12 +41,13 @@ def test_futures_roll_schedule_is_explicit():
     assert futures_expiry_for_day("2025-11-26") == "2025-12-30"
 
 
-def test_options_schedule_includes_special_session_expiry_but_not_as_research_session():
+def test_options_schedule_shifts_diwali_week_expiry_to_previous_trading_day():
     assert OPTION_EXPIRIES[0] == "2025-09-09"
     assert OPTION_EXPIRIES[-1] == "2025-12-23"
-    assert "2025-10-21" in OPTION_EXPIRIES
+    assert "2025-10-20" in OPTION_EXPIRIES
+    assert "2025-10-21" not in OPTION_EXPIRIES
     assert "2025-10-21" not in SESSION_DATES
-    assert option_expiry_for_day("2025-10-20") == "2025-10-21"
+    assert option_expiry_for_day("2025-10-20") == "2025-10-20"
     assert option_expiry_for_day("2025-10-23") == "2025-10-28"
 
 
