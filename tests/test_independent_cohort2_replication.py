@@ -56,3 +56,56 @@ def test_replication_does_not_promote_four_of_six_blocks():
     result = _replication_check(cohort1, cohort2, ["metric"])
     assert result["same_pooled_sign"] is True
     assert result["directional_replication"] is False
+
+
+def test_build_frame_replaces_null_market_auxiliary_placeholders():
+    sessions = ["2026-01-02"]
+    market_rows = []
+    vix_rows = []
+    spot_rows = []
+    option_rows = []
+    for index in range(6):
+        minute = 15 + index * 5
+        timestamp = f"2026-01-02T09:{minute:02d}:00+05:30"
+        price = 26000.0 + index
+        market_rows.append({
+            "timestamp": timestamp,
+            "futures_open": price,
+            "futures_high": price + 2.0,
+            "futures_low": price - 2.0,
+            "futures_close": price + 1.0,
+            "futures_volume": 1000.0 + index,
+            "futures_open_interest": 10000.0 + index,
+            "futures_instrument": "NIFTY FUT 2026-01-27",
+            "vix_close": None,
+            "spot_close": None,
+        })
+        vix_rows.append({"timestamp": timestamp, "close": 12.0 + index / 10.0})
+        spot_rows.append({"timestamp": timestamp, "close": 25950.0 + index})
+        for right, close in (("CE", 100.0 + index), ("PE", 99.0 + index)):
+            option_rows.append({
+                "timestamp": timestamp,
+                "expiry": "2026-01-06",
+                "strike": 26000,
+                "right": right,
+                "close": close,
+            })
+    frame = build_frame(
+        {"session_dates": sessions, "canonical_market_rows": market_rows},
+        {"session_dates": sessions, "vix_rows": vix_rows},
+        {
+            "session_dates": sessions,
+            "contract_by_date": {"2026-01-02": "2026-01-06"},
+            "option_candles": option_rows,
+        },
+        {"session_dates": sessions, "spot_rows": spot_rows},
+        block_size=1,
+    )
+    assert "vix_close" in frame.columns
+    assert "spot_close" in frame.columns
+    assert "vix_close_x" not in frame.columns
+    assert "vix_close_y" not in frame.columns
+    assert "spot_close_x" not in frame.columns
+    assert "spot_close_y" not in frame.columns
+    assert frame["vix_close"].tolist() == [12.0 + index / 10.0 for index in range(6)]
+    assert frame["spot_close"].tolist() == [25950.0 + index for index in range(6)]
