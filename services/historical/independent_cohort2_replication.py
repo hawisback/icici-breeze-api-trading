@@ -252,7 +252,7 @@ def build_frame(
     vix_frame = vix_frame[["timestamp", "close"]].rename(
         columns={"close": "vix_close"}
     )
-    frame = frame.merge(vix_frame, on="timestamp", how="left", validate="one_to_one")
+    # canonical_market_rows may carry null VIX placeholders; the standalone\n    # VIX corpus is authoritative for this frozen replication. Drop the\n    # placeholder before merging so pandas does not suffix vix_close.\n    frame = frame.drop(columns=["vix_close"], errors="ignore")\n    frame = frame.merge(vix_frame, on="timestamp", how="left", validate="one_to_one")
     frame["vix_5m_change_bps"] = (
         frame["vix_close"]
         / frame.groupby("date")["vix_close"].shift(1)
@@ -269,7 +269,7 @@ def build_frame(
     spot_frame = spot_frame[["timestamp", "close"]].rename(
         columns={"close": "spot_close"}
     )
-    frame = frame.merge(spot_frame, on="timestamp", how="left", validate="one_to_one")
+    # Likewise, standalone spot is authoritative over null market placeholders.\n    frame = frame.drop(columns=["spot_close"], errors="ignore")\n    frame = frame.merge(spot_frame, on="timestamp", how="left", validate="one_to_one")
     frame["spot_return_bps"] = (
         frame["spot_close"]
         / frame.groupby("date")["spot_close"].shift(1)
