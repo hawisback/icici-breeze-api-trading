@@ -2,7 +2,7 @@ from services.historical.independent_options_behavior_blind_results import (
     OPTIONS_BLIND_08,
     OPTIONS_BLIND_09,
     OPTIONS_BLIND_08_09_COMBINED_EVALUATION,
-    OPTIONS_BLIND_10_O2,
+    OPTIONS_BLIND_10_O2,\n    OPTIONS_BLIND_11_O2,
 )
 
 
@@ -59,3 +59,23 @@ def test_options_blind_10_records_o2_conflict_without_retuning():
     assert result["candidate_status_after_blind"] == "FROZEN_RESEARCH_ONLY_FIRST_FRESH_BLIND_WEAK_OR_CONFLICTING"
     assert result["implementation_allowed"] is False
     assert result["retune_from_blind_allowed"] is False
+
+
+def test_options_blind_11_retires_o2_under_frozen_decision_rule():
+    result = OPTIONS_BLIND_11_O2
+    assert result["candidate_id"] == "O2_DISTRIBUTED_OPTIONS_PARTICIPATION_EXPANSION"
+    assert result["source"]["sha256"] == "3877b74a4b00fd9ed7a806fbde4a8ca93c2e93efa5bb2676f3a1fd54c91fe24a"
+    assert result["scoring"]["development_reproduction"]["primary_matched_episodes"] == 67
+    assert result["scoring"]["threshold_changes"] is False
+    assert result["scoring"]["candidate_definition_changes"] is False
+    assert result["scoring"]["control_matching_changes"] is False
+    assert result["scoring"]["hhi_threshold_changes"] is False
+    assert result["primary_30m"]["matched_scorable_episodes"] == 18
+    assert result["primary_30m"]["matching_coverage_pct"] == 100.0
+    assert result["primary_30m"]["mean_matched_residual_bps"] < 0.0
+    assert abs(result["primary_30m"]["median_matched_residual_bps"]) < 1.0
+    assert result["prospective_decision_application"]["triggered"] is True
+    assert result["candidate_status_after_blind"] == "RETIRED_AS_INDEPENDENT_PREDICTIVE_CANDIDATE_DESCRIPTIVE_ONLY"
+    assert result["implementation_allowed"] is False
+    assert result["retune_from_blind_allowed"] is False
+    assert result["rescue_filters_allowed"] is False
