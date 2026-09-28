@@ -93,29 +93,30 @@ def test_execution_outcomes_do_not_use_partial_horizon_near_session_end():
 
 def test_failed_breakout_features_are_directionally_defined():
     rows = []
-    base = pd.Timestamp("2026-01-02T09:15:00+05:30")
     bars = [
         (100.0, 102.0, 99.0, 101.0, 1000.0),
         (101.0, 103.0, 100.0, 102.0, 1100.0),
         (102.0, 104.0, 101.0, 103.0, 1200.0),
         (103.0, 105.0, 102.0, 103.5, 1300.0),
     ]
-    for index, (open_, high, low, close, volume) in enumerate(bars):
-        rows.append(
-            {
-                "timestamp": base + pd.Timedelta(minutes=5 * index),
-                "date": "2026-01-02",
-                "block": 1,
-                "futures_open": open_,
-                "futures_high": high,
-                "futures_low": low,
-                "futures_close": close,
-                "futures_volume": volume,
-                "options_gap_bps": 1.0,
-                "spot_gap_bps": 0.0,
-                "futures_return_bps": float(index),
-            }
-        )
+    for block, day in ((1, "2026-01-02"), (2, "2026-01-05")):
+        base = pd.Timestamp(f"{day}T09:15:00+05:30")
+        for index, (open_, high, low, close, volume) in enumerate(bars):
+            rows.append(
+                {
+                    "timestamp": base + pd.Timedelta(minutes=5 * index),
+                    "date": day,
+                    "block": block,
+                    "futures_open": open_,
+                    "futures_high": high,
+                    "futures_low": low,
+                    "futures_close": close,
+                    "futures_volume": volume,
+                    "options_gap_bps": float(index + block),
+                    "spot_gap_bps": float(block) / 10.0,
+                    "futures_return_bps": float(index),
+                }
+            )
     frame = pd.DataFrame(rows)
     result = _add_development_features(frame)
     row = result.iloc[-1]
