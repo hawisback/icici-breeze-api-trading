@@ -2,7 +2,8 @@ from services.historical.independent_options_behavior_blind_results import (
     OPTIONS_BLIND_08,
     OPTIONS_BLIND_09,
     OPTIONS_BLIND_08_09_COMBINED_EVALUATION,
-    OPTIONS_BLIND_10_O2,\n    OPTIONS_BLIND_11_O2,
+    OPTIONS_BLIND_10_O2,
+    OPTIONS_BLIND_11_O2,
 )
 
 
