@@ -56,11 +56,27 @@ def main() -> None:
             calls_per_minute=args.calls_per_minute,
         ),
     )
-    validate_options(report)
+    # Persist first so strict QA failures remain diagnosable without repeating
+    # the historical download.
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(report, indent=2, allow_nan=False), encoding="utf-8"
     )
+    try:
+        validate_options(report)
+    except ValueError:
+        print(
+            json.dumps(
+                {
+                    "output": str(args.output),
+                    "validation": "FAILED",
+                    "quality": report.get("quality"),
+                    "option_expiries": OPTION_EXPIRIES,
+                },
+                indent=2,
+            )
+        )
+        raise
     print(
         json.dumps(
             {
