@@ -91,7 +91,7 @@ FUTURES_SEQUENCE_ATLAS_FINDING_V1 = {
     },
     "directional_state": {
         "strongest_fixed_descriptor": "three_bar_close_location",
-        "future_10m_return_spearman": -0.06795995397150808,
+        "future_10m_return_spearman": -0.06833469172978311,
         "negative_blocks": "8/8",
         "controlled_standardized_coefficient_bps": -0.47681874816893244,
         "controlled_negative_blocks": "8/8",
