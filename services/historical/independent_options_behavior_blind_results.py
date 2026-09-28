@@ -384,3 +384,100 @@ OPTIONS_BLIND_10_O2 = {
     "implementation_allowed": False,
     "retune_from_blind_allowed": False,
 }
+
+
+OPTIONS_BLIND_11_O2 = {
+    "candidate_id": "O2_DISTRIBUTED_OPTIONS_PARTICIPATION_EXPANSION",
+    "source": {
+        "filename": "independent_nifty_options_research_blind_11.json",
+        "sha256": "3877b74a4b00fd9ed7a806fbde4a8ca93c2e93efa5bb2676f3a1fd54c91fe24a",
+        "start_date": "2025-12-24",
+        "end_date": "2026-01-07",
+        "sessions": 10,
+        "underlying_rows": 750,
+        "raw_option_rows": 23250,
+        "dynamic_option_rows": 13500,
+        "dynamic_contracts_per_timestamp": 18,
+        "failed_requests": 0,
+    },
+    "scoring": {
+        "threshold_source": "unchanged frozen OPTIONS_BEHAVIOR_V2 DEVELOPMENT_CORPUS only",
+        "development_sha256": "5d640d90e03f4cfb6bfe7c1ba2b2a0c44525b8ab01b4ea4ac62abd350dd9991c",
+        "development_reproduction": {
+            "episode_starts": 75,
+            "primary_matched_episodes": 67,
+            "primary_mean_matched_residual_bps": 3.000264888969547,
+            "primary_median_matched_residual_bps": 1.762765094075469,
+        },
+        "threshold_changes": False,
+        "candidate_definition_changes": False,
+        "control_matching_changes": False,
+        "hhi_threshold_changes": False,
+        "dte_subset_selection": False,
+        "primary_horizon_switch": False,
+        "directional_claim": False,
+        "matching": "same blind block, same DTE, same 30-minute time bucket",
+        "unmatched_episode_policy": "unscorable; no broader-control fallback",
+    },
+    "episode_counts": {
+        "state_bars": 19,
+        "episode_starts": 18,
+        "sessions_with_episode_starts": 5,
+    },
+    "primary_30m": {
+        "episode_starts_with_full_horizon": 18,
+        "matched_scorable_episodes": 18,
+        "sessions_with_matched_episodes": 5,
+        "matching_coverage_pct": 100.0,
+        "episode_mean_excursion_bps": 9.868115021415331,
+        "average_matched_control_mean_excursion_bps": 10.200538270752846,
+        "mean_matched_residual_bps": -0.33242324933751427,
+        "median_matched_residual_bps": 0.2496776945967727,
+        "episodes_positive_vs_matched_control_mean": 10,
+        "episodes_positive_vs_matched_control_median": 12,
+    },
+    "secondary_15m": {
+        "matched_scorable_episodes": 18,
+        "mean_matched_residual_bps": -1.4494384915838194,
+        "median_matched_residual_bps": -1.5176053927712374,
+    },
+    "secondary_60m": {
+        "matched_scorable_episodes": 17,
+        "mean_matched_residual_bps": 0.6532893956977174,
+        "median_matched_residual_bps": 0.6307169108121791,
+    },
+    "post_blind_evaluation_diagnostics": {
+        "purpose": "Diagnostics after frozen scoring only; not eligible for rescuing or retuning O2.",
+        "primary_by_dte": {
+            "1": {"episodes": 1, "mean_residual_bps": 1.0387800801647806, "median_residual_bps": 1.0387800801647806},
+            "4": {"episodes": 2, "mean_residual_bps": -2.3267599950447306, "median_residual_bps": -2.7488120842808494},
+            "6": {"episodes": 15, "mean_residual_bps": -0.15792523854337173, "median_residual_bps": 0.2312645703228533},
+        },
+        "unmatched_primary_episodes": 0,
+        "blind10_primary_mean_matched_residual_bps": 0.1384999962590804,
+        "blind10_primary_median_matched_residual_bps": -0.7385012198385388,
+    },
+    "prospective_decision_application": {
+        "frozen_rule": "if primary again weak or negative, retire O2 as an independent predictive movement-regime candidate",
+        "triggered": True,
+        "reason": (
+            "Blind11 again shows a near-zero/mixed primary result: the 30-minute mean matched residual "
+            "is slightly negative and the median matched residual is only slightly positive. This does "
+            "not reproduce the development-sized O2 effect after Blind10 was already weak/conflicting."
+        ),
+        "decision": (
+            "retire O2 as an independent predictive movement-regime candidate; preserve only as "
+            "descriptive research behavior"
+        ),
+    },
+    "interpretation": (
+        "Blind11 provides a second fresh blind failure to reproduce the development-sized O2 primary "
+        "effect. The frozen 30-minute mean residual is slightly negative and the median is near zero. "
+        "The 15-minute secondary result is negative and the 60-minute secondary result is small positive. "
+        "Per the prospectively frozen Blind11 decision rule, O2 is retired from predictive-candidate work."
+    ),
+    "candidate_status_after_blind": "RETIRED_AS_INDEPENDENT_PREDICTIVE_CANDIDATE_DESCRIPTIVE_ONLY",
+    "implementation_allowed": False,
+    "retune_from_blind_allowed": False,
+    "rescue_filters_allowed": False,
+}
