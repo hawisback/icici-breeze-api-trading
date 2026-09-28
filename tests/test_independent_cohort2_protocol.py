@@ -52,7 +52,7 @@ def test_options_schedule_includes_special_session_expiry_but_not_as_research_se
 
 def test_replication_protocol_forbids_discovery_rescue():
     rules = PROTOCOL["replication_rules"]
-    assert PROTOCOL["candidate_frozen"] is False
+    assert PROTOCOL["protocol_version"] == "DEVELOPMENT_COHORT_2_V1_1"\n    assert PROTOCOL["protocol_correction"]["incorrect_value"] == "2025-10-21"\n    assert PROTOCOL["protocol_correction"]["correct_value"] == "2025-10-20"\n    assert PROTOCOL["candidate_frozen"] is False
     assert PROTOCOL["blind_data_used"] is False
     assert PROTOCOL["implementation_allowed"] is False
     assert rules["candidate_freeze"] is False
