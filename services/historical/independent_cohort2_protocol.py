@@ -158,7 +158,23 @@ REPLICATION_RULES = {
     "threshold_optimization": False,
 }
 
-PROTOCOL_CORRECTION = {\n    "from_version": "DEVELOPMENT_COHORT_2_V1",\n    "to_version": PROTOCOL_VERSION,\n    "field": "OPTION_EXPIRIES",\n    "incorrect_value": "2025-10-21",\n    "correct_value": "2025-10-20",\n    "reason": (\n        "21-Oct-2025 was an NSE F&O holiday with a special Muhurat session; "\n        "the NIFTY weekly expiry for that week was Monday 20-Oct-2025."\n    ),\n    "trigger": "strict ATM CE/PE coverage QA failed during first options collection",\n    "data_use_before_correction": (\n        "No Cohort-2 options price/outcome analysis or replication scoring was performed."\n    ),\n}\n\nPROTOCOL = {
+PROTOCOL_CORRECTION = {
+    "from_version": "DEVELOPMENT_COHORT_2_V1",
+    "to_version": PROTOCOL_VERSION,
+    "field": "OPTION_EXPIRIES",
+    "incorrect_value": "2025-10-21",
+    "correct_value": "2025-10-20",
+    "reason": (
+        "21-Oct-2025 was an NSE F&O holiday with a special Muhurat session; "
+        "the NIFTY weekly expiry for that week was Monday 20-Oct-2025."
+    ),
+    "trigger": "strict ATM CE/PE coverage QA failed during first options collection",
+    "data_use_before_correction": (
+        "No Cohort-2 options price/outcome analysis or replication scoring was performed."
+    ),
+}
+
+PROTOCOL = {
     "protocol_version": PROTOCOL_VERSION,
     "cohort_role": COHORT_ROLE,
     "research_only": True,
@@ -170,7 +186,8 @@ PROTOCOL_CORRECTION = {\n    "from_version": "DEVELOPMENT_COHORT_2_V1",\n    "to
     "session_dates": SESSION_DATES,
     "blocks": BLOCKS,
     "futures_expiries": FUTURES_EXPIRIES,
-    "option_expiries": OPTION_EXPIRIES,\n    "protocol_correction": PROTOCOL_CORRECTION,
+    "option_expiries": OPTION_EXPIRIES,
+    "protocol_correction": PROTOCOL_CORRECTION,
     "excluded_dates": EXCLUDED_SPECIAL_OR_HOLIDAY_DATES,
     "previously_inspected_windows": PREVIOUSLY_INSPECTED_WINDOWS,
     "expected": EXPECTED,
