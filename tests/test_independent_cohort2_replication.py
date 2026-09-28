@@ -9,7 +9,7 @@ from services.historical.independent_cohort2_protocol import PROTOCOL_VERSION
 def test_replication_block_sizes_are_frozen_before_collection():
     assert COHORT1_BLOCK_SIZE == 10
     assert COHORT2_BLOCK_SIZE == 12
-    assert PROTOCOL_VERSION == "DEVELOPMENT_COHORT_2_V1"
+    assert PROTOCOL_VERSION == "DEVELOPMENT_COHORT_2_V1_1"
 
 
 def test_replication_requires_same_sign_and_five_of_six_blocks():
