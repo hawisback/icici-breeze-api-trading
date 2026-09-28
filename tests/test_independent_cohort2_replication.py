@@ -1,7 +1,10 @@
+import pandas as pd
+
 from services.historical.independent_cohort2_replication import (
     COHORT1_BLOCK_SIZE,
     COHORT2_BLOCK_SIZE,
     _replication_check,
+    _spearman,
     build_frame,
 )
 from services.historical.independent_cohort2_protocol import PROTOCOL_VERSION
@@ -110,3 +113,9 @@ def test_build_frame_replaces_null_market_auxiliary_placeholders():
     assert "spot_close_y" not in frame.columns
     assert frame["vix_close"].tolist() == [12.0 + index / 10.0 for index in range(6)]
     assert frame["spot_close"].tolist() == [25950.0 + index for index in range(6)]
+
+
+def test_spearman_dependency_executes():
+    left = pd.Series([1.0, 2.0, 3.0, 4.0])
+    right = pd.Series([4.0, 3.0, 2.0, 1.0])
+    assert _spearman(left, right) == -1.0
