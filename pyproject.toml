@@ -17,6 +17,7 @@ dependencies = [
     "alembic>=1.14.0",
     "breeze-connect==1.0.69",
     "kiteconnect>=5.0.1",
+    "scipy>=1.15.0",
 ]
 
 [project.optional-dependencies]
