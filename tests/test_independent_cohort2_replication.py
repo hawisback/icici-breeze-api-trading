@@ -2,6 +2,7 @@ from services.historical.independent_cohort2_replication import (
     COHORT1_BLOCK_SIZE,
     COHORT2_BLOCK_SIZE,
     _replication_check,
+    build_frame,
 )
 from services.historical.independent_cohort2_protocol import PROTOCOL_VERSION
 
