@@ -24,6 +24,8 @@ from services.historical.independent_cohort3_protocol import (
 )
 
 RESEARCH_TYPE = "NIFTY_DEVELOPMENT_COHORT_3_SOURCE_MANIFEST_V1"
+EXPECTED_AUDIT_SHA256 = "ee6e0bf50fb6e839e0f7b0fed98447bf03b73323e351d2e0dd7f43a6d62291ac"
+EXPECTED_MARKET_SHA256 = "f320af82ed96cf80b740afb3fe150b56d9a97213b180e5472169ba82a9353049"
 
 
 def _sha256(path: Path) -> str:
@@ -47,6 +49,17 @@ def build_manifest(
     spot_path: Path,
     intrabar_path: Path,
 ) -> dict[str, Any]:
+    audit_sha256 = _sha256(audit_path)
+    market_sha256 = _sha256(market_path)
+    if audit_sha256 != EXPECTED_AUDIT_SHA256:
+        raise ValueError(
+            f"collection audit SHA changed: {audit_sha256} != {EXPECTED_AUDIT_SHA256}"
+        )
+    if market_sha256 != EXPECTED_MARKET_SHA256:
+        raise ValueError(
+            f"market artifact SHA changed: {market_sha256} != {EXPECTED_MARKET_SHA256}"
+        )
+
     audit = _load(audit_path)
     if audit.get("protocol_version") != PROTOCOL_VERSION:
         raise ValueError("audit protocol version mismatch")
@@ -92,12 +105,12 @@ def build_manifest(
         "implementation_allowed": False,
         "expected": EXPECTED,
         "audit": {
-            "sha256": _sha256(audit_path),
+            "sha256": audit_sha256,
             "validation": "PASSED",
         },
         "sources": {
             "market": {
-                "sha256": _sha256(market_path),
+                "sha256": market_sha256,
                 "sessions": len(market["session_dates"]),
                 "rows": len(market["canonical_market_rows"]),
             },
