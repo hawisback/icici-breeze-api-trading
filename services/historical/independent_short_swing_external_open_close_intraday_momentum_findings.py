@@ -75,11 +75,11 @@ def _frame(payload: dict[str, Any]) -> pd.DataFrame:
         "net_return_6_bps",
         "entry_timestamp",
         "entry_gap_bps",
-        "h30_terminal_bps",
-        "h30_long_mfe_bps",
-        "h30_long_mae_bps",
-        "h30_short_mfe_bps",
-        "h30_short_mae_bps",
+        "h30m_terminal_bps",
+        "h30m_long_mfe_bps",
+        "h30m_long_mae_bps",
+        "h30m_short_mfe_bps",
+        "h30m_short_mae_bps",
     }
     missing = sorted(required - set(frame.columns))
     if missing:
@@ -90,11 +90,11 @@ def _frame(payload: dict[str, Any]) -> pd.DataFrame:
     for name in (
         "net_return_6_bps",
         "entry_gap_bps",
-        "h30_terminal_bps",
-        "h30_long_mfe_bps",
-        "h30_long_mae_bps",
-        "h30_short_mfe_bps",
-        "h30_short_mae_bps",
+        "h30m_terminal_bps",
+        "h30m_long_mfe_bps",
+        "h30m_long_mae_bps",
+        "h30m_short_mfe_bps",
+        "h30m_short_mae_bps",
     ):
         frame[name] = pd.to_numeric(frame[name], errors="coerce")
 
@@ -142,7 +142,7 @@ def _signal_trades(frame: pd.DataFrame) -> pd.DataFrame:
             raise ValueError(
                 f"{cohort} {day} 14:55 row does not enter at 15:00"
             )
-        if pd.isna(trade["h30_terminal_bps"]):
+        if pd.isna(trade["h30m_terminal_bps"]):
             raise ValueError(
                 f"{cohort} {day} 14:55 row missing 30-minute closing outcome"
             )
@@ -165,20 +165,20 @@ def _signal_trades(frame: pd.DataFrame) -> pd.DataFrame:
 def _align(trades: pd.DataFrame) -> pd.DataFrame:
     result = trades.copy()
     result["aligned_terminal_bps"] = (
-        result["direction"] * result["h30_terminal_bps"]
+        result["direction"] * result["h30m_terminal_bps"]
     )
     result["aligned_entry_gap_bps"] = (
         result["direction"] * result["entry_gap_bps"]
     )
     result["aligned_mfe_bps"] = np.where(
         result["direction"] > 0,
-        result["h30_long_mfe_bps"],
-        result["h30_short_mfe_bps"],
+        result["h30m_long_mfe_bps"],
+        result["h30m_short_mfe_bps"],
     )
     result["aligned_mae_bps"] = np.where(
         result["direction"] > 0,
-        result["h30_long_mae_bps"],
-        result["h30_short_mae_bps"],
+        result["h30m_long_mae_bps"],
+        result["h30m_short_mae_bps"],
     )
     return result
 
