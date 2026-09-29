@@ -170,6 +170,24 @@ def validate_market(payload: dict[str, Any]) -> None:
         "provider-reported futures open interest"
     ):
         raise ValueError("Cohort 4 requires provider-reported futures OI")
+    quality = payload.get("quality") or {}
+    required_quality = {
+        "sessions": EXPECTED["sessions"],
+        "rows": EXPECTED["five_minute_rows"],
+        "duplicate_rows": 0,
+        "invalid_ohlc_rows": 0,
+        "missing_volume_rows": 0,
+        "missing_open_interest_rows": 0,
+        "nonpositive_volume_rows": 0,
+        "nonpositive_open_interest_rows": 0,
+        "wrong_contract_rows": 0,
+        "complete_75_bar_sessions": EXPECTED["sessions"],
+    }
+    for key, expected in required_quality.items():
+        if quality.get(key) != expected:
+            raise ValueError(
+                f"market quality {key} expected {expected}, got {quality.get(key)}"
+            )
 
 
 def validate_options(payload: dict[str, Any]) -> None:
