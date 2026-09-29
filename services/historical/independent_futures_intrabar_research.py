@@ -49,7 +49,16 @@ def _number(value: Any) -> float | None:
 
 def _contract_by_date(payload: dict[str, Any]) -> dict[str, str]:
     mapping: dict[str, set[str]] = defaultdict(set)
-    for row in payload["underlying_market_rows"]:
+    source_rows = list(
+        payload.get("underlying_market_rows")
+        or payload.get("canonical_market_rows")
+        or []
+    )
+    if not source_rows:
+        raise ValueError(
+            "market payload must contain underlying_market_rows or canonical_market_rows"
+        )
+    for row in source_rows:
         day = str(row["timestamp"])[:10]
         match = FUTURES_RE.match(str(row["futures_instrument"]))
         if not match:
