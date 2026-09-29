@@ -81,3 +81,59 @@ def validate_amended_dates() -> None:
         raise ValueError("replacement session must be earliest amended session")
     if SESSION_DATES[-1] != "2025-09-08":
         raise ValueError("amended Cohort 4 end date changed")
+
+
+
+def expected_contract_by_date() -> dict[str, str]:
+    result: dict[str, str] = {}
+    for day in SESSION_DATES:
+        matches = [expiry for expiry in FUTURES_MONTHLY_EXPIRIES if expiry >= day]
+        if not matches:
+            raise ValueError(f"no frozen futures expiry covers amended date {day}")
+        result[day] = matches[0]
+    return result
+
+
+def validate_amended_market(payload: dict) -> None:
+    validate_amended_dates()
+    if list(payload.get("session_dates") or []) != SESSION_DATES:
+        raise ValueError("market sessions differ from QA-amended Cohort 4 dates")
+    rows = list(payload.get("nifty_futures") or [])
+    if len(rows) != EXPECTED["five_minute_rows"]:
+        raise ValueError(
+            f"expected {EXPECTED['five_minute_rows']} futures rows, got {len(rows)}"
+        )
+    coverage = payload.get("coverage") or {}
+    if list(coverage.get("futures_dates") or []) != SESSION_DATES:
+        raise ValueError("amended futures coverage dates do not match")
+    provenance = (payload.get("provenance") or {}).get("nifty_futures") or {}
+    if provenance.get("canonical_source") != "BREEZE":
+        raise ValueError("amended Cohort 4 canonical futures must remain BREEZE")
+    if provenance.get("volume_semantics") != "actual futures traded volume":
+        raise ValueError("amended Cohort 4 requires actual futures volume")
+    if provenance.get("open_interest_semantics") != (
+        "provider-reported futures open interest"
+    ):
+        raise ValueError("amended Cohort 4 requires provider-reported futures OI")
+    if dict(provenance.get("breeze_contract_by_date") or {}) != expected_contract_by_date():
+        raise ValueError("amended contract map differs from frozen schedule")
+
+    quality = payload.get("quality") or {}
+    required = {
+        "sessions": EXPECTED["sessions"],
+        "rows": EXPECTED["five_minute_rows"],
+        "duplicate_rows": 0,
+        "invalid_ohlc_rows": 0,
+        "missing_volume_rows": 0,
+        "missing_open_interest_rows": 0,
+        "nonpositive_volume_rows": 0,
+        "nonpositive_open_interest_rows": 0,
+        "wrong_contract_rows": 0,
+        "complete_75_bar_sessions": EXPECTED["sessions"],
+    }
+    for key, expected in required.items():
+        if quality.get(key) != expected:
+            raise ValueError(
+                f"amended market quality {key} expected {expected}, "
+                f"got {quality.get(key)}"
+            )
