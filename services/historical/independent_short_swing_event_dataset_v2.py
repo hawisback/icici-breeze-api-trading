@@ -81,15 +81,15 @@ def _rolling_return_sum(
     window: int,
 ) -> pd.Series:
     temp = pd.DataFrame({
+        "cohort": frame["cohort"],
         "date": frame["date"],
         "value": returns.abs(),
     })
     return (
-        temp["value"]
-        .groupby(temp["date"])
+        temp.groupby(["cohort", "date"])["value"]
         .rolling(window=window, min_periods=window)
         .sum()
-        .reset_index(level=0, drop=True)
+        .reset_index(level=[0, 1], drop=True)
     )
 
 
@@ -103,7 +103,7 @@ def _recompute_state_features(frame: pd.DataFrame) -> pd.DataFrame:
         result["cohort_block"], errors="raise"
     ).astype(int)
 
-    group = result.groupby("date", sort=False)
+    group = result.groupby(["cohort", "date"], sort=False)
     previous_close = group["futures_close"].shift(1)
     result["futures_return_bps"] = (
         result["futures_close"] / previous_close - 1.0
@@ -156,14 +156,14 @@ def _recompute_state_features(frame: pd.DataFrame) -> pd.DataFrame:
         [group["futures_volume"].shift(lag) for lag in (1, 2, 3)],
         "mean",
     )
-    prior_full = prior_full_h & prior_full_l & prior_full_v
-    result["prior_3_high"] = prior_high.where(prior_full)
-    result["prior_3_low"] = prior_low.where(prior_full)
-    result["prior_3_volume_mean"] = prior_volume_mean.where(prior_full)
+    prior_price_full = prior_full_h & prior_full_l
+    result["prior_3_high"] = prior_high.where(prior_price_full)
+    result["prior_3_low"] = prior_low.where(prior_price_full)
+    result["prior_3_volume_mean"] = prior_volume_mean.where(prior_full_v)
     result["volume_vs_prior3_mean"] = (
         result["futures_volume"]
         / result["prior_3_volume_mean"].replace(0.0, np.nan)
-    ).where(prior_full)
+    ).where(prior_full_v)
 
     up_breakout = (
         result["futures_high"] / result["prior_3_high"] - 1.0
@@ -171,8 +171,8 @@ def _recompute_state_features(frame: pd.DataFrame) -> pd.DataFrame:
     down_breakout = (
         result["prior_3_low"] / result["futures_low"] - 1.0
     ) * 10000.0
-    result["up_breakout_bps"] = up_breakout.clip(lower=0.0).where(prior_full)
-    result["down_breakout_bps"] = down_breakout.clip(lower=0.0).where(prior_full)
+    result["up_breakout_bps"] = up_breakout.clip(lower=0.0).where(prior_price_full)
+    result["down_breakout_bps"] = down_breakout.clip(lower=0.0).where(prior_price_full)
     result["close_vs_prior3_high_bps"] = (
         result["futures_close"] / result["prior_3_high"] - 1.0
     ) * 10000.0
@@ -193,7 +193,7 @@ def _recompute_state_features(frame: pd.DataFrame) -> pd.DataFrame:
         "closed_breakout_down": result["futures_close"] < result["prior_3_low"],
     }
     for name, condition in breakout_conditions.items():
-        result[name] = condition.astype("boolean").where(prior_full, pd.NA)
+        result[name] = condition.astype("boolean").where(prior_price_full, pd.NA)
 
     result["vix_5m_change_bps"] = (
         result["vix_close"] / group["vix_close"].shift(1) - 1.0
