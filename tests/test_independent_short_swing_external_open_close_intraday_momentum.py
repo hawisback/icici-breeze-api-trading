@@ -30,13 +30,13 @@ def _session_rows(cohort, block, day, opening_30m_return, h30_terminal):
             "net_return_6_bps": net6,
             "entry_timestamp": (ts + pd.Timedelta(minutes=5)).isoformat(),
             "entry_gap_bps": 0.0,
-            "h30_terminal_bps": (
+            "h30m_terminal_bps": (
                 float(h30_terminal) if i == 68 else None
             ),
-            "h30_long_mfe_bps": 4.0 if i == 68 else None,
-            "h30_long_mae_bps": -2.0 if i == 68 else None,
-            "h30_short_mfe_bps": 2.0 if i == 68 else None,
-            "h30_short_mae_bps": -4.0 if i == 68 else None,
+            "h30m_long_mfe_bps": 4.0 if i == 68 else None,
+            "h30m_long_mae_bps": -2.0 if i == 68 else None,
+            "h30m_short_mfe_bps": 2.0 if i == 68 else None,
+            "h30m_short_mae_bps": -4.0 if i == 68 else None,
         })
     return rows
 
@@ -125,3 +125,13 @@ def test_external_structural_gate_is_frozen():
     assert STRUCTURAL_GATE["minimum_positive_chronological_blocks"] == 15
     assert STRUCTURAL_GATE["total_chronological_blocks"] == 22
     assert STRUCTURAL_GATE["bootstrap_samples"] == 10000
+
+
+def test_fixture_uses_real_v2_h30m_schema_names():
+    row = _session_rows("cohort1", 1, "2026-01-02", 1.0, 2.0)[68]
+    assert "h30m_terminal_bps" in row
+    assert "h30m_long_mfe_bps" in row
+    assert "h30m_long_mae_bps" in row
+    assert "h30m_short_mfe_bps" in row
+    assert "h30m_short_mae_bps" in row
+    assert "h30_terminal_bps" not in row
