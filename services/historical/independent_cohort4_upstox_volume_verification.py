@@ -351,13 +351,16 @@ def main() -> None:
             "UPSTOX_ACCESS_TOKEN is required for independent expired-contract verification"
         )
 
-    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        contract = _resolve_contract(client, token)
-        key = str(contract["instrument_key"])
-        raw_5m = _fetch_candles(client, token, key, "5minute")
-        raw_1m = _fetch_candles(client, token, key, "1minute")
-
+    contract: dict[str, Any] | None = None
+    raw_5m: list[list[Any]] = []
+    raw_1m: list[list[Any]] = []
     try:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            contract = _resolve_contract(client, token)
+            key = str(contract["instrument_key"])
+            raw_5m = _fetch_candles(client, token, key, "5minute")
+            raw_1m = _fetch_candles(client, token, key, "1minute")
+
         report = verify(
             input_sha256=input_sha,
             contract=contract,
@@ -378,6 +381,10 @@ def main() -> None:
             "raw_1m_count": len(raw_1m),
             "failure": f"{type(exc).__name__}: {exc}",
         }
+        if isinstance(exc, httpx.HTTPStatusError):
+            response = exc.response
+            report["http_status"] = response.status_code
+            report["http_response_text"] = response.text[:2000]
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
             json.dumps(report, indent=2, allow_nan=False), encoding="utf-8"
