@@ -62,6 +62,12 @@ def test_source_manifest_hashes_exact_passed_artifacts_without_scoring(
         _write(path, payload)
         paths[name] = path
 
+    import hashlib
+    audit_sha = hashlib.sha256(paths["audit"].read_bytes()).hexdigest()
+    market_sha = hashlib.sha256(paths["market"].read_bytes()).hexdigest()
+    monkeypatch.setattr(manifest_mod, "EXPECTED_AUDIT_SHA256", audit_sha)
+    monkeypatch.setattr(manifest_mod, "EXPECTED_MARKET_SHA256", market_sha)
+
     report = build_manifest(
         audit_path=paths["audit"],
         market_path=paths["market"],
