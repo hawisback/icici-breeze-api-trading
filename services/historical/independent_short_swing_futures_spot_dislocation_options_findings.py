@@ -93,6 +93,8 @@ def _event_frame(payload: dict[str, Any]) -> pd.DataFrame:
         "futures_return_bps", "spot_close", "options_specific_fast_lead",
         "entry_timestamp",
     }
+    for horizon in STRUCTURAL_RULE_FAMILY["fixed_exit_minutes"]:
+        required.add(f"h{int(horizon)}m_terminal_bps")
     missing = sorted(required - set(frame.columns))
     if missing:
         raise ValueError(f"event schema missing {missing}")
@@ -114,9 +116,11 @@ def _thresholds(frame: pd.DataFrame) -> dict[int, float]:
 
 
 def _signals(frame: pd.DataFrame, percentile: int, horizon: int, threshold: float) -> pd.DataFrame:
+    terminal_column = f"h{int(horizon)}m_terminal_bps"
     mask = (
         frame["abs_return_dislocation_bps"].ge(threshold)
         & frame["direction"].ne(0)
+        & frame[terminal_column].notna()
         & frame["options_specific_fast_lead"].notna()
         & (frame["options_specific_fast_lead"] * frame["direction"]).gt(0)
     )
