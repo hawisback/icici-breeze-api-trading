@@ -57,3 +57,20 @@ def test_each_77_bar_session_contributes_66_events():
     events = _build_events(frame)
     assert len(events) == 13 * 66 == EXPECTED_SCORABLE_EVENTS
     assert events.groupby("date").size().eq(66).all()
+
+
+
+def test_collector_main_loads_local_env_before_collection(monkeypatch, tmp_path):
+    import sys
+    import services.historical.independent_current_regime_magnitude_market as market
+
+    calls = []
+    monkeypatch.setattr(market, "_load_local_env", lambda: calls.append("env"))
+    monkeypatch.setattr(market, "collect", lambda: {
+        "session_dates": [],
+        "rows": 0,
+        "quality": {},
+    })
+    monkeypatch.setattr(sys, "argv", ["prog", "--output", str(tmp_path / "out.json")])
+    market.main()
+    assert calls == ["env"]
