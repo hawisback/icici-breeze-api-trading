@@ -6,6 +6,7 @@ from services.historical.independent_short_swing_futures_spot_dislocation_option
     _atm_strike,
     _cell_pass,
     _cost_points,
+    _signals,
 )
 from services.historical.independent_short_swing_futures_spot_dislocation_options_protocol import (
     COST_MODEL,
@@ -59,3 +60,20 @@ def test_cell_pass_requires_cost_robustness_and_stability():
     passed, failures = _cell_pass(summaries)
     assert passed is False
     assert "two_point_slippage_pooled_not_positive" in failures
+
+
+def test_option_signals_require_same_scorable_horizon_as_structural_screen():
+    frame = pd.DataFrame(
+        {
+            "date": ["2025-09-09", "2025-09-09"],
+            "entry_timestamp": pd.to_datetime(
+                ["2025-09-09 15:25:00", "2025-09-09 15:30:00"]
+            ),
+            "abs_return_dislocation_bps": [10.0, 10.0],
+            "direction": [-1.0, -1.0],
+            "options_specific_fast_lead": [-1.0, -1.0],
+            "h5m_terminal_bps": [1.0, np.nan],
+        }
+    )
+    selected = _signals(frame, percentile=80, horizon=5, threshold=2.0)
+    assert list(selected["entry_timestamp"].dt.strftime("%H:%M")) == ["15:25"]
