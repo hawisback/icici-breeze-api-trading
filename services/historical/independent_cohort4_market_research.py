@@ -47,6 +47,13 @@ def _quality(rows: list[Any], plan: dict[date, str]) -> dict[str, Any]:
     )
     missing_volume = sum(row.volume is None for row in rows)
     missing_oi = sum(row.open_interest is None for row in rows)
+    nonpositive_volume = sum(
+        row.volume is not None and float(row.volume) <= 0.0 for row in rows
+    )
+    nonpositive_oi = sum(
+        row.open_interest is not None and float(row.open_interest) <= 0.0
+        for row in rows
+    )
     wrong_contract = 0
     for row in rows:
         day = datetime.fromisoformat(str(row.timestamp)).date()
@@ -63,6 +70,8 @@ def _quality(rows: list[Any], plan: dict[date, str]) -> dict[str, Any]:
         "invalid_ohlc_rows": int(invalid_ohlc),
         "missing_volume_rows": int(missing_volume),
         "missing_open_interest_rows": int(missing_oi),
+        "nonpositive_volume_rows": int(nonpositive_volume),
+        "nonpositive_open_interest_rows": int(nonpositive_oi),
         "wrong_contract_rows": int(wrong_contract),
         "complete_75_bar_sessions": sum(
             counts.get(day, 0) == int(EXPECTED["five_minute_bars_per_session"])
@@ -95,6 +104,8 @@ def collect(client: BreezeFuturesClient) -> dict[str, Any]:
         "invalid_ohlc_rows",
         "missing_volume_rows",
         "missing_open_interest_rows",
+        "nonpositive_volume_rows",
+        "nonpositive_open_interest_rows",
         "wrong_contract_rows",
     ):
         if quality[key] != 0:
