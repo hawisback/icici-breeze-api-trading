@@ -20,6 +20,7 @@ CONTRACT_DISCOVERY = {
     "candidate_business_days_back": 5,
     "probe_calendar_days_back": 7,
     "minimum_probe_rows": 1,
+    "include_one_post_window_expiry": True,
     "manifest_must_be_complete_before_scoring": True,
 }
 
