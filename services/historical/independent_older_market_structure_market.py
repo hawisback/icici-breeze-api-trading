@@ -63,8 +63,8 @@ def _load_manifest(path: Path) -> tuple[dict[str, Any], dict[str, date]]:
     if payload.get("complete") is not True:
         raise ValueError("expiry manifest is incomplete")
     contracts = list(payload.get("contracts") or [])
-    if len(contracts) != 36:
-        raise ValueError(f"expected 36 monthly contracts, got {len(contracts)}")
+    if len(contracts) != 37:
+        raise ValueError(f"expected 37 monthly contracts, got {len(contracts)}")
     mapping: dict[str, date] = {}
     for row in contracts:
         month = str(row.get("month") or "")
@@ -74,7 +74,7 @@ def _load_manifest(path: Path) -> tuple[dict[str, Any], dict[str, date]]:
         mapping[month] = date.fromisoformat(expiry_raw)
     expected_months = []
     cursor = date(2022, 1, 1)
-    while cursor <= date(2024, 12, 1):
+    while cursor <= date(2025, 1, 1):
         expected_months.append(cursor.strftime("%Y-%m"))
         cursor = (
             date(cursor.year + 1, 1, 1)
