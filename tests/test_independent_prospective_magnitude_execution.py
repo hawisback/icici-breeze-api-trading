@@ -278,3 +278,25 @@ def test_analyzer_produces_no_quartile_threshold_or_trading_promotion(monkeypatc
     assert report["guardrails"]["candidate_frozen"] is False
     assert report["guardrails"]["blind_validation_allowed"] is False
     assert report["guardrails"]["implementation_allowed"] is False
+
+
+def test_sealed_writer_allows_identical_rerun_but_refuses_changed_bytes(tmp_path: Path):
+    from services.historical.independent_prospective_magnitude_market import (
+        _write_report,
+    )
+
+    output = tmp_path / "sealed.json"
+    report = _synthetic_session_payload(SESSION_DATES[0])
+
+    _write_report(report, output)
+    first = output.read_bytes()
+
+    _write_report(report, output)
+    assert output.read_bytes() == first
+
+    changed = _synthetic_session_payload(SESSION_DATES[0])
+    changed["request_diagnostics"]["raw_count"] = 78
+    with pytest.raises(FileExistsError, match="refusing to overwrite sealed research artifact"):
+        _write_report(changed, output)
+
+    assert output.read_bytes() == first
