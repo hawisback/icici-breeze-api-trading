@@ -76,9 +76,9 @@ def _valid_session_payload(day: str) -> dict:
 
 
 def _set_ready_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BREEZE_API_KEY", "key")
-    monkeypatch.setenv("BREEZE_SECRET_KEY", "secret")
-    monkeypatch.setenv("BREEZE_SESSION_TOKEN", "token")
+    monkeypatch.setenv("BREEZE_API_KEY", "API_VALUE_DO_NOT_EXPOSE")
+    monkeypatch.setenv("BREEZE_SECRET_KEY", "SECRET_VALUE_DO_NOT_EXPOSE")
+    monkeypatch.setenv("BREEZE_SESSION_TOKEN", "TOKEN_VALUE_DO_NOT_EXPOSE")
     monkeypatch.setattr(
         preflight_module.importlib.util,
         "find_spec",
@@ -156,8 +156,9 @@ def test_preflight_blocks_missing_credentials_without_exposing_values(
     }
     assert "missing_breeze_credentials" in report["blockers"]
     serialized = json.dumps(report)
-    assert "secret" not in serialized.lower()
-    assert "token" in serialized.lower()  # credential key name only
+    assert "API_VALUE_DO_NOT_EXPOSE" not in serialized
+    assert "SECRET_VALUE_DO_NOT_EXPOSE" not in serialized
+    assert "TOKEN_VALUE_DO_NOT_EXPOSE" not in serialized
 
 
 def test_preflight_blocks_invalid_existing_artifact(
