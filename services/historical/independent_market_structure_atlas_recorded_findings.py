@@ -24,6 +24,21 @@ MARKET_STRUCTURE_ATLAS_RECORDED_FINDINGS_V1 = {
         "rejected_dates": ["2025-10-21"],
         "accepted_first_date": "2025-01-01",
         "accepted_last_date": "2026-09-07",
+        "database_fragment_dates_after_last_complete_session": [
+            "2026-09-08",
+            "2026-09-09",
+            "2026-09-10",
+            "2026-09-11",
+            "2026-09-15",
+            "2026-09-16",
+            "2026-09-17",
+            "2026-09-18",
+        ],
+        "fragment_note": (
+            "Each listed date had only 2 database rows and zero rows in the "
+            "09:15-15:25 common atlas slice, so none was a QA-complete atlas "
+            "session."
+        ),
         "chronological_block_sizes": [69, 69, 69, 69, 68, 68],
     },
     "patterns_meeting_frozen_labels": [
