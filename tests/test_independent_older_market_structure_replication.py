@@ -4,8 +4,12 @@ import json
 
 import pytest
 
+import hashlib
 import services.historical.independent_older_market_structure_findings as findings
 import services.historical.independent_older_market_structure_market as market
+from services.historical.independent_older_market_structure_qa_amendment import (
+    OLDER_MARKET_STRUCTURE_QA_AMENDMENT_V1,
+)
 from services.historical.independent_older_market_structure_replication_protocol import (
     PROTOCOL_VERSION,
     RELATIONSHIPS,
@@ -19,7 +23,10 @@ def _manifest_payload():
     while cursor <= date(2025, 1, 1):
         # Synthetic manifest only: one expiry per month is enough for structural tests.
         expiry = date(cursor.year, cursor.month, 20)
-        contracts.append({"month": cursor.strftime("%Y-%m"), "expiry": expiry.isoformat()})
+        contracts.append({
+            "month": cursor.strftime("%Y-%m"),
+            "expiry": None if cursor == date(2022, 1, 1) else expiry.isoformat(),
+        })
         cursor = (
             date(cursor.year + 1, 1, 1)
             if cursor.month == 12
@@ -28,7 +35,8 @@ def _manifest_payload():
     return {
         "protocol_version": PROTOCOL_VERSION,
         "provider": "BREEZE",
-        "complete": True,
+        "complete": False,
+        "unresolved_months": ["2022-01"],
         "contracts": contracts,
     }
 
@@ -41,15 +49,30 @@ def test_protocol_freezes_only_two_preselected_relationships():
     assert WINDOW["start"] == "2022-01-01"
     assert WINDOW["end"] == "2024-12-31"
     assert WINDOW["bars_per_session"] == 75
+    assert OLDER_MARKET_STRUCTURE_QA_AMENDMENT_V1["effective_window_start"] == (
+        "2022-02-01"
+    )
+    assert OLDER_MARKET_STRUCTURE_QA_AMENDMENT_V1["relationships_changed"] is False
+    assert OLDER_MARKET_STRUCTURE_QA_AMENDMENT_V1["replication_gate_changed"] is False
 
 
-def test_manifest_loader_requires_complete_36_month_manifest(tmp_path: Path):
+def test_manifest_loader_applies_recorded_january_2022_qa_amendment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(_manifest_payload()), encoding="utf-8")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    monkeypatch.setitem(
+        OLDER_MARKET_STRUCTURE_QA_AMENDMENT_V1,
+        "expiry_manifest_sha256",
+        digest,
+    )
     payload, mapping = market._load_manifest(path)
-    assert payload["complete"] is True
-    assert len(mapping) == 37
-    assert sorted(mapping)[0] == "2022-01"
+    assert payload["complete"] is False
+    assert payload["unresolved_months"] == ["2022-01"]
+    assert len(mapping) == 36
+    assert sorted(mapping)[0] == "2022-02"
     assert sorted(mapping)[-1] == "2025-01"
 
 
@@ -57,9 +80,10 @@ def test_contract_periods_are_contiguous_from_frozen_window():
     mapping = {
         row["month"]: date.fromisoformat(row["expiry"])
         for row in _manifest_payload()["contracts"]
+        if row["expiry"] is not None
     }
     periods = market._contract_periods(mapping)
-    assert periods[0][0] == date(2022, 1, 1)
+    assert periods[0][0] == date(2022, 2, 1)
     for previous, current in zip(periods, periods[1:]):
         assert current[0] == previous[2] + timedelta(days=1)
 
