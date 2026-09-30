@@ -16,7 +16,7 @@ from services.historical.independent_older_market_structure_replication_protocol
 def _manifest_payload():
     contracts = []
     cursor = date(2022, 1, 1)
-    while cursor <= date(2024, 12, 1):
+    while cursor <= date(2025, 1, 1):
         # Synthetic manifest only: one expiry per month is enough for structural tests.
         expiry = date(cursor.year, cursor.month, 20)
         contracts.append({"month": cursor.strftime("%Y-%m"), "expiry": expiry.isoformat()})
@@ -48,9 +48,9 @@ def test_manifest_loader_requires_complete_36_month_manifest(tmp_path: Path):
     path.write_text(json.dumps(_manifest_payload()), encoding="utf-8")
     payload, mapping = market._load_manifest(path)
     assert payload["complete"] is True
-    assert len(mapping) == 36
+    assert len(mapping) == 37
     assert sorted(mapping)[0] == "2022-01"
-    assert sorted(mapping)[-1] == "2024-12"
+    assert sorted(mapping)[-1] == "2025-01"
 
 
 def test_contract_periods_are_contiguous_from_frozen_window():
