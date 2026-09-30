@@ -109,6 +109,8 @@ def preflight(
         blockers.append("breeze_connect_not_installed")
     if artifact_status == "invalid":
         blockers.append("existing_session_artifact_invalid")
+    if artifact_status == "valid_sealed":
+        blockers.append("session_already_sealed")
     if current < completion:
         blockers.append("collection_window_not_open")
 
