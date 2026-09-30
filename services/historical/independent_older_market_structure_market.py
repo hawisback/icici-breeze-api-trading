@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import time as time_module
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ from services.historical.independent_prospective_magnitude_market import (
 IST = ZoneInfo("Asia/Kolkata")
 RESEARCH_TYPE = "NIFTY_BREEZE_OLDER_MARKET_STRUCTURE_MARKET_V1"
 MAX_CHUNK_DAYS = 10
+REQUEST_SLEEP_SECONDS = 0.30
+REQUEST_RETRIES = 3
 
 
 def _sha256(path: Path) -> str:
@@ -136,6 +139,35 @@ def _num(row: dict[str, Any], key: str) -> float:
     return value
 
 
+def _request_history(client: Any, *, chunk_start: date, chunk_end: date, expiry: date) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for attempt in range(1, REQUEST_RETRIES + 1):
+        try:
+            response = _request_history(
+                client,
+                chunk_start=chunk_start,
+                chunk_end=chunk_end,
+                expiry=expiry,
+            )
+            if not isinstance(response, dict):
+                raise RuntimeError("Breeze returned non-dict historical response")
+            error = response.get("Error")
+            status = response.get("Status")
+            if error not in (None, "", "None"):
+                raise RuntimeError(f"Breeze historical error: {error}")
+            if status not in (None, 200, "200"):
+                raise RuntimeError(f"Breeze historical status: {status}")
+            return response
+        except Exception as exc:
+            last_error = exc
+            if attempt < REQUEST_RETRIES:
+                time_module.sleep(REQUEST_SLEEP_SECONDS * attempt)
+    raise RuntimeError(
+        f"Breeze historical request failed after {REQUEST_RETRIES} attempts "
+        f"for {chunk_start}..{chunk_end} expiry {expiry}: {last_error}"
+    )
+
+
 def _normalize_rows(
     response: dict[str, Any] | None,
     *,
@@ -216,6 +248,7 @@ def collect_market(
                     "accepted_rows": len(normalized),
                 }
             )
+            time_module.sleep(REQUEST_SLEEP_SECONDS)
 
     by_day: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
