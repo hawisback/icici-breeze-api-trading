@@ -13,6 +13,10 @@ from services.historical.independent_older_market_structure_replication_protocol
     PROTOCOL_VERSION,
     WINDOW,
 )
+from services.historical.independent_older_market_structure_qa_amendment import (
+    AMENDMENT_VERSION,
+    OLDER_MARKET_STRUCTURE_QA_AMENDMENT_V1,
+)
 from services.historical.independent_prospective_magnitude_market import (
     _load_local_env,
     _secret,
@@ -60,35 +64,46 @@ def _load_manifest(path: Path) -> tuple[dict[str, Any], dict[str, date]]:
         raise ValueError("expiry manifest protocol version mismatch")
     if payload.get("provider") != "BREEZE":
         raise ValueError("expiry manifest must be BREEZE")
-    if payload.get("complete") is not True:
-        raise ValueError("expiry manifest is incomplete")
+    expected_sha = str(
+        OLDER_MARKET_STRUCTURE_QA_AMENDMENT_V1["expiry_manifest_sha256"]
+    )
+    actual_sha = _sha256(path)
+    if actual_sha != expected_sha:
+        raise ValueError("expiry manifest SHA does not match recorded QA amendment")
+    if payload.get("unresolved_months") != ["2022-01"]:
+        raise ValueError("expiry manifest unresolved months differ from QA amendment")
+
     contracts = list(payload.get("contracts") or [])
     if len(contracts) != 37:
-        raise ValueError(f"expected 37 monthly contracts, got {len(contracts)}")
+        raise ValueError(f"expected 37 manifest months, got {len(contracts)}")
+
     mapping: dict[str, date] = {}
     for row in contracts:
         month = str(row.get("month") or "")
-        expiry_raw = str(row.get("expiry") or "")
+        expiry_raw = row.get("expiry")
+        if month == "2022-01":
+            if expiry_raw is not None:
+                raise ValueError("January 2022 must remain unresolved under QA amendment")
+            continue
         if not month or not expiry_raw:
-            raise ValueError("expiry manifest contains empty month/expiry")
-        mapping[month] = date.fromisoformat(expiry_raw)
-    expected_months = []
-    cursor = date(2022, 1, 1)
-    while cursor <= date(2025, 1, 1):
-        expected_months.append(cursor.strftime("%Y-%m"))
-        cursor = (
-            date(cursor.year + 1, 1, 1)
-            if cursor.month == 12
-            else date(cursor.year, cursor.month + 1, 1)
-        )
+            raise ValueError("required expiry manifest month is unresolved")
+        mapping[month] = date.fromisoformat(str(expiry_raw))
+
+    expected_months = list(
+        OLDER_MARKET_STRUCTURE_QA_AMENDMENT_V1[
+            "required_resolved_contract_months"
+        ]
+    )
     if sorted(mapping) != expected_months:
-        raise ValueError("expiry manifest months do not match frozen 2022-2024 window")
+        raise ValueError("resolved expiry months do not match QA amendment")
     return payload, mapping
 
 
 def _contract_periods(mapping: dict[str, date]) -> list[tuple[date, date, date]]:
     expiries = [mapping[key] for key in sorted(mapping)]
-    start = date.fromisoformat(WINDOW["start"])
+    start = date.fromisoformat(
+        str(OLDER_MARKET_STRUCTURE_QA_AMENDMENT_V1["effective_window_start"])
+    )
     end = date.fromisoformat(WINDOW["end"])
     periods: list[tuple[date, date, date]] = []
     cursor = start
@@ -234,6 +249,10 @@ def collect_market(
         "research_only": True,
         "provider": "BREEZE",
         "window": WINDOW,
+        "qa_amendment_version": AMENDMENT_VERSION,
+        "effective_window_start": OLDER_MARKET_STRUCTURE_QA_AMENDMENT_V1[
+            "effective_window_start"
+        ],
         "expiry_manifest_sha256": _sha256(manifest_path),
         "expiry_contracts": {
             month: expiry.isoformat() for month, expiry in sorted(mapping.items())
