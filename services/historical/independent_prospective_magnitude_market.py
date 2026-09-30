@@ -344,8 +344,22 @@ def assemble_session_artifacts(session_dir: Path) -> dict[str, Any]:
 
 
 def _write_report(report: dict[str, Any], output: Path) -> None:
+    """Seal a QA artifact: identical reruns are idempotent, changes are refused."""
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    serialized = json.dumps(report, indent=2, allow_nan=False).encode("utf-8")
+    existing_identical = False
+
+    if output.exists():
+        existing = output.read_bytes()
+        if existing != serialized:
+            raise FileExistsError(
+                f"refusing to overwrite sealed research artifact {output}; "
+                "existing bytes differ from the newly collected report"
+            )
+        existing_identical = True
+    else:
+        output.write_bytes(serialized)
+
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     print(
         json.dumps(
@@ -359,6 +373,8 @@ def _write_report(report: dict[str, Any], output: Path) -> None:
                 "outcome_scoring_performed": report.get(
                     "outcome_scoring_performed", False
                 ),
+                "sealed_artifact": True,
+                "existing_identical": existing_identical,
             },
             indent=2,
         )
