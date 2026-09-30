@@ -156,3 +156,27 @@ def test_market_validator_rejects_pre_scored_artifact():
     payload["pattern_scoring_performed"] = True
     with pytest.raises(ValueError, match="outcome-unscored"):
         findings._validate_market(payload)
+
+
+class _FlakyHistoryClient:
+    def __init__(self):
+        self.calls = 0
+
+    def get_historical_data_v2(self, **kwargs):
+        self.calls += 1
+        if self.calls < 3:
+            return {"Status": 500, "Error": "temporary", "Success": []}
+        return {"Status": 200, "Error": None, "Success": []}
+
+
+def test_history_request_retries_provider_errors(monkeypatch: pytest.MonkeyPatch):
+    client = _FlakyHistoryClient()
+    monkeypatch.setattr(market.time_module, "sleep", lambda seconds: None)
+    response = market._request_history(
+        client,
+        chunk_start=date(2022, 2, 1),
+        chunk_end=date(2022, 2, 10),
+        expiry=date(2022, 2, 24),
+    )
+    assert client.calls == 3
+    assert response["Status"] == 200
