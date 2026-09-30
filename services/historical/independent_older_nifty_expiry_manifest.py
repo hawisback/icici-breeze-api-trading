@@ -108,9 +108,10 @@ def discover_manifest(
 ) -> dict[str, Any]:
     start = date.fromisoformat(WINDOW["start"])
     end = date.fromisoformat(WINDOW["end"])
+    discovery_end = date(end.year + 1, 1, 1)
     months: list[dict[str, Any]] = []
 
-    for year, month in _month_iter(start, end):
+    for year, month in _month_iter(start, discovery_end):
         attempts: list[dict[str, Any]] = []
         resolved: str | None = None
         for candidate in _expiry_candidates(year, month):
