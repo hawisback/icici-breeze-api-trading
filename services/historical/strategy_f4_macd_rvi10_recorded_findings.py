@@ -5,6 +5,12 @@ STRATEGY_F4_MACD_RVI10_RECORDED_FINDINGS_V1 = {
     "protocol_version": "STRATEGY_F4_OPTION_NATIVE_MACD_RVI10_EXPLORATION_V1",
     "strategy_id": "F4",
     "research_only": True,
+    "invalid_for_user_intended_indicator": True,
+    "indicator_correction": (
+        "This artifact used Relative Vigor Index. The intended indicator is "
+        "Relative Volatility Index (0-100, length 10, 50 centerline). These "
+        "findings must not be used to select Strategy F thresholds."
+    ),
     "source": {
         "backtest_artifact_sha256": (
             "f18a0d58175ba2668a6b3c7f246cfeeddcee172ad871b7fcd7a2c7becdd68b21"
@@ -75,7 +81,7 @@ STRATEGY_F4_MACD_RVI10_RECORDED_FINDINGS_V1 = {
         "any new candidate is frozen."
     ),
     "decision": "F4_RVI10_DID_NOT_ROBUSTIFY_RAW_MACD_ACROSS_DEVELOPMENT_MONTHS",
-    "status": "NO_SURVIVOR_DIAGNOSE_SIDE_BY_MONTH_WITHOUT_NEW_THRESHOLD_SEARCH",
+    "status": "INVALIDATED_WRONG_RVI_INDICATOR_RELATIVE_VIGOR_NOT_VOLATILITY",
     "guardrails": {
         "research_only": True,
         "live_execution": False,
