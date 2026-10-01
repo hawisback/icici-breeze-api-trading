@@ -1,0 +1,211 @@
+"""Collect fresh May 2026 one-minute option data for F5 histogram holdout."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+from collections import defaultdict
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any
+
+from services.historical.independent_options_market_research import (
+    _load_local_env,
+    _usable_secret,
+)
+from services.historical.strategy_f_macd_options_market import BreezeSpotClient
+from services.historical.strategy_f5_2min_macd_rvi10_trail_market import (
+    BreezeOneMinuteOptionsClient,
+)
+from services.historical.strategy_f5_hist_strength_may_holdout_protocol import (
+    CANDIDATE_NAME,
+    EXPIRIES,
+    PROTOCOL_VERSION,
+    STRATEGY_ID,
+    WINDOW,
+)
+
+RESEARCH_TYPE = "STRATEGY_F5_HIST_STRENGTH_MAY_RAW_MARKET_V1"
+
+
+def _atm_strike(price: float) -> int:
+    return int(math.floor(price / 50.0 + 0.5) * 50)
+
+
+def _nearest_expiry(day: date) -> date:
+    frozen = [date.fromisoformat(x) for x in EXPIRIES]
+    eligible = [x for x in frozen if x >= day]
+    if not eligible:
+        raise ValueError(f"no frozen May holdout expiry for {day}")
+    return min(eligible)
+
+
+def _daily_contracts(spot_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    start = date.fromisoformat(WINDOW["start"])
+    end = date.fromisoformat(WINDOW["end"])
+    by_day: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in spot_rows:
+        by_day[str(row["date"])].append(row)
+
+    selected = []
+    for day_text, rows in sorted(by_day.items()):
+        day = date.fromisoformat(day_text)
+        if not (start <= day <= end):
+            continue
+        opening = next(
+            (
+                r for r in sorted(rows, key=lambda x: x["timestamp"])
+                if datetime.fromisoformat(str(r["timestamp"])).strftime("%H:%M")
+                == "09:15"
+            ),
+            None,
+        )
+        if opening is None:
+            continue
+        spot_open = float(opening["open"])
+        selected.append({
+            "date": day.isoformat(),
+            "month": day.strftime("%Y-%m"),
+            "spot_0915_open": spot_open,
+            "strike": _atm_strike(spot_open),
+            "expiry": _nearest_expiry(day).isoformat(),
+        })
+    return selected
+
+
+def _request_plan(
+    spot_rows: list[dict[str, Any]],
+    contracts: list[dict[str, Any]],
+) -> dict[tuple[str, int, str], list[date]]:
+    available_dates = sorted(
+        {date.fromisoformat(str(row["date"])) for row in spot_rows}
+    )
+    warmup_n = int(WINDOW["warmup_previous_sessions_per_contract"])
+    plan: dict[tuple[str, int, str], set[date]] = defaultdict(set)
+
+    for selected in contracts:
+        day = date.fromisoformat(str(selected["date"]))
+        expiry = date.fromisoformat(str(selected["expiry"]))
+        prior = [d for d in available_dates if d < day]
+        needed = [d for d in prior[-warmup_n:] + [day] if d <= expiry]
+        for right in ("CE", "PE"):
+            plan[
+                (str(selected["expiry"]), int(selected["strike"]), right)
+            ].update(needed)
+    return {key: sorted(days) for key, days in sorted(plan.items())}
+
+
+def collect(
+    *,
+    spot_client: BreezeSpotClient,
+    options_client: BreezeOneMinuteOptionsClient,
+) -> dict[str, Any]:
+    warmup = date.fromisoformat(WINDOW["warmup_start"])
+    end = date.fromisoformat(WINDOW["end"])
+    spot_rows = spot_client.history(warmup, end)
+    contracts = _daily_contracts(spot_rows)
+    plan = _request_plan(spot_rows, contracts)
+
+    option_rows: list[dict[str, Any]] = []
+    requests = []
+    for (expiry, strike, right), days in plan.items():
+        rows = options_client.history(
+            days,
+            expiry,
+            strike,
+            "call" if right == "CE" else "put",
+        )
+        option_rows.extend(rows)
+        requests.append({
+            "expiry": expiry,
+            "strike": strike,
+            "right": right,
+            "session_dates": [d.isoformat() for d in days],
+            "rows_fetched": len(rows),
+        })
+
+    dedup = {
+        (
+            str(row["timestamp"]),
+            str(row["expiry"]),
+            int(row["strike"]),
+            str(row["right"]),
+        ): row
+        for row in option_rows
+    }
+    option_rows = [dedup[key] for key in sorted(dedup)]
+
+    return {
+        "research_type": RESEARCH_TYPE,
+        "protocol_version": PROTOCOL_VERSION,
+        "strategy_id": STRATEGY_ID,
+        "candidate_name": CANDIDATE_NAME,
+        "research_only": True,
+        "window": WINDOW,
+        "daily_contracts": contracts,
+        "spot_rows": spot_rows,
+        "option_rows_1m": option_rows,
+        "option_contract_requests": requests,
+        "quality": {
+            "spot_rows": len(spot_rows),
+            "selected_sessions": len(contracts),
+            "unique_option_contracts": len(plan),
+            "option_rows_1m": len(option_rows),
+            "option_contract_request_count": len(requests),
+        },
+        "request_diagnostics": {
+            "spot": spot_client.request_diagnostics,
+            "options": options_client.request_diagnostics,
+        },
+        "strategy_outcomes_scored": False,
+        "broker_called": False,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Collect fresh May 2026 market data for F5 histogram holdout"
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/strategy_f5_hist_strength_may_market_2026_05.json"),
+    )
+    parser.add_argument("--calls-per-minute", type=int, default=80)
+    args = parser.parse_args()
+
+    _load_local_env()
+    key = _usable_secret("BREEZE_API_KEY")
+    secret = _usable_secret("BREEZE_SECRET_KEY")
+    token = _usable_secret("BREEZE_SESSION_TOKEN")
+    if not (key and secret and token):
+        raise RuntimeError(
+            "BREEZE_API_KEY, BREEZE_SECRET_KEY and BREEZE_SESSION_TOKEN are required"
+        )
+
+    report = collect(
+        spot_client=BreezeSpotClient(
+            key, secret, token, calls_per_minute=args.calls_per_minute
+        ),
+        options_client=BreezeOneMinuteOptionsClient(
+            key, secret, token, calls_per_minute=args.calls_per_minute
+        ),
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(
+        json.dumps(report, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(args.output.read_bytes()).hexdigest()
+    print(json.dumps({
+        "output": str(args.output),
+        "sha256": digest,
+        "quality": report["quality"],
+        "strategy_outcomes_scored": False,
+        "broker_called": False,
+    }, indent=2))
+
+
+if __name__ == "__main__":
+    main()
