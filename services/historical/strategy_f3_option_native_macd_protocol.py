@@ -47,6 +47,7 @@ MACD = {
     "source": "option_close",
     "ema_adjust": False,
     "continuous_per_exact_contract_across_sessions": True,
+    "minimum_prior_option_bars_before_session": 35,
 }
 
 OPTION_SELECTION = {
