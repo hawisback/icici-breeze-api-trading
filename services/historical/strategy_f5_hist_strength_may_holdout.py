@@ -14,7 +14,7 @@ from services.historical.strategy_f5_2min_macd_rvi10_trail_backtest import (
     _decorate,
     _observations,
     _one_min_open_lookup,
-    _report,
+    _summary,
     _trail_trade_simulation,
 )
 from services.historical.strategy_f5_hist_strength_may_holdout_protocol import (
@@ -60,6 +60,44 @@ def _entry_key(trade: dict[str, Any]) -> tuple[str, str, int, str]:
         str(trade["right"]),
     )
 
+
+
+
+def _holdout_report(
+    trades: list[dict[str, Any]],
+    skips: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "quality": {
+            "scorable_trades": len(trades),
+            "skipped_trade_intents": len(skips),
+        },
+        "pooled": {
+            key: _summary(trades, key)
+            for key in ("0.00", "0.50", "1.00")
+        },
+        "by_month": {
+            "2026-05": {
+                key: _summary(
+                    [t for t in trades if str(t["month"]) == "2026-05"],
+                    key,
+                )
+                for key in ("0.00", "0.50", "1.00")
+            }
+        },
+        "ce_0_00": _summary(
+            [t for t in trades if t["right"] == "CE"], "0.00"
+        ),
+        "pe_0_00": _summary(
+            [t for t in trades if t["right"] == "PE"], "0.00"
+        ),
+        "exit_reason_counts": {
+            reason: sum(str(t["exit_reason"]) == reason for t in trades)
+            for reason in sorted({str(t["exit_reason"]) for t in trades})
+        },
+        "trades": trades,
+        "skipped": skips,
+    }
 
 def _gate(
     baseline_report: dict[str, Any],
@@ -154,8 +192,8 @@ def backtest(
     baseline_trades = _decorate(baseline_trades)
     candidate_trades = _decorate(candidate_trades)
 
-    baseline_report = _report(baseline_trades, baseline_skips)
-    candidate_report = _report(candidate_trades, candidate_skips)
+    baseline_report = _holdout_report(baseline_trades, baseline_skips)
+    candidate_report = _holdout_report(candidate_trades, candidate_skips)
     gate = _gate(
         baseline_report,
         candidate_report,
