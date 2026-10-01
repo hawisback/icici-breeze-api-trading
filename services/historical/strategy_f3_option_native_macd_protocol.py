@@ -34,6 +34,7 @@ BACKTEST_WINDOW = {
     "start": "2026-09-01",
     "end": "2026-09-30",
     "option_warmup_start": "2026-08-20",
+    "option_warmup_previous_sessions_per_contract": 5,
     "provider": "BREEZE",
     "bar_interval": "5minute",
     "force_exit_time": "15:20",
