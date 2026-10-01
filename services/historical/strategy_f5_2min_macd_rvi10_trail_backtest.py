@@ -247,6 +247,11 @@ def _observations(
                     "close": float(row["close"]),
                     "macd": float(row["macd"]),
                     "macd_signal": float(row["macd_signal"]),
+                    "macd_hist_pct": (
+                        100.0
+                        * (float(row["macd"]) - float(row["macd_signal"]))
+                        / float(row["close"])
+                    ),
                     "rvi": float(row["relative_volatility_index"]),
                     "bullish_cross": bool(bullish),
                     "bearish_cross": bool(bearish),
