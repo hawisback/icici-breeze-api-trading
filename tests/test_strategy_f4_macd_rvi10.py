@@ -140,3 +140,36 @@ def test_robustness_screen_is_deliberately_monthwise_and_slippage_aware():
         "require_positive_net_at_0_5_slippage_each_month"
     ] is True
     assert ROBUSTNESS_SCREEN["require_positive_pooled_net_at_1_0_slippage"] is True
+
+
+
+def test_candidate_report_includes_monthly_side_breakdown():
+    from services.historical.strategy_f4_macd_rvi10_exploration import (
+        _candidate_report,
+    )
+
+    trades = [
+        {
+            "month": "2026-07",
+            "right": "CE",
+            "slippage_sensitivity": {
+                "0.00": {"net_pnl_inr": -100.0},
+                "0.50": {"net_pnl_inr": -150.0},
+                "1.00": {"net_pnl_inr": -200.0},
+            },
+        },
+        {
+            "month": "2026-07",
+            "right": "PE",
+            "slippage_sensitivity": {
+                "0.00": {"net_pnl_inr": 300.0},
+                "0.50": {"net_pnl_inr": 250.0},
+                "1.00": {"net_pnl_inr": 200.0},
+            },
+        },
+    ]
+
+    report = _candidate_report("BASELINE", trades, [], [])
+
+    assert report["by_month_side"]["2026-07"]["CE"]["0.00"]["net_pnl_inr"] == -100.0
+    assert report["by_month_side"]["2026-07"]["PE"]["0.00"]["net_pnl_inr"] == 300.0
