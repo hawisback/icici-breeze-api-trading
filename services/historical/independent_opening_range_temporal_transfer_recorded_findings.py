@@ -8,7 +8,7 @@ OPENING_RANGE_TEMPORAL_TRANSFER_RECORDED_FINDINGS_V1 = {
     "research_only": True,
     "source": {
         "findings_artifact_sha256": (
-            "d22978568a88ac31d20e3b9b3545b4c209266899971b4e5267762542650476f6"
+            "149534c08739ca883050ac8a7b310d4caf2d8ae6a8d840810bfb12b5af0829da"
         ),
         "training_market_sha256": (
             "dbc368f444d4d4956672b78b2d9e806f0940f526b4a013023e96d22592948ed5"
