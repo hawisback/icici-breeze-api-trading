@@ -77,6 +77,7 @@ EXECUTION = {
     "entry_price": "NEXT_5M_OPTION_BAR_OPEN",
     "exit_price": "NEXT_5M_OPTION_BAR_OPEN",
     "simultaneous_ce_pe_bullish_entry": "SKIP_AMBIGUOUS_TIMESTAMP",
+    "same_timestamp_exit_then_opposite_entry_allowed": True,
     "force_exit_price": "15:20_OPTION_BAR_OPEN",
     "allow_entry_at_or_after_force_exit": False,
     "overnight_positions": False,
