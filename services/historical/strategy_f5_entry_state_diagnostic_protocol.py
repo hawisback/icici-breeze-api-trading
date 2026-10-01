@@ -32,7 +32,8 @@ RVI:
 MACD:
 - macd_hist_pct: 100 * (MACD - signal) / option_close
 - macd_hist_delta_pct: 100 * ((hist_t - hist_t-1) / option_close)
-- macd_hist_expanding: macd_hist_delta_pct > 0
+- macd_hist_acceleration_pct: 100 * (((hist_t-hist_t-1) - (hist_t-1-hist_t-2)) / option_close)
+- macd_hist_accelerating: macd_hist_acceleration_pct > 0
 - macd_above_zero: MACD > 0
 - macd_pct: 100 * MACD / option_close
 
@@ -50,13 +51,13 @@ Frozen natural-state diagnostics
 --------------------------------
 These are descriptive states, not promoted filters:
 - RVI_RISING
-- MACD_HIST_EXPANDING
+- MACD_HIST_ACCELERATING
 - MACD_ABOVE_ZERO
 - MOMENTUM_3BAR_POSITIVE
 - VOLUME_EXPANDING
-- RVI_RISING_AND_HIST_EXPANDING
+- RVI_RISING_AND_HIST_ACCELERATING
 - RVI_RISING_AND_MOMENTUM_3BAR_POSITIVE
-- HIST_EXPANDING_AND_MOMENTUM_3BAR_POSITIVE
+- HIST_ACCELERATING_AND_MOMENTUM_3BAR_POSITIVE
 
 No numeric cut-point search is allowed in this study. Continuous-feature
 separation is reported with medians, quartiles, standardized mean difference,
@@ -75,6 +76,7 @@ CONTINUOUS_FEATURES = [
     "rvi_delta_1",
     "macd_hist_pct",
     "macd_hist_delta_pct",
+    "macd_hist_acceleration_pct",
     "macd_pct",
     "return_1bar_pct",
     "return_2bar_pct",
