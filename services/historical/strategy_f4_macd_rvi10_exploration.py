@@ -510,6 +510,26 @@ def _candidate_report(
             }
             for month, month_trades in by_month.items()
         },
+        "by_month_side": {
+            month: {
+                right: {
+                    "0.00": _summary(
+                        [t for t in month_trades if t["right"] == right],
+                        "0.00",
+                    ),
+                    "0.50": _summary(
+                        [t for t in month_trades if t["right"] == right],
+                        "0.50",
+                    ),
+                    "1.00": _summary(
+                        [t for t in month_trades if t["right"] == right],
+                        "1.00",
+                    ),
+                }
+                for right in ("CE", "PE")
+            }
+            for month, month_trades in by_month.items()
+        },
         "ce_0_00": _summary([t for t in trades if t["right"] == "CE"], "0.00"),
         "pe_0_00": _summary([t for t in trades if t["right"] == "PE"], "0.00"),
     }
