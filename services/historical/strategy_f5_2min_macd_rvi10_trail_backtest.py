@@ -770,9 +770,16 @@ def _report(
             [t for t in trades if t["right"] == "PE"],
             "0.00",
         ),
-        "exit_reason_counts": dict(
-            pd.Series([str(t["exit_reason"]) for t in trades]).value_counts()
-        ) if trades else {},
+        "exit_reason_counts": (
+            {
+                str(k): int(v)
+                for k, v in pd.Series(
+                    [str(t["exit_reason"]) for t in trades]
+                ).value_counts().items()
+            }
+            if trades
+            else {}
+        ),
         "trades": trades,
         "skipped": skips,
     }
