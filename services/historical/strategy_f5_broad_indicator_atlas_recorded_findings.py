@@ -7,7 +7,7 @@ STRATEGY_F5_BROAD_INDICATOR_ATLAS_RECORDED_FINDINGS_V1 = {
     "research_only": True,
     "source": {
         "atlas_artifact_sha256": (
-            "ddab83cbe6870f04578914bf3d9d0a55e9d83be639be5fdfd809cda9b2cd1b83"
+            "1b7d3952ef4429250f3a2b8e4edad621f438a52426dec5227e325214c4ae9dfa"
         ),
         "market_artifact_sha256": (
             "0ed1b1499505e53c310deddbb2e9a6b78bba48c8c23fab94639dc2fa6765e2a9"
