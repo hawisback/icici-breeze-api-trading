@@ -36,7 +36,7 @@ WINDOW = {
     "session_start": "09:15",
     "session_end_exclusive": "15:30",
     "warmup_previous_sessions_per_contract": 5,
-    "expected_trading_sessions": 40,
+    "expected_trading_sessions": 41,
 }
 
 EXPIRIES = [
@@ -58,6 +58,7 @@ EXCHANGE_PROVENANCE = {
     ),
     "expiry_rule_reference": "NSE/FAOP/68747",
     "jan_feb_fo_holidays": ["2026-01-15", "2026-01-26"],
+    "special_live_session": "2026-02-01_UNION_BUDGET",
     "holiday_references": ["NSE/FAOP/71777", "NSE/FAOP/72262"],
     "march_03_holiday_causes_next_expiry": "2026-03-02",
     "nifty_lot_size": 65,
