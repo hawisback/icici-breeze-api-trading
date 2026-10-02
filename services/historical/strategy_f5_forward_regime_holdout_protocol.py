@@ -36,7 +36,7 @@ FROZEN_ON = "2026-10-02"
 
 WINDOW = {
     "start": "2026-10-05",
-    "end": "2026-12-31",
+    "end": "2026-12-29",
     "warmup_start": "2026-09-25",
     "months": ["2026-10", "2026-11", "2026-12"],
     "session_start": "09:15",
@@ -50,8 +50,8 @@ WINDOW = {
 EXCLUDED_PREVIOUSLY_INSPECTED_DATES = ["2026-10-01"]
 
 # NIFTY weekly options expire Tuesday; when Tuesday is an NSE trading holiday,
-# expiry moves to the previous trading day. Jan-05-2027 is included so Dec 30-31
-# have a nearest non-expired weekly contract.
+# expiry moves to the previous trading day. The holdout ends on the final frozen
+# 2026 weekly expiry so no Jan-2027 contract assumption is required.
 EXPIRIES = [
     "2026-10-06",
     "2026-10-13",
@@ -66,7 +66,6 @@ EXPIRIES = [
     "2026-12-15",
     "2026-12-22",
     "2026-12-29",
-    "2027-01-05",
 ]
 
 OPTION_SELECTION = {
