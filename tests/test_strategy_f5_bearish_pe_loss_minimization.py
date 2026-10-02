@@ -43,6 +43,7 @@ def test_breadth_status_keeps_unavailable_separate():
 def test_no_positive_close_candidates_use_mfe_at_or_below_zero():
     state = {
         "checkpoint_available": True,
+        "candidate_eligible": True,
         "max_favorable_close_return_pct": 0.0,
     }
     assert _candidate_condition("NO_POSITIVE_CLOSE_BY_6M", state) is True
@@ -52,10 +53,12 @@ def test_no_positive_close_candidates_use_mfe_at_or_below_zero():
 def test_two_percent_mfe_candidate_is_strictly_below_two():
     low = {
         "checkpoint_available": True,
+        "candidate_eligible": True,
         "max_favorable_close_return_pct": 1.99,
     }
     exact = {
         "checkpoint_available": True,
+        "candidate_eligible": True,
         "max_favorable_close_return_pct": 2.0,
     }
     assert _candidate_condition("MFE_LT_2PCT_BY_10M", low) is True
@@ -65,6 +68,16 @@ def test_two_percent_mfe_candidate_is_strictly_below_two():
 def test_missing_checkpoint_never_triggers():
     state = {
         "checkpoint_available": False,
+        "candidate_eligible": False,
         "max_favorable_close_return_pct": None,
+    }
+    assert _candidate_condition("NO_POSITIVE_CLOSE_BY_6M", state) is False
+
+
+def test_ineligible_checkpoint_never_triggers_even_with_no_progress():
+    state = {
+        "checkpoint_available": True,
+        "candidate_eligible": False,
+        "max_favorable_close_return_pct": -5.0,
     }
     assert _candidate_condition("NO_POSITIVE_CLOSE_BY_6M", state) is False
