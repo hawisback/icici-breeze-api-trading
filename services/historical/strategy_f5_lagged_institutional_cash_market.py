@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -79,7 +80,10 @@ def _normalize_payload(payload: Any) -> list[dict[str, Any]]:
     for raw in payload:
         if not isinstance(raw, dict):
             continue
-        category = str(_first(raw, "category", "clientType") or "").strip().upper()
+        raw_category = str(
+            _first(raw, "category", "clientType") or ""
+        ).strip().upper()
+        category = re.sub(r"[^A-Z/]+", "", raw_category)
         if category in {"FII/FPI", "FII", "DII"}:
             generic = True
             day = _parse_date(_first(raw, "date", "tradeDate"))
