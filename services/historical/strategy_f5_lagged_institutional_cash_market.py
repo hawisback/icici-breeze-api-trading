@@ -167,6 +167,7 @@ def collect(
     f5_market_sha256: str,
     source_rows: list[dict[str, Any]],
     source_description: str,
+    source_sha256: str | None = None,
     request_diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if f5_market.get("protocol_version") != F5_PROTOCOL_VERSION:
@@ -184,7 +185,7 @@ def collect(
     if not target_sessions:
         raise ValueError("no target Jul-Sep sessions in F5 market")
     before = [d for d in all_sessions if d < target_sessions[0]]
-    needed = set(before[-1:] + target_sessions)
+    needed = set(before[-1:] + target_sessions[:-1])
 
     deduped = {str(row["date"]): row for row in source_rows}
     rows = [
@@ -206,6 +207,7 @@ def collect(
         "window": WINDOW,
         "source": {
             "description": source_description,
+            "source_file_sha256": source_sha256,
             "nse_page_url": NSE_PAGE_URL,
             "nse_api_url": NSE_API_URL,
             "units": "INR_CRORE",
@@ -250,11 +252,13 @@ def main() -> None:
     if args.source_file:
         source_rows = _load_source_file(args.source_file)
         source_description = f"ARCHIVED_NSE_FORMAT:{args.source_file.name}"
+        source_sha = _sha256(args.source_file)
         diagnostics: list[dict[str, Any]] = []
     else:
         client = NSECashFlowClient(timeout_seconds=args.timeout_seconds)
         source_rows = client.fetch_snapshot()
         source_description = "NSE_FIIDII_PROVISIONAL_API_SNAPSHOT"
+        source_sha = None
         diagnostics = client.request_diagnostics
 
     report = collect(
@@ -262,6 +266,7 @@ def main() -> None:
         f5_market_sha256=f5_sha,
         source_rows=source_rows,
         source_description=source_description,
+        source_sha256=source_sha,
         request_diagnostics=diagnostics,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
