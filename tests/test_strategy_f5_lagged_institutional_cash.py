@@ -55,6 +55,27 @@ def test_normalize_generic_nse_category_rows():
     }]
 
 
+def test_normalize_nse_category_footnote_markers():
+    rows = _normalize_payload([
+        {
+            "category": "FII/FPI *",
+            "date": "01-Jul-2026",
+            "buyValue": 10,
+            "sellValue": 12,
+            "netValue": -2,
+        },
+        {
+            "category": "DII **",
+            "date": "01-Jul-2026",
+            "buyValue": 14,
+            "sellValue": 11,
+            "netValue": 3,
+        },
+    ])
+    assert rows[0]["FII_net_cr"] == -2.0
+    assert rows[0]["DII_net_cr"] == 3.0
+
+
 def test_normalize_wide_snapshot_shape():
     rows = _normalize_payload([{
         "date": "02-Jul-2026",
