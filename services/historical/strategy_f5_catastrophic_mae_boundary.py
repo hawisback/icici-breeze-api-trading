@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from services.historical.strategy_f5_dominant_nifty_regime import _classify_day
 from services.historical.strategy_f5_catastrophic_mae_boundary_protocol import (
     DEVELOPMENT_WINDOW,
     GUARDRAILS,
+    OPERATIONAL_ROUNDING_STEP_PCT,
     PRESERVATION_TARGET_PCT,
     PROTOCOL_VERSION,
     QUANTILE,
@@ -124,6 +126,37 @@ def _distribution(values: list[float]) -> dict[str, Any]:
     }
 
 
+def _round_strictly_outward(distance_pct: float) -> float:
+    step = float(OPERATIONAL_ROUNDING_STEP_PCT)
+    units = math.floor(float(distance_pct) / step + 1e-12) + 1
+    return round(units * step, 8)
+
+
+def _empirical_group_boundary(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {"available": False}
+    allowed_breaches = math.floor(
+        len(values) * (100.0 - PRESERVATION_TARGET_PCT) / 100.0
+    )
+    ordered = sorted(float(value) for value in values)
+    protected_index = min(allowed_breaches, len(ordered) - 1)
+    raw_exclusive_distance = abs(float(ordered[protected_index]))
+    operational_distance = _round_strictly_outward(
+        raw_exclusive_distance
+    )
+    breaches = sum(value <= -operational_distance for value in values)
+    preservation = (len(values) - breaches) / len(values) * 100.0
+    return {
+        "available": True,
+        "count": len(values),
+        "allowed_breaches": allowed_breaches,
+        "raw_exclusive_distance_pct": round(raw_exclusive_distance, 6),
+        "operational_distance_pct": round(operational_distance, 4),
+        "observed_breaches_at_operational_distance": breaches,
+        "observed_preservation_pct": round(preservation, 2),
+    }
+
+
 def _candidate_distance(
     winner_values: list[float],
     activated_values: list[float],
@@ -133,14 +166,17 @@ def _candidate_distance(
             "available": False,
             "reason": "MISSING_SUCCESSFUL_TRADE_GROUP",
         }
+
     winner_p05 = float(np.quantile(np.asarray(winner_values), QUANTILE))
     activated_p05 = float(
         np.quantile(np.asarray(activated_values), QUANTILE)
     )
-    # MAE values are negative. The more negative boundary is farther away and
-    # therefore more conservative for successful-trade preservation.
-    chosen_mae = min(winner_p05, activated_p05)
-    stop_distance = abs(chosen_mae)
+    winner_boundary = _empirical_group_boundary(winner_values)
+    activated_boundary = _empirical_group_boundary(activated_values)
+    stop_distance = max(
+        float(winner_boundary["operational_distance_pct"]),
+        float(activated_boundary["operational_distance_pct"]),
+    )
     winner_breaches = sum(value <= -stop_distance for value in winner_values)
     activated_breaches = sum(
         value <= -stop_distance for value in activated_values
@@ -153,11 +189,20 @@ def _candidate_distance(
         / len(activated_values)
         * 100.0
     )
+
+    worst_success_mae = min(min(winner_values), min(activated_values))
+    zero_success_breach_distance = _round_strictly_outward(
+        abs(float(worst_success_mae))
+    )
     return {
         "available": True,
-        "derivation": "MAX_DISTANCE_OF_WINNER_P05_AND_ACTIVATED_P05",
-        "winner_p05_mae_pct": round(winner_p05, 4),
-        "activated_p05_mae_pct": round(activated_p05, 4),
+        "derivation": "EMPIRICAL_95PCT_SUCCESS_PRESERVATION_BOUNDARY",
+        "interpolated_p05_descriptive_only": {
+            "winner_p05_mae_pct": round(winner_p05, 4),
+            "activated_p05_mae_pct": round(activated_p05, 4),
+        },
+        "winner_empirical_boundary": winner_boundary,
+        "activated_empirical_boundary": activated_boundary,
         "candidate_stop_distance_pct": round(stop_distance, 4),
         "candidate_stop_return_pct": round(-stop_distance, 4),
         "development_winner_preservation_pct_at_boundary": round(
@@ -167,6 +212,11 @@ def _candidate_distance(
             activated_preservation, 2
         ),
         "preservation_target_pct": PRESERVATION_TARGET_PCT,
+        "zero_observed_success_breach_reference_pct": round(
+            zero_success_breach_distance, 4
+        ),
+        "zero_success_breach_reference_is_candidate": False,
+        "operational_rounding_step_pct": OPERATIONAL_ROUNDING_STEP_PCT,
         "not_pnl_optimized": True,
     }
 
