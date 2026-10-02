@@ -32,7 +32,7 @@ def _spot(ts: str, close: float, open_: float = 100.0):
 def test_holdout_is_fresh_forward_and_excludes_october_1():
     assert PROTOCOL_VERSION == "STRATEGY_F5_FORWARD_REGIME_HOLDOUT_V1"
     assert WINDOW["start"] == "2026-10-05"
-    assert WINDOW["end"] == "2026-12-31"
+    assert WINDOW["end"] == "2026-12-29"
     assert "2026-10-01" in EXCLUDED_PREVIOUSLY_INSPECTED_DATES
     assert GUARDRAILS["fresh_forward_holdout"] is True
     assert GUARDRAILS["no_threshold_search_on_holdout"] is True
@@ -42,7 +42,7 @@ def test_holiday_shifted_tuesday_expiries_are_frozen():
     assert "2026-10-19" in EXPIRIES
     assert "2026-11-09" in EXPIRIES
     assert "2026-11-23" in EXPIRIES
-    assert "2027-01-05" in EXPIRIES
+    assert EXPIRIES[-1] == "2026-12-29"
 
 
 def test_entry_time_regime_uses_only_completed_5m_bars():
