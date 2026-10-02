@@ -126,9 +126,22 @@ def _checkpoint_state(
         entry_day_obs.get(str(trade["entry_timestamp"]), {})
         .get(str(trade["right"]))
     )
+    baseline_exit_dt = datetime.fromisoformat(str(trade["exit_timestamp"]))
+    activation_text = trade.get("trail_activation_timestamp")
+    activation_dt = (
+        None
+        if not activation_text
+        else datetime.fromisoformat(str(activation_text))
+    )
+    candidate_eligible = (
+        checkpoint_obs is not None
+        and baseline_exit_dt > checkpoint
+        and (activation_dt is None or activation_dt > checkpoint)
+    )
     return {
         "minutes": int(minutes),
         "checkpoint_available": checkpoint_obs is not None,
+        "candidate_eligible": candidate_eligible,
         "observations": len(path),
         "max_favorable_close_return_pct": (
             None if not returns else round(max(returns), 4)
@@ -168,7 +181,7 @@ def _checkpoint_state(
 def _anatomy_report(rows: list[dict[str, Any]], checkpoint: int) -> dict[str, Any]:
     eligible = [
         row for row in rows
-        if row["checkpoints"][str(checkpoint)]["checkpoint_available"]
+        if row["checkpoints"][str(checkpoint)]["candidate_eligible"]
     ]
     winners = [row for row in eligible if row["baseline_winner"]]
     losers = [row for row in eligible if not row["baseline_winner"]]
@@ -222,7 +235,7 @@ def _candidate_condition(
     candidate_name: str,
     state: dict[str, Any],
 ) -> bool:
-    if not state.get("checkpoint_available"):
+    if not state.get("candidate_eligible"):
         return False
     mfe = state.get("max_favorable_close_return_pct")
     if mfe is None:
@@ -371,6 +384,27 @@ def _candidate_report(
     breadth_confirmed = [
         r for r in results if r["breadth_status"] == "CONFIRMED"
     ]
+    breadth_baseline_zero = round(sum(
+        float(baseline_trades_by_entry[str(r["entry_timestamp"])]
+              ["primary_cost_model"]["net_pnl_inr"])
+        for r in breadth_confirmed
+    ), 2)
+    breadth_candidate_zero = round(sum(
+        float(r["costs"]["0.00"]["net_pnl_inr"])
+        for r in breadth_confirmed
+    ), 2)
+    breadth_winners_total = sum(r["baseline_winner"] for r in breadth_confirmed)
+    breadth_activated_total = sum(
+        r["baseline_trail_activated"] for r in breadth_confirmed
+    )
+    breadth_winners_untouched = sum(
+        r["baseline_winner"] and not r["triggered"]
+        for r in breadth_confirmed
+    )
+    breadth_activated_untouched = sum(
+        r["baseline_trail_activated"] and not r["triggered"]
+        for r in breadth_confirmed
+    )
     return {
         "candidate": candidate_name,
         "checkpoint_minutes": checkpoint_minutes,
@@ -390,10 +424,36 @@ def _candidate_report(
         "breadth_confirmed_secondary": {
             "trades": len(breadth_confirmed),
             "triggered": sum(r["triggered"] for r in breadth_confirmed),
-            "candidate_zero_slippage": _summary([
-                float(r["costs"]["0.00"]["net_pnl_inr"])
+            "triggered_baseline_winners": sum(
+                r["triggered"] and r["baseline_winner"]
                 for r in breadth_confirmed
-            ]),
+            ),
+            "triggered_baseline_activated": sum(
+                r["triggered"] and r["baseline_trail_activated"]
+                for r in breadth_confirmed
+            ),
+            "winner_untouched_pct": (
+                round(
+                    breadth_winners_untouched / breadth_winners_total * 100.0,
+                    2,
+                )
+                if breadth_winners_total
+                else 100.0
+            ),
+            "activated_untouched_pct": (
+                round(
+                    breadth_activated_untouched / breadth_activated_total * 100.0,
+                    2,
+                )
+                if breadth_activated_total
+                else 100.0
+            ),
+            "baseline_zero_slippage_net_pnl_inr": breadth_baseline_zero,
+            "candidate_zero_slippage_net_pnl_inr": breadth_candidate_zero,
+            "net_delta_vs_baseline_zero_slippage_inr": round(
+                breadth_candidate_zero - breadth_baseline_zero,
+                2,
+            ),
         },
         "screen": {
             "passed": not failures,
