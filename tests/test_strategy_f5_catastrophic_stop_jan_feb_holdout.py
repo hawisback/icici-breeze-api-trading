@@ -35,7 +35,7 @@ def test_jan_feb_expiries_and_coverage_are_frozen():
     ]
     assert _nearest_expiry(date(2026, 1, 1)).isoformat() == "2026-01-06"
     assert _nearest_expiry(date(2026, 2, 25)).isoformat() == "2026-03-02"
-    assert WINDOW["expected_trading_sessions"] == 40
+    assert WINDOW["expected_trading_sessions"] == 41
 
 
 def _trade():
