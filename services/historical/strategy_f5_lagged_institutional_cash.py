@@ -112,10 +112,7 @@ def _context_by_session(
                 "prior_report_date": prior.isoformat(),
             }
             continue
-        required = (
-            "FII_buy_cr", "FII_sell_cr", "FII_net_cr",
-            "DII_buy_cr", "DII_sell_cr", "DII_net_cr",
-        )
+        required = ("FII_net_cr", "DII_net_cr")
         if any(raw.get(k) is None for k in required):
             result[day_key] = {
                 "available": False,
