@@ -126,14 +126,30 @@ def _context_by_session(
             "available": True,
             "prior_report_date": prior.isoformat(),
             "FII": {
-                "buy_cr": float(raw["FII_buy_cr"]),
-                "sell_cr": float(raw["FII_sell_cr"]),
+                "buy_cr": (
+                    None
+                    if raw.get("FII_buy_cr") is None
+                    else float(raw["FII_buy_cr"])
+                ),
+                "sell_cr": (
+                    None
+                    if raw.get("FII_sell_cr") is None
+                    else float(raw["FII_sell_cr"])
+                ),
                 "net_cr": float(raw["FII_net_cr"]),
                 "flow_state": fii_state,
             },
             "DII": {
-                "buy_cr": float(raw["DII_buy_cr"]),
-                "sell_cr": float(raw["DII_sell_cr"]),
+                "buy_cr": (
+                    None
+                    if raw.get("DII_buy_cr") is None
+                    else float(raw["DII_buy_cr"])
+                ),
+                "sell_cr": (
+                    None
+                    if raw.get("DII_sell_cr") is None
+                    else float(raw["DII_sell_cr"])
+                ),
                 "net_cr": float(raw["DII_net_cr"]),
                 "flow_state": dii_state,
             },
