@@ -7,6 +7,10 @@ from services.historical.strategy_f5_lagged_institutional_cash import (
 )
 from services.historical.strategy_f5_lagged_institutional_cash_market import (
     _normalize_payload,
+    collect,
+)
+from services.historical.strategy_f5_2min_macd_rvi10_trail_protocol import (
+    PROTOCOL_VERSION as F5_PROTOCOL_VERSION,
 )
 from services.historical.strategy_f5_lagged_institutional_cash_protocol import (
     GUARDRAILS,
@@ -118,3 +122,40 @@ def test_missing_prior_report_stays_unavailable_not_a_sign_state():
     assert jul1["available"] is False
     assert jul1["reason"] == "PRIOR_CASH_REPORT_MISSING"
     assert "FII" not in jul1
+
+
+def test_collector_requests_only_reports_that_can_be_lagged_into_target_days():
+    f5_market = {
+        "protocol_version": F5_PROTOCOL_VERSION,
+        "strategy_outcomes_scored": False,
+        "spot_rows": [
+            {"date": "2026-06-30"},
+            {"date": "2026-07-01"},
+            {"date": "2026-07-02"},
+        ],
+    }
+    source_rows = [
+        {
+            "date": day,
+            "FII_buy_cr": 1.0,
+            "FII_sell_cr": 2.0,
+            "FII_net_cr": -1.0,
+            "DII_buy_cr": 2.0,
+            "DII_sell_cr": 1.0,
+            "DII_net_cr": 1.0,
+        }
+        for day in ("2026-06-30", "2026-07-01", "2026-07-02")
+    ]
+    report = collect(
+        f5_market,
+        f5_market_sha256="f5",
+        source_rows=source_rows,
+        source_description="TEST_ARCHIVE",
+        source_sha256="archive-sha",
+    )
+    assert report["quality"]["target_sessions"] == 2
+    assert report["quality"]["needed_source_sessions"] == 2
+    assert [r["date"] for r in report["cash_rows"]] == [
+        "2026-06-30", "2026-07-01"
+    ]
+    assert report["source"]["source_file_sha256"] == "archive-sha"
