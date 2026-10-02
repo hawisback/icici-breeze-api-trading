@@ -9,6 +9,7 @@ from services.historical.strategy_f5_forward_regime_holdout import (
 from services.historical.strategy_f5_forward_regime_holdout_protocol import (
     EXCLUDED_PREVIOUSLY_INSPECTED_DATES,
     EXPIRIES,
+    FROZEN_LATE_ENTRY_DIAGNOSTIC_CUTOFF,
     GUARDRAILS,
     PROTOCOL_VERSION,
     VALIDATION_GATE,
@@ -123,3 +124,9 @@ def test_partial_holdout_does_not_score_outcomes():
     assert report["decision"] == "HOLDOUT_NOT_COMPLETE_NO_OUTCOMES_SCORED"
     assert "primary_bearish_analysis" not in report
     assert GUARDRAILS["no_partial_holdout_outcome_reporting"] is True
+
+
+def test_late_entry_forward_diagnostic_is_descriptive_only():
+    assert FROZEN_LATE_ENTRY_DIAGNOSTIC_CUTOFF == "14:30"
+    assert GUARDRAILS["late_entry_forward_reporting_descriptive_only"] is True
+    assert GUARDRAILS["no_late_entry_hard_block"] is True
