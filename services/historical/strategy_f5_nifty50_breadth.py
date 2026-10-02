@@ -180,15 +180,23 @@ def _month_report(month: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
             "PE_breadth_confirmed": _summary([
                 r for r in bearish_pe if r["breadth_confirmed"]
             ]),
-            "PE_breadth_not_confirmed": _summary([
-                r for r in bearish_pe if not r["breadth_confirmed"]
+            "PE_breadth_available_not_confirmed": _summary([
+                r for r in bearish_pe
+                if r["breadth_available"] and not r["breadth_confirmed"]
+            ]),
+            "PE_breadth_unavailable": _summary([
+                r for r in bearish_pe if not r["breadth_available"]
             ]),
             "CE_all": _summary(bearish_ce),
             "CE_breadth_confirmed": _summary([
                 r for r in bearish_ce if r["breadth_confirmed"]
             ]),
-            "CE_breadth_not_confirmed": _summary([
-                r for r in bearish_ce if not r["breadth_confirmed"]
+            "CE_breadth_available_not_confirmed": _summary([
+                r for r in bearish_ce
+                if r["breadth_available"] and not r["breadth_confirmed"]
+            ]),
+            "CE_breadth_unavailable": _summary([
+                r for r in bearish_ce if not r["breadth_available"]
             ]),
         },
         "bullish_regime": {
@@ -196,8 +204,12 @@ def _month_report(month: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
             "CE_breadth_confirmed": _summary([
                 r for r in bullish_ce if r["breadth_confirmed"]
             ]),
-            "CE_breadth_not_confirmed": _summary([
-                r for r in bullish_ce if not r["breadth_confirmed"]
+            "CE_breadth_available_not_confirmed": _summary([
+                r for r in bullish_ce
+                if r["breadth_available"] and not r["breadth_confirmed"]
+            ]),
+            "CE_breadth_unavailable": _summary([
+                r for r in bullish_ce if not r["breadth_available"]
             ]),
         },
     }
@@ -259,10 +271,18 @@ def analyze(
         regime = regimes.get(day, {}).get("regime")
         b = breadth.get(day, {})
         breadth_direction = b.get("breadth_direction")
+        breadth_available = bool(b.get("available"))
         breadth_confirmed = (
-            regime in {"BULLISH", "BEARISH"}
+            breadth_available
+            and regime in {"BULLISH", "BEARISH"}
             and breadth_direction == regime
         )
+        if not breadth_available:
+            breadth_status = "UNAVAILABLE"
+        elif breadth_confirmed:
+            breadth_status = "CONFIRMED"
+        else:
+            breadth_status = "AVAILABLE_NOT_CONFIRMED"
         pnl = float(trade["primary_cost_model"]["net_pnl_inr"])
         enriched.append({
             "date": day,
@@ -273,9 +293,10 @@ def analyze(
             "net_pnl_inr": pnl,
             "winner": pnl > 0.0,
             "dominant_nifty_regime": regime,
-            "breadth_available": bool(b.get("available")),
+            "breadth_available": breadth_available,
             "breadth_direction": breadth_direction,
             "breadth_confirmed": breadth_confirmed,
+            "breadth_status": breadth_status,
             "advancers": b.get("advancers"),
             "decliners": b.get("decliners"),
             "net_breadth_pct_of_complete": b.get(
@@ -329,6 +350,14 @@ def analyze(
             "baseline_trades": len(selected),
             "matched_trades": len(enriched),
             "directional_regime_days": len(directional_days),
+            "breadth_available_directional_days": sum(
+                bool(breadth.get(day, {}).get("available"))
+                for day in directional_days
+            ),
+            "breadth_unavailable_directional_days": sum(
+                not bool(breadth.get(day, {}).get("available"))
+                for day in directional_days
+            ),
             "breadth_confirmed_directional_days": len(confirmed_days),
         },
         "daily_breadth": breadth,
@@ -337,15 +366,23 @@ def analyze(
             "PE_breadth_confirmed": _summary([
                 r for r in bearish_pe if r["breadth_confirmed"]
             ]),
-            "PE_breadth_not_confirmed": _summary([
-                r for r in bearish_pe if not r["breadth_confirmed"]
+            "PE_breadth_available_not_confirmed": _summary([
+                r for r in bearish_pe
+                if r["breadth_available"] and not r["breadth_confirmed"]
+            ]),
+            "PE_breadth_unavailable": _summary([
+                r for r in bearish_pe if not r["breadth_available"]
             ]),
             "CE_all": _summary(bearish_ce),
             "CE_breadth_confirmed": _summary([
                 r for r in bearish_ce if r["breadth_confirmed"]
             ]),
-            "CE_breadth_not_confirmed": _summary([
-                r for r in bearish_ce if not r["breadth_confirmed"]
+            "CE_breadth_available_not_confirmed": _summary([
+                r for r in bearish_ce
+                if r["breadth_available"] and not r["breadth_confirmed"]
+            ]),
+            "CE_breadth_unavailable": _summary([
+                r for r in bearish_ce if not r["breadth_available"]
             ]),
         },
         "secondary_bullish_analysis": {
@@ -353,8 +390,12 @@ def analyze(
             "CE_breadth_confirmed": _summary([
                 r for r in bullish_ce if r["breadth_confirmed"]
             ]),
-            "CE_breadth_not_confirmed": _summary([
-                r for r in bullish_ce if not r["breadth_confirmed"]
+            "CE_breadth_available_not_confirmed": _summary([
+                r for r in bullish_ce
+                if r["breadth_available"] and not r["breadth_confirmed"]
+            ]),
+            "CE_breadth_unavailable": _summary([
+                r for r in bullish_ce if not r["breadth_available"]
             ]),
         },
         "by_month": {
