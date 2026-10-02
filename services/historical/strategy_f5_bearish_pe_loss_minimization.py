@@ -119,6 +119,8 @@ def _checkpoint_state(
     obs_by_day: dict[str, dict[str, dict[str, Any]]],
     minutes: int,
 ) -> dict[str, Any]:
+    entry_dt = datetime.fromisoformat(str(trade["entry_timestamp"]))
+    checkpoint = entry_dt + timedelta(minutes=int(minutes))
     path, checkpoint_obs = _trade_path(trade, obs_by_day, minutes)
     returns = [float(x["close_return_pct"]) for x in path]
     entry_day_obs = obs_by_day.get(str(trade["date"]), {})
