@@ -197,3 +197,26 @@ def test_collector_requests_only_reports_that_can_be_lagged_into_target_days():
         "2026-06-30", "2026-07-01"
     ]
     assert report["source"]["source_file_sha256"] == "archive-sha"
+
+
+def test_session_context_accepts_net_only_archive():
+    sessions = [date(2026, 6, 30), date(2026, 7, 1)]
+    rows = [{
+        "date": "2026-06-30",
+        "FII_buy_cr": None,
+        "FII_sell_cr": None,
+        "FII_net_cr": -2557.0,
+        "DII_buy_cr": None,
+        "DII_sell_cr": None,
+        "DII_net_cr": 6842.0,
+    }]
+    context = _context_by_session(sessions, rows)
+    jul1 = context["2026-07-01"]
+    assert jul1["available"] is True
+    assert jul1["FII"]["buy_cr"] is None
+    assert jul1["FII"]["sell_cr"] is None
+    assert jul1["FII"]["flow_state"] == "SELLING"
+    assert jul1["DII"]["buy_cr"] is None
+    assert jul1["DII"]["sell_cr"] is None
+    assert jul1["DII"]["flow_state"] == "BUYING"
+    assert jul1["offset_state"] == "FII_SELL_DII_BUY"
