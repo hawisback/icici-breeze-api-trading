@@ -120,7 +120,11 @@ class FakeKiteMarket(FakeKite):
 
 
 @pytest.mark.asyncio
-async def test_kite_resolves_exact_active_future_from_instrument_master():
+async def test_kite_resolves_exact_active_future_from_instrument_master(monkeypatch):
+    monkeypatch.setattr(
+        "services.broker_gateway.zerodha_kite_adapter.ist_today",
+        lambda: date(2026, 9, 21),
+    )
     adapter = ZerodhaKiteAdapter(custom_client=FakeKiteMarket())
     adapter._access_token = "access-token"
     contract = await adapter.resolve_nearest_future("NIFTY")

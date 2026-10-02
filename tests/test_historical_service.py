@@ -213,10 +213,14 @@ async def test_instrument_service_ensures_current_nifty_futures_even_when_seed_e
     repo = InstrumentRepository(db_path=tmp_path / "instruments.db")
     service = InstrumentService(repository=repo)
     await service.initialize()
+    # Make the contract-calendar assertion deterministic rather than depending
+    # on the wall-clock date when CI happens to run.
+    await service.ensure_current_nifty_futures(today=date(2026, 9, 21))
     futures = await repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
     futures = [item for item in futures if item.segment == "FUTURES"]
     expiries = {item.expiry for item in futures}
-    assert "2026-09-29" in expiries or date.today().year != 2026
+    assert "2026-09-29" in expiries
+    assert "2026-10-27" in expiries
     assert len(futures) >= 2
     assert all(item.instrument_id.startswith("INST-NIFTY-FUT-") for item in futures)
 

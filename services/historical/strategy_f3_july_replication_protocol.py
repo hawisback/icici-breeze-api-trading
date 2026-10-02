@@ -1,0 +1,127 @@
+"""Frozen July 2026 replication for the original corrected Strategy F3.
+
+This returns to the user's actual option-native CALL-or-PUT MACD pattern after
+the later PE-only candidate failed in June.
+
+Rules are unchanged from F3:
+- fixed daily ATM strike from 09:15 NIFTY spot open
+- exact CE and PE option premium charts
+- MACD(12,26,9) on each option close
+- bullish crossover enters that option at next 5m open
+- bearish crossover on held option exits at next 5m open
+- one position across CE/PE
+- force flat 15:20
+- no filters, stops, targets, or parameter changes
+"""
+from __future__ import annotations
+
+PROTOCOL_VERSION = "STRATEGY_F3_JULY_REPLICATION_V1"
+STRATEGY_ID = "F3"
+STRATEGY_NAME = "OPTION_NATIVE_MACD"
+ROLE = "SEPARATE_MONTH_FULL_F3_REPLICATION"
+
+BACKTEST_WINDOW = {
+    "start": "2026-07-01",
+    "end": "2026-07-31",
+    "option_warmup_start": "2026-06-19",
+    "option_warmup_previous_sessions_per_contract": 5,
+    "provider": "BREEZE",
+    "bar_interval": "5minute",
+    "force_exit_time": "15:20",
+}
+
+MACD = {
+    "fast_length": 12,
+    "slow_length": 26,
+    "signal_length": 9,
+    "source": "option_close",
+    "ema_adjust": False,
+    "continuous_per_exact_contract_across_sessions": True,
+    "minimum_prior_option_bars_before_session": 35,
+}
+
+OPTION_SELECTION = {
+    "underlying": "NIFTY",
+    "strike_step": 50,
+    "daily_atm_reference": "09:15_NIFTY_SPOT_OPEN",
+    "fixed_strike_for_entire_session": True,
+    "rights": ["CE", "PE"],
+    "expiry_policy": "NEAREST_NON_EXPIRED_WEEKLY_INCLUDING_0DTE",
+    "weekly_expiries": [
+        "2026-07-07",
+        "2026-07-14",
+        "2026-07-21",
+        "2026-07-28",
+        "2026-08-04",
+    ],
+    "lot_size": 65,
+}
+
+SIGNALS = {
+    "entry": "OPTION_MACD_PREV <= OPTION_SIGNAL_PREV AND OPTION_MACD_NOW > OPTION_SIGNAL_NOW",
+    "exit": "HELD_OPTION_MACD_PREV >= HELD_OPTION_SIGNAL_PREV AND HELD_OPTION_MACD_NOW < HELD_OPTION_SIGNAL_NOW",
+    "signal_known_at": "completed_option_5m_bar_end",
+}
+
+EXECUTION = {
+    "one_position_across_ce_and_pe": True,
+    "entry_price": "NEXT_5M_OPTION_BAR_OPEN",
+    "exit_price": "NEXT_5M_OPTION_BAR_OPEN",
+    "simultaneous_ce_pe_bullish_entry": "SKIP_AMBIGUOUS_TIMESTAMP",
+    "same_timestamp_exit_then_opposite_entry_allowed": True,
+    "force_exit_price": "15:20_OPTION_BAR_OPEN",
+    "allow_entry_at_or_after_force_exit": False,
+    "overnight_positions": False,
+    "stop_loss": None,
+    "profit_target": None,
+}
+
+COST_MODEL = {
+    "primary_slippage_points_each_side": 0.0,
+    "slippage_sensitivity_points_each_side": [0.0, 0.5, 1.0],
+    "brokerage_per_order_inr": 20.0,
+    "exchange_charge_rate": 0.0003503,
+    "stt_sell_rate": 0.001,
+    "gst_rate": 0.18,
+    "sebi_charge_rate": 0.000001,
+    "stamp_buy_rate": 0.00003,
+    "version": "paper_options_costs_v1",
+    "bid_ask_available": False,
+    "fidelity": "PARTIAL_FIDELITY_OHLC_OPEN_PLUS_EXPLICIT_COSTS",
+}
+
+REPLICATION_GATE = {
+    "net_pnl_after_explicit_costs_positive": True,
+    "profit_factor_above_one": True,
+    "net_pnl_positive_at_0_5_point_slippage_each_side": True,
+    "report_1_point_slippage_without_requiring_pass": True,
+    "full_trade_price_coverage_required": True,
+}
+
+REPORTING = {
+    "overall": True,
+    "ce_and_pe_separately": True,
+    "daily_pnl": True,
+    "time_of_day": True,
+    "win_rate": True,
+    "profit_factor": True,
+    "max_drawdown": True,
+    "largest_winner_concentration": True,
+    "slippage_sensitivity": True,
+    "coverage_and_skips": True,
+}
+
+GUARDRAILS = {
+    "research_only": True,
+    "backtest_only": True,
+    "live_execution": False,
+    "paper_execution": False,
+    "broker_orders": False,
+    "no_dynamic_atm_splicing": True,
+    "no_side_filter": True,
+    "no_macd_parameter_optimization": True,
+    "no_extra_filters": True,
+    "no_time_of_day_filter": True,
+    "no_stop_target_search": True,
+    "strategy_d_remains_paused": True,
+}
