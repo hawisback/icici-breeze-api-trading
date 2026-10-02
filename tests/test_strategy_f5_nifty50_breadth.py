@@ -75,3 +75,29 @@ def test_breadth_day_uses_simple_majority_with_complete_coverage():
     assert result["decliners"] == 20
     assert result["breadth_direction"] == "BULLISH"
     assert result["coverage_pct"] == 100.0
+
+
+def test_breadth_report_separates_unavailable_from_not_confirmed():
+    from services.historical.strategy_f5_nifty50_breadth import _summary
+
+    rows = [
+        {
+            "breadth_available": True,
+            "breadth_confirmed": False,
+            "net_pnl_inr": -10.0,
+            "trail_activated": False,
+        },
+        {
+            "breadth_available": False,
+            "breadth_confirmed": False,
+            "net_pnl_inr": 20.0,
+            "trail_activated": True,
+        },
+    ]
+    available_not_confirmed = [
+        r for r in rows
+        if r["breadth_available"] and not r["breadth_confirmed"]
+    ]
+    unavailable = [r for r in rows if not r["breadth_available"]]
+    assert _summary(available_not_confirmed)["net_pnl_inr"] == -10.0
+    assert _summary(unavailable)["net_pnl_inr"] == 20.0
