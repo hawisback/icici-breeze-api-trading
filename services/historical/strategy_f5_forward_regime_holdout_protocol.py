@@ -33,6 +33,7 @@ PROTOCOL_VERSION = "STRATEGY_F5_FORWARD_REGIME_HOLDOUT_V1"
 STRATEGY_ID = "F5"
 ROLE = "FRESH_FORWARD_HOLDOUT_NO_LOOKAHEAD_CONTEXT_VALIDATION"
 FROZEN_ON = "2026-10-02"
+FROZEN_LATE_ENTRY_DIAGNOSTIC_CUTOFF = "14:30"
 
 WINDOW = {
     "start": "2026-10-05",
@@ -127,6 +128,10 @@ SECONDARY_REPORTING = {
     "mixed_regime": "DESCRIPTIVE_ONLY",
     "entry_time_regime_availability": True,
     "monthly_stability": True,
+    "late_bearish_PE_ge_1430": (
+        "DESCRIPTIVE_ONLY_PREREGISTERED_AFTER_JUNE_HOLDOUT_FAILURE"
+    ),
+    "late_entry_cutoff": FROZEN_LATE_ENTRY_DIAGNOSTIC_CUTOFF,
 }
 
 SOURCE_PROVENANCE = {
@@ -156,6 +161,8 @@ GUARDRAILS = {
     "no_regime_magnitude_threshold": True,
     "no_threshold_search_on_holdout": True,
     "no_partial_holdout_outcome_reporting": True,
+    "late_entry_forward_reporting_descriptive_only": True,
+    "no_late_entry_hard_block": True,
     "no_cash_filter": True,
     "no_breadth_filter": True,
     "no_institutional_oi_filter": True,
