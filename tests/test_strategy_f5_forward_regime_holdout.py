@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from services.historical.strategy_f5_forward_regime_holdout import (
     _entry_time_regime,
     _gate,
+    analyze,
 )
 from services.historical.strategy_f5_forward_regime_holdout_protocol import (
     EXCLUDED_PREVIOUSLY_INSPECTED_DATES,
@@ -78,13 +79,13 @@ def test_gate_passes_only_when_frozen_bearish_relationship_holds():
     daily = {
         f"2026-10-{day:02d}": {
             "bearish_entry_context_trades": 2,
-            "bearish_PE": {"net_pnl_inr": 100.0},
-            "bearish_CE": {"net_pnl_inr": -50.0},
+            "bearish_PE": {"trades": 1, "net_pnl_inr": 100.0},
+            "bearish_CE": {"trades": 1, "net_pnl_inr": -50.0},
         }
         for day in range(5, 15)
     }
     result = _gate(
-        target_sessions=int(VALIDATION_GATE["minimum_target_sessions"]),
+        target_sessions=int(VALIDATION_GATE["expected_target_sessions"]),
         bearish_pe=pe,
         bearish_ce=ce,
         daily=daily,
@@ -100,3 +101,25 @@ def test_gate_is_inconclusive_when_coverage_is_insufficient():
         daily={},
     )
     assert result["status"] == "INCONCLUSIVE_COVERAGE"
+
+
+def test_partial_holdout_does_not_score_outcomes():
+    market = {
+        "protocol_version": PROTOCOL_VERSION,
+        "strategy_outcomes_scored": False,
+        "daily_contracts": [
+            {
+                "date": "2026-10-05",
+                "month": "2026-10",
+                "spot_0915_open": 100.0,
+                "strike": 100,
+                "expiry": "2026-10-06",
+            }
+        ],
+        "spot_rows": [],
+        "option_rows_1m": [],
+    }
+    report = analyze(market, source_market_sha256="partial")
+    assert report["decision"] == "HOLDOUT_NOT_COMPLETE_NO_OUTCOMES_SCORED"
+    assert "primary_bearish_analysis" not in report
+    assert GUARDRAILS["no_partial_holdout_outcome_reporting"] is True
