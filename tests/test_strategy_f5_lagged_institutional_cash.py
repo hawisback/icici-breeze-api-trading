@@ -91,6 +91,23 @@ def test_normalize_wide_snapshot_shape():
     assert rows[0]["DII_net_cr"] == 7.0
 
 
+def test_normalize_net_only_archived_rows():
+    rows = _normalize_payload([{
+        "date": "30-Jun-2026",
+        "FII_net_cr": -2557,
+        "DII_net_cr": 6842,
+    }])
+    assert rows == [{
+        "date": "2026-06-30",
+        "FII_buy_cr": None,
+        "FII_sell_cr": None,
+        "FII_net_cr": -2557.0,
+        "DII_buy_cr": None,
+        "DII_sell_cr": None,
+        "DII_net_cr": 6842.0,
+    }]
+
+
 def test_flow_and_offset_states_use_sign_only():
     assert _flow_state(0.01) == "BUYING"
     assert _flow_state(-0.01) == "SELLING"
