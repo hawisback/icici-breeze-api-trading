@@ -18,14 +18,19 @@ experienced, rather than only completed 2-minute closes.
 
 Candidate derivation
 --------------------
-Calculate the 5th percentile MAE for:
-1. baseline winners
-2. trail-activated trades
+The interpolated 5th-percentile MAE is reported descriptively, but the actual
+candidate uses an EMPIRICAL preservation boundary because small samples can
+make a linear-interpolated p05 violate the stated 95% preservation target.
 
-The single catastrophic-stop candidate is the more conservative (farther)
-distance required by those two successful-trade distributions. This candidate
-is outcome-derived development research and MUST be frozen before any fresh
-holdout scoring.
+For each successful-trade group:
+1. allow at most floor(5% * N) historical breaches,
+2. find the next-worst MAE that must remain untouched,
+3. place the stop strictly beyond that MAE,
+4. round outward to the next 0.01 percentage point.
+
+The single candidate is the farther of the winner and trail-activation
+empirical boundaries. A separate zero-observed-success-breach reference is
+also reported, but is descriptive and is not a second candidate.
 
 No P&L counterfactual is scored here. No percentage grid is searched.
 """
@@ -45,6 +50,7 @@ DEVELOPMENT_WINDOW = {
 
 PRESERVATION_TARGET_PCT = 95.0
 QUANTILE = 0.05
+OPERATIONAL_ROUNDING_STEP_PCT = 0.01
 
 GUARDRAILS = {
     "research_only": True,
@@ -59,6 +65,8 @@ GUARDRAILS = {
     "no_pnl_optimization_on_development": True,
     "no_support_resistance_retuning": True,
     "single_candidate_is_success_preservation_derived": True,
+    "interpolated_quantile_not_used_as_operational_boundary": True,
+    "operational_boundary_rounded_outward_not_inward": True,
     "candidate_requires_fresh_holdout_before_promotion": True,
     "existing_f5_entry_exit_trail_frozen": True,
     "strategy_d_remains_paused": True,
