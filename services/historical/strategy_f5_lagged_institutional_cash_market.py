@@ -96,9 +96,8 @@ def _normalize_payload(payload: Any) -> list[dict[str, Any]]:
     if generic:
         return [
             row for _, row in sorted(by_date.items())
-            if all(row.get(f"{p}_{f}_cr") is not None
-                   for p in ("FII", "DII")
-                   for f in ("buy", "sell", "net"))
+            if row.get("FII_net_cr") is not None
+            and row.get("DII_net_cr") is not None
         ]
 
     output: list[dict[str, Any]] = []
@@ -117,9 +116,10 @@ def _normalize_payload(payload: Any) -> list[dict[str, Any]]:
             "DII_sell_cr": _number(_first(raw, "diisell", "dii_sell_cr", "dii_sell")),
             "DII_net_cr": _number(_first(raw, "diinet", "dii_net_cr", "dii_net")),
         }
-        if all(row[f"{p}_{f}_cr"] is not None
-               for p in ("FII", "DII")
-               for f in ("buy", "sell", "net")):
+        if (
+            row["FII_net_cr"] is not None
+            and row["DII_net_cr"] is not None
+        ):
             output.append(row)
     return sorted(output, key=lambda r: str(r["date"]))
 
