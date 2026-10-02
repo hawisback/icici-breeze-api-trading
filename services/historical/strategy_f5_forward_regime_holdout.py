@@ -180,26 +180,36 @@ def _gate(
         for item in daily.values()
         if item["bearish_entry_context_trades"] > 0
     ]
+    comparable_bearish_days = [
+        item
+        for item in bearish_days
+        if int(item["bearish_PE"]["trades"]) > 0
+        and int(item["bearish_CE"]["trades"]) > 0
+    ]
     pe_above_ce_days = sum(
         float(item["bearish_PE"]["net_pnl_inr"])
         > float(item["bearish_CE"]["net_pnl_inr"])
-        for item in bearish_days
+        for item in comparable_bearish_days
     )
     pct_days = (
-        round(pe_above_ce_days / len(bearish_days) * 100.0, 2)
-        if bearish_days
+        round(pe_above_ce_days / len(comparable_bearish_days) * 100.0, 2)
+        if comparable_bearish_days
         else None
     )
 
     coverage_checks = {
-        "minimum_target_sessions": (
-            target_sessions >= int(VALIDATION_GATE["minimum_target_sessions"])
+        "expected_target_sessions": (
+            target_sessions >= int(VALIDATION_GATE["expected_target_sessions"])
         ),
         "minimum_bearish_PE_trades": (
             int(pe["trades"]) >= int(VALIDATION_GATE["minimum_bearish_PE_trades"])
         ),
         "minimum_bearish_CE_trades": (
             int(ce["trades"]) >= int(VALIDATION_GATE["minimum_bearish_CE_trades"])
+        ),
+        "minimum_comparable_bearish_days": (
+            len(comparable_bearish_days)
+            >= int(VALIDATION_GATE["minimum_comparable_bearish_days"])
         ),
     }
     if not all(coverage_checks.values()):
@@ -233,6 +243,7 @@ def _gate(
             "coverage_checks": coverage_checks,
             "effect_checks": effect_checks,
             "bearish_days_with_entry_context": len(bearish_days),
+            "comparable_bearish_days": len(comparable_bearish_days),
             "bearish_days_PE_net_above_CE": pe_above_ce_days,
             "pct_bearish_days_PE_net_above_CE": pct_days,
         }
@@ -242,6 +253,7 @@ def _gate(
         "coverage_checks": coverage_checks,
         "effect_checks": None,
         "bearish_days_with_entry_context": len(bearish_days),
+        "comparable_bearish_days": len(comparable_bearish_days),
         "bearish_days_PE_net_above_CE": pe_above_ce_days,
         "pct_bearish_days_PE_net_above_CE": pct_days,
     }
@@ -261,13 +273,6 @@ def analyze(
     spot_rows = list(market.get("spot_rows") or [])
     option_rows = list(market.get("option_rows_1m") or [])
 
-    bars_2m, incomplete = _aggregate_2m(option_rows)
-    obs, insufficient = _observations(contracts, bars_2m)
-    open_2m = _bar_open_lookup(bars_2m)
-    open_1m = _one_min_open_lookup(option_rows)
-    trades, skips = _trail_trade_simulation(contracts, obs, open_2m, open_1m)
-    trades = _decorate(trades)
-
     start = date.fromisoformat(WINDOW["start"])
     end = date.fromisoformat(WINDOW["end"])
     target_sessions = sorted(
@@ -277,6 +282,34 @@ def analyze(
             if start <= date.fromisoformat(str(contract["date"])) <= end
         }
     )
+    if str(WINDOW["end"]) not in target_sessions:
+        return {
+            "research_type": RESEARCH_TYPE,
+            "protocol_version": PROTOCOL_VERSION,
+            "strategy_id": STRATEGY_ID,
+            "role": ROLE,
+            "research_only": True,
+            "source_market_sha256": source_market_sha256,
+            "quality": {
+                "target_sessions_collected": len(target_sessions),
+                "required_end_session": str(WINDOW["end"]),
+                "holdout_complete": False,
+            },
+            "validation": {
+                "status": "HOLDOUT_NOT_COMPLETE_NO_OUTCOMES_SCORED",
+            },
+            "decision": "HOLDOUT_NOT_COMPLETE_NO_OUTCOMES_SCORED",
+            "guardrails": GUARDRAILS,
+            "broker_called": False,
+        }
+
+    bars_2m, incomplete = _aggregate_2m(option_rows)
+    obs, insufficient = _observations(contracts, bars_2m)
+    open_2m = _bar_open_lookup(bars_2m)
+    open_1m = _one_min_open_lookup(option_rows)
+    trades, skips = _trail_trade_simulation(contracts, obs, open_2m, open_1m)
+    trades = _decorate(trades)
+
     spot_by_day: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in spot_rows:
         day = str(row["date"])
@@ -408,8 +441,8 @@ def main() -> None:
         "output": str(args.output),
         "sha256": _sha256(args.output),
         "quality": report["quality"],
-        "primary_bearish_analysis": report["primary_bearish_analysis"],
-        "by_month": report["by_month"],
+        "primary_bearish_analysis": report.get("primary_bearish_analysis"),
+        "by_month": report.get("by_month"),
         "validation": report["validation"],
         "decision": report["decision"],
         "broker_called": False,
