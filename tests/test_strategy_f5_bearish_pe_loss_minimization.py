@@ -1,6 +1,7 @@
 from services.historical.strategy_f5_bearish_pe_loss_minimization import (
     _breadth_status,
     _candidate_condition,
+    _checkpoint_state,
 )
 from services.historical.strategy_f5_bearish_pe_loss_minimization_protocol import (
     CANDIDATES,
@@ -81,3 +82,31 @@ def test_ineligible_checkpoint_never_triggers_even_with_no_progress():
         "max_favorable_close_return_pct": -5.0,
     }
     assert _candidate_condition("NO_POSITIVE_CLOSE_BY_6M", state) is False
+
+
+def test_checkpoint_state_defines_checkpoint_from_entry_timestamp():
+    trade = {
+        "date": "2026-07-01",
+        "entry_timestamp": "2026-07-01T09:30:00+05:30",
+        "exit_timestamp": "2026-07-01T09:40:00+05:30",
+        "trail_activation_timestamp": None,
+        "right": "PE",
+        "entry_open": 100.0,
+    }
+    obs_by_day = {
+        "2026-07-01": {
+            "2026-07-01T09:32:00+05:30": {
+                "PE": {"close": 99.0, "macd_hist_pct": 0.1, "rvi": 55.0}
+            },
+            "2026-07-01T09:34:00+05:30": {
+                "PE": {"close": 98.0, "macd_hist_pct": 0.08, "rvi": 52.0}
+            },
+            "2026-07-01T09:36:00+05:30": {
+                "PE": {"close": 97.0, "macd_hist_pct": 0.05, "rvi": 49.0}
+            },
+        }
+    }
+    state = _checkpoint_state(trade, obs_by_day, 6)
+    assert state["checkpoint_available"] is True
+    assert state["candidate_eligible"] is True
+    assert state["observations"] == 3
