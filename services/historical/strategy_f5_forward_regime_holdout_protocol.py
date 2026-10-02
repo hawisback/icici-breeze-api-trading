@@ -107,16 +107,19 @@ PRIMARY_HYPOTHESIS = {
 }
 
 VALIDATION_GATE = {
-    "minimum_target_sessions": 55,
+    "expected_target_sessions": 58,
+    "holdout_end_session_required": True,
     "minimum_bearish_PE_trades": 20,
     "minimum_bearish_CE_trades": 10,
     "require_bearish_PE_net_positive": True,
     "require_bearish_CE_net_negative": True,
     "require_bearish_PE_average_pnl_above_CE": True,
     "require_bearish_PE_activation_rate_above_CE": True,
+    "minimum_comparable_bearish_days": 5,
     "minimum_pct_bearish_days_PE_net_above_CE": 55.0,
     "if_coverage_fails": "INCONCLUSIVE_NOT_FAIL",
     "no_gate_retuning_after_holdout_opens": True,
+    "blind_partial_window_outcomes": True,
 }
 
 SECONDARY_REPORTING = {
@@ -152,6 +155,7 @@ GUARDRAILS = {
     "no_filtered_path_resimulation": True,
     "no_regime_magnitude_threshold": True,
     "no_threshold_search_on_holdout": True,
+    "no_partial_holdout_outcome_reporting": True,
     "no_cash_filter": True,
     "no_breadth_filter": True,
     "no_institutional_oi_filter": True,
