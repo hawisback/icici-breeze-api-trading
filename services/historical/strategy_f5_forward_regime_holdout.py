@@ -21,6 +21,7 @@ from services.historical.strategy_f5_2min_macd_rvi10_trail_backtest import (
 )
 from services.historical.strategy_f5_forward_regime_holdout_protocol import (
     ENTRY_TIME_REGIME,
+    FROZEN_LATE_ENTRY_DIAGNOSTIC_CUTOFF,
     GUARDRAILS,
     PRIMARY_HYPOTHESIS,
     PROTOCOL_VERSION,
@@ -326,10 +327,15 @@ def analyze(
             str(trade["entry_timestamp"]),
         )
         pnl = float(trade["primary_cost_model"]["net_pnl_inr"])
+        entry_timestamp = str(trade["entry_timestamp"])
         enriched.append({
             "date": day,
             "month": str(trade["month"]),
-            "entry_timestamp": str(trade["entry_timestamp"]),
+            "entry_timestamp": entry_timestamp,
+            "late_entry_ge_1430": (
+                datetime.fromisoformat(entry_timestamp).strftime("%H:%M")
+                >= FROZEN_LATE_ENTRY_DIAGNOSTIC_CUTOFF
+            ),
             "right": str(trade["right"]),
             "trail_activated": bool(trade.get("trail_activated")),
             "net_pnl_inr": pnl,
@@ -404,6 +410,12 @@ def analyze(
             "bullish_PE": _summary([r for r in bullish if r["right"] == "PE"]),
             "mixed_CE": _summary([r for r in mixed if r["right"] == "CE"]),
             "mixed_PE": _summary([r for r in mixed if r["right"] == "PE"]),
+            "bearish_PE_before_1430": _summary([
+                r for r in bearish_pe if not r["late_entry_ge_1430"]
+            ]),
+            "bearish_PE_ge_1430": _summary([
+                r for r in bearish_pe if r["late_entry_ge_1430"]
+            ]),
         },
         "by_month": by_month,
         "daily": daily,
