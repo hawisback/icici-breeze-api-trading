@@ -1,4 +1,4 @@
-"""Read-only NIFTY PE MACD/RSI backtest on 3-minute option-premium candles."""
+"""Read-only NIFTY PE MACD/RSI backtest on 3-minute option-price candles."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ CLOSE = time(15, 30)
 class Config:
     days: int = 10
     warmup_days: int = 5
-    target_premium: float = 400.0
     quantity: int = 65
     source: str = "BREEZE"
     fast: int = 3
@@ -281,11 +280,11 @@ def run(historical_db: Path, instruments_db: Path, cfg: Config = Config()) -> di
                         continue
                     if i + 1 >= len(bars[k]) or bars[k][i+1].start.astimezone(IST).date() != day:
                         continue
-                    candidates.append((abs(bars[k][i].close - cfg.target_premium), inst.strike, inst,
+                    candidates.append((inst.strike, inst,
                                        bars[k][i], bars[k][i+1], m[i], s[i], r[i]))
                 candidate_count += len(candidates)
                 if candidates:
-                    _, _, inst, signal_bar, entry_bar, m, s, r = min(candidates, key=lambda x: (x[0], x[1]))
+                    _, inst, signal_bar, entry_bar, m, s, r = min(candidates, key=lambda x: x[0])
                     position = {"instrument": inst, "signal_bar": signal_bar, "entry_bar": entry_bar,
                                 "macd": m, "signal": s, "rsi": r}
         if position:
@@ -302,7 +301,7 @@ def run(historical_db: Path, instruments_db: Path, cfg: Config = Config()) -> di
         "strategy": "NIFTY_PE_3M_MACD_SMA_3_10_SIGNAL16_RSI14",
         "test_days": [d.isoformat() for d in test_days],
         "rules": {"entry": "fresh bottom-up MACD cross AND RSI(14)>50", "exit": "top-down MACD cross",
-                  "target_premium": cfg.target_premium, "quantity": cfg.quantity, "timeframe": "3m",
+                  "quantity": cfg.quantity, "timeframe": "3m",
                   "expiry": "nearest non-expired", "fill": "next 3m open"},
         "candidate_signals": candidate_count,
         "trades": trades,
@@ -312,7 +311,8 @@ def run(historical_db: Path, instruments_db: Path, cfg: Config = Config()) -> di
                     "average_gross_pnl": round(mean(pnls), 2) if pnls else 0.0,
                     "best_trade": max(pnls) if pnls else 0.0, "worst_trade": min(pnls) if pnls else 0.0},
         "notes": ["Gross P&L excludes charges/slippage.",
-                  "Closest qualifying PE to Rs 400 is used; no max distance filter.",
+                  "Option premium is not used for eligibility or selection.",
+                  "When multiple PE contracts signal on the same event, the lower strike is used only as a deterministic tie-breaker.",
                   "SQLite databases are opened read-only; no broker calls are made."],
     }
 
@@ -326,7 +326,6 @@ def _trade(position, exit_price: float, exit_time: datetime, reason: str, cfg: C
             "expiry": inst.expiry.isoformat(), "strike": inst.strike, "quantity": cfg.quantity,
             "signal_time_ist": signal_bar.end.astimezone(IST).isoformat(),
             "signal_close": round(signal_bar.close, 2),
-            "premium_distance": round(abs(signal_bar.close - cfg.target_premium), 2),
             "entry_time_ist": entry_bar.start.astimezone(IST).isoformat(), "entry_price": round(entry_bar.open, 2),
             "entry_macd": round(position["macd"], 6), "entry_signal": round(position["signal"], 6),
             "entry_rsi": round(position["rsi"], 4),
@@ -341,13 +340,11 @@ def main() -> None:
     p.add_argument("--historical-db", type=Path, default=Path("data/market/historical.db"))
     p.add_argument("--instruments-db", type=Path, default=Path("data/instruments/instruments.db"))
     p.add_argument("--days", type=int, default=10)
-    p.add_argument("--target-premium", type=float, default=400.0)
     p.add_argument("--quantity", type=int, default=65)
     p.add_argument("--source", default="BREEZE")
     p.add_argument("--output", type=Path)
     a = p.parse_args()
-    cfg = Config(days=a.days, target_premium=a.target_premium,
-                 quantity=a.quantity, source=a.source.upper())
+    cfg = Config(days=a.days, quantity=a.quantity, source=a.source.upper())
     report = run(a.historical_db, a.instruments_db, cfg)
     for i, t in enumerate(report["trades"], 1):
         print(f"{i:>2} {t['date']} PE {t['strike']:.0f} {t['entry_price']:.2f}->{t['exit_price']:.2f} "
