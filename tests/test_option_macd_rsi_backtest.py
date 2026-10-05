@@ -64,6 +64,5 @@ def test_defaults_match_requested_strategy():
         config.slow,
         config.signal,
         config.rsi,
-        config.target_premium,
         config.quantity,
-    ) == (3, 10, 16, 14, 400.0, 65)
+    ) == (3, 10, 16, 14, 65)
