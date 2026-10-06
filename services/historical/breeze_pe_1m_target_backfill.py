@@ -121,6 +121,44 @@ def option_instrument_id(expiry: date, strike: int) -> str:
     return f"INST-NIFTY-{expiry.isoformat()}-{strike}-PE"
 
 
+def futures_contract_expiry(instrument_id: str) -> date | None:
+    prefix = "INST-NIFTY-FUT-"
+    if not instrument_id.startswith(prefix):
+        return None
+    try:
+        return date.fromisoformat(instrument_id[len(prefix):])
+    except ValueError:
+        return None
+
+
+def choose_futures_candidate(rows: list[dict[str, Any]], day: date) -> dict[str, Any] | None:
+    """Choose one point-in-time NIFTY futures series for strike-band discovery.
+
+    Prefer the nearest non-expired contract, then the source with the most
+    1-minute rows. BREEZE wins only a row-count tie.
+    """
+    eligible: list[dict[str, Any]] = []
+    for row in rows:
+        expiry = futures_contract_expiry(str(row["instrument_id"]))
+        if expiry is None or expiry < day:
+            continue
+        item = dict(row)
+        item["contract_expiry"] = expiry
+        eligible.append(item)
+    if not eligible:
+        return None
+    nearest = min(item["contract_expiry"] for item in eligible)
+    same_expiry = [item for item in eligible if item["contract_expiry"] == nearest]
+    return min(
+        same_expiry,
+        key=lambda item: (
+            -int(item["rows"]),
+            0 if str(item["source"]) == "BREEZE" else 1,
+            str(item["instrument_id"]),
+        ),
+    )
+
+
 class BreezePe1mTargetBackfill:
     def __init__(
         self,
@@ -170,7 +208,8 @@ class BreezePe1mTargetBackfill:
         self.report.notes.extend(
             [
                 "NIFTY weekly expiry is resolved as the nearest Tuesday on/after each trading session.",
-                "Strike bands are derived from the stored 1m NIFTY futures range, with -300/+800 point buffers.",
+                "Strike-band futures input uses the nearest non-expired futures contract, then the source with the most 1m rows; BREEZE wins only a row-count tie.",
+                "Strike bands are derived from that selected stored 1m NIFTY futures range, with -300/+800 point buffers.",
                 "Backfill is additive: existing historical candle primary keys are never overwritten.",
                 "Warm-up sessions populate indicator history only; the backtest still evaluates the final test_days sessions.",
             ]
@@ -197,23 +236,25 @@ class BreezePe1mTargetBackfill:
             selected = [str(row["day"]) for row in dates][::-1]
             sessions: list[dict[str, Any]] = []
             for day_text in selected:
-                sources = conn.execute(
+                source_rows = conn.execute(
                     """
-                    SELECT source, COUNT(*) AS rows, MIN(low) AS day_low, MAX(high) AS day_high
+                    SELECT instrument_id, source, COUNT(*) AS rows,
+                           MIN(low) AS day_low, MAX(high) AS day_high
                     FROM historical_candles
                     WHERE interval = '1m'
                       AND instrument_id LIKE 'INST-NIFTY-FUT-%'
                       AND substr(start_time, 1, 10) = ?
                       AND source IN ('BREEZE', 'KITE')
-                    GROUP BY source
-                    ORDER BY CASE source WHEN 'BREEZE' THEN 0 WHEN 'KITE' THEN 1 ELSE 2 END
+                    GROUP BY instrument_id, source
                     """,
                     (day_text,),
                 ).fetchall()
-                if not sources:
+                if not source_rows:
                     continue
-                row = sources[0]
                 day = date.fromisoformat(day_text)
+                row = choose_futures_candidate([dict(x) for x in source_rows], day)
+                if row is None:
+                    continue
                 strikes = strike_band(
                     float(row["day_low"]),
                     float(row["day_high"]),
@@ -224,6 +265,7 @@ class BreezePe1mTargetBackfill:
                 sessions.append(
                     {
                         "date": day,
+                        "futures_instrument": str(row["instrument_id"]),
                         "futures_source": str(row["source"]),
                         "futures_rows": int(row["rows"]),
                         "futures_low": float(row["day_low"]),
@@ -282,6 +324,7 @@ class BreezePe1mTargetBackfill:
                 "date": day.isoformat(),
                 "role": "WARMUP" if is_warmup else "TEST",
                 "expiry": expiry.isoformat(),
+                "futures_instrument": session["futures_instrument"],
                 "futures_source": session["futures_source"],
                 "futures_low": session["futures_low"],
                 "futures_high": session["futures_high"],
