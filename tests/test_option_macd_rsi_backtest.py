@@ -65,4 +65,5 @@ def test_defaults_match_requested_strategy():
         config.signal,
         config.rsi,
         config.quantity,
-    ) == (3, 10, 16, 14, 65)
+        config.end_date,
+    ) == (3, 10, 16, 14, 65, None)
