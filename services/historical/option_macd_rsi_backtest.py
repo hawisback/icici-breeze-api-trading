@@ -21,6 +21,7 @@ CLOSE = time(15, 30)
 class Config:
     days: int = 10
     warmup_days: int = 5
+    end_date: date | None = None
     quantity: int = 65
     source: str = "BREEZE"
     fast: int = 3
@@ -93,8 +94,15 @@ def load_puts(path: Path) -> list[Instrument]:
     return out
 
 
-def discover_days(path: Path, ids: Sequence[str], source: str, count: int) -> list[date]:
+def discover_days(
+    path: Path,
+    ids: Sequence[str],
+    source: str,
+    count: int,
+    end_date: date | None = None,
+) -> list[date]:
     found: set[date] = set()
+    end_text = end_date.isoformat() if end_date else None
     with _ro(path) as conn:
         for batch in _chunks(ids):
             marks = ",".join("?" for _ in batch)
@@ -102,8 +110,9 @@ def discover_days(path: Path, ids: Sequence[str], source: str, count: int) -> li
                 f"""SELECT DISTINCT substr(start_time,1,10) d
                     FROM historical_candles
                     WHERE instrument_id IN ({marks}) AND interval='1m' AND source=?
+                      AND (? IS NULL OR substr(start_time,1,10) <= ?)
                     ORDER BY d DESC LIMIT ?""",
-                [*batch, source.upper(), count * 3],
+                [*batch, source.upper(), end_text, end_text, count * 3],
             ).fetchall()
             for row in rows:
                 try:
@@ -238,8 +247,13 @@ def run(historical_db: Path, instruments_db: Path, cfg: Config = Config()) -> di
     puts = load_puts(instruments_db)
     if not puts:
         raise RuntimeError("No NIFTY PUT metadata found")
-    days = discover_days(historical_db, [x.instrument_id for x in puts], cfg.source,
-                         cfg.days + cfg.warmup_days)
+    days = discover_days(
+        historical_db,
+        [x.instrument_id for x in puts],
+        cfg.source,
+        cfg.days + cfg.warmup_days,
+        cfg.end_date,
+    )
     if len(days) < cfg.days:
         raise RuntimeError(f"Only {len(days)} option-data sessions found; need {cfg.days}")
     test_days = days[-cfg.days:]
@@ -299,6 +313,7 @@ def run(historical_db: Path, instruments_db: Path, cfg: Config = Config()) -> di
     wins = sum(x > 0 for x in pnls)
     return {
         "strategy": "NIFTY_PE_3M_MACD_SMA_3_10_SIGNAL16_RSI14",
+        "requested_end_date": cfg.end_date.isoformat() if cfg.end_date else None,
         "test_days": [d.isoformat() for d in test_days],
         "rules": {"entry": "fresh bottom-up MACD cross AND RSI(14)>50", "exit": "top-down MACD cross",
                   "quantity": cfg.quantity, "timeframe": "3m",
@@ -340,11 +355,12 @@ def main() -> None:
     p.add_argument("--historical-db", type=Path, default=Path("data/market/historical.db"))
     p.add_argument("--instruments-db", type=Path, default=Path("data/instruments/instruments.db"))
     p.add_argument("--days", type=int, default=10)
+    p.add_argument("--end-date", type=date.fromisoformat)
     p.add_argument("--quantity", type=int, default=65)
     p.add_argument("--source", default="BREEZE")
     p.add_argument("--output", type=Path)
     a = p.parse_args()
-    cfg = Config(days=a.days, quantity=a.quantity, source=a.source.upper())
+    cfg = Config(days=a.days, end_date=a.end_date, quantity=a.quantity, source=a.source.upper())
     report = run(a.historical_db, a.instruments_db, cfg)
     for i, t in enumerate(report["trades"], 1):
         print(f"{i:>2} {t['date']} PE {t['strike']:.0f} {t['entry_price']:.2f}->{t['exit_price']:.2f} "
