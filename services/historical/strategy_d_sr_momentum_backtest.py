@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter, defaultdict
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from statistics import mean
@@ -35,10 +36,15 @@ from services.historical.strategy_a_data_audit import (
     _row_to_candle,
     _source_predicate,
 )
+from services.strategy.features import FeatureEngine
 from services.strategy.strategies.sr_momentum_breakout import (
     REAL_SOURCES,
     StrategyDConfig,
     StrategyDPositionManager,
+    _crossed_resistance,
+    _crossed_support,
+    _futures_vwap_confirmation,
+    _in_entry_window,
     evaluate_strategy_d_signal,
     previous_session_levels,
 )
@@ -47,10 +53,28 @@ from services.strategy.strategies.sr_momentum_breakout import (
 SESSION_START = time(9, 15)
 SESSION_END_EXCLUSIVE = time(15, 35)
 DEFAULT_WARMUP_CALENDAR_DAYS = 35
+EXPECTED_SESSION_5M_BARS = 75
+SESSION_LAST_5M_START = time(15, 25)
 
 
 def _session_date(candle: Candle) -> date:
     return candle.start_time.astimezone(IST).date()
+
+
+def _regular_session_5m(
+    candles: Sequence[Candle],
+) -> list[Candle]:
+    """Return one canonical 5m candle per instrument/start on the cash session."""
+    canonical: dict[tuple[str, datetime], Candle] = {}
+    for candle in candles:
+        if candle.interval != "5m" or candle.source not in REAL_SOURCES:
+            continue
+        local_start = candle.start_time.astimezone(IST)
+        local_time = local_start.time().replace(tzinfo=None)
+        if not SESSION_START <= local_time <= SESSION_LAST_5M_START:
+            continue
+        canonical[(candle.instrument_id, candle.start_time)] = candle
+    return sorted(canonical.values(), key=lambda item: item.start_time)
 
 
 def _group_by_day(
@@ -78,6 +102,266 @@ def _active_futures_by_day(candles: Sequence[Candle]) -> dict[date, list[Candle]
     return result
 
 
+def _diagnose_strategy_d_bar(
+    *,
+    spot_history: Sequence[Candle],
+    futures_history: Sequence[Candle],
+    levels: Any,
+    config: StrategyDConfig,
+    signal: Any,
+) -> dict[str, Any]:
+    """Observe Strategy D qualification without changing signal behavior."""
+    conditions: dict[str, bool] = {}
+    values: dict[str, Any] = {}
+    blocker = "UNKNOWN"
+
+    if len(spot_history) < config.rsi_period + 2:
+        return {
+            "primary_blocker": "HISTORY_NOT_READY",
+            "conditions": {"history_ready": False},
+            "values": values,
+            "breakout_direction": None,
+            "qualified_signal": signal is not None,
+        }
+
+    conditions["history_ready"] = True
+    current = spot_history[-1]
+    previous = spot_history[-2]
+    in_window = _in_entry_window(current.end_time, config)
+    conditions["entry_window"] = in_window
+
+    closes = [float(bar.close) for bar in spot_history]
+    previous_rsi = FeatureEngine.calculate_rsi(
+        closes[:-1],
+        config.rsi_period,
+    )
+    current_rsi = FeatureEngine.calculate_rsi(
+        closes,
+        config.rsi_period,
+    )
+    values["rsi_previous"] = round(float(previous_rsi), 6)
+    values["rsi_current"] = round(float(current_rsi), 6)
+    outside_trap = not (
+        config.trap_rsi_low
+        <= current_rsi
+        <= config.trap_rsi_high
+    )
+    conditions["rsi_outside_trap_zone"] = outside_trap
+
+    atr = FeatureEngine.calculate_atr(
+        list(spot_history),
+        config.atr_period,
+    )
+    conditions["atr_valid"] = atr > 0
+    values["atr_5m"] = round(float(atr), 6)
+
+    range_pass = False
+    previous_day_range_atr = None
+    if atr > 0:
+        previous_day_range_atr = (
+            levels.pdh - levels.pdl
+        ) / float(atr)
+        values["previous_day_range_atr"] = round(
+            float(previous_day_range_atr),
+            6,
+        )
+        range_pass = (
+            config.max_previous_day_range_atr is None
+            or previous_day_range_atr
+            < config.max_previous_day_range_atr
+        )
+    conditions["previous_day_range_pass"] = range_pass
+
+    confirmation = _futures_vwap_confirmation(
+        futures_history,
+        through=current.end_time,
+    )
+    conditions["futures_vwap_available"] = confirmation is not None
+    futures_price = None
+    vwap = None
+    if confirmation is not None:
+        futures_price, vwap = confirmation
+        values["futures_price"] = round(float(futures_price), 6)
+        values["futures_vwap"] = round(float(vwap), 6)
+
+    resistance = _crossed_resistance(
+        float(previous.close),
+        float(current.close),
+        levels,
+    )
+    support = _crossed_support(
+        float(previous.close),
+        float(current.close),
+        levels,
+    )
+    conditions["resistance_breakout"] = resistance is not None
+    conditions["support_breakout"] = support is not None
+    structural = resistance is not None or support is not None
+    conditions["structural_breakout"] = structural
+
+    breakout_direction = (
+        "CALL"
+        if resistance is not None
+        else "PUT"
+        if support is not None
+        else None
+    )
+    values["breakout_level"] = (
+        resistance[0]
+        if resistance is not None
+        else support[0]
+        if support is not None
+        else None
+    )
+
+    long_current = (
+        current_rsi
+        > config.long_rsi_cross
+        + config.minimum_rsi_clearance_points
+    )
+    short_current = (
+        current_rsi
+        < config.short_rsi_cross
+        - config.minimum_rsi_clearance_points
+    )
+    long_cross = previous_rsi <= config.long_rsi_cross and long_current
+    short_cross = previous_rsi >= config.short_rsi_cross and short_current
+    long_already = previous_rsi > config.long_rsi_cross and long_current
+    short_already = previous_rsi < config.short_rsi_cross and short_current
+
+    conditions["long_rsi_current_qualified"] = long_current
+    conditions["short_rsi_current_qualified"] = short_current
+    conditions["long_rsi_cross_same_bar"] = long_cross
+    conditions["short_rsi_cross_same_bar"] = short_cross
+    conditions["long_rsi_already_qualified"] = long_already
+    conditions["short_rsi_already_qualified"] = short_already
+
+    vwap_aligned = False
+    rsi_current_aligned = False
+    rsi_cross_aligned = False
+    rsi_already_aligned = False
+    if resistance is not None:
+        vwap_aligned = (
+            confirmation is not None
+            and futures_price > vwap
+        )
+        rsi_current_aligned = long_current
+        rsi_cross_aligned = long_cross
+        rsi_already_aligned = long_already
+    elif support is not None:
+        vwap_aligned = (
+            confirmation is not None
+            and futures_price < vwap
+        )
+        rsi_current_aligned = short_current
+        rsi_cross_aligned = short_cross
+        rsi_already_aligned = short_already
+
+    conditions["breakout_vwap_aligned"] = structural and vwap_aligned
+    conditions["breakout_rsi_current_qualified"] = (
+        structural and rsi_current_aligned
+    )
+    conditions["breakout_rsi_cross_same_bar"] = (
+        structural and rsi_cross_aligned
+    )
+    conditions["breakout_rsi_already_qualified"] = (
+        structural and rsi_already_aligned
+    )
+    conditions["breakout_vwap_and_rsi_current"] = (
+        structural and vwap_aligned and rsi_current_aligned
+    )
+    conditions["breakout_vwap_and_rsi_cross"] = (
+        structural and vwap_aligned and rsi_cross_aligned
+    )
+    conditions["qualified_signal"] = signal is not None
+
+    if not in_window:
+        blocker = "OUTSIDE_ENTRY_WINDOW"
+    elif not outside_trap:
+        blocker = "RSI_TRAP_ZONE"
+    elif atr <= 0:
+        blocker = "ATR_INVALID"
+    elif not range_pass:
+        blocker = "PREVIOUS_DAY_RANGE_FILTER"
+    elif confirmation is None:
+        blocker = "FUTURES_VWAP_UNAVAILABLE"
+    elif not structural:
+        blocker = "NO_STRUCTURAL_BREAKOUT"
+    elif not vwap_aligned:
+        blocker = "FUTURES_VWAP_MISALIGNED"
+    elif rsi_already_aligned:
+        blocker = "RSI_ALREADY_QUALIFIED_BEFORE_BREAKOUT"
+    elif not rsi_cross_aligned:
+        blocker = "RSI_CROSS_NOT_CONFIRMED"
+    elif signal is None:
+        blocker = "UNCLASSIFIED_SIGNAL_REJECTION"
+    else:
+        blocker = "QUALIFIED_SIGNAL"
+
+    return {
+        "primary_blocker": blocker,
+        "conditions": conditions,
+        "values": values,
+        "breakout_direction": breakout_direction,
+        "qualified_signal": signal is not None,
+    }
+
+
+def _signal_diagnostic_report(
+    *,
+    condition_counts: Counter[str],
+    blocker_counts: Counter[str],
+    breakout_counts: Counter[str],
+    per_session: dict[str, dict[str, Any]],
+    bars_evaluated: int,
+) -> dict[str, Any]:
+    structural = condition_counts["structural_breakout"]
+    return {
+        "bars_evaluated": bars_evaluated,
+        "condition_counts": dict(sorted(condition_counts.items())),
+        "primary_blocker_counts": dict(sorted(blocker_counts.items())),
+        "breakout_direction_counts": dict(sorted(breakout_counts.items())),
+        "structural_breakouts": structural,
+        "breakout_with_vwap_alignment": (
+            condition_counts["breakout_vwap_aligned"]
+        ),
+        "breakout_with_rsi_current_qualified": (
+            condition_counts["breakout_rsi_current_qualified"]
+        ),
+        "breakout_with_rsi_cross_same_bar": (
+            condition_counts["breakout_rsi_cross_same_bar"]
+        ),
+        "breakout_with_rsi_already_qualified": (
+            condition_counts["breakout_rsi_already_qualified"]
+        ),
+        "breakout_with_vwap_and_rsi_current": (
+            condition_counts["breakout_vwap_and_rsi_current"]
+        ),
+        "breakout_with_vwap_and_rsi_cross": (
+            condition_counts["breakout_vwap_and_rsi_cross"]
+        ),
+        "qualified_signal_bars": condition_counts["qualified_signal"],
+        "per_session": {
+            day: {
+                "bars_evaluated": row["bars_evaluated"],
+                "structural_breakouts": row["structural_breakouts"],
+                "qualified_signal_bars": row["qualified_signal_bars"],
+                "primary_blocker_counts": dict(
+                    sorted(row["primary_blocker_counts"].items())
+                ),
+            }
+            for day, row in sorted(per_session.items())
+        },
+        "interpretation_note": (
+            "RSI-current-qualified counts breakouts where RSI was already "
+            "beyond the directional threshold or crossed it on that bar; "
+            "RSI-cross-same-bar counts only the stricter production entry "
+            "condition. Their gap directly measures breakout bars rejected "
+            "because RSI crossed earlier."
+        ),
+    }
+
+
 def _period_metrics(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     values = [float(row["realized_r"]) for row in rows]
     wins = [value for value in values if value > 0]
@@ -96,6 +380,25 @@ def _period_metrics(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
             if losses and sum(losses) != 0
             else None
         ),
+    }
+
+
+def _session_summary(
+    trades: Sequence[dict[str, Any]],
+    usable_session_dates: Sequence[date],
+) -> dict[str, Any]:
+    trade_counts = Counter(str(row["date"]) for row in trades)
+    session_dates = [day.isoformat() for day in usable_session_dates]
+    trade_days = sum(trade_counts.get(day, 0) > 0 for day in session_dates)
+    return {
+        "session_count": len(session_dates),
+        "session_dates": session_dates,
+        "trade_days": trade_days,
+        "no_trade_days": len(session_dates) - trade_days,
+        "trades_by_date": {
+            day: trade_counts.get(day, 0)
+            for day in session_dates
+        },
     }
 
 
@@ -155,6 +458,16 @@ def _metrics(
         ),
         "max_drawdown_r": round(max_drawdown, 6),
         "max_losing_streak": max_losing_streak,
+        "mean_mfe_r": (
+            round(mean(float(row["mfe_r"]) for row in trades), 6)
+            if trades
+            else None
+        ),
+        "mean_mae_r": (
+            round(mean(float(row["mae_r"]) for row in trades), 6)
+            if trades
+            else None
+        ),
         "scale_out_trades": sum(
             row.get("scale_out_time") is not None for row in trades
         ),
@@ -203,19 +516,21 @@ def run_backtest(
     one_minute_spot_candles: Sequence[Candle] = (),
     start_date: date | None = None,
     end_date: date | None = None,
+    session_dates: Sequence[date] | None = None,
     config: StrategyDConfig | None = None,
 ) -> dict[str, Any]:
     """Run one frozen Strategy D ruleset on preloaded real candles."""
     cfg = config or StrategyDConfig.v1_control()
     if cfg.variant == "V2_CANDIDATE":
         validate_v2_config(cfg)
-    spot = sorted(spot_candles, key=lambda item: item.start_time)
+    spot = _regular_session_5m(spot_candles)
+    regular_futures = _regular_session_5m(futures_candles)
     spot_by_day = _group_by_day(spot, interval="5m")
     minute_by_day = _group_by_day(
         one_minute_spot_candles,
         interval="1m",
     )
-    futures_by_day = _active_futures_by_day(futures_candles)
+    futures_by_day = _active_futures_by_day(regular_futures)
     available_days = sorted(spot_by_day)
     if start_date is not None:
         available_days = [
@@ -225,13 +540,24 @@ def run_backtest(
         available_days = [
             day for day in available_days if day <= end_date
         ]
+    if session_dates is not None:
+        requested_days = set(session_dates)
+        available_days = [
+            day for day in available_days if day in requested_days
+        ]
 
     manager = StrategyDPositionManager(strategy_d_config=cfg)
     trades: list[dict[str, Any]] = []
     levels_rows: list[dict[str, Any]] = []
     usable_sessions = 0
+    usable_session_dates: list[date] = []
     usable_sessions_with_1m = 0
     skipped: Counter[str] = Counter()
+    diagnostic_conditions: Counter[str] = Counter()
+    diagnostic_blockers: Counter[str] = Counter()
+    diagnostic_breakouts: Counter[str] = Counter()
+    diagnostic_sessions: dict[str, dict[str, Any]] = {}
+    diagnostic_bars_evaluated = 0
 
     for day in available_days:
         day_spot = spot_by_day.get(day, [])
@@ -245,9 +571,63 @@ def run_backtest(
             skipped["NO_ACTIVE_FUTURES_5M"] += 1
             continue
         usable_sessions += 1
+        usable_session_dates.append(day)
         if day_minutes:
             usable_sessions_with_1m += 1
         levels_rows.append(levels.to_dict())
+        # Diagnostics intentionally evaluate every regular-session decision
+        # bar. They are independent of position replay so V1/V2 funnels remain
+        # directly comparable even when one variant enters more trades.
+        day_key = day.isoformat()
+        day_diag = diagnostic_sessions.setdefault(
+            day_key,
+            {
+                "bars_evaluated": 0,
+                "structural_breakouts": 0,
+                "qualified_signal_bars": 0,
+                "primary_blocker_counts": Counter(),
+            },
+        )
+        for bar in day_spot:
+            history = [
+                item for item in spot
+                if item.end_time <= bar.end_time
+            ]
+            futures_history = [
+                item for item in day_futures
+                if item.end_time <= bar.end_time
+            ]
+            diagnostic_signal = evaluate_strategy_d_signal(
+                history,
+                futures_history,
+                levels,
+                cfg,
+            )
+            diagnostic = _diagnose_strategy_d_bar(
+                spot_history=history,
+                futures_history=futures_history,
+                levels=levels,
+                config=cfg,
+                signal=diagnostic_signal,
+            )
+            diagnostic_bars_evaluated += 1
+            for name, passed in diagnostic["conditions"].items():
+                if passed:
+                    diagnostic_conditions[name] += 1
+            diagnostic_blockers[diagnostic["primary_blocker"]] += 1
+            if diagnostic["breakout_direction"] is not None:
+                diagnostic_breakouts[
+                    diagnostic["breakout_direction"]
+                ] += 1
+            day_diag["bars_evaluated"] += 1
+            if diagnostic["conditions"].get("structural_breakout"):
+                day_diag["structural_breakouts"] += 1
+            if diagnostic["qualified_signal"]:
+                day_diag["qualified_signal_bars"] += 1
+            day_diag["primary_blocker_counts"][
+                diagnostic["primary_blocker"]
+            ] += 1
+
         used_levels: set[tuple[str, str]] = set()
         index = 0
         while index < len(day_spot):
@@ -384,7 +764,18 @@ def run_backtest(
             ),
         },
         "metrics": _metrics(trades, usable_sessions),
+        "signal_diagnostics": _signal_diagnostic_report(
+            condition_counts=diagnostic_conditions,
+            blocker_counts=diagnostic_blockers,
+            breakout_counts=diagnostic_breakouts,
+            per_session=diagnostic_sessions,
+            bars_evaluated=diagnostic_bars_evaluated,
+        ),
         "usable_sessions": usable_sessions,
+        "session_summary": _session_summary(
+            trades,
+            usable_session_dates,
+        ),
         "intrabar_coverage": {
             "one_minute_candles_loaded": len(
                 one_minute_spot_candles
@@ -440,6 +831,38 @@ def run_backtest(
     }
 
 
+def _ablation_snapshot(
+    label: str,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """Compact research-only view for entry-filter causal comparison."""
+    return {
+        "label": label,
+        "research_only": True,
+        "config": report["config"],
+        "metrics": report["metrics"],
+        "signal_diagnostics": report["signal_diagnostics"],
+        "session_summary": report["session_summary"],
+        "trade_outcomes": [
+            {
+                "date": row["date"],
+                "direction": row["direction"],
+                "breakout_level_name": row["breakout_level_name"],
+                "entry_time": row["entry_time"],
+                "rsi_previous": row["rsi_previous"],
+                "rsi_current": row["rsi_current"],
+                "rsi_clearance_points": row["rsi_clearance_points"],
+                "previous_day_range_atr": row[
+                    "previous_day_range_atr"
+                ],
+                "realized_r": row["realized_r"],
+                "runner_exit_reason": row["runner_exit_reason"],
+            }
+            for row in report["trades"]
+        ],
+    }
+
+
 def build_v2_comparison(
     *,
     spot_candles: Sequence[Candle],
@@ -447,6 +870,7 @@ def build_v2_comparison(
     one_minute_spot_candles: Sequence[Candle] = (),
     start_date: date | None = None,
     end_date: date | None = None,
+    session_dates: Sequence[date] | None = None,
 ) -> dict[str, Any]:
     """Return V2 as the main report with corrected V1 metrics beside it."""
     control = run_backtest(
@@ -455,6 +879,7 @@ def build_v2_comparison(
         one_minute_spot_candles=one_minute_spot_candles,
         start_date=start_date,
         end_date=end_date,
+        session_dates=session_dates,
         config=StrategyDConfig.v1_control(),
     )
     candidate = run_backtest(
@@ -463,14 +888,70 @@ def build_v2_comparison(
         one_minute_spot_candles=one_minute_spot_candles,
         start_date=start_date,
         end_date=end_date,
+        session_dates=session_dates,
         config=StrategyDConfig.v2_candidate(),
     )
+
+    # Research-only ablations isolate the two V2 entry changes without
+    # mutating the frozen V2 candidate or any production thresholds.
+    rsi_only_config = replace(
+        StrategyDConfig.v1_control(),
+        variant="ABLATION_RSI_CLEARANCE_ONLY",
+        minimum_rsi_clearance_points=(
+            StrategyDConfig.v2_candidate().minimum_rsi_clearance_points
+        ),
+    )
+    range_only_config = replace(
+        StrategyDConfig.v1_control(),
+        variant="ABLATION_RANGE_FILTER_ONLY",
+        max_previous_day_range_atr=(
+            StrategyDConfig.v2_candidate().max_previous_day_range_atr
+        ),
+    )
+    rsi_only = run_backtest(
+        spot_candles=spot_candles,
+        futures_candles=futures_candles,
+        one_minute_spot_candles=one_minute_spot_candles,
+        start_date=start_date,
+        end_date=end_date,
+        session_dates=session_dates,
+        config=rsi_only_config,
+    )
+    range_only = run_backtest(
+        spot_candles=spot_candles,
+        futures_candles=futures_candles,
+        one_minute_spot_candles=one_minute_spot_candles,
+        start_date=start_date,
+        end_date=end_date,
+        session_dates=session_dates,
+        config=range_only_config,
+    )
+    candidate["entry_filter_ablation"] = {
+        "purpose": (
+            "Research-only causal isolation of V2 entry filters; "
+            "the frozen V2 candidate is unchanged."
+        ),
+        "V1_CONTROL": _ablation_snapshot("V1_CONTROL", control),
+        "RSI_CLEARANCE_ONLY": _ablation_snapshot(
+            "RSI_CLEARANCE_ONLY",
+            rsi_only,
+        ),
+        "RANGE_FILTER_ONLY": _ablation_snapshot(
+            "RANGE_FILTER_ONLY",
+            range_only,
+        ),
+        "V2_CANDIDATE": _ablation_snapshot(
+            "V2_CANDIDATE",
+            candidate,
+        ),
+    }
     control_metrics = control["metrics"]
     candidate_metrics = candidate["metrics"]
     candidate["comparison_to_corrected_v1"] = {
         "control_strategy_id": control["strategy_id"],
         "control_config": control["config"],
         "control_metrics": control_metrics,
+        "control_signal_diagnostics": control["signal_diagnostics"],
         "delta": {
             "trades": (
                 candidate_metrics["trades"]
@@ -533,6 +1014,124 @@ def _available_spot_dates(
     first = _aware(rows["first_ts"]).astimezone(IST).date()
     last = _aware(rows["last_ts"]).astimezone(IST).date()
     return first, last
+
+
+def _expected_session_5m_starts(day: date) -> set[datetime]:
+    cursor = datetime.combine(day, SESSION_START, tzinfo=IST)
+    last = datetime.combine(day, SESSION_LAST_5M_START, tzinfo=IST)
+    result: set[datetime] = set()
+    while cursor <= last:
+        result.add(cursor)
+        cursor += timedelta(minutes=5)
+    return result
+
+
+def _has_complete_session_5m(
+    candles: Sequence[Candle],
+    day: date,
+) -> bool:
+    expected = _expected_session_5m_starts(day)
+    actual = {
+        candle.start_time.astimezone(IST).replace(
+            second=0,
+            microsecond=0,
+        )
+        for candle in candles
+        if candle.interval == "5m"
+        and candle.source in REAL_SOURCES
+        and _session_date(candle) == day
+    }
+    return len(expected) == EXPECTED_SESSION_5M_BARS and expected <= actual
+
+
+def _available_usable_session_dates(
+    conn: Any,
+    source: str,
+) -> list[date]:
+    """Return dates with complete spot, prior-spot and active-futures 5m data.
+
+    Exact-session research must not silently treat a partial intraday capture as
+    a usable trading session. Strategy D also needs complete previous-session
+    spot data because PDH/PDL and classic pivots are derived from that session.
+    """
+    source_clause, source_params = _source_predicate(source)
+    rows = conn.execute(
+        f"""
+        SELECT instrument_id, interval, start_time, end_time,
+               open, high, low, close, volume, open_interest, source
+        FROM historical_candles
+        WHERE interval = '5m'
+          AND (
+            instrument_id = 'INST-NIFTY-INDEX'
+            OR instrument_id LIKE 'INST-NIFTY-FUT-%'
+          )
+          AND {source_clause}
+        ORDER BY start_time ASC
+        """,
+        source_params,
+    ).fetchall()
+    candles = _regular_session_5m(
+        [_row_to_candle(row) for row in rows]
+    )
+    spot_by_day = _group_by_day(
+        [
+            candle
+            for candle in candles
+            if candle.instrument_id == "INST-NIFTY-INDEX"
+        ],
+        interval="5m",
+    )
+    futures_by_day = _active_futures_by_day(
+        [
+            candle
+            for candle in candles
+            if "NIFTY-FUT-" in candle.instrument_id.upper()
+        ]
+    )
+    spot_dates = sorted(spot_by_day)
+    complete_spot_dates = {
+        day
+        for day, bars in spot_by_day.items()
+        if _has_complete_session_5m(bars, day)
+    }
+
+    eligible: list[date] = []
+    for index, day in enumerate(spot_dates):
+        if index == 0 or day not in complete_spot_dates:
+            continue
+        previous_day = spot_dates[index - 1]
+        if previous_day not in complete_spot_dates:
+            continue
+        active_futures = futures_by_day.get(day, [])
+        if not _has_complete_session_5m(active_futures, day):
+            continue
+        eligible.append(day)
+    return eligible
+
+
+def _select_requested_session_dates(
+    available_dates: Sequence[date],
+    *,
+    sessions: int,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[date]:
+    """Select an exact research-session window deterministically."""
+    if sessions <= 0:
+        raise ValueError("sessions must be greater than zero")
+    eligible = sorted(set(available_dates))
+    if start_date is not None:
+        eligible = [day for day in eligible if day >= start_date]
+    if end_date is not None:
+        eligible = [day for day in eligible if day <= end_date]
+    if len(eligible) < sessions:
+        raise ValueError(
+            f"requested {sessions} usable sessions but only "
+            f"{len(eligible)} complete candidate sessions are available"
+        )
+    if start_date is not None:
+        return eligible[:sessions]
+    return eligible[-sessions:]
 
 
 def _load_spot_interval_rows(
@@ -643,6 +1242,15 @@ def _parse_args() -> argparse.Namespace:
         type=date.fromisoformat,
     )
     parser.add_argument(
+        "--sessions",
+        type=int,
+        help=(
+            "Run exactly this many usable sessions. Without --start-date, "
+            "the latest eligible sessions are selected; with --start-date, "
+            "selection proceeds forward from that date."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=(
@@ -660,8 +1268,29 @@ def main() -> None:
             conn,
             args.source,
         )
-    start_date = args.start_date or first
-    end_date = args.end_date or last
+        available_session_dates = (
+            _available_usable_session_dates(conn, args.source)
+            if args.sessions is not None
+            else []
+        )
+
+    selected_session_dates: list[date] | None = None
+    if args.sessions is not None:
+        try:
+            selected_session_dates = _select_requested_session_dates(
+                available_session_dates,
+                sessions=args.sessions,
+                start_date=args.start_date,
+                end_date=args.end_date,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        start_date = selected_session_dates[0]
+        end_date = selected_session_dates[-1]
+    else:
+        start_date = args.start_date or first
+        end_date = args.end_date or last
+
     if end_date < start_date:
         raise SystemExit(
             "end-date must not precede start-date"
@@ -678,7 +1307,18 @@ def main() -> None:
         one_minute_spot_candles=one_minute_spot,
         start_date=start_date,
         end_date=end_date,
+        session_dates=selected_session_dates,
     )
+    if (
+        args.sessions is not None
+        and report["usable_sessions"] != args.sessions
+    ):
+        raise SystemExit(
+            "candidate-date selection did not produce exactly "
+            f"{args.sessions} usable sessions; got "
+            f"{report['usable_sessions']}. "
+            "Review skipped_sessions_or_events and data coverage."
+        )
     args.output.parent.mkdir(
         parents=True,
         exist_ok=True,
@@ -697,11 +1337,16 @@ def main() -> None:
             {
                 "strategy_id": report["strategy_id"],
                 "metrics": report["metrics"],
+                "signal_diagnostics": report["signal_diagnostics"],
                 "usable_sessions": report["usable_sessions"],
+                "session_summary": report["session_summary"],
                 "intrabar_coverage": report["intrabar_coverage"],
                 "comparison_to_corrected_v1": (
                     report["comparison_to_corrected_v1"]
                 ),
+                "entry_filter_ablation": report[
+                    "entry_filter_ablation"
+                ],
                 "skipped": report["skipped_sessions_or_events"],
                 "output": str(args.output),
             },
