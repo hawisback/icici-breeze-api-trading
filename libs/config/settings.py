@@ -100,8 +100,8 @@ class PlatformSettings(BaseSettings):
 
     # External AI trade intent gateway. These values are server-owned: clients
     # cannot select their own execution mode or trailing-stop policy.
-    ai_trade_enabled: bool = Field(default=False, alias="AI_TRADE_ENABLED")
-    ai_trade_mode: TradingMode = Field(default=TradingMode.PAPER, alias="AI_TRADE_MODE")
+    ai_trade_enabled: bool = Field(default=True, alias="AI_TRADE_ENABLED")
+    ai_trade_mode: TradingMode = Field(default=TradingMode.PAPER, alias="AI_TRADE_MODE", description="Operator-owned mode. PAPER is supported; LIVE submissions fail closed until protective-order integration is implemented.")
     ai_trade_db_path: Path = Field(default=Path("./data/ai_trades.db"), alias="AI_TRADE_DB_PATH")
     ai_trade_max_quantity: int = Field(default=65, ge=1, le=1800, alias="AI_TRADE_MAX_QUANTITY")
     ai_trade_max_premium_notional: float = Field(default=15000, gt=0, alias="AI_TRADE_MAX_PREMIUM_NOTIONAL")
