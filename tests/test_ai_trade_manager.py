@@ -1,0 +1,178 @@
+"""External AI intent -> durable backend-owned PAPER trade and trailing tests."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from libs.contracts.models import TradingMode, utc_now
+from services.ai_context.trading import AITradeError, AITradeService
+
+INSTRUMENT = "INST-NIFTY-2026-10-13-22500-CE"
+
+
+class Chain:
+    bid = 99.0
+    ask = 100.0
+    source = "KITE"
+    stale = False
+
+    async def get_chain(self, *, underlying, expiry, provider):
+        assert underlying == "NIFTY"
+        assert provider == "kite"
+        assert expiry in (None, "2026-10-13")
+        from datetime import timedelta
+
+        ts = utc_now() - timedelta(seconds=60 if self.stale else 1)
+        return {
+            "source": self.source,
+            "expiry": "2026-10-13",
+            "strikes": [{
+                "strike": 22500,
+                "call": {
+                    "instrument_id": INSTRUMENT,
+                    "symbol": "NIFTY26O1322500CE",
+                    "bid": self.bid,
+                    "ask": self.ask,
+                    "lot_size": 65,
+                    "market_timestamp": ts.isoformat(),
+                },
+                "put": None,
+            }],
+        }
+
+
+class Context:
+    ready = True
+
+    async def get_snapshot(self):
+        return {"entry_permitted": self.ready}
+
+
+def settings(path: Path, *, mode=TradingMode.PAPER, enabled=True):
+    return SimpleNamespace(
+        ai_trade_db_path=path,
+        ai_trade_enabled=enabled,
+        ai_trade_mode=mode,
+        ai_trade_max_quantity=65,
+        ai_trade_max_premium_notional=15000,
+        ai_trade_max_daily_entries=3,
+        ai_trade_initial_stop_pct=6.0,
+        ai_trade_trail_activation_pct=5.0,
+        ai_trade_trail_gap_pct=3.0,
+        ai_trade_target_pct=7.0,
+        ai_trade_max_hold_seconds=480,
+        ai_trade_poll_seconds=2.5,
+    )
+
+
+def service(path: Path, *, chain=None, context=None, mode=TradingMode.PAPER, enabled=True):
+    return AITradeService(
+        settings=settings(path, mode=mode, enabled=enabled),
+        option_chain_service=chain or Chain(),
+        ai_context_service_factory=lambda: context or Context(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_signal_is_idempotent_and_survives_restart(tmp_path):
+    path = tmp_path / "ai.db"
+    manager = service(path)
+    await manager.initialize()
+    first = await manager.submit(signal_id="signal-001", instrument_id=INSTRUMENT, quantity=65)
+    assert first["status"] == "OPEN"
+    assert first["entry_price"] == 100.0
+    assert first["initial_stop"] == 94.0
+    assert first["target_price"] == 107.0
+    assert "mode" not in first
+    again = await manager.submit(signal_id="signal-001", instrument_id=INSTRUMENT, quantity=65)
+    assert again["trade_id"] == first["trade_id"]
+
+    restarted = service(path)
+    await restarted.initialize()
+    found = await restarted.get(first["trade_id"])
+    assert found is not None
+    assert found["status"] == "OPEN"
+    with pytest.raises(AITradeError) as exc:
+        await restarted.submit(signal_id="signal-002", instrument_id=INSTRUMENT, quantity=65)
+    assert exc.value.code == "ANOTHER_AI_TRADE_IS_OPEN"
+
+
+@pytest.mark.asyncio
+async def test_independent_worker_trails_then_exits_at_bid(tmp_path):
+    chain = Chain()
+    manager = service(tmp_path / "ai.db", chain=chain)
+    await manager.initialize()
+    trade = await manager.submit(signal_id="signal-003", instrument_id=INSTRUMENT, quantity=65)
+
+    chain.bid, chain.ask = 105.5, 106.0
+    await manager.poll_once()
+    rising = await manager.get(trade["trade_id"])
+    assert rising is not None
+    assert rising["trailing_active"] is True
+    assert rising["current_stop"] >= 100.0
+    assert rising["status"] == "OPEN"
+
+    chain.bid, chain.ask = 101.0, 101.5
+    await manager.poll_once()
+    closed = await manager.get(trade["trade_id"])
+    assert closed is not None
+    assert closed["status"] == "CLOSED"
+    assert closed["exit_reason"] == "TRAILING_STOP"
+    assert closed["exit_price"] == 101.0
+    assert closed["pnl"] == 65.0
+
+
+@pytest.mark.asyncio
+async def test_stale_market_never_creates_an_imaginary_exit(tmp_path):
+    chain = Chain()
+    manager = service(tmp_path / "ai.db", chain=chain)
+    await manager.initialize()
+    trade = await manager.submit(signal_id="signal-004", instrument_id=INSTRUMENT, quantity=65)
+    chain.bid, chain.ask = 50.0, 51.0
+    chain.stale = True
+    await manager.poll_once()
+    current = await manager.get(trade["trade_id"])
+    assert current is not None
+    assert current["status"] == "OPEN"
+    assert current["data_status"] == "OPTION_QUOTE_STALE"
+    assert current["exit_price"] is None
+
+
+@pytest.mark.asyncio
+async def test_live_selection_fails_closed_without_executing(tmp_path):
+    manager = service(tmp_path / "ai.db", mode=TradingMode.LIVE)
+    await manager.initialize()
+    with pytest.raises(AITradeError) as exc:
+        await manager.submit(signal_id="signal-005", instrument_id=INSTRUMENT, quantity=65)
+    assert exc.value.code == "EXECUTION_MODE_NOT_READY"
+    assert await manager.list() == []
+
+
+@pytest.mark.asyncio
+async def test_disabled_and_invalid_lots_never_create_trade(tmp_path):
+    manager = service(tmp_path / "ai.db", enabled=False)
+    await manager.initialize()
+    with pytest.raises(AITradeError) as exc:
+        await manager.submit(signal_id="signal-006", instrument_id=INSTRUMENT, quantity=65)
+    assert exc.value.code == "AI_TRADING_NOT_ENABLED"
+
+    manager = service(tmp_path / "ai.db")
+    with pytest.raises(AITradeError) as exc:
+        await manager.submit(signal_id="signal-007", instrument_id=INSTRUMENT, quantity=1)
+    assert exc.value.code == "INVALID_LOT_QUANTITY"
+    assert await manager.list() == []
+
+
+@pytest.mark.asyncio
+async def test_data_gate_required_for_new_trade(tmp_path):
+    context = Context()
+    context.ready = False
+    manager = service(tmp_path / "ai.db", context=context)
+    await manager.initialize()
+    with pytest.raises(AITradeError) as exc:
+        await manager.submit(signal_id="signal-008", instrument_id=INSTRUMENT, quantity=65)
+    assert exc.value.code == "ENTRY_CONTEXT_NOT_READY"
+    assert await manager.list() == []

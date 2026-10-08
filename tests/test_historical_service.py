@@ -216,7 +216,8 @@ async def test_instrument_service_ensures_current_nifty_futures_even_when_seed_e
     futures = await repo.search(query="NIFTY", underlying="NIFTY", limit=10000)
     futures = [item for item in futures if item.segment == "FUTURES"]
     expiries = {item.expiry for item in futures}
-    assert "2026-09-29" in expiries or date.today().year != 2026
+    assert len(expiries) >= 2
+    assert all(date.fromisoformat(expiry) >= date.today() for expiry in expiries)
     assert len(futures) >= 2
     assert all(item.instrument_id.startswith("INST-NIFTY-FUT-") for item in futures)
 

@@ -57,6 +57,7 @@ from services.api_gateway.service_container import (
     get_services,
     initialize_services,
 )
+from services.api_gateway.ai_routes import router as ai_router
 from services.broker_gateway.presentation import internal_router, set_clean_broker_service
 
 
@@ -217,6 +218,7 @@ async def lifespan(app: FastAPI):
             await port80_server.wait_closed()
         except Exception:
             pass
+    await container.ai_trade_svc.stop()
     await container.market_svc.stop_simulated_feed()
     await container.exec_svc.stop()
     await container.risk_svc.stop()
@@ -241,6 +243,7 @@ register_error_handlers(app)
 
 # Register internal broker gateway router
 app.include_router(internal_router)
+app.include_router(ai_router)
 
 # Boundary protection middlewares (wrapping order: outermost wraps innermost)
 app.add_middleware(RateLimitMiddleware, rate_limiter=rate_limiter, settings=platform_settings)

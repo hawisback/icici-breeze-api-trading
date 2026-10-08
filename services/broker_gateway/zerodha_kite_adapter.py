@@ -10,6 +10,7 @@ import asyncio
 from datetime import date, datetime, timedelta, timezone
 import logging
 import re
+from time import monotonic
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -46,6 +47,8 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         self._kite = custom_client
         self._access_token = ""
         self._write_lock = asyncio.Lock()
+        self._quote_lock = asyncio.Lock()
+        self._last_quote_request_at: Optional[float] = None
         self._nse_instruments: Optional[list[dict[str, Any]]] = None
         self._nfo_instruments: Optional[list[dict[str, Any]]] = None
         self.request_timeout_sec = request_timeout_sec
@@ -347,7 +350,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         """Return the two index quotes used by the current market-data service."""
         if not self.is_active:
             return []
-        raw = await self._run(lambda: self._kite.quote(["NSE:NIFTY 50", "NSE:NIFTY BANK"]))
+        raw = await self._run_quote(lambda: self._kite.quote(["NSE:NIFTY 50", "NSE:NIFTY BANK"]))
         result: list[Quote] = []
         for instrument_id, symbol in [
             ("INST-NIFTY-INDEX", "NIFTY 50"),
@@ -387,64 +390,127 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         return result
 
     async def get_option_chain_view(self, underlying: str, expiry: str) -> dict[str, Any]:
-        """Build the option-chain shape consumed by the platform UI from Kite NFO data."""
+        """Get ATM-centred option quotes from Kite, without any local instrument master.
+
+        The NFO instrument dump is metadata only: request live market quotes for
+        a bounded set of nearby contracts, not for every listed contract.
+        """
         if not self.is_active:
             return {}
         clean_underlying = "BANKNIFTY" if "BANK" in underlying.upper() else "NIFTY"
         expiry_date = date.fromisoformat(expiry)
         if self._nfo_instruments is None:
             self._nfo_instruments = await self._run(lambda: self._kite.instruments("NFO"))
-        rows = self._nfo_instruments
+        rows = self._nfo_instruments or []
         contracts = [
-            row
-            for row in rows
+            row for row in rows
             if str(row.get("name", "")).upper() == clean_underlying
             and str(row.get("expiry", ""))[:10] == expiry_date.isoformat()
-            and row.get("instrument_type") in {"CE", "PE"}
+            and str(row.get("instrument_type", "")).upper() in {"CE", "PE"}
+            and row.get("tradingsymbol")
+            and row.get("strike") is not None
         ]
         if not contracts:
             return {}
 
         spot_key = "NSE:NIFTY BANK" if clean_underlying == "BANKNIFTY" else "NSE:NIFTY 50"
-        quote_keys = [spot_key] + [f"NFO:{row['tradingsymbol']}" for row in contracts]
-        spot_quotes = await self._run(lambda: self._kite.quote(quote_keys))
-        spot = float(spot_quotes.get(spot_key, {}).get("last_price") or 0)
+        # Spot discovery comes from Kite, not from a hardcoded or stale local
+        # index value. Avoid quoting the entire NFO expiry just to find ATM.
+        spot_data = await self._run_quote(lambda: self._kite.ltp([spot_key]))
+        spot = float((spot_data or {}).get(spot_key, {}).get("last_price") or 0)
+        if spot <= 0:
+            logger.warning("Kite index LTP unavailable for %s", spot_key)
+            return {}
+
         step = 100 if clean_underlying == "BANKNIFTY" else 50
-        atm = round(spot / step) * step if spot else float(contracts[len(contracts) // 2].get("strike", 0))
-        contracts.sort(key=lambda row: abs(float(row.get("strike", 0)) - atm))
-        contracts = contracts[:62]
-        quotes = spot_quotes
+        atm = round(spot / step) * step
+        # 61 nearest strike levels x two rights = at most 122 contracts,
+        # covering the AI API's maximum strike_window=30 on both sides of ATM.
+        # This stays well below Kite's full-quote limit of 500 instruments.
+        levels = sorted(
+            {float(row["strike"]) for row in contracts},
+            key=lambda strike: (abs(strike - atm), strike),
+        )[:61]
+        selected_strikes = set(levels)
+        # Only one contract per strike/right belongs in an option matrix.
+        nearby_by_side = {}
+        for row in contracts:
+            strike = float(row["strike"])
+            right = str(row["instrument_type"]).upper()
+            if strike in selected_strikes:
+                nearby_by_side.setdefault((strike, right), row)
+        nearby = list(nearby_by_side.values())
+        quote_keys = [f"NFO:{row['tradingsymbol']}" for row in nearby]
+        quotes = await self._run_quote(lambda: self._kite.quote(quote_keys))
+        if not isinstance(quotes, dict):
+            return {}
 
         strikes: dict[float, dict[str, Any]] = {}
-        for row in contracts:
-            strike = float(row.get("strike", 0))
-            right = str(row.get("instrument_type"))
-            quote = quotes.get(f"NFO:{row['tradingsymbol']}", {}) or {}
-            depth = quote.get("depth", {}) or {}
-            buy_depth = depth.get("buy", []) or []
-            sell_depth = depth.get("sell", []) or []
+        quoted_contracts = 0
+        observed_times: list[datetime] = []
+        for row in nearby:
+            symbol = str(row["tradingsymbol"])
+            quote = quotes.get(f"NFO:{symbol}")
+            # Kite omits instrument keys for which it has no market quote.
+            # Do not present absent quotes as zero-price / zero-OI evidence.
+            if (
+                not isinstance(quote, dict)
+                or not quote
+                or float(quote.get("last_price") or 0) <= 0
+            ):
+                continue
+            quoted_contracts += 1
+            strike = float(row["strike"])
+            right = str(row["instrument_type"]).upper()
+            depth = quote.get("depth") or {}
+            buy_depth = depth.get("buy") or []
+            sell_depth = depth.get("sell") or []
+            quote_time = _parse_exchange_quote_datetime(
+                quote.get("timestamp") or quote.get("last_trade_time")
+            )
+            if quote_time is not None:
+                observed_times.append(quote_time)
+            last_price = float(quote.get("last_price") or 0)
+            previous_close = float((quote.get("ohlc") or {}).get("close") or 0)
             item = {
                 "instrument_id": f"INST-{clean_underlying}-{expiry}-{int(strike)}-{right}",
-                "symbol": row["tradingsymbol"],
-                "ltp": float(quote.get("last_price") or 0),
-                "change_pct": float(quote.get("net_change") or 0),
+                "symbol": symbol,
+                "ltp": last_price,
+                "change_pct": round(
+                    (last_price - previous_close) / previous_close * 100, 4
+                ) if previous_close > 0 else None,
                 "volume": int(quote.get("volume") or 0),
                 "open_interest": int(quote.get("oi") or 0),
-                "oi_change": 0,
+                # Kite full quotes do not provide change in OI directly.
+                "oi_change": None,
                 "bid": float((buy_depth[0] if buy_depth else {}).get("price") or 0),
                 "ask": float((sell_depth[0] if sell_depth else {}).get("price") or 0),
                 "lot_size": int(row.get("lot_size") or 1),
+                "market_timestamp": quote_time.isoformat() if quote_time else None,
             }
             bucket = strikes.setdefault(strike, {"strike": strike, "call": None, "put": None})
             bucket["call" if right == "CE" else "put"] = item
+
+        if not quoted_contracts:
+            logger.warning("Kite returned no quoted option contracts for %s %s", clean_underlying, expiry)
+            return {}
 
         return {
             "underlying": clean_underlying,
             "spot_price": spot,
             "expiry": expiry,
-            "available_expiries": sorted({str(row.get("expiry"))[:10] for row in rows if row.get("expiry")}),
-            "atm_strike": round(spot / step) * step if spot else atm,
+            "available_expiries": await self.get_option_expiries(clean_underlying),
+            "atm_strike": atm,
             "source": "KITE",
+            "requested_contract_count": len(nearby),
+            "quoted_contract_count": quoted_contracts,
+            "partial_quote_coverage": quoted_contracts < len(nearby),
+            # A conservative earliest quote timestamp, if every contract has
+            # one; retrieval time alone is not proof of live quote freshness.
+            "market_timestamp": (
+                min(observed_times).isoformat()
+                if len(observed_times) == quoted_contracts else None
+            ),
             "strikes": [strikes[key] for key in sorted(strikes)],
         }
 
@@ -542,6 +608,16 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         futures = [row for row in all_futures if str(row.get("expiry", ""))[:10] >= today]
         futures.sort(key=lambda row: str(row.get("expiry", ""))[:10])
         return int(futures[0]["instrument_token"]) if futures else None
+
+    async def _run_quote(self, callback):
+        """Serialize quote/LTP calls to respect Kite's one-request-per-second limit."""
+        async with self._quote_lock:
+            if self._last_quote_request_at is not None:
+                delay = 1.05 - (monotonic() - self._last_quote_request_at)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            self._last_quote_request_at = monotonic()
+            return await self._run(callback)
 
     async def _run(self, callback):
         return await asyncio.wait_for(

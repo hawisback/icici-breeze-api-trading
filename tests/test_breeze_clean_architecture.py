@@ -742,7 +742,11 @@ def test_breeze_security_master_resolves_nearest_future_without_calendar_guessin
 
 
 @pytest.mark.asyncio
-async def test_breeze_resolve_nearest_future_prefers_security_master() -> None:
+async def test_breeze_resolve_nearest_future_prefers_security_master(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "services.broker_gateway.icici_breeze_adapter.ist_today",
+        lambda: date(2026, 9, 21),
+    )
     sdk = MagicMock()
     sdk.stock_script_dict_list = [{}, {}, {}, {}, {
         "FUT-NIFTY-29-Sep-2026": "50123",
