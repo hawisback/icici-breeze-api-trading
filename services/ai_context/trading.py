@@ -39,10 +39,11 @@ class AITradeService:
     """
 
     def __init__(self, *, settings: Any, option_chain_service: Any,
-                 ai_context_service_factory: Any) -> None:
+                 ai_context_service_factory: Any, strategy_service: Any = None) -> None:
         self.settings = settings
         self.chain = option_chain_service
         self.context_factory = ai_context_service_factory
+        self.strategy_service = strategy_service
         self.path = Path(settings.ai_trade_db_path)
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
@@ -219,6 +220,15 @@ class AITradeService:
                     if (await cursor.fetchone())[0] >= self.settings.ai_trade_max_daily_entries:
                         raise AITradeError("AI_DAILY_ENTRY_LIMIT_REACHED")
 
+                # The existing strategy engine tracks PAPER positions in a
+                # separate strategy ledger. Reject concurrent exposure there,
+                # not only positions visible to OMS or the broker portfolio.
+                if self.strategy_service is not None:
+                    config = self.strategy_service.config
+                    if getattr(config, "kill_switch", False):
+                        raise AITradeError("STRATEGY_KILL_SWITCH_ACTIVE")
+                    if await self.strategy_service.repo.get_active_trades():
+                        raise AITradeError("STRATEGY_POSITION_ALREADY_ACTIVE")
                 snapshot = await self.context_factory().get_snapshot()
                 if snapshot.get("entry_permitted") is not True:
                     raise AITradeError("ENTRY_CONTEXT_NOT_READY")
