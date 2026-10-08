@@ -1,6 +1,6 @@
 # AI Market Context API
 
-This API is a read-only evidence layer for a scheduler-driven AI trading assistant.
+This API exposes read-only evidence plus an independent AI PAPER trade-intent endpoint for a scheduler-driven AI trading assistant.
 The AI wakes on its own schedule (minimum one minute) and decides which endpoints
 to call. Backend services prepare and normalize data but do not make the market or
 trade decision.
@@ -24,6 +24,8 @@ substituting simulated evidence.
 - GET /api/v1/ai/nifty/options — ATM-centered option chain plus numeric aggregates.
 - GET /api/v1/ai/account/context — portfolio, live broker account and safety state.
 - GET /api/v1/ai/data-quality — feed, broker-session and quote freshness metadata.
+- POST /api/v1/ai/trades — independent, mode-neutral AI PAPER trade intent.
+- GET /api/v1/ai/trades — AI trade journal; GET /api/v1/ai/trades/{trade_id} — current trade state.
 
 ## AI workflow
 
@@ -32,9 +34,15 @@ A normal one-minute cycle starts with /nifty/snapshot. The AI can then drill int
 source/freshness fields where the underlying service exposes them, allowing the AI
 to reject stale or unavailable evidence.
 
-Order execution is intentionally outside this API. Any future AI-proposed order
-must continue through the platform's deterministic risk, OMS and execution safety
-boundaries.
+The external AI alone decides whether a signal is actionable. Read-only
+snapshot `entry_permitted` (schema 1.2) is a backwards-compatible alias
+for `entry_data_ready`: **market-data diagnostics only**. Shared strategy
+positions, global system risk mode, and OMS order state remain available
+as account information but do not block `POST /api/v1/ai/trades` PAPER
+submissions. The independent AI PAPER manager enforces only AI-specific
+quantity/notional/open-position/daily limits and real Kite quote integrity.
+LIVE routing by this API is not supported and fails closed. See
+`docs/AI_SCHEDULER_INTEGRATION.md` for the mode-neutral trade lifecycle.
 
 
 ## Local POC setup and Kite option-chain diagnostics
@@ -75,6 +83,7 @@ candles (explicit `vwap_scope=requested_candles`) and additionally returns
 is available. The `regular_session` flag checks weekdays and clock time,
 but does not yet implement the full NSE holiday/special-session calendar.
 
-This POC is **read-only**. None of these response fields constitutes an
-authorization or recommendation to trade. Live trading needs a separate
-deterministic freshness/session/risk validation step.
+None of the read-only market-data response fields is a recommendation,
+entry classification or authorization for LIVE trading. The AI decides
+when to send a mode-neutral request; broker-protected LIVE trading will
+need separate execution risk validation before it is enabled.

@@ -380,7 +380,7 @@ class AIContextService:
         if order_book_available:
             try:
                 orders = await self.oms_svc.list_orders(limit=500)
-                terminal = {"FILLED", "CANCELLED", "REJECTED", "EXPIRED", "FAILED_SAFE"}
+                terminal = {"FILLED", "CANCELLED", "REJECTED", "RISK_REJECTED", "EXPIRED", "FAILED_SAFE"}
                 for order in orders:
                     state = getattr(order, "status", None)
                     state = getattr(state, "value", state)
@@ -595,12 +595,14 @@ class AIContextService:
             if not account_blockers:
                 account_blockers.append("ACCOUNT_CONTEXT_UNAVAILABLE")
 
-        blockers = list(dict.fromkeys([*data_blockers, *account_blockers]))
+        # Market-data readiness must not inherit strategy/global risk mode or
+        # historical OMS state: those belong to a different trading process.
+        # Account/OMS/risk details remain available as read-only diagnostics.
         entry_data_ready = not data_blockers
         quality["entry_data_ready"] = entry_data_ready
         quality["entry_data_blockers"] = data_blockers
         return {
-            "schema_version": "1.1",
+            "schema_version": "1.2",
             "snapshot_id": generate_id(),
             "as_of": utc_now().isoformat(),
             "principle": "OBJECTIVE_DATA_ONLY_AI_INTERPRETS",
@@ -635,8 +637,15 @@ class AIContextService:
             },
             "data_quality": quality,
             "entry_data_ready": entry_data_ready,
+            # Legacy readiness fields are retained for scheduler compatibility,
+            # but apply to market DATA ONLY, never strategy signal decisions.
             "entry_context_ready": bool(account.get("entry_context_ready")),
-            "entry_permitted": not blockers,
-            "blocking_reasons": blockers,
-            "entry_execution_note": "Evidence only; execution engine must independently enforce live gates, reconciliation and protective orders.",
+            "entry_permitted": entry_data_ready,
+            "blocking_reasons": data_blockers,
+            "readiness_scope": "MARKET_DATA_ONLY",
+            "entry_execution_note": (
+                "Market-data diagnostics only. Shared account/strategy risk and OMS "
+                "state are informational and do not gate AI PAPER trade intents. "
+                "AI chooses entries; broker LIVE execution remains disabled here."
+            ),
         }

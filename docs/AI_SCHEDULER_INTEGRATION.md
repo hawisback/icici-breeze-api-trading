@@ -1,8 +1,10 @@
 # AI scheduler integration contract
 
-This document describes the read-only contract for a one-minute NIFTY signal assistant.
-It is **not** an autonomous order-execution API. External schedulers must run their
-own orchestration and must not treat AI output as broker authority.
+This document describes the market-data contract and the independent mode-neutral
+PAPER trade-intent API for an external NIFTY AI scheduler. AI—not the backend
+strategy engine—classifies trade opportunities and chooses when to request entry.
+The backend validates the specific simulated contract and manages exits.
+It never converts an AI signal into a LIVE broker order on this API.
 
 ## Authentication and deployment
 
@@ -54,10 +56,11 @@ Content-Type: application/json
 `signal_id` is a durable idempotency key. The AI chooses a live
 Kite-listed NIFTY option instrument from `GET /nifty/options`, but **never**
 the fill price, stop, execution mode or trailing policy. The server
-requires context readiness, flat reconciled account, no open strategy
-trade, no unresolved orders, a real exchange-timestamped contract quote,
-a valid spread, lot-size alignment and operator quantity/notional/daily
-caps. In PAPER, the assumed entry is the *observed ask*; exits use
+requires a real exchange-timestamped Kite contract quote, an acceptable
+spread, lot-size alignment and **AI-specific** quantity/notional/daily/open
+trade caps. Internal strategy positions, the strategy kill switch, the
+global risk mode, broker portfolio and OMS orders **do not veto AI PAPER**
+submissions. They may still appear in account context as evidence. In PAPER, the assumed entry is the *observed ask*; exits use
 the *observed bid*. These are simulated fills, not guaranteed executable
 market prices. The response omits the backend's execution mode.
 
@@ -82,11 +85,14 @@ The loop resumes persisted open PAPER trades after backend restarts:
    states; no broker protective order exists for PAPER simulated fills.
 5. `pnl` is **gross simulated premium P&L** before fees and slippage.
 
-This PAPER lifecycle is intentionally separate from the existing
-strategy-generated trade ledger. It checks strategy active positions and
-kill switch to avoid overlapping position authority. A future release
-should unify PAPER ledger reporting and the OMS/PAPER broker adapter,
-and separately wire broker-held protective orders for LIVE.
+This PAPER lifecycle is intentionally separate from the existing strategy
+engine, OMS and risk/kill-switch state. Neither engine blocks the other's
+PAPER trade choices: the AI manager limits its own open trade, and the
+strategy engine manages its own ledger. Both use shared market-data services,
+but their trading state and entry classifiers are independent. Simulated AI
+positions are not consolidated into the existing strategy/OMS portfolio totals.
+A future LIVE implementation must reintroduce broker-wide protection,
+reconciliation and global emergency controls before any LIVE routing.
 
 ## Scheduler cycle
 
@@ -94,9 +100,11 @@ and separately wire broker-held protective orders for LIVE.
    fetch **one** `GET /api/v1/ai/nifty/snapshot` and retain its `snapshot_id`.
    The snapshot deliberately uses the same ten-strike window as the default
    `/nifty/options` PCR scope.
-2. Reject new entries whenever `entry_permitted` is not exactly `true`.
-   Log all `blocking_reasons` and emit NO_TRADE. Missing, unavailable,
-   simulated, delayed or unreconciled data is not a trading signal.
+2. Interpret `entry_data_ready`, `entry_permitted` (legacy data-only alias)
+   and `blocking_reasons` strictly as **market-data diagnostics**, not a
+   signal classifier or server trading authorization. Use the raw source/
+   timestamp evidence to decide if data meets your own strategy needs.
+   Never treat missing, unavailable or fabricated prices as valid fills.
 3. Use `technicals["1m"].metrics` for the latest *completed-bar*
    `macd_crossed_above_zero`, `macd_crossed_below_zero`,
    `macd_histogram_expanding_positive`,
@@ -105,23 +113,27 @@ and separately wire broker-held protective orders for LIVE.
    `macd_histogram_prev`, `rsi_14_prev` and `data_through`.
    Never infer a crossover merely from a current RSI/MACD threshold.
 4. Use `technicals["5m"].metrics` EMA20 and latest completed 5m
-   close for the trend filter. Require the snapshot's data gates to pass.
+   close for the trend filter. The external AI owns all trend/entry rules.
 5. For derivatives confirmation, inspect `options.summary.pcr_oi`
    and its `pcr_scope`. PCR is **not** a directional prediction. With
    thresholds bullish >=0.95 and bearish <=1.05, PCR in [0.95,1.05]
    satisfies both; it cannot distinguish direction by itself.
-6. Before emitting a Signal Card, check `entry_context_ready`,
-   `account.pending_orders_count`, `account.open_positions_count`,
-   and `account.broker_open_positions_count`. Never assume a local
-   count of zero proves that the broker account is flat.
+6. Account/OMS/risk details remain visible as **informational diagnostics**,
+   including strategy positions and global risk mode. Do not use their
+   `entry_context_ready`, `entry_blockers`, `pending_orders_count` or
+   strategy kill-switch state to veto a separate AI PAPER decision. Only the
+   AI journal's own open trades govern AI trade overlap.
 7. Include `snapshot_id`, the exact candle closing timestamps, quote
    source and timestamp, PCR scope, option quote coverage, proposed expiry,
    bid/ask spread, and explicit reasons for each signal condition.
 
-The `entry_permitted` field means that the *observation context* is eligible
-for further consideration. It does **not** grant permission to route a LIVE
-order. The existing live preflight, risk engine, broker reconciliation and
-order authorization remain definitive.
+Snapshot schema 1.2 retains `entry_permitted` for compatibility, but it
+now equals `entry_data_ready` and `blocking_reasons` contains **data-only**
+diagnostics. `readiness_scope=MARKET_DATA_ONLY`. These fields never judge
+bullish/bearish classification and are not checked by `POST /trades`.
+The separate account `entry_context_ready` is a diagnostic of the existing
+platform's global risk/OMS state, **not an AI PAPER order gate**.
+The LIVE broker execution route remains fail-closed.
 
 ## Execution and exits (external scheduler / execution-engine work)
 
@@ -144,11 +156,11 @@ watching a protective stop, exit deadline, or broker order status.
 
 ## Test and monitoring requirements
 
-Cover invalid JWT, stale/future exchange times, simulated feed, incomplete
-or missing 1m/5m bars, missing ATM legs, option-chain timeout, stale option
-timestamps, conflicting broker/local positions, SUBMISSION_UNKNOWN orders,
-overlapping scheduler cycles, and service restarts. Alert on persistent
-`entry_permitted=false` and never convert failure into permissive fallback.
+Cover invalid JWT, stale/future exchange times, simulated feed, missing
+ATM legs, option-chain timeout, stale option timestamps, AI-specific duplicate
+signals/open trades, conflicting quantities, service restarts, and isolated
+strategy/global-risk/OMS states. Report missing or stale input data honestly;
+never substitute fabricated quote prices for valid PAPER fills.
 
 The regular-session weekday indicator is **not** a complete NSE holiday
 calendar. Exchange-closed sessions must stay blocked through market-data

@@ -11,7 +11,6 @@ from typing import Optional
 from libs.config.settings import BrokerBackend, MarketDataBackend, PlatformSettings, get_platform_settings
 from libs.contracts.models import SystemMode, TradingMode
 from libs.events.bus import EventBus, InMemoryEventBus, get_event_bus
-from services.ai_context.service import AIContextService
 from services.ai_context.trading import AITradeService
 from services.audit.repository import AuditRepository
 from services.audit.service import AuditService
@@ -311,20 +310,11 @@ async def initialize_services(
     auth_svc = AuthService(repository=auth_repo, event_bus=bus, settings=app_settings)
     await auth_svc.initialize()
 
+    # AI PAPER owns a separate journal/entry policy; it consumes real option
+    # quotes but never depends on StrategyService, OMS or shared LIVE risk mode.
     ai_trade_svc = AITradeService(
         settings=app_settings,
         option_chain_service=option_chain_svc,
-        strategy_service=strategy_svc,
-        ai_context_service_factory=lambda: AIContextService(
-            market_data_service=market_svc,
-            historical_service=historical_svc,
-            option_chain_service=option_chain_svc,
-            portfolio_service=portfolio_svc,
-            broker_gateway=gateway_svc,
-            broker_session_service=session_svc,
-            risk_service=risk_svc,
-            order_management_service=oms_svc,
-        ),
     )
     await ai_trade_svc.initialize()
 
