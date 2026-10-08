@@ -30,13 +30,63 @@ class OptionChainService:
         self.inst_svc = instrument_service
         self.mkt_svc = market_data_service
         self.broker_gateway = broker_gateway
+        # Share one bounded Kite chain across AI, UI, strategy and PAPER worker.
+        # Keep exchange timestamps unchanged: retrieval time is NOT quote freshness.
         self._kite_chain_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
         self._kite_chain_cache_ttl = 10.0
         self._kite_chain_retry_after = 0.0
         self._kite_chain_lock = asyncio.Lock()
+        # Expiry metadata changes slowly, unlike contract bid/ask quotes.
+        self._kite_expiries_cache: dict[str, tuple[float, list[str]]] = {}
+        self._kite_expiries_cache_ttl = 60.0
+        self._kite_expiries_lock = asyncio.Lock()
+        self._wire_kite_market_quote_getter()
 
     def set_broker_gateway(self, broker_gateway: Any) -> None:
         self.broker_gateway = broker_gateway
+        self._kite_chain_cache.clear()
+        self._kite_expiries_cache.clear()
+        self._wire_kite_market_quote_getter()
+
+    def _wire_kite_market_quote_getter(self) -> None:
+        """Reuse a genuinely fresh Kite index tick instead of an extra LTP call."""
+        adapter = getattr(self.broker_gateway, "kite_adapter", None)
+        setter = getattr(adapter, "set_market_quote_getter", None)
+        getter = getattr(self.mkt_svc, "get_latest_quote", None)
+        if callable(setter) and callable(getter):
+            setter(getter)
+
+    def _cached_kite_chain(self, underlying: str, expiry: str | None) -> dict[str, Any] | None:
+        """Return a real-time bounded-cache hit before even reading expiry metadata."""
+        now = monotonic()
+        selected: tuple[str, dict[str, Any]] | None = None
+        for (name, cached_expiry), (captured, chain) in self._kite_chain_cache.items():
+            if name != underlying or (expiry and expiry != cached_expiry):
+                continue
+            if cached_expiry < ist_today().isoformat() or now - captured >= self._kite_chain_cache_ttl:
+                continue
+            if selected is None or cached_expiry < selected[0]:
+                selected = (cached_expiry, chain)
+        return deepcopy(selected[1]) if selected else None
+
+    async def _kite_expiries(self, underlying: str, adapter: Any) -> list[str]:
+        now = monotonic()
+        existing = self._kite_expiries_cache.get(underlying)
+        if existing and now - existing[0] < self._kite_expiries_cache_ttl:
+            return [e for e in existing[1] if e >= ist_today().isoformat()]
+        async with self._kite_expiries_lock:
+            now = monotonic()
+            existing = self._kite_expiries_cache.get(underlying)
+            if existing and now - existing[0] < self._kite_expiries_cache_ttl:
+                return [e for e in existing[1] if e >= ist_today().isoformat()]
+            expiries = sorted({
+                str(e)[:10]
+                for e in await adapter.get_option_expiries(underlying)
+                if str(e)[:10] >= ist_today().isoformat()
+            })
+            if expiries:
+                self._kite_expiries_cache[underlying] = (monotonic(), expiries)
+            return expiries
 
     async def get_chain(
         self,
@@ -51,9 +101,23 @@ class OptionChainService:
         else:
             clean_underlying = "NIFTY"
 
-        requested_provider = str(provider or "").strip().lower()
+        # All normal option consumers (AI, UI and internal strategies) use Kite.
+        # Explicit Breeze remains a legacy opt-in for diagnostics only.
+        requested_provider = str(provider or ("kite" if self.broker_gateway else "")).strip().lower()
         if requested_provider and requested_provider not in {"kite", "breeze"}:
             raise ValueError(f"Unsupported option-chain provider: {provider}")
+
+        # The fast path avoids scanning Kite's NFO expiry metadata and avoids
+        # broker calls from repeated PAPER worker / UI / AI reads.
+        kite = getattr(self.broker_gateway, "kite_adapter", None)
+        if (
+            requested_provider == "kite"
+            and kite is not None
+            and getattr(kite, "is_active", False)
+        ):
+            cached_chain = self._cached_kite_chain(clean_underlying, expiry)
+            if cached_chain is not None:
+                return cached_chain
 
         all_expiries: list[str] = []
         reference_provider = (
@@ -115,20 +179,14 @@ class OptionChainService:
             get_expiries = getattr(reference_adapter, "get_option_expiries", None)
             if callable(get_expiries):
                 try:
-                    live_expiries = await get_expiries(clean_underlying)
-                    if live_expiries:
-                        all_expiries = sorted(
-                            {
-                                str(value)[:10]
-                                for value in live_expiries
-                                if str(value)[:10] >= ist_today().isoformat()
-                            }
-                        )
+                    all_expiries = await self._kite_expiries(
+                        clean_underlying, reference_adapter
+                    )
                 except Exception as exc:
                     logger.warning("Unable to refresh Kite option expiries: %s", exc)
 
-        # Preserve the existing local-master fallback for normal platform
-        # consumers. An explicit Kite request is intentionally fail-closed:
+        # Preserve local-master fallback only for explicit legacy Breeze/offline
+        # consumers. All default Kite requests intentionally fail closed:
         # if Kite cannot supply current expiries, do not substitute stale local
         # contracts or another broker.
         if not all_expiries and requested_provider != "kite":
@@ -183,9 +241,8 @@ class OptionChainService:
         step = 100 if clean_underlying == "BANKNIFTY" else 50
         atm_strike = round(spot_price / step) * step
 
-        # 2. Option-chain/reference traffic is independent of LIVE execution
-        # ownership. In hybrid mode this defaults to Breeze while frequent
-        # quote/candle traffic uses Kite.
+        # 2. Option-chain data defaults to Kite regardless of LIVE broker
+        # execution ownership. Explicit Breeze is legacy opt-in only.
         breeze_active = False
         if self.broker_gateway and reference_provider == "breeze":
             breeze_adapter = reference_adapter
@@ -313,8 +370,8 @@ class OptionChainService:
                             self._kite_chain_retry_after = monotonic() + 15.0
                             logger.warning("Live Kite option chain query error: %s", type(exc).__name__)
 
-        # A caller that explicitly requested real Kite quotes must never trigger
-        # the synthetic/local-master fallback, even on timeout or missing quotes.
+        # A Kite option-data caller must never trigger Breeze or a simulated
+        # local-master fallback, even on timeout or missing quotes.
         if requested_provider == "kite":
             return {
                 "underlying": clean_underlying,
