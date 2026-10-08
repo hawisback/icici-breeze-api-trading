@@ -546,7 +546,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         if not self.is_active:
             return {}
         match = re.fullmatch(
-            r"INST-(NIFTY|BANKNIFTY)-(\\d{4}-\\d{2}-\\d{2})-(\\d+)-(CE|PE)",
+            r"INST-(NIFTY|BANKNIFTY)-(\d{4}-\d{2}-\d{2})-(\d+)-(CE|PE)",
             instrument_id,
         )
         if not match:
