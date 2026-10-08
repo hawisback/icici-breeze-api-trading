@@ -30,6 +30,7 @@ class AIContextService:
         broker_session_service: Any,
         risk_service: Any,
         order_management_service: Any | None = None,
+        ai_only_mode: bool = False,
     ) -> None:
         self.market_svc = market_data_service
         self.historical_svc = historical_service
@@ -39,6 +40,7 @@ class AIContextService:
         self.session_svc = broker_session_service
         self.risk_svc = risk_service
         self.oms_svc = order_management_service
+        self.ai_only_mode = ai_only_mode
 
     @staticmethod
     def _dump(value: Any) -> Any:
@@ -531,17 +533,29 @@ class AIContextService:
         options = await self.get_options(strike_window=10)
         quality = await self.get_data_quality()
         session = self._session_context(options.get("expiry"))
-        try:
-            account = await self.get_account_context()
-        except Exception as exc:
+        if self.ai_only_mode:
+            # The snapshot is market evidence. Avoid repeatedly querying broker
+            # funds/positions and OMS for every one-minute AI/monitor refresh.
+            # Detailed diagnostics remain available on explicit /account/context.
             account = {
-                "entry_context_ready": False,
-                "entry_blockers": ["ACCOUNT_CONTEXT_UNAVAILABLE"],
-                "error_type": type(exc).__name__,
-                "local_portfolio": {"positions": [], "pnl": None},
+                "entry_context_ready": None,
+                "entry_blockers": [],
+                "diagnostic_note": "Call /api/v1/ai/account/context if needed",
                 "local_open_positions_count": None,
                 "broker_open_positions_count": None,
             }
+        else:
+            try:
+                account = await self.get_account_context()
+            except Exception as exc:
+                account = {
+                    "entry_context_ready": False,
+                    "entry_blockers": ["ACCOUNT_CONTEXT_UNAVAILABLE"],
+                    "error_type": type(exc).__name__,
+                    "local_portfolio": {"positions": [], "pnl": None},
+                    "local_open_positions_count": None,
+                    "broker_open_positions_count": None,
+                }
 
         data_blockers: list[str] = []
         if not session["regular_session"]:
