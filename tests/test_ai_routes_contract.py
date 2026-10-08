@@ -8,6 +8,7 @@ def test_ai_routes_are_locally_accessible_without_tokens_except_trade_intent():
         "/api/v1/ai/nifty/candles",
         "/api/v1/ai/nifty/technicals",
         "/api/v1/ai/nifty/options",
+        "/api/v1/ai/heavyweights",
         "/api/v1/ai/account/context",
         "/api/v1/ai/data-quality",
         "/api/v1/ai/trades",
