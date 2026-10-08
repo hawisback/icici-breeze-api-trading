@@ -11,6 +11,8 @@ from typing import Optional
 from libs.config.settings import BrokerBackend, MarketDataBackend, PlatformSettings, get_platform_settings
 from libs.contracts.models import SystemMode, TradingMode
 from libs.events.bus import EventBus, InMemoryEventBus, get_event_bus
+from services.ai_context.service import AIContextService
+from services.ai_context.trading import AITradeService
 from services.audit.repository import AuditRepository
 from services.audit.service import AuditService
 from services.auth.repository import AuthRepository
@@ -58,6 +60,7 @@ class ServiceContainer:
     exec_svc: ExecutionService
     portfolio_svc: PortfolioService
     strategy_svc: StrategyService
+    ai_trade_svc: AITradeService
     audit_svc: AuditService
     auth_svc: AuthService
     idempotency_repo: IdempotencyRepository
@@ -78,6 +81,8 @@ async def initialize_services(
 
     if _container is not None:
         try:
+            if getattr(_container.ai_trade_svc, "_task", None):
+                _container.ai_trade_svc._task.cancel()
             if hasattr(_container.oms_svc, "_outbox_worker_task") and _container.oms_svc._outbox_worker_task:
                 _container.oms_svc._outbox_worker_task.cancel()
             if hasattr(_container.exec_svc, "_reconciliation_task") and _container.exec_svc._reconciliation_task:
@@ -306,6 +311,22 @@ async def initialize_services(
     auth_svc = AuthService(repository=auth_repo, event_bus=bus, settings=app_settings)
     await auth_svc.initialize()
 
+    ai_trade_svc = AITradeService(
+        settings=app_settings,
+        option_chain_service=option_chain_svc,
+        ai_context_service_factory=lambda: AIContextService(
+            market_data_service=market_svc,
+            historical_service=historical_svc,
+            option_chain_service=option_chain_svc,
+            portfolio_service=portfolio_svc,
+            broker_gateway=gateway_svc,
+            broker_session_service=session_svc,
+            risk_service=risk_svc,
+            order_management_service=oms_svc,
+        ),
+    )
+    await ai_trade_svc.initialize()
+
     idempotency_repo = IdempotencyRepository(db_path=app_settings.gateway_db_path)
     await idempotency_repo.initialize()
 
@@ -326,12 +347,14 @@ async def initialize_services(
         exec_svc=exec_svc,
         portfolio_svc=portfolio_svc,
         strategy_svc=strategy_svc,
+        ai_trade_svc=ai_trade_svc,
         audit_svc=audit_svc,
         auth_svc=auth_svc,
         idempotency_repo=idempotency_repo,
         rate_limiter=rate_limiter,
     )
 
+    ai_trade_svc.start()
     logger.info("All microservices initialized successfully.")
     return _container
 
