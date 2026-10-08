@@ -223,6 +223,7 @@ class AIContextService:
         captured = self._parse_timestamp(
             chain.get("captured_at") or chain.get("timestamp")
         )
+        market_observed = self._parse_timestamp(chain.get("market_timestamp"))
         return {
             "available": True,
             "underlying": chain.get("underlying", underlying.upper()),
@@ -233,6 +234,8 @@ class AIContextService:
             "atm_strike": chain.get("atm_strike"),
             "captured_at": captured.isoformat() if captured else None,
             "age_seconds": self._age_seconds(captured),
+            "market_timestamp": market_observed.isoformat() if market_observed else None,
+            "market_data_age_seconds": self._age_seconds(market_observed),
             "summary": summarize_option_chain(filtered),
             "strikes": strikes,
             "capabilities": chain.get("capabilities", {}),
@@ -364,6 +367,8 @@ class AIContextService:
                 "summary": options.get("summary"),
                 "captured_at": options.get("captured_at"),
                 "age_seconds": options.get("age_seconds"),
+                "market_timestamp": options.get("market_timestamp"),
+                "market_data_age_seconds": options.get("market_data_age_seconds"),
             },
             "session": self._session_context(options.get("expiry")),
             "account": {
