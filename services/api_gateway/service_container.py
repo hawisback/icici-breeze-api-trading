@@ -314,6 +314,7 @@ async def initialize_services(
     ai_trade_svc = AITradeService(
         settings=app_settings,
         option_chain_service=option_chain_svc,
+        strategy_service=strategy_svc,
         ai_context_service_factory=lambda: AIContextService(
             market_data_service=market_svc,
             historical_service=historical_svc,
