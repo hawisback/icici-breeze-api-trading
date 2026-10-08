@@ -83,3 +83,45 @@ async def test_kite_missing_contract_quotes_are_not_represented_as_zero_oi():
 
     assert chain == {}
     assert len(client.quote_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_chain_reuses_fresh_real_kite_index_tick_without_ltp_request():
+    from libs.contracts.models import Quote, utc_now
+
+    client = LargeNfoKite()
+    adapter = ZerodhaKiteAdapter(custom_client=client)
+    adapter._access_token = "test-token"
+    adapter.set_market_quote_getter(
+        lambda instrument_id: Quote(
+            instrument_id=instrument_id, symbol="NIFTY 50",
+            last_price=25025.0, source="KITE", timestamp=utc_now(),
+        )
+    )
+    chain = await adapter.get_option_chain_view("NIFTY", client.expiry)
+    assert chain["source"] == "KITE"
+    assert chain["atm_strike"] == 25000
+    assert client.spot_requests == []
+    assert len(client.quote_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_or_non_kite_cached_spot_cannot_replace_broker_ltp():
+    from datetime import timedelta
+    from libs.contracts.models import Quote, utc_now
+
+    for source, age in (("BREEZE", 0), ("KITE", 30)):
+        client = LargeNfoKite()
+        adapter = ZerodhaKiteAdapter(custom_client=client)
+        adapter._access_token = "test-token"
+        adapter.set_market_quote_getter(
+            lambda inst_id, source=source, age=age: Quote(
+                instrument_id=inst_id, symbol="NIFTY 50",
+                last_price=99999.0, source=source,
+                timestamp=utc_now() - timedelta(seconds=age),
+            )
+        )
+        chain = await adapter.get_option_chain_view("NIFTY", client.expiry)
+        assert chain["source"] == "KITE"
+        assert chain["atm_strike"] == 25000
+        assert client.spot_requests == [["NSE:NIFTY 50"]]
