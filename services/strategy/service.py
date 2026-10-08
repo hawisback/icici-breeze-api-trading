@@ -582,7 +582,7 @@ class StrategyService:
         await self.repo.save_runtime(self.strategy_b.export_state(), "volatility_breakout")
         await self.repo.save_runtime(self.strategy_e.export_state(), "pivot_vwap_scalp")
 
-    async def initialize(self) -> None:
+    async def initialize(self, *, start_scheduler: bool = True) -> None:
         await self.repo.initialize()
         self.config = await self.repo.get_auto_config()
         # Arming is deliberately process-local in effect. A restart must never
@@ -647,7 +647,7 @@ class StrategyService:
         await self._seed_default_strategy()
 
         # Start background evaluation loop if enabled
-        if not self._loop_task or self._loop_task.done():
+        if start_scheduler and (not self._loop_task or self._loop_task.done()):
             self._is_running = True
             self._loop_task = asyncio.create_task(self._run_scheduler_loop())
 
