@@ -125,6 +125,17 @@ def compute_technicals(candles: Sequence[Candle]) -> dict[str, Any]:
             "macd": None,
             "macd_signal": None,
             "macd_histogram": None,
+            "macd_histogram_prev": None,
+            "macd_histogram_prev2": None,
+            "macd_crossed_above_zero": False,
+            "macd_crossed_below_zero": False,
+            "macd_histogram_expanding_positive": False,
+            "macd_histogram_expanding_negative": False,
+            "rsi_14_prev": None,
+            "rsi_14_prev2": None,
+            "rsi_crossed_above_55": False,
+            "rsi_crossed_below_45": False,
+            "bar_end_time": None,
             "atr_14": None,
             "vwap": None,
             "session_vwap": None,
@@ -147,10 +158,28 @@ def compute_technicals(candles: Sequence[Candle]) -> dict[str, Any]:
     macd_signal_series = _ema_series(macd_values, 9) if macd_values else []
     macd_value = macd_values[-1] if macd_values else None
     macd_signal = macd_signal_series[-1] if macd_signal_series else None
-    macd_histogram = (
-        macd_value - macd_signal
-        if macd_value is not None and macd_signal is not None
-        else None
+    # Match MACD values to signal EMA positions; only completed bars count.
+    # Null is intentional for insufficient warmup, never a fabricated zero.
+    valid_histogram = [
+        macd - signal
+        for macd, signal in zip(
+            macd_values, macd_signal_series, strict=True
+        )
+        if signal is not None
+    ]
+    macd_histogram = valid_histogram[-1] if valid_histogram else None
+    hist_prev = valid_histogram[-2] if len(valid_histogram) >= 2 else None
+    hist_prev2 = valid_histogram[-3] if len(valid_histogram) >= 3 else None
+    rsi_now = _rsi_wilder(closes, 14)
+    rsi_prev = _rsi_wilder(closes[:-1], 14)
+    rsi_prev2 = _rsi_wilder(closes[:-2], 14)
+    macd_cross_up = (
+        hist_prev is not None and macd_histogram is not None
+        and hist_prev <= 0 < macd_histogram
+    )
+    macd_cross_down = (
+        hist_prev is not None and macd_histogram is not None
+        and hist_prev >= 0 > macd_histogram
     )
 
     return {
@@ -159,10 +188,27 @@ def compute_technicals(candles: Sequence[Candle]) -> dict[str, Any]:
         "ema_9": _round(ema_9[-1]),
         "ema_20": _round(ema_20[-1]),
         "ema_50": _round(ema_50[-1]),
-        "rsi_14": _round(_rsi_wilder(closes, 14)),
+        "rsi_14": _round(rsi_now),
+        "rsi_14_prev": _round(rsi_prev),
+        "rsi_14_prev2": _round(rsi_prev2),
+        "rsi_crossed_above_55": bool(rsi_now is not None and rsi_prev is not None and rsi_prev <= 55 < rsi_now),
+        "rsi_crossed_below_45": bool(rsi_now is not None and rsi_prev is not None and rsi_prev >= 45 > rsi_now),
         "macd": _round(macd_value),
         "macd_signal": _round(macd_signal),
         "macd_histogram": _round(macd_histogram),
+        "macd_histogram_prev": _round(hist_prev),
+        "macd_histogram_prev2": _round(hist_prev2),
+        "macd_crossed_above_zero": macd_cross_up,
+        "macd_crossed_below_zero": macd_cross_down,
+        "macd_histogram_expanding_positive": bool(
+            macd_histogram is not None and hist_prev is not None
+            and macd_histogram > 0 and macd_histogram > hist_prev
+        ),
+        "macd_histogram_expanding_negative": bool(
+            macd_histogram is not None and hist_prev is not None
+            and macd_histogram < 0 and macd_histogram < hist_prev
+        ),
+        "bar_end_time": ordered[-1].end_time.isoformat(),
         "atr_14": _round(_atr_wilder(ordered, 14)),
         "vwap": _round(_vwap(ordered)),
         "session_vwap": _round(_session_vwap(ordered)),
