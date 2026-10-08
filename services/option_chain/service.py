@@ -98,6 +98,20 @@ class OptionChainService:
                 self._kite_expiries_cache[underlying] = (monotonic(), expiries)
             return expiries
 
+    async def get_contract_quote(self, instrument_id: str) -> dict[str, Any]:
+        """One Kite NFO contract quote for AI trade entry/stop management.
+
+        Shares Kite's already-loaded NFO instrument list and single broker
+        quote pacing; never falls back to Breeze or the synthetic chain.
+        """
+        adapter = getattr(self.broker_gateway, "kite_adapter", None)
+        if not adapter or not getattr(adapter, "is_active", False):
+            return {}
+        get_quote = getattr(adapter, "get_option_contract_quote", None)
+        if not callable(get_quote):
+            return {}
+        return await get_quote(instrument_id)
+
     async def get_chain(
         self,
         underlying: str = "NIFTY",
