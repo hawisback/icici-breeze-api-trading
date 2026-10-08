@@ -4798,7 +4798,7 @@ class StrategyService:
 
     async def get_trigger_diagnostics(self) -> TriggerDiagnosticsResponse:
         """Gathers granular condition diagnostics across all strategies and session gates."""
-        features = self._last_features or MarketFeatures(timestamp=utc_now(), data_reason="Awaiting first completed evaluation")
+        features = self._last_features or MarketFeatures(timestamp=utc_now(), spot_price=0.0, data_reason="Awaiting first completed evaluation")
         candles_5m, candles_15m, futures_candles = self._market_snapshot
 
         diag_a = self.strategy_a.diagnose(features, candles_5m, candles_15m, overrides=self._active_overrides, futures_candles=futures_candles)
