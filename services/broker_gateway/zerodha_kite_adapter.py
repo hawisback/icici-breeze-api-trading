@@ -10,6 +10,7 @@ import asyncio
 from datetime import date, datetime, timedelta, timezone
 import logging
 import re
+from time import monotonic
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -46,6 +47,8 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         self._kite = custom_client
         self._access_token = ""
         self._write_lock = asyncio.Lock()
+        self._quote_lock = asyncio.Lock()
+        self._last_quote_request_at: Optional[float] = None
         self._nse_instruments: Optional[list[dict[str, Any]]] = None
         self._nfo_instruments: Optional[list[dict[str, Any]]] = None
         self.request_timeout_sec = request_timeout_sec
@@ -347,7 +350,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         """Return the two index quotes used by the current market-data service."""
         if not self.is_active:
             return []
-        raw = await self._run(lambda: self._kite.quote(["NSE:NIFTY 50", "NSE:NIFTY BANK"]))
+        raw = await self._run_quote(lambda: self._kite.quote(["NSE:NIFTY 50", "NSE:NIFTY BANK"]))
         result: list[Quote] = []
         for instrument_id, symbol in [
             ("INST-NIFTY-INDEX", "NIFTY 50"),
@@ -413,7 +416,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         spot_key = "NSE:NIFTY BANK" if clean_underlying == "BANKNIFTY" else "NSE:NIFTY 50"
         # Spot discovery comes from Kite, not from a hardcoded or stale local
         # index value. Avoid quoting the entire NFO expiry just to find ATM.
-        spot_data = await self._run(lambda: self._kite.ltp([spot_key]))
+        spot_data = await self._run_quote(lambda: self._kite.ltp([spot_key]))
         spot = float((spot_data or {}).get(spot_key, {}).get("last_price") or 0)
         if spot <= 0:
             logger.warning("Kite index LTP unavailable for %s", spot_key)
@@ -438,7 +441,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
                 nearby_by_side.setdefault((strike, right), row)
         nearby = list(nearby_by_side.values())
         quote_keys = [f"NFO:{row['tradingsymbol']}" for row in nearby]
-        quotes = await self._run(lambda: self._kite.quote(quote_keys))
+        quotes = await self._run_quote(lambda: self._kite.quote(quote_keys))
         if not isinstance(quotes, dict):
             return {}
 
@@ -605,6 +608,16 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         futures = [row for row in all_futures if str(row.get("expiry", ""))[:10] >= today]
         futures.sort(key=lambda row: str(row.get("expiry", ""))[:10])
         return int(futures[0]["instrument_token"]) if futures else None
+
+    async def _run_quote(self, callback):
+        """Serialize quote/LTP calls to respect Kite's one-request-per-second limit."""
+        async with self._quote_lock:
+            if self._last_quote_request_at is not None:
+                delay = 1.05 - (monotonic() - self._last_quote_request_at)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            self._last_quote_request_at = monotonic()
+            return await self._run(callback)
 
     async def _run(self, callback):
         return await asyncio.wait_for(
