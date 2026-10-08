@@ -71,12 +71,24 @@ class AIContextService:
         interval: str = "5m",
         limit: int = 100,
     ) -> dict[str, Any]:
-        candles = await self.historical_svc.get_candles(
-            instrument_id=instrument_id,
-            interval=interval,
-            limit=limit,
-            allow_synthetic_fallback=False,
-        )
+        try:
+            candles = await self.historical_svc.get_candles(
+                instrument_id=instrument_id,
+                interval=interval,
+                limit=limit,
+                allow_synthetic_fallback=False,
+            )
+        except Exception as exc:
+            return {
+                "available": False,
+                "reason": "MARKET_CANDLE_FETCH_FAILED",
+                "error_type": type(exc).__name__,
+                "instrument_id": instrument_id,
+                "interval": interval,
+                "requested_limit": limit,
+                "candles": [],
+                "generated_at": utc_now().isoformat(),
+            }
         real = [c for c in candles if is_real_market_source(c.source)]
         if not real:
             return {
@@ -109,12 +121,23 @@ class AIContextService:
         interval: str = "5m",
         limit: int = 200,
     ) -> dict[str, Any]:
-        candles = await self.historical_svc.get_candles(
-            instrument_id=instrument_id,
-            interval=interval,
-            limit=limit,
-            allow_synthetic_fallback=False,
-        )
+        try:
+            candles = await self.historical_svc.get_candles(
+                instrument_id=instrument_id,
+                interval=interval,
+                limit=limit,
+                allow_synthetic_fallback=False,
+            )
+        except Exception as exc:
+            return {
+                "available": False,
+                "reason": "MARKET_CANDLE_FETCH_FAILED",
+                "error_type": type(exc).__name__,
+                "instrument_id": instrument_id,
+                "interval": interval,
+                "metrics": compute_technicals([]),
+                "calculated_at": utc_now().isoformat(),
+            }
         real = [c for c in candles if is_real_market_source(c.source)]
         if not real:
             return {
@@ -145,11 +168,22 @@ class AIContextService:
         expiry: str | None = None,
         strike_window: int = 10,
     ) -> dict[str, Any]:
-        chain = await self.option_chain_svc.get_chain(
-            underlying=underlying,
-            expiry=expiry,
-            provider="kite",
-        )
+        try:
+            chain = await self.option_chain_svc.get_chain(
+                underlying=underlying,
+                expiry=expiry,
+                provider="kite",
+            )
+        except Exception as exc:
+            chain = {
+                "source": "UNAVAILABLE",
+                "expiry": expiry,
+                "strikes": [],
+                "capabilities": {
+                    "strategy_a_rejection_reason": "OPTION_CHAIN_FETCH_FAILED",
+                },
+                "error_type": type(exc).__name__,
+            }
         source = str(chain.get("source") or "UNAVAILABLE").upper()
         if not is_real_market_source(source):
             capabilities = chain.get("capabilities", {}) or {}
@@ -162,6 +196,9 @@ class AIContextService:
                 "reason": reason,
                 "underlying": underlying.upper(),
                 "source": source,
+                "expiry": chain.get("expiry"),
+                "available_expiries": chain.get("available_expiries", []),
+                "error_type": chain.get("error_type"),
                 "summary": summarize_option_chain({**chain, "strikes": []}),
                 "strikes": [],
                 "generated_at": utc_now().isoformat(),
@@ -199,6 +236,9 @@ class AIContextService:
             "summary": summarize_option_chain(filtered),
             "strikes": strikes,
             "capabilities": chain.get("capabilities", {}),
+            "requested_contract_count": chain.get("requested_contract_count"),
+            "quoted_contract_count": chain.get("quoted_contract_count"),
+            "partial_quote_coverage": chain.get("partial_quote_coverage"),
             "generated_at": utc_now().isoformat(),
         }
 
@@ -274,7 +314,7 @@ class AIContextService:
                 pass
         return {
             "time_ist": now_ist.isoformat(),
-            "regular_session": open_dt <= now_ist <= close_dt,
+            "regular_session": now_ist.weekday() < 5 and open_dt <= now_ist <= close_dt,
             "minutes_since_open": minutes_since_open,
             "minutes_to_close": minutes_to_close,
             "nearest_expiry": expiry,
@@ -317,7 +357,10 @@ class AIContextService:
             "technicals": technicals,
             "options": {
                 "available": options.get("available", False),
+                "reason": options.get("reason"),
                 "source": options.get("source"),
+                "expiry": options.get("expiry"),
+                "partial_quote_coverage": options.get("partial_quote_coverage"),
                 "summary": options.get("summary"),
                 "captured_at": options.get("captured_at"),
                 "age_seconds": options.get("age_seconds"),
