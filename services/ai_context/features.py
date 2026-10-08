@@ -234,11 +234,15 @@ def summarize_option_chain(chain: dict[str, Any]) -> dict[str, Any]:
     put_contracts = 0
     call_oi_change_complete = True
     put_oi_change_complete = True
+    call_oi_complete = True
+    put_oi_complete = True
 
     for row in chain.get("strikes", []) or []:
         call = row.get("call") or {}
         put = row.get("put") or {}
         if call:
+            if call.get("open_interest") is None:
+                call_oi_complete = False
             call_contracts += 1
             call_oi += int(call.get("open_interest") or 0)
             call_volume += int(call.get("volume") or 0)
@@ -247,6 +251,8 @@ def summarize_option_chain(chain: dict[str, Any]) -> dict[str, Any]:
             else:
                 call_oi_change += int(call["oi_change"])
         if put:
+            if put.get("open_interest") is None:
+                put_oi_complete = False
             put_contracts += 1
             put_oi += int(put.get("open_interest") or 0)
             put_volume += int(put.get("volume") or 0)
@@ -263,12 +269,12 @@ def summarize_option_chain(chain: dict[str, Any]) -> dict[str, Any]:
         "strike_count": len(chain.get("strikes", []) or []),
         "call_contract_count": call_contracts,
         "put_contract_count": put_contracts,
-        "call_open_interest": call_oi,
-        "put_open_interest": put_oi,
+        "call_open_interest": call_oi if call_oi_complete else None,
+        "put_open_interest": put_oi if put_oi_complete else None,
         "call_oi_change": call_oi_change if call_oi_change_complete else None,
         "put_oi_change": put_oi_change if put_oi_change_complete else None,
         "call_volume": call_volume,
         "put_volume": put_volume,
-        "pcr_oi": _round(put_oi / call_oi if call_oi else None),
+        "pcr_oi": _round(put_oi / call_oi if call_oi and call_oi_complete and put_oi_complete else None),
         "pcr_volume": _round(put_volume / call_volume if call_volume else None),
     }
