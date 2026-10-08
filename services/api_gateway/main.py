@@ -218,6 +218,7 @@ async def lifespan(app: FastAPI):
             await port80_server.wait_closed()
         except Exception:
             pass
+    await container.ai_trade_svc.stop()
     await container.market_svc.stop_simulated_feed()
     await container.exec_svc.stop()
     await container.risk_svc.stop()
