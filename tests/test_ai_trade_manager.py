@@ -44,13 +44,6 @@ class Chain:
         }
 
 
-class Context:
-    ready = True
-
-    async def get_snapshot(self):
-        return {"entry_permitted": self.ready}
-
-
 def settings(path: Path, *, mode=TradingMode.PAPER, enabled=True):
     return SimpleNamespace(
         ai_trade_db_path=path,
@@ -68,11 +61,10 @@ def settings(path: Path, *, mode=TradingMode.PAPER, enabled=True):
     )
 
 
-def service(path: Path, *, chain=None, context=None, mode=TradingMode.PAPER, enabled=True):
+def service(path: Path, *, chain=None, mode=TradingMode.PAPER, enabled=True):
     return AITradeService(
         settings=settings(path, mode=mode, enabled=enabled),
         option_chain_service=chain or Chain(),
-        ai_context_service_factory=lambda: context or Context(),
     )
 
 
@@ -167,14 +159,36 @@ async def test_disabled_and_invalid_lots_never_create_trade(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_data_gate_required_for_new_trade(tmp_path):
-    context = Context()
-    context.ready = False
-    manager = service(tmp_path / "ai.db", context=context)
+async def test_ai_paper_entry_has_no_strategy_oms_or_global_risk_dependency(tmp_path, monkeypatch):
+    """Even a halted strategy or unresolved OMS order cannot veto isolated AI PAPER."""
+    from services.ai_context.service import AIContextService
+    from services.strategy.service import StrategyService
+
+    async def do_not_consult_shared_context(*args, **kwargs):
+        raise AssertionError("AI PAPER must not consult shared risk / OMS context")
+
+    async def do_not_consult_strategy(*args, **kwargs):
+        raise AssertionError("AI PAPER must not inspect internal strategy positions")
+
+    monkeypatch.setattr(AIContextService, "get_snapshot", do_not_consult_shared_context)
+    monkeypatch.setattr(StrategyService, "get_status", do_not_consult_strategy)
+
+    manager = service(tmp_path / "ai.db")
+    await manager.initialize()
+    trade = await manager.submit(signal_id="signal-008", instrument_id=INSTRUMENT, quantity=65)
+    assert trade["status"] == "OPEN"
+    assert trade["entry_price"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_bad_quote_still_blocks_an_ai_paper_entry(tmp_path):
+    chain = Chain()
+    chain.stale = True
+    manager = service(tmp_path / "ai.db", chain=chain)
     await manager.initialize()
     with pytest.raises(AITradeError) as exc:
-        await manager.submit(signal_id="signal-008", instrument_id=INSTRUMENT, quantity=65)
-    assert exc.value.code == "ENTRY_CONTEXT_NOT_READY"
+        await manager.submit(signal_id="signal-009", instrument_id=INSTRUMENT, quantity=65)
+    assert exc.value.code == "OPTION_QUOTE_STALE"
     assert await manager.list() == []
 
 def test_default_config_enables_only_paper(monkeypatch):
