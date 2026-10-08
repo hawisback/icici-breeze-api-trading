@@ -152,9 +152,14 @@ class AIContextService:
         )
         source = str(chain.get("source") or "UNAVAILABLE").upper()
         if not is_real_market_source(source):
+            capabilities = chain.get("capabilities", {}) or {}
+            reason = (
+                capabilities.get("strategy_a_rejection_reason")
+                or "NO_REAL_OPTION_CHAIN"
+            )
             return {
                 "available": False,
-                "reason": "NO_REAL_OPTION_CHAIN",
+                "reason": reason,
                 "underlying": underlying.upper(),
                 "source": source,
                 "summary": summarize_option_chain({**chain, "strikes": []}),
