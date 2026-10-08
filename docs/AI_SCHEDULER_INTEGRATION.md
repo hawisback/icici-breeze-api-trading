@@ -106,6 +106,39 @@ positions are not consolidated into the existing strategy/OMS portfolio totals.
 A future LIVE implementation must reintroduce broker-wide protection,
 reconciliation and global emergency controls before any LIVE routing.
 
+## Reset stale PAPER OMS orders (local maintenance only)
+
+Old `PAPER` orders stuck in `VALIDATING` belong to the **internal OMS**,
+not the independent AI PAPER trade journal. They can cause the global
+`/account/context.entry_context_ready` diagnostic to be false; they do
+**not** block new AI PAPER `POST /trades` submissions on the current code.
+
+If an operator explicitly wants to discard historical PAPER OMS orders
+and start that ledger fresh, **stop all backend and strategy processes**
+first (including the Docker Compose backend if applicable). From the
+repository root:
+
+```bash
+python scripts/reset_paper_oms.py
+python scripts/reset_paper_oms.py --apply --backend-stopped
+```
+
+The first command shows counts and statuses without editing anything.
+The second backs up the entire original OMS SQLite database under
+`data/backups/`, validates the backup, then removes only `PAPER` OMS
+orders, their intents, order events and matching outbox/inbox entries
+in one transaction. `LIVE` and `SHADOW` records are not changed.
+The command refuses missing/mismatched schemas and inconsistent order modes.
+
+Afterwards restart the backend and verify
+`GET /api/v1/ai/account/context`, `GET /api/v1/orders` and
+`GET /api/v1/risk/status`. The cleanup intentionally **does not reset**
+the global `ENTRY_BLOCKED` risk state, delete broker executions,
+clear internal strategy ledgers, or delete `data/ai_trades.db`
+(the separate AI PAPER trade journal). If `ENTRY_BLOCKED` remains,
+reconcile its actual cause and use the operator safety controls; never
+reset it automatically merely because PAPER orders were deleted.
+
 ## Scheduler cycle
 
 1. Once per minute during the configured Indian market trading window,
