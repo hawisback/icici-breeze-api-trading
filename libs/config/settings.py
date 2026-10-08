@@ -100,6 +100,15 @@ class PlatformSettings(BaseSettings):
 
     # External AI trade intent gateway. These values are server-owned: clients
     # cannot select their own execution mode or trailing-stop policy.
+    ai_trust_local_docker_gateway: bool = Field(
+        default=False,
+        alias="AI_TRUST_LOCAL_DOCKER_GATEWAY",
+        description=(
+            "Allow credential-free AI API requests from the container's exact "
+            "default bridge gateway, only with a localhost Host header. "
+            "Enable only when Docker publishes the API port on 127.0.0.1."
+        ),
+    )
     ai_trade_enabled: bool = Field(default=True, alias="AI_TRADE_ENABLED")
     ai_trade_mode: TradingMode = Field(default=TradingMode.PAPER, alias="AI_TRADE_MODE", description="Operator-owned mode. PAPER is supported; LIVE submissions fail closed until protective-order integration is implemented.")
     ai_trade_db_path: Path = Field(default=Path("./data/ai_trades.db"), alias="AI_TRADE_DB_PATH")
