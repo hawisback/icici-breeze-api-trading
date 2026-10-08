@@ -277,7 +277,14 @@ class AIContextService:
             for side in ("call", "put")
             if row.get(side)
         ]
-        expected_contracts = len(strikes) * 2
+        # A window missing entire strikes must not look 100% covered.
+        # This AI endpoint is NIFTY-only (50-point near-ATM strikes).
+        expected_levels = {
+            round(atm / 50) * 50 + offset * 50
+            for offset in range(-strike_window, strike_window + 1)
+        }
+        present_levels = {int(float(row.get("strike") or 0)) for row in strikes}
+        expected_contracts = len(expected_levels) * 2
         market_times = [
             self._parse_timestamp(contract.get("market_timestamp"))
             for contract in contracts
@@ -295,7 +302,10 @@ class AIContextService:
         )
         atm_contracts = [atm_row.get(side) for side in ("call", "put")]
         atm_spreads: list[float] = []
-        atm_quote_valid = len(atm_contracts) == 2 and all(atm_contracts)
+        atm_quote_valid = (
+            len(atm_contracts) == 2 and all(atm_contracts)
+            and int(float(atm_row.get("strike") or 0)) == round(atm / 50) * 50
+        )
         for contract in atm_contracts:
             if not contract:
                 continue
@@ -322,6 +332,7 @@ class AIContextService:
             "quote_coverage_ratio": round(quote_coverage, 4),
             "selected_contract_count": len(contracts),
             "expected_contract_count": expected_contracts,
+            "missing_strike_levels": sorted(expected_levels - present_levels),
             "pcr_scope": f"ATM_PLUS_MINUS_{strike_window}_STRIKES",
             "atm_quote_valid": bool(atm_quote_valid),
             "atm_max_spread_pct": round(max(atm_spreads), 3) if len(atm_spreads) == 2 else None,
