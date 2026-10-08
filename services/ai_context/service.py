@@ -267,10 +267,43 @@ class AIContextService:
 
         filtered = dict(chain)
         filtered["strikes"] = strikes
+        # PCR is meaningful only for the advertised strike window. Capture
+        # quote coverage and exchange-observed time for that same exact window.
+        contracts = [
+            row[side]
+            for row in strikes
+            for side in ("call", "put")
+            if row.get(side)
+        ]
+        expected_contracts = len(strikes) * 2
+        market_times = [
+            self._parse_timestamp(contract.get("market_timestamp"))
+            for contract in contracts
+        ]
+        times_complete = bool(contracts) and all(t is not None for t in market_times)
         captured = self._parse_timestamp(
             chain.get("captured_at") or chain.get("timestamp")
         )
-        market_observed = self._parse_timestamp(chain.get("market_timestamp"))
+        market_observed = (
+            min(market_times) if times_complete else None
+        )
+        atm_row = (
+            min(strikes, key=lambda row: abs(float(row.get("strike") or 0) - atm))
+            if strikes else {}
+        )
+        atm_contracts = [atm_row.get(side) for side in ("call", "put")]
+        atm_spreads: list[float] = []
+        atm_quote_valid = len(atm_contracts) == 2 and all(atm_contracts)
+        for contract in atm_contracts:
+            if not contract:
+                continue
+            bid, ask = float(contract.get("bid") or 0), float(contract.get("ask") or 0)
+            if bid <= 0 or ask < bid:
+                atm_quote_valid = False
+                continue
+            atm_spreads.append((ask - bid) / ((ask + bid) / 2) * 100)
+        quote_coverage = (len(contracts) / expected_contracts) if expected_contracts else 0.0
+        market_age = self._age_seconds(market_observed)
         return {
             "available": True,
             "underlying": chain.get("underlying", underlying.upper()),
@@ -282,7 +315,14 @@ class AIContextService:
             "captured_at": captured.isoformat() if captured else None,
             "age_seconds": self._age_seconds(captured),
             "market_timestamp": market_observed.isoformat() if market_observed else None,
-            "market_data_age_seconds": self._age_seconds(market_observed),
+            "market_data_age_seconds": market_age,
+            "quote_timestamps_complete": times_complete,
+            "quote_coverage_ratio": round(quote_coverage, 4),
+            "selected_contract_count": len(contracts),
+            "expected_contract_count": expected_contracts,
+            "pcr_scope": f"ATM_PLUS_MINUS_{strike_window}_STRIKES",
+            "atm_quote_valid": bool(atm_quote_valid),
+            "atm_max_spread_pct": round(max(atm_spreads), 3) if len(atm_spreads) == 2 else None,
             "summary": summarize_option_chain(filtered),
             "strikes": strikes,
             "capabilities": chain.get("capabilities", {}),
