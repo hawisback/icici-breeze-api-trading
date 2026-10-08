@@ -10,20 +10,18 @@ from __future__ import annotations
 from datetime import date
 
 from pydantic import BaseModel, ConfigDict, Field
-from libs.contracts.models import UserPrincipal, UserRole
 from services.ai_context.trading import AITradeError
-from services.api_gateway.dependencies import require_roles
+from services.api_gateway.ai_local_access import require_local_ai_client
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from services.ai_context.service import AIContextService
 from services.api_gateway.service_container import get_services
-from services.api_gateway.dependencies import get_current_user
 
 router = APIRouter(
     prefix="/api/v1/ai",
     tags=["AI Market Context"],
-    dependencies=[Depends(get_current_user)],  # JWT or authorized loopback single-user mode
+    dependencies=[Depends(require_local_ai_client)],  # no token; local clients only
 )
 
 
@@ -108,7 +106,6 @@ class AISignalIntent(BaseModel):
 @router.post("/trades", status_code=201)
 async def submit_ai_trade(
     req: AISignalIntent,
-    _user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.TRADER)),
 ):
     """Submit an idempotent signal ID; backend decides execution and all exits."""
     try:
@@ -124,7 +121,6 @@ async def submit_ai_trade(
 @router.get("/trades")
 async def list_ai_trades(
     limit: int = Query(default=25, ge=1, le=100),
-    _user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.TRADER)),
 ):
     return await get_services().ai_trade_svc.list(limit=limit)
 
@@ -132,7 +128,6 @@ async def list_ai_trades(
 @router.get("/trades/{trade_id}")
 async def get_ai_trade(
     trade_id: str,
-    _user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.TRADER)),
 ):
     trade = await get_services().ai_trade_svc.get(trade_id)
     if trade is None:
