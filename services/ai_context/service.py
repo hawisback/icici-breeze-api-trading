@@ -492,6 +492,7 @@ class AIContextService:
         }
 
     async def get_snapshot(self) -> dict[str, Any]:
+        """One entry-context envelope with explicit fail-closed readiness evidence."""
         quote = self.market_svc.get_latest_quote("INST-NIFTY-INDEX")
         quote_source = str(getattr(quote, "source", "") or "").upper() if quote else None
         if quote and is_real_market_source(quote_source):
@@ -514,13 +515,82 @@ class AIContextService:
                 limit=200,
             )
 
-        options = await self.get_options(strike_window=5)
-        local_positions = await self.portfolio_svc.get_positions()
-        pnl = await self.portfolio_svc.get_pnl_summary()
+        # Match /nifty/options' default PCR scope, never calculate a second
+        # non-comparable PCR from a different strike window.
+        options = await self.get_options(strike_window=10)
         quality = await self.get_data_quality()
+        session = self._session_context(options.get("expiry"))
+        try:
+            account = await self.get_account_context()
+        except Exception as exc:
+            account = {
+                "entry_context_ready": False,
+                "entry_blockers": ["ACCOUNT_CONTEXT_UNAVAILABLE"],
+                "error_type": type(exc).__name__,
+                "local_portfolio": {"positions": [], "pnl": None},
+                "local_open_positions_count": None,
+                "broker_open_positions_count": None,
+            }
 
+        data_blockers: list[str] = []
+        if not session["regular_session"]:
+            data_blockers.append("OUTSIDE_REGULAR_SESSION")
+        if not quality["quote_ready"]:
+            data_blockers.append("QUOTE_OR_EXECUTION_FEED_UNHEALTHY")
+
+        # A crossover signal requires sufficient complete candles and prior
+        # histogram/RSI values, not just a valid latest scalar measurement.
+        for interval, max_age, required_bars in (
+            ("1m", 90.0, 40),
+            ("5m", 360.0, 50),
+        ):
+            result = technicals[interval]
+            metrics = result.get("metrics") or {}
+            age = result.get("age_seconds")
+            if (
+                not result.get("available")
+                or age is None or age < 0 or age > max_age
+                or metrics.get("data_points", 0) < required_bars
+                or (result.get("missing_recent_session_bars") or 0) > 0
+            ):
+                data_blockers.append(f"{interval.upper()}_CANDLE_DATA_NOT_READY")
+            if interval == "1m" and (
+                metrics.get("macd_histogram_prev") is None
+                or metrics.get("rsi_14_prev") is None
+            ):
+                data_blockers.append("MOMENTUM_HISTORY_NOT_READY")
+
+        option_age = options.get("market_data_age_seconds")
+        coverage = options.get("quote_coverage_ratio")
+        spread = options.get("atm_max_spread_pct")
+        if (
+            not options.get("available")
+            or not options.get("quote_timestamps_complete")
+            or option_age is None or option_age > 30.0
+            or coverage is None or coverage < 0.9
+            or not options.get("atm_quote_valid")
+            or spread is None or spread > 5.0
+            or (options.get("summary") or {}).get("pcr_oi") is None
+        ):
+            data_blockers.append("OPTION_CHAIN_NOT_ENTRY_READY")
+
+        # Future exchange time must not be considered fresh due to zero-clamp.
+        observed = self._parse_timestamp(options.get("market_timestamp"))
+        if observed is not None and (observed - utc_now()).total_seconds() > 1.0:
+            data_blockers.append("FUTURE_OPTION_EXCHANGE_TIMESTAMP")
+
+        account_blockers = list(account.get("entry_blockers") or [])
+        if not account.get("entry_context_ready"):
+            if not account_blockers:
+                account_blockers.append("ACCOUNT_CONTEXT_UNAVAILABLE")
+
+        blockers = list(dict.fromkeys([*data_blockers, *account_blockers]))
+        entry_data_ready = not data_blockers
+        quality["entry_data_ready"] = entry_data_ready
+        quality["entry_data_blockers"] = data_blockers
         return {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
+            "snapshot_id": generate_id(),
             "as_of": utc_now().isoformat(),
             "principle": "OBJECTIVE_DATA_ONLY_AI_INTERPRETS",
             "underlying": underlying,
@@ -531,23 +601,31 @@ class AIContextService:
                 "source": options.get("source"),
                 "expiry": options.get("expiry"),
                 "partial_quote_coverage": options.get("partial_quote_coverage"),
+                "quote_coverage_ratio": options.get("quote_coverage_ratio"),
+                "quote_timestamps_complete": options.get("quote_timestamps_complete"),
+                "atm_quote_valid": options.get("atm_quote_valid"),
+                "atm_max_spread_pct": options.get("atm_max_spread_pct"),
+                "pcr_scope": options.get("pcr_scope"),
                 "summary": options.get("summary"),
                 "captured_at": options.get("captured_at"),
                 "age_seconds": options.get("age_seconds"),
                 "market_timestamp": options.get("market_timestamp"),
                 "market_data_age_seconds": options.get("market_data_age_seconds"),
             },
-            "session": self._session_context(options.get("expiry")),
+            "session": session,
             "account": {
-                "open_positions_count": len(
-                    [p for p in local_positions if int(p.quantity) != 0]
-                ),
-                "positions": [
-                    p.model_dump(mode="json")
-                    for p in local_positions
-                    if int(p.quantity) != 0
-                ],
-                "pnl": pnl,
+                "open_positions_count": account.get("local_open_positions_count"),
+                "broker_open_positions_count": account.get("broker_open_positions_count"),
+                "pending_orders_count": (account.get("order_book") or {}).get("pending_count"),
+                "positions": (account.get("local_portfolio") or {}).get("positions", []),
+                "pnl": (account.get("local_portfolio") or {}).get("pnl"),
+                "entry_context_ready": account.get("entry_context_ready", False),
+                "entry_blockers": account_blockers,
             },
             "data_quality": quality,
+            "entry_data_ready": entry_data_ready,
+            "entry_context_ready": bool(account.get("entry_context_ready")),
+            "entry_permitted": not blockers,
+            "blocking_reasons": blockers,
+            "entry_execution_note": "Evidence only; execution engine must independently enforce live gates, reconciliation and protective orders.",
         }
