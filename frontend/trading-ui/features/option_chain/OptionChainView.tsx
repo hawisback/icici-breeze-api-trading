@@ -15,7 +15,8 @@ export function OptionChainView() {
   const { data: chain, isLoading } = useQuery({
     queryKey: ["option_chain", underlying, selectedExpiry],
     queryFn: () => fetchOptionChain(underlying, selectedExpiry),
-    refetchInterval: 10000,
+    staleTime: 10000,
+    refetchInterval: 15000, // Backend shares a 10s Kite chain cache across consumers.
   });
 
   const handleSelectOption = (
@@ -49,7 +50,7 @@ export function OptionChainView() {
               </span>
             ) : (
               <span className="px-1.5 py-0.2 rounded bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[9px]">
-                SYNTHETIC (OFFLINE)
+                {chain?.source === "UNAVAILABLE" ? "KITE UNAVAILABLE" : "OFFLINE DATA"}
               </span>
             )}
           </div>
