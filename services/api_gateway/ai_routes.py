@@ -139,10 +139,3 @@ async def get_ai_trade(
         raise HTTPException(status_code=404, detail="TRADE_NOT_FOUND")
     return trade
 
-
-@router.get("/operator/trade-config")
-async def get_ai_trade_operator_config(
-    _user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
-):
-    """Operator-only endpoint; AI trading credentials cannot inspect execution mode."""
-    return get_services().ai_trade_svc.operator_config()
