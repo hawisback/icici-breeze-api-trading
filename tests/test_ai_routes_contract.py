@@ -1,7 +1,8 @@
 from services.api_gateway.ai_routes import router
+from services.api_gateway.dependencies import get_current_user
 
 
-def test_ai_routes_are_read_only_and_expected():
+def test_ai_routes_are_read_only_except_authenticated_trade_intent():
     expected = {
         "/api/v1/ai/nifty/snapshot",
         "/api/v1/ai/nifty/candles",
@@ -9,9 +10,11 @@ def test_ai_routes_are_read_only_and_expected():
         "/api/v1/ai/nifty/options",
         "/api/v1/ai/account/context",
         "/api/v1/ai/data-quality",
+        "/api/v1/ai/trades",
+        "/api/v1/ai/trades/{trade_id}",
+        "/api/v1/ai/operator/trade-config",
     }
-    paths = {route.path for route in router.routes}
-    assert paths == expected
-
+    assert {route.path for route in router.routes} == expected
+    assert any(dependency.dependency is get_current_user for dependency in router.dependencies)
     for route in router.routes:
-        assert route.methods == {"GET"}
+        assert route.methods == ({"POST"} if route.path == "/api/v1/ai/trades" else {"GET"})
