@@ -444,12 +444,17 @@ class ZerodhaKiteAdapter(BrokerAdapter):
 
         strikes: dict[float, dict[str, Any]] = {}
         quoted_contracts = 0
+        observed_times: list[datetime] = []
         for row in nearby:
             symbol = str(row["tradingsymbol"])
             quote = quotes.get(f"NFO:{symbol}")
             # Kite omits instrument keys for which it has no market quote.
             # Do not present absent quotes as zero-price / zero-OI evidence.
-            if not isinstance(quote, dict) or not quote:
+            if (
+                not isinstance(quote, dict)
+                or not quote
+                or float(quote.get("last_price") or 0) <= 0
+            ):
                 continue
             quoted_contracts += 1
             strike = float(row["strike"])
@@ -460,6 +465,8 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             quote_time = _parse_exchange_quote_datetime(
                 quote.get("timestamp") or quote.get("last_trade_time")
             )
+            if quote_time is not None:
+                observed_times.append(quote_time)
             last_price = float(quote.get("last_price") or 0)
             previous_close = float((quote.get("ohlc") or {}).get("close") or 0)
             item = {
@@ -495,6 +502,12 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             "requested_contract_count": len(nearby),
             "quoted_contract_count": quoted_contracts,
             "partial_quote_coverage": quoted_contracts < len(nearby),
+            # A conservative earliest quote timestamp, if every contract has
+            # one; retrieval time alone is not proof of live quote freshness.
+            "market_timestamp": (
+                min(observed_times).isoformat()
+                if len(observed_times) == quoted_contracts else None
+            ),
             "strikes": [strikes[key] for key in sorted(strikes)],
         }
 
