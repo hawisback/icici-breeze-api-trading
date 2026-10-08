@@ -74,8 +74,9 @@ async def test_futures_vwap_refuses_gapped_session_without_guessing(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_ai_technicals_labels_futures_basis_not_index_vwap():
+async def test_ai_technicals_labels_futures_basis_not_index_vwap(monkeypatch):
     at = datetime(2026, 10, 9, 10, 5, tzinfo=IST).astimezone(timezone.utc)
+    monkeypatch.setattr("services.ai_context.service.utc_now", lambda: at + timedelta(minutes=1))
 
     class Historical:
         async def get_candles(self, **kwargs):
