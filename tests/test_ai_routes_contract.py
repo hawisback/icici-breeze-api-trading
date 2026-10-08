@@ -1,8 +1,8 @@
 from services.api_gateway.ai_routes import router
-from services.api_gateway.dependencies import get_current_user
+from services.api_gateway.ai_local_access import require_local_ai_client
 
 
-def test_ai_routes_are_read_only_except_authenticated_trade_intent():
+def test_ai_routes_are_locally_accessible_without_tokens_except_trade_intent():
     expected = {
         "/api/v1/ai/nifty/snapshot",
         "/api/v1/ai/nifty/candles",
@@ -14,7 +14,7 @@ def test_ai_routes_are_read_only_except_authenticated_trade_intent():
         "/api/v1/ai/trades/{trade_id}",
     }
     assert {route.path for route in router.routes} == expected
-    assert any(dependency.dependency is get_current_user for dependency in router.dependencies)
+    assert any(dependency.dependency is require_local_ai_client for dependency in router.dependencies)
     for route in router.routes:
         assert route.methods in ({"GET"}, {"POST"})
         if route.methods == {"POST"}:
