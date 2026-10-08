@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import services.api_gateway.ai_routes as ai_routes
+import services.api_gateway.service_container as container_module
 from libs.config.settings import PlatformSettings
 from services.api_gateway.service_container import initialize_services
 
@@ -39,6 +40,9 @@ async def test_ai_only_mode_starts_stop_manager_but_not_legacy_pollers(tmp_path)
         await services.risk_svc.stop()
         await services.oms_svc.stop_outbox_worker()
         await services.event_bus.stop()
+        # Prevent leaking this AI-only test container into subsequent gateway
+        # tests that intentionally initialize the default full platform.
+        container_module._container = None
 
 
 @pytest.mark.asyncio
