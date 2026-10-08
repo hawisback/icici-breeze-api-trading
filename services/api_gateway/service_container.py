@@ -179,7 +179,8 @@ async def initialize_services(
 
     market_svc = MarketDataService(event_bus=bus, broker_gateway=gateway_svc)
     await market_svc.initialize()
-    await market_svc.start_feed_loop(interval_sec=2.5)
+    if not app_settings.ai_only_mode:
+        await market_svc.start_feed_loop(interval_sec=2.5)
 
     historical_repo = HistoricalRepository(db_path=app_settings.historical_db_path)
     historical_svc = HistoricalService(repository=historical_repo, broker_gateway=gateway_svc, instrument_service=instrument_svc)
@@ -194,7 +195,8 @@ async def initialize_services(
     oms_repo = OMSRepository(db_path=app_settings.oms_db_path)
     oms_svc = OMSService(repository=oms_repo, event_bus=bus)
     await oms_svc.initialize()
-    await oms_svc.start_outbox_worker(poll_interval_sec=0.2)
+    if not app_settings.ai_only_mode:
+        await oms_svc.start_outbox_worker(poll_interval_sec=0.2)
 
     live_gate = LiveTradingGate(settings=app_settings, event_bus=bus)
 
@@ -227,7 +229,10 @@ async def initialize_services(
             app_settings.live_market_data_max_age_seconds
         ),
     )
-    await risk_svc.initialize()
+    if app_settings.ai_only_mode:
+        await risk_svc.repo.initialize()  # read-only diagnostics; no risk outbox worker
+    else:
+        await risk_svc.initialize()
 
     exec_svc = ExecutionService(
         broker_gateway=gateway_svc,
@@ -242,7 +247,8 @@ async def initialize_services(
             app_settings.live_market_data_max_age_seconds
         ),
     )
-    await exec_svc.initialize()
+    if not app_settings.ai_only_mode:
+        await exec_svc.initialize()  # skip historical OMS submission recovery and broker polling
 
     strategy_repo = StrategyRepository(
         db_path=app_settings.strategy_db_path,
@@ -256,17 +262,17 @@ async def initialize_services(
         market_data_service=market_svc,
         historical_service=historical_svc,
     )
-    await strategy_svc.initialize()
+    await strategy_svc.initialize(start_scheduler=not app_settings.ai_only_mode)
 
     # Startup reconciliation never grants authority. It only compares durable
     # local LIVE state with broker truth and, on verified inconsistencies,
     # blocks new entries until an operator resolves them.
-    startup_orders = await oms_svc.list_orders(limit=500)
+    startup_orders = await oms_svc.list_orders(limit=500) if not app_settings.ai_only_mode else []
     startup_broker_positions = []
     startup_broker_verified = False
     startup_broker_error = None
     startup_session = await session_svc.get_session_status()
-    if startup_session.get("connected"):
+    if startup_session.get("connected") and not app_settings.ai_only_mode:
         try:
             startup_broker_positions = await gateway_svc.get_positions(
                 mode=TradingMode.LIVE
@@ -290,7 +296,8 @@ async def initialize_services(
         )
     )
     if (
-        app_settings.live_trading_enabled
+        not app_settings.ai_only_mode
+        and app_settings.live_trading_enabled
         and startup_broker_verified
         and startup_reconciliation.get("issues")
     ):
