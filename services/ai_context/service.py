@@ -343,6 +343,7 @@ class AIContextService:
             "available": True,
             "underlying": chain.get("underlying", underlying.upper()),
             "source": source,
+            "oi_change_basis": chain.get("oi_change_basis", "UNAVAILABLE"),
             "expiry": chain.get("expiry"),
             "available_expiries": chain.get("available_expiries", []),
             "spot_price": chain.get("spot_price"),
@@ -367,6 +368,20 @@ class AIContextService:
             "partial_quote_coverage": chain.get("partial_quote_coverage"),
             "generated_at": utc_now().isoformat(),
         }
+
+    async def get_heavyweights(self) -> dict[str, Any]:
+        """Read five equity quotes in one Kite batch; no directional scoring."""
+        kite = getattr(self.gateway_svc, "kite_adapter", None)
+        fetch = getattr(kite, "get_heavyweights_quotes", None)
+        if not kite or not getattr(kite, "is_active", False) or not callable(fetch):
+            return {"available": False, "source": "UNAVAILABLE",
+                    "reason": "KITE_SESSION_UNAVAILABLE", "stocks": []}
+        try:
+            return await fetch()
+        except Exception as exc:
+            return {"available": False, "source": "UNAVAILABLE",
+                    "reason": "KITE_HEAVYWEIGHTS_FETCH_FAILED",
+                    "error_type": type(exc).__name__, "stocks": []}
 
     async def get_account_context(self) -> dict[str, Any]:
         """Read-only portfolio evidence; never equate local flat with broker flat."""
