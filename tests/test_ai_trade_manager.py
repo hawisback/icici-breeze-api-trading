@@ -242,3 +242,73 @@ def test_both_deployment_templates_enable_paper_and_not_live():
         content = (root / env_name).read_text(encoding="utf-8")
         assert "AI_TRADE_ENABLED=true" in content
         assert "AI_TRADE_MODE=PAPER" in content
+
+
+@pytest.mark.asyncio
+async def test_ai_paper_uses_targeted_single_kite_contract_quote_and_tracks_last_bid(tmp_path):
+    class SingleKite:
+        def __init__(self):
+            self.calls = []
+            self.bid = 99.0
+
+        async def get_contract_quote(self, instrument_id):
+            from libs.contracts.models import utc_now
+            self.calls.append(instrument_id)
+            return {
+                "source": "KITE", "expiry": "2026-10-13",
+                "instrument_id": instrument_id, "symbol": "NIFTY26O1322500CE",
+                "bid": self.bid, "ask": self.bid + 1, "lot_size": 65,
+                "market_timestamp": utc_now().isoformat(),
+            }
+
+        async def get_chain(self, **kwargs):
+            raise AssertionError("Trailing PAPER stop must not fetch entire option chain")
+
+    chain = SingleKite()
+    manager = service(tmp_path / "ai.db", chain=chain)
+    await manager.initialize()
+    trade = await manager.submit(signal_id="signal-one-leg-01", instrument_id=INSTRUMENT, quantity=65)
+    assert trade["last_bid"] == 99
+    assert trade["unrealized_pnl"] == -65.0
+    chain.bid = 105.5
+    await manager.poll_once()
+    updated = await manager.get(trade["trade_id"])
+    assert updated["trailing_active"] is True
+    assert updated["last_bid"] == 105.5
+    assert updated["unrealized_pnl"] == 357.5
+    assert len(chain.calls) == 2
+    chain.bid = 101.0
+    await manager.poll_once()
+    closed = await manager.get(trade["trade_id"])
+    assert closed["status"] == "CLOSED"
+    assert closed["exit_reason"] == "TRAILING_STOP"
+    assert closed["unrealized_pnl"] is None
+    assert closed["pnl"] == 65.0
+
+
+@pytest.mark.asyncio
+async def test_old_ai_journal_is_migrated_for_last_bid(tmp_path):
+    import aiosqlite
+    path = tmp_path / "old.db"
+    # Simulate an older persistent PAPER journal containing the prior table schema.
+    async with aiosqlite.connect(path) as db:
+        await db.execute("""
+            CREATE TABLE ai_paper_trades (
+                trade_id TEXT PRIMARY KEY, signal_id TEXT NOT NULL,
+                instrument_id TEXT NOT NULL, symbol TEXT NOT NULL, expiry TEXT NOT NULL,
+                quantity INTEGER NOT NULL, entry_price REAL NOT NULL, entry_bid REAL NOT NULL,
+                initial_stop REAL NOT NULL, current_stop REAL NOT NULL,
+                target_price REAL NOT NULL, peak_bid REAL NOT NULL,
+                trailing_active INTEGER DEFAULT 0, status TEXT NOT NULL,
+                entry_time TEXT NOT NULL, last_quote_at TEXT NOT NULL,
+                last_checked_at TEXT, data_status TEXT DEFAULT 'VALID',
+                exit_time TEXT, exit_price REAL, exit_reason TEXT, pnl REAL,
+                policy_json TEXT NOT NULL
+            )
+        """)
+        await db.commit()
+    manager = service(path)
+    await manager.initialize()
+    async with aiosqlite.connect(path) as db:
+        columns = [row[1] for row in await (await db.execute("PRAGMA table_info(ai_paper_trades)")).fetchall()]
+        assert "last_bid" in columns
