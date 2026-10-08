@@ -154,7 +154,8 @@ async def initialize_services(
             logger.warning("Startup Kite auto-activation deferred: %s", exc)
 
     if (
-        app_settings.breeze_api_key
+        not app_settings.ai_only_mode
+        and app_settings.breeze_api_key
         and app_settings.breeze_secret_key
         and app_settings.breeze_session_token
     ):
