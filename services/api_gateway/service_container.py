@@ -28,6 +28,7 @@ from services.market_data.service import MarketDataService
 from services.oms.repository import OMSRepository
 from services.oms.service import OMSService
 from services.option_chain.service import OptionChainService
+from services.option_chain.oi_baselines import KiteSessionOIBaselines
 from services.portfolio.repository import PortfolioRepository
 from services.portfolio.service import PortfolioService
 from services.risk.live_gate import LiveTradingGate
@@ -197,6 +198,9 @@ async def initialize_services(
         instrument_service=instrument_svc,
         market_data_service=market_svc,
         broker_gateway=gateway_svc,
+        oi_baselines=KiteSessionOIBaselines(
+            app_settings.ai_trade_db_path.parent / "kite_session_oi.db"
+        ),
     )
 
     oms_repo = OMSRepository(db_path=app_settings.oms_db_path)

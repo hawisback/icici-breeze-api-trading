@@ -7,6 +7,7 @@ run in a worker thread and never blocks the asyncio event loop.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 import logging
 import re
@@ -52,6 +53,8 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         self._nse_instruments: Optional[list[dict[str, Any]]] = None
         self._nfo_instruments: Optional[list[dict[str, Any]]] = None
         self._market_quote_getter = None
+        self._heavyweights_cache: tuple[float, dict[str, Any]] | None = None
+        self._heavyweights_lock = asyncio.Lock()
         self.request_timeout_sec = request_timeout_sec
 
     def set_market_quote_getter(self, getter: Any) -> None:
@@ -96,6 +99,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             self._kite.set_access_token(access_token)
             self._nse_instruments = None
             self._nfo_instruments = None
+            self._heavyweights_cache = None
             logger.info("Kite session successfully activated for account %s", self.api_key[:8])
             return True
         except Exception as exc:
@@ -118,6 +122,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             self._access_token = token
             self._nse_instruments = None
             self._nfo_instruments = None
+            self._heavyweights_cache = None
             await self._run(self._kite.profile)
             return True
         except Exception as exc:
@@ -130,6 +135,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         self._kite = None
         self._nse_instruments = None
         self._nfo_instruments = None
+        self._heavyweights_cache = None
 
     async def resolve_nearest_future(self, underlying: str = "NIFTY") -> Optional[dict[str, object]]:
         if not self.is_active:
@@ -351,6 +357,58 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             for row in rows
         ]
 
+    async def get_heavyweights_quotes(self) -> dict[str, Any]:
+        """One batched Kite read of five specified NIFTY constituent equities.
+
+        Market evidence only, not a claim that these are the current five
+        largest weights or that their move proves a directional market signal.
+        """
+        symbols = ("HDFCBANK", "RELIANCE", "ICICIBANK", "INFY", "TCS")
+        if not self.is_active:
+            return {"available": False, "source": "UNAVAILABLE",
+                    "reason": "KITE_SESSION_UNAVAILABLE", "stocks": []}
+        cached = self._heavyweights_cache
+        if cached and monotonic() - cached[0] < 15.0:
+            return deepcopy(cached[1])
+        async with self._heavyweights_lock:
+            cached = self._heavyweights_cache
+            if cached and monotonic() - cached[0] < 15.0:
+                return deepcopy(cached[1])
+            keys = [f"NSE:{symbol}" for symbol in symbols]
+            raw = await self._run_quote(lambda: self._kite.quote(keys))
+            stocks: list[dict[str, Any]] = []
+            for symbol in symbols:
+                quote = raw.get(f"NSE:{symbol}") if isinstance(raw, dict) else None
+                if not isinstance(quote, dict):
+                    continue
+                value = float(quote.get("last_price") or 0)
+                timestamp = _parse_exchange_quote_datetime(
+                    quote.get("timestamp") or quote.get("last_trade_time")
+                )
+                if value <= 0 or timestamp is None:
+                    continue
+                previous_close = float((quote.get("ohlc") or {}).get("close") or 0)
+                stocks.append({
+                    "symbol": symbol, "last_price": value,
+                    "change_pct": (
+                        round((value - previous_close) / previous_close * 100, 4)
+                        if previous_close > 0 else None
+                    ),
+                    "market_timestamp": timestamp.isoformat(),
+                    "age_seconds": round(max(0.0, (utc_now() - timestamp).total_seconds()), 3),
+                    "source": "KITE",
+                })
+            response = {
+                "available": bool(stocks), "source": "KITE",
+                "stocks": stocks, "requested_symbols": list(symbols),
+                "missing_symbols": [s for s in symbols if s not in {x["symbol"] for x in stocks}],
+                "captured_at": utc_now().isoformat(),
+                "reason": None if stocks else "NO_VALID_KITE_EQUITY_QUOTES",
+            }
+            if stocks:
+                self._heavyweights_cache = (monotonic(), response)
+            return deepcopy(response)
+
     async def get_index_quotes(self) -> list[Quote]:
         """Return the two index quotes used by the current market-data service."""
         if not self.is_active:
@@ -502,7 +560,9 @@ class ZerodhaKiteAdapter(BrokerAdapter):
                     (last_price - previous_close) / previous_close * 100, 4
                 ) if previous_close > 0 else None,
                 "volume": int(quote.get("volume") or 0),
-                "open_interest": int(quote.get("oi") or 0),
+                "open_interest": (
+                    int(quote["oi"]) if quote.get("oi") is not None else None
+                ),
                 # Kite full quotes do not provide change in OI directly.
                 "oi_change": None,
                 "bid": float((buy_depth[0] if buy_depth else {}).get("price") or 0),

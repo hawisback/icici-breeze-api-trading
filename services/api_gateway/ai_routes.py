@@ -107,6 +107,12 @@ async def get_nifty_ai_options(
     )
 
 
+@router.get("/heavyweights")
+async def get_ai_heavyweights():
+    """One cached, timestamped batch of five NSE equities via Kite."""
+    return await _context_service().get_heavyweights()
+
+
 @router.get("/account/context")
 async def get_ai_account_context():
     """Portfolio, live broker account and safety state for AI risk awareness."""

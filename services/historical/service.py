@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time
+import asyncio
 import logging
 import math
 from time import monotonic
@@ -29,10 +30,98 @@ class HistoricalService:
         self.broker_gateway = broker_gateway
         self.instrument_service = instrument_service
         self._provider_retry_after: dict[tuple[str, str, str], float] = {}
+        self._futures_vwap_cache: tuple[float, dict[str, Any]] | None = None
+        self._futures_vwap_lock = asyncio.Lock()
 
     def set_broker_gateway(self, broker_gateway: Any) -> None:
         """Inject broker gateway for live candle retrieval."""
         self.broker_gateway = broker_gateway
+        self._futures_vwap_cache = None
+
+    async def get_nifty_futures_session_vwap(self) -> dict[str, Any]:
+        """09:15-onward traded-volume VWAP from the nearest listed Kite future.
+
+        Index OHLCV is not valid VWAP input: NIFTY 50 itself is not traded.
+        Fetch one bounded five-minute Kite candle window per minute (not one
+        request for each AI technical timeframe). A missing bar, a partial
+        session, or nonpositive volume returns unavailable, never an estimate.
+        """
+        now = utc_now()
+        local = now.astimezone(IST)
+        unavailable = {"available": False, "source": "KITE", "basis": "NIFTY_FUTURES",
+                       "value": None, "reason": "FUTURES_SESSION_VWAP_UNAVAILABLE"}
+        if local.weekday() >= 5 or not (time(9, 20) <= local.time() <= time(15, 30)):
+            return {**unavailable, "reason": "OUTSIDE_FUTURES_SESSION"}
+        cached = self._futures_vwap_cache
+        if cached and monotonic() - cached[0] < (55 if cached[1].get("available") else 10):
+            return dict(cached[1])
+        async with self._futures_vwap_lock:
+            cached = self._futures_vwap_cache
+            if cached and monotonic() - cached[0] < (55 if cached[1].get("available") else 10):
+                return dict(cached[1])
+            result = dict(unavailable)
+            try:
+                kite = getattr(self.broker_gateway, "kite_adapter", None)
+                if not kite or not getattr(kite, "is_active", False):
+                    result["reason"] = "KITE_SESSION_UNAVAILABLE"
+                else:
+                    future = await kite.resolve_nearest_future("NIFTY")
+                    if not future or not future.get("expiry"):
+                        result["reason"] = "NIFTY_FUTURE_NOT_LISTED"
+                    else:
+                        contract_id = f"INST-NIFTY-FUT-{future['expiry']}"
+                        start = datetime.combine(local.date(), time(9, 15), tzinfo=IST)
+                        end = self._expected_completed_end("5m", now)
+                        if not end or end <= start.astimezone(timezone.utc):
+                            result["reason"] = "NO_COMPLETED_SESSION_BARS"
+                        else:
+                            bars = await kite.fetch_historical_candles_window(
+                                instrument_id=contract_id, interval="5m",
+                                start_time=start.astimezone(timezone.utc), end_time=end,
+                            )
+                            bars = sorted(
+                                (b for b in bars if b.source == "KITE" and b.interval == "5m"
+                                 and b.start_time >= start.astimezone(timezone.utc)
+                                 and b.end_time <= end), key=lambda b: b.start_time
+                            )
+                            # Require every completed 5m session candle, including 09:15.
+                            expected = start.astimezone(timezone.utc)
+                            valid = bool(bars) and bars[0].start_time == expected
+                            numerator, total_volume = 0.0, 0
+                            for bar in bars:
+                                if (
+                                    bar.start_time != expected
+                                    or (bar.end_time - bar.start_time).total_seconds() != 300
+                                    or bar.low <= 0 or bar.low > min(bar.open, bar.close)
+                                    or max(bar.open, bar.close) > bar.high
+                                    or bar.volume < 0
+                                ):
+                                    valid = False
+                                    break
+                                numerator += ((bar.high + bar.low + bar.close) / 3) * bar.volume
+                                total_volume += bar.volume
+                                expected = bar.end_time
+                            if expected != end or total_volume <= 0:
+                                valid = False
+                            if valid:
+                                result = {
+                                    "available": True, "source": "KITE",
+                                    "basis": "NIFTY_FUTURES", "value": round(numerator / total_volume, 6),
+                                    "instrument_id": contract_id, "expiry": future["expiry"],
+                                    "session_start": start.isoformat(),
+                                    "data_through": end.isoformat(),
+                                    "candle_interval": "5m",
+                                    "candle_count": len(bars),
+                                    "volume": total_volume,
+                                }
+                            else:
+                                result["reason"] = "INCOMPLETE_FUTURES_SESSION_CANDLES"
+            except Exception as exc:
+                logger.warning("Kite futures VWAP source failed: %s", type(exc).__name__)
+                result["reason"] = "FUTURES_SESSION_FETCH_FAILED"
+            self._futures_vwap_cache = (monotonic(), result)
+            return dict(result)
+
 
     async def initialize(self) -> None:
         await self.repo.initialize()

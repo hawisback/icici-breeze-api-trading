@@ -21,7 +21,8 @@ substituting simulated evidence.
 - GET /api/v1/ai/nifty/snapshot — compact starting packet for each AI cycle.
 - GET /api/v1/ai/nifty/candles — 1m, 5m or 15m completed real-market candles.
 - GET /api/v1/ai/nifty/technicals — objective RSI/MACD/EMA/ATR/VWAP measurements.
-- GET /api/v1/ai/nifty/options — ATM-centered option chain plus numeric aggregates.
+- GET /api/v1/ai/nifty/options — ATM-centered Kite option chain, session OI change and numeric aggregates.
+- GET /api/v1/ai/heavyweights — one batched Kite NSE quote for HDFCBANK, RELIANCE, ICICIBANK, INFY and TCS.
 - GET /api/v1/ai/account/context — portfolio, live broker account and safety state.
 - GET /api/v1/ai/data-quality — feed, broker-session and quote freshness metadata.
 - POST /api/v1/ai/trades — independent, mode-neutral AI PAPER trade intent.
@@ -81,12 +82,9 @@ not provided for all returned contracts: retrieval time **does not** establish
 market freshness. `partial_quote_coverage` indicates when some requested
 contracts had no usable quotes. Missing individual contracts are omitted, not
 zero-filled. Kite quote data does not provide an authoritative OI change, so
-`oi_change` and aggregate `call_oi_change`/`put_oi_change` are `null`, not 0.
+the AI API persists the first **fresh, exchange-timestamped** OI observation for each contract per IST trading session in `data/kite_session_oi.db`. `oi_change` is the current OI minus that first observed OI, **not** a previous-close comparison. On the first observation, missing timestamps, stale quotes, an out-of-session observation or a database error, the value remains `null`, not zero. Each leg carries `oi_change_basis=FIRST_OBSERVED_SESSION` and `oi_baseline_at`; the response advertises its basis. Comparison baselines survive direct-Uvicorn restarts. `pcr_oi` is also `null` when Kite omits an OI observation, rather than silently treating missing OI as zero.
 
-The technicals endpoint keeps the existing `vwap` calculated over requested
-candles (explicit `vwap_scope=requested_candles`) and additionally returns
-`session_vwap` for the last candle's IST trading session, when traded volume
-is available. The `regular_session` flag checks weekdays and clock time,
+The technicals endpoint retains historical `vwap` computed from the requested candles, but **never** interprets the NIFTY 50 index itself as a traded-volume series. For NIFTY index technicals, `metrics.session_vwap` now uses the nearest listed **Kite NIFTY future**, explicitly labelled by `metrics.session_vwap_basis=NIFTY_FUTURES`, `session_vwap_instrument_id`, and `session_vwap_data_through`. It fetches complete 5-minute futures bars starting at 09:15 IST, enforces exact contiguous coverage and positive actual volume, and caches the result for 55 seconds shared across 1m/5m/15m AI requests. If the source is unavailable, early-session, stale or has a missing bar, the value is `null` with `session_vwap_reason`. Futures VWAP is **not** the NIFTY spot index level; the basis distinction is economically important. The `regular_session` flag checks weekdays and clock time,
 but does not yet implement the full NSE holiday/special-session calendar.
 
 None of the read-only market-data response fields is a recommendation,
@@ -107,11 +105,21 @@ need separate execution risk validation before it is enabled.
   index quote no older than 6 seconds, the option-chain adapter reuses it
   for ATM discovery rather than making an additional Kite index-LTP call.
   Missing, stale or Breeze/synthetic ticks trigger the real Kite-LTP fetch.
-- The browser option-chain display refreshes every 15 seconds rather than
-  10 seconds; prefer one /nifty/snapshot per AI decision cycle, drill down
-  into /nifty/options or other views only when needed. Avoid repeatedly
-  calling all APIs during a single scan.
+- The current AI-only dashboard calls only the AI snapshot and AI trade journal. Prefer one /nifty/snapshot per AI decision cycle; drill down into /nifty/options, /nifty/technicals and /heavyweights only when needed. Avoid repeatedly calling all APIs during a scan. Heavyweights quote retrieval sends **one** batch of five NSE instruments and caches the complete result for 15 seconds.
 - Repeated API responses may contain the same quotes within a cache window;
   use **market_timestamp** / exchange observation age, never just captured_at,
   when considering a simulated trade. The PAPER manager continues to reject
   stale, missing, invalid or too-wide quotes.
+
+## Direct Uvicorn smoke checks (local workstation)
+
+Run `python run_platform.py` or `uvicorn services.api_gateway.main:app --host 127.0.0.1 --port 8000` after configuring the daily Kite session. No Docker or AI login is required.
+
+```bash
+curl http://127.0.0.1:8000/api/v1/ai/nifty/technicals?interval=5m\&limit=200
+curl 'http://127.0.0.1:8000/api/v1/ai/nifty/options?strike_window=10'
+curl http://127.0.0.1:8000/api/v1/ai/heavyweights
+curl 'http://127.0.0.1:8000/api/v1/ai/nifty/candles?interval=15m\&limit=20'
+```
+
+Session OI deltas need two distinct, fresh exchange observations of the same strike/expiry; the first establishes the session baseline. They do not become previous-close OI changes. The OI baseline SQLite file is **not** the legacy OMS PAPER order book and must not be reset alongside it. These features provide raw measurements; the external AI alone classifies traps or trade entries. Kite session activation and broker-real data must be verified on the local running instance.

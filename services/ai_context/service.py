@@ -200,6 +200,27 @@ class AIContextService:
             }
         ordered = sorted(real, key=lambda candle: candle.end_time)
         latest = ordered[-1]
+        metrics = compute_technicals(ordered)
+        if instrument_id == "INST-NIFTY-INDEX":
+            # NIFTY is an index, not a traded volume series: never label its
+            # zero/estimated volume as genuine session VWAP. A nearest-Kite-
+            # futures VWAP is provided separately and clearly attributed.
+            metrics["session_vwap"] = None
+            metrics["session_vwap_basis"] = "NIFTY_FUTURES"
+            metrics["session_vwap_instrument_id"] = None
+            metrics["session_vwap_data_through"] = None
+            metrics["session_vwap_reason"] = "FUTURES_SESSION_VWAP_UNAVAILABLE"
+            getter = getattr(self.historical_svc, "get_nifty_futures_session_vwap", None)
+            if callable(getter):
+                try:
+                    future_vwap = await getter()
+                    metrics["session_vwap"] = future_vwap.get("value") if future_vwap.get("available") else None
+                    metrics["session_vwap_instrument_id"] = future_vwap.get("instrument_id")
+                    metrics["session_vwap_data_through"] = future_vwap.get("data_through")
+                    metrics["session_vwap_reason"] = future_vwap.get("reason")
+                    metrics["session_vwap_candle_count"] = future_vwap.get("candle_count")
+                except Exception as exc:
+                    metrics["session_vwap_reason"] = "FUTURES_SESSION_FETCH_FAILED"
         return {
             "available": True,
             "instrument_id": instrument_id,
@@ -208,7 +229,7 @@ class AIContextService:
             "age_seconds": self._age_seconds(latest.end_time),
             "sources": sorted({str(c.source).upper() for c in ordered}),
             "missing_recent_session_bars": self._recent_session_missing_bars(ordered),
-            "metrics": compute_technicals(ordered),
+            "metrics": metrics,
             "calculated_at": utc_now().isoformat(),
         }
 
@@ -322,6 +343,7 @@ class AIContextService:
             "available": True,
             "underlying": chain.get("underlying", underlying.upper()),
             "source": source,
+            "oi_change_basis": chain.get("oi_change_basis", "UNAVAILABLE"),
             "expiry": chain.get("expiry"),
             "available_expiries": chain.get("available_expiries", []),
             "spot_price": chain.get("spot_price"),
@@ -346,6 +368,20 @@ class AIContextService:
             "partial_quote_coverage": chain.get("partial_quote_coverage"),
             "generated_at": utc_now().isoformat(),
         }
+
+    async def get_heavyweights(self) -> dict[str, Any]:
+        """Read five equity quotes in one Kite batch; no directional scoring."""
+        kite = getattr(self.gateway_svc, "kite_adapter", None)
+        fetch = getattr(kite, "get_heavyweights_quotes", None)
+        if not kite or not getattr(kite, "is_active", False) or not callable(fetch):
+            return {"available": False, "source": "UNAVAILABLE",
+                    "reason": "KITE_SESSION_UNAVAILABLE", "stocks": []}
+        try:
+            return await fetch()
+        except Exception as exc:
+            return {"available": False, "source": "UNAVAILABLE",
+                    "reason": "KITE_HEAVYWEIGHTS_FETCH_FAILED",
+                    "error_type": type(exc).__name__, "stocks": []}
 
     async def get_account_context(self) -> dict[str, Any]:
         """Read-only portfolio evidence; never equate local flat with broker flat."""

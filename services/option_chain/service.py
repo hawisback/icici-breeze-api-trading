@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 import logging
 from time import monotonic
 from typing import Any, Optional
+from services.option_chain.oi_baselines import KiteSessionOIBaselines
 import asyncio
 
 from libs.contracts.models import OptionRight
@@ -26,10 +27,12 @@ class OptionChainService:
         instrument_service: InstrumentService,
         market_data_service: MarketDataService,
         broker_gateway: Optional[Any] = None,
+        oi_baselines: KiteSessionOIBaselines | None = None,
     ) -> None:
         self.inst_svc = instrument_service
         self.mkt_svc = market_data_service
         self.broker_gateway = broker_gateway
+        self.oi_baselines = oi_baselines
         # Share one bounded Kite chain across AI, UI, strategy and PAPER worker.
         # Keep exchange timestamps unchanged: retrieval time is NOT quote freshness.
         self._kite_chain_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
@@ -375,6 +378,9 @@ class OptionChainService:
                                 expiry=selected_expiry,
                             )
                             if kite_chain.get("strikes"):
+                                if self.oi_baselines:
+                                    await self.oi_baselines.enrich(kite_chain)
+                                kite_chain["oi_change_basis"] = "FIRST_OBSERVED_SESSION" if self.oi_baselines else "UNAVAILABLE"
                                 kite_chain["available_expiries"] = all_expiries or kite_chain.get("available_expiries", [])
                                 captured_at = datetime.now(timezone.utc).isoformat()
                                 kite_chain["captured_at"] = captured_at
