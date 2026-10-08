@@ -1,4 +1,4 @@
-"""Read-only AI-facing market context endpoints.
+"""AI-facing read-only context and controlled trade-intent endpoints.
 
 These endpoints expose evidence and objective calculations. They intentionally do
 not emit trading recommendations, directional labels, setup scores, confidence
@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, ConfigDict, Field
+from libs.contracts.models import UserPrincipal, UserRole
+from services.ai_context.trading import AITradeError
+from services.api_gateway.dependencies import require_roles
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from services.ai_context.service import AIContextService
 from services.api_gateway.service_container import get_services
@@ -89,3 +94,55 @@ async def get_ai_account_context():
 async def get_ai_data_quality():
     """Explicit exchange and execution-feed freshness for AI gating."""
     return await _context_service().get_data_quality()
+
+
+class AISignalIntent(BaseModel):
+    """Trading mode, prices, and risk policy are deliberately not caller inputs."""
+
+    model_config = ConfigDict(extra="forbid")
+    signal_id: str = Field(min_length=8, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    instrument_id: str = Field(min_length=12, max_length=140)
+    quantity: int = Field(gt=0, le=1800)
+
+
+@router.post("/trades", status_code=201)
+async def submit_ai_trade(
+    req: AISignalIntent,
+    _user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.TRADER)),
+):
+    """Submit an idempotent signal ID; backend decides execution and all exits."""
+    try:
+        return await get_services().ai_trade_svc.submit(
+            signal_id=req.signal_id,
+            instrument_id=req.instrument_id,
+            quantity=req.quantity,
+        )
+    except AITradeError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.code) from exc
+
+
+@router.get("/trades")
+async def list_ai_trades(
+    limit: int = Query(default=25, ge=1, le=100),
+    _user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.TRADER)),
+):
+    return await get_services().ai_trade_svc.list(limit=limit)
+
+
+@router.get("/trades/{trade_id}")
+async def get_ai_trade(
+    trade_id: str,
+    _user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.TRADER)),
+):
+    trade = await get_services().ai_trade_svc.get(trade_id)
+    if trade is None:
+        raise HTTPException(status_code=404, detail="TRADE_NOT_FOUND")
+    return trade
+
+
+@router.get("/operator/trade-config")
+async def get_ai_trade_operator_config(
+    _user: UserPrincipal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+):
+    """Operator-only endpoint; AI trading credentials cannot inspect execution mode."""
+    return get_services().ai_trade_svc.operator_config()
