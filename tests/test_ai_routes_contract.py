@@ -16,4 +16,7 @@ def test_ai_routes_are_read_only_except_authenticated_trade_intent():
     assert {route.path for route in router.routes} == expected
     assert any(dependency.dependency is get_current_user for dependency in router.dependencies)
     for route in router.routes:
-        assert route.methods == ({"POST"} if route.path == "/api/v1/ai/trades" else {"GET"})
+        assert route.methods in ({"GET"}, {"POST"})
+        if route.methods == {"POST"}:
+            assert route.path == "/api/v1/ai/trades"
+    assert len([r for r in router.routes if r.methods == {"POST"}]) == 1
