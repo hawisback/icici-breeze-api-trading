@@ -29,6 +29,7 @@ class AIContextService:
         broker_gateway: Any,
         broker_session_service: Any,
         risk_service: Any,
+        order_management_service: Any | None = None,
     ) -> None:
         self.market_svc = market_data_service
         self.historical_svc = historical_service
@@ -37,6 +38,7 @@ class AIContextService:
         self.gateway_svc = broker_gateway
         self.session_svc = broker_session_service
         self.risk_svc = risk_service
+        self.oms_svc = order_management_service
 
     @staticmethod
     def _dump(value: Any) -> Any:
@@ -333,6 +335,7 @@ class AIContextService:
         }
 
     async def get_account_context(self) -> dict[str, Any]:
+        """Read-only portfolio evidence; never equate local flat with broker flat."""
         positions = await self.portfolio_svc.get_positions()
         pnl = await self.portfolio_svc.get_pnl_summary()
         risk_mode = await self.risk_svc.get_system_mode()
@@ -360,16 +363,70 @@ class AIContextService:
             except Exception as exc:
                 broker_live["error"] = type(exc).__name__
 
+        order_book_available = self.oms_svc is not None
+        pending_orders: list[dict[str, Any]] = []
+        order_error = None
+        if order_book_available:
+            try:
+                orders = await self.oms_svc.list_orders(limit=500)
+                terminal = {"FILLED", "CANCELLED", "REJECTED", "EXPIRED", "FAILED_SAFE"}
+                for order in orders:
+                    state = getattr(order, "status", None)
+                    state = getattr(state, "value", state)
+                    if str(state).upper() not in terminal:
+                        pending_orders.append(self._dump(order))
+            except Exception as exc:
+                order_book_available = False
+                order_error = type(exc).__name__
+
+        def nonzero(values: list[Any]) -> list[Any]:
+            return [
+                p for p in values
+                if int((p.get("quantity", 0) if isinstance(p, dict)
+                        else getattr(p, "quantity", 0)) or 0) != 0
+            ]
+
+        local_open = nonzero(positions)
+        broker_open = nonzero(broker_live["positions"])
+        blockers: list[str] = []
+        if risk_mode.value != "NORMAL":
+            blockers.append("SYSTEM_MODE_NOT_NORMAL")
+        if not execution_session.get("connected"):
+            blockers.append("EXECUTION_BROKER_DISCONNECTED")
+        if not broker_live["available"]:
+            blockers.append("BROKER_POSITIONS_UNVERIFIED")
+        if local_open:
+            blockers.append("LOCAL_POSITION_OPEN")
+        if broker_open:
+            blockers.append("BROKER_POSITION_OPEN")
+        if bool(local_open) != bool(broker_open):
+            blockers.append("BROKER_LOCAL_POSITION_MISMATCH")
+        if not order_book_available:
+            blockers.append("ORDER_BOOK_UNVERIFIED")
+        if pending_orders:
+            blockers.append("PENDING_OR_UNKNOWN_ORDERS")
+
         return {
             "as_of": utc_now().isoformat(),
             "risk_system_mode": risk_mode.value,
             "broker_sessions": sessions,
             "execution_session": execution_session,
             "local_portfolio": {
-                "positions": [p.model_dump(mode="json") for p in positions],
+                "positions": [self._dump(p) for p in positions],
                 "pnl": pnl,
             },
             "broker_live": broker_live,
+            "order_book": {
+                "available": order_book_available,
+                "error": order_error,
+                "pending_count": len(pending_orders),
+                "pending_orders": pending_orders,
+            },
+            "local_open_positions_count": len(local_open),
+            "broker_open_positions_count": len(broker_open),
+            "entry_context_ready": not blockers,
+            "entry_blockers": blockers,
+            "note": "Entry context is evidence only; final live authorization remains in the risk/live-gate execution pipeline.",
         }
 
     async def get_data_quality(self) -> dict[str, Any]:
