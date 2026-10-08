@@ -9,12 +9,17 @@ from __future__ import annotations
 
 from datetime import date
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
 from services.ai_context.service import AIContextService
 from services.api_gateway.service_container import get_services
+from services.api_gateway.dependencies import get_current_user
 
-router = APIRouter(prefix="/api/v1/ai", tags=["AI Market Context"])
+router = APIRouter(
+    prefix="/api/v1/ai",
+    tags=["AI Market Context"],
+    dependencies=[Depends(get_current_user)],  # JWT or authorized loopback single-user mode
+)
 
 
 def _context_service() -> AIContextService:
@@ -27,12 +32,13 @@ def _context_service() -> AIContextService:
         broker_gateway=services.gateway_svc,
         broker_session_service=services.session_svc,
         risk_service=services.risk_svc,
+        order_management_service=services.oms_svc,
     )
 
 
 @router.get("/nifty/snapshot")
 async def get_nifty_ai_snapshot():
-    """Compact starting context for each scheduled AI reasoning cycle."""
+    """Validated entry context, with blockers; never grants order authority."""
     return await _context_service().get_snapshot()
 
 
@@ -53,7 +59,7 @@ async def get_nifty_ai_technicals(
     interval: str = Query(default="5m", pattern=r"^(1m|5m|15m)$"),
     limit: int = Query(default=200, ge=50, le=500),
 ):
-    """Objective RSI, MACD, EMA, ATR, VWAP and return measurements."""
+    """Completed-bar RSI/MACD histories, EMA, ATR, VWAP and returns."""
     return await _context_service().get_technicals(
         interval=interval,
         limit=limit,
@@ -81,5 +87,5 @@ async def get_ai_account_context():
 
 @router.get("/data-quality")
 async def get_ai_data_quality():
-    """Explicit feed/source freshness so AI can reject stale evidence."""
+    """Explicit exchange and execution-feed freshness for AI gating."""
     return await _context_service().get_data_quality()
