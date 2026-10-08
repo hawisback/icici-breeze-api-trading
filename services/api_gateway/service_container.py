@@ -88,8 +88,14 @@ async def initialize_services(
                 _container.exec_svc._reconciliation_task.cancel()
             if hasattr(_container.risk_svc, "_outbox_worker_task") and _container.risk_svc._outbox_worker_task:
                 _container.risk_svc._outbox_worker_task.cancel()
-            if hasattr(_container.market_svc, "_feed_task") and _container.market_svc._feed_task:
-                _container.market_svc._feed_task.cancel()
+            # Cancel legacy background workers when switching to AI-only mode
+            # via service reinitialization (e.g. hot reload/test setup).
+            strategy_task = getattr(_container.strategy_svc, "_loop_task", None)
+            if strategy_task:
+                strategy_task.cancel()
+            market_task = getattr(_container.market_svc, "_simulation_task", None)
+            if market_task:
+                market_task.cancel()
         except Exception:
             pass
         _container = None
