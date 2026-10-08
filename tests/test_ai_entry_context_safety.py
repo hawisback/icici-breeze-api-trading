@@ -47,7 +47,8 @@ def _service(**kwargs):
 
 def test_ai_routes_require_server_identity():
     assert any(dependency.dependency is get_current_user for dependency in router.dependencies)
-    assert all(route.methods == {"GET"} for route in router.routes)
+    assert all(route.methods == {"GET"} for route in router.routes if route.path != "/api/v1/ai/trades")
+    assert any(route.methods == {"POST"} for route in router.routes)
 
 
 def test_only_completed_real_valid_candles_are_exposed():
