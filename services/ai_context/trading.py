@@ -189,7 +189,7 @@ class AITradeService:
         # Never silently fall back to PAPER if the operator selected LIVE:
         # an unprotected LIVE route is not a safe "connecting the dots" patch.
         if self.settings.ai_trade_mode != TradingMode.PAPER:
-            raise AITradeError("LIVE_PROTECTIVE_ORDER_INTEGRATION_NOT_ENABLED", 403)
+            raise AITradeError("EXECUTION_MODE_NOT_READY", 403)
         if quantity <= 0 or quantity > self.settings.ai_trade_max_quantity:
             raise AITradeError("QUANTITY_EXCEEDS_OPERATOR_LIMIT", 422)
         if not instrument_id.startswith("INST-NIFTY-"):
