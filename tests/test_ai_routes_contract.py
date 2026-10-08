@@ -12,7 +12,6 @@ def test_ai_routes_are_read_only_except_authenticated_trade_intent():
         "/api/v1/ai/data-quality",
         "/api/v1/ai/trades",
         "/api/v1/ai/trades/{trade_id}",
-        "/api/v1/ai/operator/trade-config",
     }
     assert {route.path for route in router.routes} == expected
     assert any(dependency.dependency is get_current_user for dependency in router.dependencies)
