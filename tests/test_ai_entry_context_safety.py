@@ -11,7 +11,7 @@ from libs.contracts.models import Candle, Quote, SystemMode, utc_now
 from services.ai_context.features import compute_technicals
 from services.ai_context.service import AIContextService
 from services.api_gateway.ai_routes import router
-from services.api_gateway.dependencies import get_current_user
+from services.api_gateway.ai_local_access import require_local_ai_client
 
 
 def _candle(end, *, source="KITE", interval="1m", close=22500.0):
@@ -45,8 +45,8 @@ def _service(**kwargs):
     return AIContextService(**defaults)
 
 
-def test_ai_routes_require_server_identity():
-    assert any(dependency.dependency is get_current_user for dependency in router.dependencies)
+def test_ai_routes_require_local_peer_not_login():
+    assert any(dependency.dependency is require_local_ai_client for dependency in router.dependencies)
     assert all(route.methods == {"GET"} for route in router.routes if route.path != "/api/v1/ai/trades")
     assert any(route.methods == {"POST"} for route in router.routes)
 
