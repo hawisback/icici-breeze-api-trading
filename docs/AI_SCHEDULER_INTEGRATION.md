@@ -6,13 +6,26 @@ strategy engine—classifies trade opportunities and chooses when to request ent
 The backend validates the specific simulated contract and manages exits.
 It never converts an AI signal into a LIVE broker order on this API.
 
-## Authentication and deployment
+## Local access (no login or JWT)
 
-All `/api/v1/ai/*` endpoints now require an authorized identity: a valid
-Bearer JWT, or the explicitly configured loopback-only local single-user mode.
-Do not put broker credentials, access tokens, account numbers, or secrets into
-LLM prompts or decision logs. Run the API on the loopback interface and use a
-private service identity for a separately hosted scheduler.
+All `/api/v1/ai/*` routes, including `POST /trades`, accept localhost
+HTTP requests **without any Authorization header**. Use
+`http://127.0.0.1:8000/api/v1/ai` directly. Do not call `/auth/login`.
+
+This is **not** an open network API: nonlocal TCP clients are rejected
+with HTTP 403 (`AI_API_LOCAL_ONLY`), even if they send spoofed Host or
+X-Forwarded-For headers. Run `python run_platform.py` with
+`API_HOST=127.0.0.1`; never expose unauthenticated AI trade routes on
+a public interface.
+
+Docker Compose already publishes only `127.0.0.1:8000:8000` on the
+host. Because Docker may relay that connection from its bridge gateway,
+Compose explicitly sets `AI_TRUST_LOCAL_DOCKER_GATEWAY=true` for this
+single localhost-bound deployment. Do not enable that option with
+publicly reachable host port mappings or untrusted container networking.
+The rest of the platform retains its existing authentication and RBAC.
+The external scheduler must run on the same workstation or use a secure,
+locally terminated tunnel into the workstation's loopback interface.
 
 ## Mode-neutral AI trade submission (PAPER first)
 
@@ -47,7 +60,6 @@ On a validated, fresh signal from the external scheduler:
 
 ```http
 POST /api/v1/ai/trades
-Authorization: Bearer <trader-scoped-token>
 Content-Type: application/json
 
 {"signal_id":"signal-20261008-1033-pe","instrument_id":"INST-NIFTY-2026-10-13-22500-PE","quantity":65}
@@ -66,8 +78,8 @@ market prices. The response omits the backend's execution mode.
 
 Use `GET /api/v1/ai/trades` and `GET /api/v1/ai/trades/{trade_id}` to
 track state. The same generic state schema is returned for a repeated
-`signal_id`. Trader/Admin authorization is required; the generic
-market-context endpoints remain read-only.
+`signal_id`. No JWT, session login, or trader role is required for
+these local AI endpoints. Nonlocal callers are denied.
 
 An independent backend loop polls Kite contract quotes every 2.5 seconds
 (configurable). It persists entry, trailing state, last observed quote,
@@ -156,7 +168,8 @@ watching a protective stop, exit deadline, or broker order status.
 
 ## Test and monitoring requirements
 
-Cover invalid JWT, stale/future exchange times, simulated feed, missing
+Cover nonlocal peer rejection, forged forwarded headers, stale/future
+exchange times, simulated feed, missing
 ATM legs, option-chain timeout, stale option timestamps, AI-specific duplicate
 signals/open trades, conflicting quantities, service restarts, and isolated
 strategy/global-risk/OMS states. Report missing or stale input data honestly;
