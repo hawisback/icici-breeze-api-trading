@@ -430,19 +430,41 @@ class AIContextService:
         }
 
     async def get_data_quality(self) -> dict[str, Any]:
+        """A recent response is not the same as a recent exchange observation."""
         quote = self.market_svc.get_latest_quote("INST-NIFTY-INDEX")
         quote_source = str(getattr(quote, "source", "") or "").upper() if quote else None
         quote_real = bool(quote and is_real_market_source(quote_source))
+        quote_age = self._age_seconds(quote.timestamp) if quote_real else None
+        future_quote = bool(
+            quote_real and (quote.timestamp - utc_now()).total_seconds() > 1.0
+        )
+        quote_ready = bool(
+            quote_real and quote.last_price > 0 and quote_age is not None
+            and quote_age < 10.0 and not future_quote
+        )
         sessions = await self.session_svc.get_all_session_statuses()
+        feed = self.market_svc.get_feed_status()
+        health_fn = getattr(self.market_svc, "get_execution_feed_health", None)
+        if callable(health_fn):
+            execution_feed = health_fn(max_age_seconds=10.0)
+        else:
+            execution_feed = {
+                "healthy": False,
+                "reasons": ["EXECUTION_FEED_HEALTH_UNAVAILABLE"],
+            }
         return {
             "checked_at": utc_now().isoformat(),
-            "market_feed": self.market_svc.get_feed_status(),
+            "market_feed": feed,
+            "execution_feed": execution_feed,
             "nifty_quote": {
                 "available": quote_real,
                 "source": quote_source,
                 "exchange_timestamp": quote.timestamp.isoformat() if quote_real else None,
-                "age_seconds": self._age_seconds(quote.timestamp) if quote_real else None,
+                "age_seconds": quote_age,
+                "future_timestamp": future_quote,
+                "fresh": quote_ready,
             },
+            "quote_ready": quote_ready and bool(execution_feed.get("healthy")),
             "broker_sessions": sessions,
         }
 
@@ -462,6 +484,7 @@ class AIContextService:
         return {
             "time_ist": now_ist.isoformat(),
             "regular_session": now_ist.weekday() < 5 and open_dt <= now_ist <= close_dt,
+            "calendar_authoritative": False,  # Weekdays only; feed verification catches closed-market stale quotes.
             "minutes_since_open": minutes_since_open,
             "minutes_to_close": minutes_to_close,
             "nearest_expiry": expiry,
