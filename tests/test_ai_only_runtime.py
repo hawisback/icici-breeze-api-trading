@@ -19,6 +19,8 @@ async def test_ai_only_mode_starts_stop_manager_but_not_legacy_pollers(tmp_path)
         ai_trade_db_path=tmp_path / "ai_trades.db",
         ai_only_mode=True,
         market_data_backend="kite",
+        KITE_API_KEY="test-kite-key",
+        KITE_API_SECRET="test-kite-secret",
     )
     services = await initialize_services(settings=settings)
     try:
