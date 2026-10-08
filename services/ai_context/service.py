@@ -148,6 +148,7 @@ class AIContextService:
         chain = await self.option_chain_svc.get_chain(
             underlying=underlying,
             expiry=expiry,
+            provider="kite",
         )
         source = str(chain.get("source") or "UNAVAILABLE").upper()
         if not is_real_market_source(source):
