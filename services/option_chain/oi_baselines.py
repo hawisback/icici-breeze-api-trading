@@ -80,21 +80,32 @@ class KiteSessionOIBaselines:
                             PRIMARY KEY (session_date, instrument_id)
                         )
                     """)
-                    for item, instrument, oi, observed in valid:
-                        await db.execute(
-                            "INSERT OR IGNORE INTO kite_session_oi_baselines "
-                            "(session_date, instrument_id, baseline_oi, observed_at) VALUES (?,?,?,?)",
-                            (today.isoformat(), instrument, oi, observed.isoformat()),
-                        )
+                    # Batched SQLite work; never make one DB round-trip per
+                    # contract, and never make an extra broker request.
+                    await db.executemany(
+                        "INSERT OR IGNORE INTO kite_session_oi_baselines "
+                        "(session_date, instrument_id, baseline_oi, observed_at) VALUES (?,?,?,?)",
+                        [(today.isoformat(), inst, oi, obs.isoformat()) for _, inst, oi, obs in valid],
+                    )
+                    baseline_rows: dict[str, tuple[int, str]] = {}
+                    keys = list(dict.fromkeys(inst for _, inst, _, _ in valid))
+                    for offset in range(0, len(keys), 400):
+                        batch = keys[offset:offset + 400]
+                        marks = ",".join("?" for _ in batch)
                         cursor = await db.execute(
-                            "SELECT baseline_oi, observed_at FROM kite_session_oi_baselines "
-                            "WHERE session_date=? AND instrument_id=?",
-                            (today.isoformat(), instrument),
+                            "SELECT instrument_id, baseline_oi, observed_at "
+                            "FROM kite_session_oi_baselines WHERE session_date=? "
+                            f"AND instrument_id IN ({marks})",
+                            [today.isoformat(), *batch],
                         )
-                        baseline = await cursor.fetchone()
-                        if not baseline:
+                        for inst, base_oi, base_time in await cursor.fetchall():
+                            baseline_rows[inst] = (int(base_oi), str(base_time))
+                    for item, instrument, oi, observed in valid:
+                        baseline = baseline_rows.get(instrument)
+                        if baseline is None:
                             continue
-                        base_oi, base_time = int(baseline[0]), datetime.fromisoformat(baseline[1])
+                        base_oi, raw_time = baseline
+                        base_time = datetime.fromisoformat(raw_time)
                         item["oi_baseline_at"] = base_time.isoformat()
                         # First sampled tick isn't an OI change. Observations
                         # older than that baseline cannot be compared either.
