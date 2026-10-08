@@ -5262,7 +5262,7 @@ class StrategyService:
         """Status payload consumed by the Auto-Trading UI."""
         # UI polling is read-only; only evaluate_cycle owns broker I/O.
         active_trades = await self.repo.get_active_trades()
-        features = self._last_features or MarketFeatures(timestamp=utc_now(), data_reason="Awaiting first completed evaluation")
+        features = self._last_features or MarketFeatures(timestamp=utc_now(), spot_price=0.0, data_reason="Awaiting first completed evaluation")
 
         # Position lifecycle updates run only inside evaluate_cycle().
         # Keeping this endpoint read-only prevents UI polling from racing the
