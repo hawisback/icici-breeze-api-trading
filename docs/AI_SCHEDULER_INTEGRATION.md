@@ -16,10 +16,10 @@ private service identity for a separately hosted scheduler.
 
 The external AI scheduler **does not** know or choose the execution mode.
 The backend owns its own separate config in `.env`; restart the backend
-after operator changes. Defaults are **disabled**, PAPER mode.
+after operator changes. Defaults are **enabled for PAPER**, never LIVE.
 
 ```dotenv
-AI_TRADE_ENABLED=false
+AI_TRADE_ENABLED=true
 AI_TRADE_MODE=PAPER
 AI_TRADE_MAX_QUANTITY=65
 AI_TRADE_MAX_PREMIUM_NOTIONAL=15000
@@ -32,8 +32,9 @@ AI_TRADE_MAX_HOLD_SECONDS=480
 AI_TRADE_POLL_SECONDS=2.5
 ```
 
-After testing in a non-production paper environment, the operator may set
-`AI_TRADE_ENABLED=true`. Sending `PAPER` or `LIVE` in a trade request is
+To disable new AI paper entries, set `AI_TRADE_ENABLED=false` and restart
+ the backend. Existing open simulated trades remain monitored until closed.
+Sending `PAPER` or `LIVE` in a trade request is
 rejected as an unknown field. **If the operator selects LIVE, this new
 adapter blocks submissions** with `EXECUTION_MODE_NOT_READY`. The existing
 OMS/Risk/LiveTradingGate/protective-stop services must be integrated and

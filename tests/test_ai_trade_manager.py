@@ -176,3 +176,55 @@ async def test_data_gate_required_for_new_trade(tmp_path):
         await manager.submit(signal_id="signal-008", instrument_id=INSTRUMENT, quantity=65)
     assert exc.value.code == "ENTRY_CONTEXT_NOT_READY"
     assert await manager.list() == []
+
+def test_default_config_enables_only_paper(monkeypatch):
+    """Mode is owned by backend settings, never accepted from an AI request."""
+    from libs.config.settings import PlatformSettings
+    from services.api_gateway.ai_routes import AISignalIntent
+    from pydantic import ValidationError
+
+    monkeypatch.delenv("AI_TRADE_ENABLED", raising=False)
+    monkeypatch.delenv("AI_TRADE_MODE", raising=False)
+    config = PlatformSettings(_env_file=None)
+    assert config.ai_trade_enabled is True
+    assert config.ai_trade_mode == TradingMode.PAPER
+
+    with pytest.raises(ValidationError):
+        AISignalIntent(
+            signal_id="signal-mode-test",
+            instrument_id=INSTRUMENT,
+            quantity=65,
+            trading_mode="LIVE",
+        )
+    with pytest.raises(ValidationError):
+        AISignalIntent(
+            signal_id="signal-price-test",
+            instrument_id=INSTRUMENT,
+            quantity=65,
+            price=100.0,
+        )
+
+
+def test_operator_can_disable_or_select_live_but_cannot_bypass_live_block(monkeypatch):
+    from libs.config.settings import PlatformSettings
+
+    monkeypatch.setenv("AI_TRADE_ENABLED", "false")
+    monkeypatch.setenv("AI_TRADE_MODE", "PAPER")
+    disabled = PlatformSettings(_env_file=None)
+    assert disabled.ai_trade_enabled is False
+
+    monkeypatch.setenv("AI_TRADE_ENABLED", "true")
+    monkeypatch.setenv("AI_TRADE_MODE", "LIVE")
+    live_selected = PlatformSettings(_env_file=None)
+    assert live_selected.ai_trade_enabled is True
+    assert live_selected.ai_trade_mode == TradingMode.LIVE
+
+
+def test_both_deployment_templates_enable_paper_and_not_live():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for env_name in (".env.example", ".env.local-live.example"):
+        content = (root / env_name).read_text(encoding="utf-8")
+        assert "AI_TRADE_ENABLED=true" in content
+        assert "AI_TRADE_MODE=PAPER" in content
