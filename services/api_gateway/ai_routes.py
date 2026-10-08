@@ -7,6 +7,8 @@ scores, or pre-ranked option contracts.
 
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Query
 
 from services.ai_context.service import AIContextService
@@ -60,13 +62,13 @@ async def get_nifty_ai_technicals(
 
 @router.get("/nifty/options")
 async def get_nifty_ai_options(
-    expiry: str | None = Query(default=None),
+    expiry: date | None = Query(default=None),
     strike_window: int = Query(default=10, ge=0, le=30),
 ):
     """Real option-chain evidence around ATM without contract ranking."""
     return await _context_service().get_options(
         underlying="NIFTY",
-        expiry=expiry,
+        expiry=expiry.isoformat() if expiry else None,
         strike_window=strike_window,
     )
 
