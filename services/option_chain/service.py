@@ -59,6 +59,16 @@ class OptionChainService:
     def _cached_kite_chain(self, underlying: str, expiry: str | None) -> dict[str, Any] | None:
         """Return a real-time bounded-cache hit before even reading expiry metadata."""
         now = monotonic()
+        # An explicit far-expiry request must never change the implicit
+        # nearest-listed-expiry default for other callers.
+        if expiry is None:
+            expiry_entry = self._kite_expiries_cache.get(underlying)
+            if not expiry_entry or now - expiry_entry[0] >= self._kite_expiries_cache_ttl:
+                return None
+            future = [e for e in expiry_entry[1] if e >= ist_today().isoformat()]
+            if not future:
+                return None
+            expiry = min(future)
         selected: tuple[str, dict[str, Any]] | None = None
         for (name, cached_expiry), (captured, chain) in self._kite_chain_cache.items():
             if name != underlying or (expiry and expiry != cached_expiry):
