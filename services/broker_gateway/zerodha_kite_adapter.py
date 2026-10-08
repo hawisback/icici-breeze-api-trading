@@ -51,7 +51,12 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         self._last_quote_request_at: Optional[float] = None
         self._nse_instruments: Optional[list[dict[str, Any]]] = None
         self._nfo_instruments: Optional[list[dict[str, Any]]] = None
+        self._market_quote_getter = None
         self.request_timeout_sec = request_timeout_sec
+
+    def set_market_quote_getter(self, getter: Any) -> None:
+        """Reuse latest Kite index tick when its exchange time is recent."""
+        self._market_quote_getter = getter
 
     @property
     def is_active(self) -> bool:
@@ -414,10 +419,27 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             return {}
 
         spot_key = "NSE:NIFTY BANK" if clean_underlying == "BANKNIFTY" else "NSE:NIFTY 50"
-        # Spot discovery comes from Kite, not from a hardcoded or stale local
-        # index value. Avoid quoting the entire NFO expiry just to find ATM.
-        spot_data = await self._run_quote(lambda: self._kite.ltp([spot_key]))
-        spot = float((spot_data or {}).get(spot_key, {}).get("last_price") or 0)
+        # Prefer the already-polled index tick (Kite only, <= 6s old).
+        # This avoids one unnecessary broker LTP request per chain refresh.
+        # Never use the seeded/simulated or Breeze quote to choose ATM.
+        spot = 0.0
+        if callable(self._market_quote_getter):
+            index_id = (
+                "INST-BANKNIFTY-INDEX" if clean_underlying == "BANKNIFTY"
+                else "INST-NIFTY-INDEX"
+            )
+            cached = self._market_quote_getter(index_id)
+            if cached is not None and str(getattr(cached, "source", "")).upper() == "KITE":
+                observed = getattr(cached, "timestamp", None)
+                if observed is not None and observed.tzinfo is not None:
+                    seconds = (utc_now() - observed).total_seconds()
+                    if 0 <= seconds <= 6.0:
+                        spot = float(getattr(cached, "last_price", 0) or 0)
+        if spot <= 0:
+            # A fresh market-data tick is unavailable: ask Kite for live LTP
+            # rather than guessing a strike from hardcoded/stale values.
+            spot_data = await self._run_quote(lambda: self._kite.ltp([spot_key]))
+            spot = float((spot_data or {}).get(spot_key, {}).get("last_price") or 0)
         if spot <= 0:
             logger.warning("Kite index LTP unavailable for %s", spot_key)
             return {}
