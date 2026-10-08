@@ -54,9 +54,13 @@ backend port is host-loopback-only (`127.0.0.1:8000:8000`). When running
 `python run_platform.py` directly, set `API_HOST=127.0.0.1` in your environment
 to achieve the same local-only boundary.
 
-`GET /nifty/options` and the options section of `GET /nifty/snapshot`
-explicitly use an active **Kite session**, irrespective of the reference-data
-broker used by other services. Expiries and option tradingsymbols come from Kite
+All normal option-chain consumers—including `/api/v1/options/chain`,
+internal strategies, `GET /nifty/options` and snapshot option summaries—now
+use **Kite NFO quotes and listed contracts** by default, independently of
+whether Breeze remains the broker for LIVE order routing. A missing Kite
+session returns `source=UNAVAILABLE`; there is no Breeze or synthetic
+fallback for normal option-chain requests. Explicit `provider="breeze"`
+remains a legacy diagnostic service option, not an AI trading route. Expiries and option tradingsymbols come from Kite
 NFO instruments, **not** `instruments.db`. Missing/failed Kite responses never
 silently substitute simulated quotes. Start the server with a valid Kite daily
 session/access token and verify its broker session status.
@@ -89,3 +93,25 @@ None of the read-only market-data response fields is a recommendation,
 entry classification or authorization for LIVE trading. The AI decides
 when to send a mode-neutral request; broker-protected LIVE trading will
 need separate execution risk validation before it is enabled.
+
+## Kite call-efficiency strategy
+
+- A single bounded Kite option-chain quote batch (at most 122 contracts)
+  is cached for 10 seconds and shared across the external AI, UI, internal
+  strategies and AI PAPER trade monitor. Concurrent cache misses are
+  deduplicated via an asynchronous lock. Cached quote exchange timestamps
+  are never rewritten to look fresher than their real exchange times.
+- Kite NFO expiry metadata is cached for 60 seconds, so every AI/worker
+  read does not traverse the NFO master and refresh expiry lists again.
+- When the existing market-feed service has an exchange-timestamped **Kite**
+  index quote no older than 6 seconds, the option-chain adapter reuses it
+  for ATM discovery rather than making an additional Kite index-LTP call.
+  Missing, stale or Breeze/synthetic ticks trigger the real Kite-LTP fetch.
+- The browser option-chain display refreshes every 15 seconds rather than
+  10 seconds; prefer one /nifty/snapshot per AI decision cycle, drill down
+  into /nifty/options or other views only when needed. Avoid repeatedly
+  calling all APIs during a single scan.
+- Repeated API responses may contain the same quotes within a cache window;
+  use **market_timestamp** / exchange observation age, never just captured_at,
+  when considering a simulated trade. The PAPER manager continues to reject
+  stale, missing, invalid or too-wide quotes.

@@ -46,7 +46,10 @@ async def test_api_gateway_health_and_endpoints():
         assert res.status_code == 200
         chain = res.json()
         assert "strikes" in chain
-        assert len(chain["strikes"]) > 0
+        # Offline environment without a Kite session must fail closed, never
+        # present a Breeze/synthetic option matrix as live data.
+        assert chain["source"] == "UNAVAILABLE"
+        assert chain["strikes"] == []
 
         # 6. Orders list
         res = await client.get("/api/v1/orders")

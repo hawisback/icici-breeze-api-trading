@@ -193,3 +193,102 @@ async def test_explicit_kite_chain_does_not_seed_when_broker_returns_no_quotes()
     result = await service.get_chain(underlying="NIFTY", provider="kite")
     assert result["source"] == "UNAVAILABLE"
     assert result["strikes"] == []
+
+
+@pytest.mark.asyncio
+async def test_default_option_chain_uses_kite_even_when_reference_broker_is_breeze():
+    expiry = (ist_today() + timedelta(days=7)).isoformat()
+    kite = _KiteAdapter(expiry)
+    service = OptionChainService(
+        instrument_service=_NoLocalOptionMaster(),
+        market_data_service=_MarketData(),
+        broker_gateway=_Gateway(kite),
+    )
+    chain = await service.get_chain(underlying="NIFTY")
+    assert chain["source"] == "KITE"
+    assert chain["strikes"]
+    assert kite.chain_requests == [("NIFTY", expiry)]
+
+
+@pytest.mark.asyncio
+async def test_default_kite_option_chain_fails_closed_if_session_missing():
+    expiry = (ist_today() + timedelta(days=7)).isoformat()
+    service = OptionChainService(
+        instrument_service=_NoLocalOptionMaster(),
+        market_data_service=_MarketData(),
+        broker_gateway=_Gateway(_KiteAdapter(expiry, active=False)),
+    )
+    chain = await service.get_chain(underlying="NIFTY")
+    assert chain["source"] == "UNAVAILABLE"
+    assert chain["strikes"] == []
+
+
+@pytest.mark.asyncio
+async def test_kite_chain_and_expiries_are_shared_without_duplicate_adapter_calls():
+    expiry = (ist_today() + timedelta(days=7)).isoformat()
+    kite = _KiteAdapter(expiry)
+    service = OptionChainService(
+        instrument_service=_NoLocalOptionMaster(),
+        market_data_service=_MarketData(),
+        broker_gateway=_Gateway(kite),
+    )
+    first = await service.get_chain(underlying="NIFTY")
+    assert first["source"] == "KITE"
+    # Cache must be copy-safe across consumers (UI, strategy and AI worker).
+    first["strikes"].clear()
+    second = await service.get_chain(underlying="NIFTY", provider="kite")
+    assert second["strikes"]
+    assert kite.expiry_requests == ["NIFTY"]
+    assert kite.chain_requests == [("NIFTY", expiry)]
+
+    # Expire market quotes but NOT Kite's relatively static expiry metadata.
+    service._kite_chain_cache_ttl = 0
+    refreshed = await service.get_chain(underlying="NIFTY")
+    assert refreshed["source"] == "KITE"
+    assert kite.expiry_requests == ["NIFTY"]
+    assert kite.chain_requests == [("NIFTY", expiry), ("NIFTY", expiry)]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_option_chain_requests_share_single_kite_quote_batch():
+    import asyncio
+
+    expiry = (ist_today() + timedelta(days=7)).isoformat()
+    kite = _KiteAdapter(expiry)
+    service = OptionChainService(
+        instrument_service=_NoLocalOptionMaster(),
+        market_data_service=_MarketData(),
+        broker_gateway=_Gateway(kite),
+    )
+    output = await asyncio.gather(
+        service.get_chain("NIFTY"),
+        service.get_chain("NIFTY", provider="kite"),
+        service.get_chain("NIFTY"),
+    )
+    assert all(x["source"] == "KITE" for x in output)
+    assert len(kite.chain_requests) == 1
+    assert len(kite.expiry_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_cached_far_expiry_never_replaces_default_nearest_expiry():
+    nearest = (ist_today() + timedelta(days=7)).isoformat()
+    far = (ist_today() + timedelta(days=14)).isoformat()
+
+    class TwoExpiryKite(_KiteAdapter):
+        async def get_option_expiries(self, underlying: str):
+            self.expiry_requests.append(underlying)
+            return [nearest, far]
+
+    kite = TwoExpiryKite(nearest)
+    service = OptionChainService(
+        instrument_service=_NoLocalOptionMaster(),
+        market_data_service=_MarketData(),
+        broker_gateway=_Gateway(kite),
+    )
+    requested = await service.get_chain("NIFTY", expiry=far)
+    assert requested["expiry"] == far
+    default = await service.get_chain("NIFTY")
+    assert default["expiry"] == nearest
+    assert kite.chain_requests == [("NIFTY", far), ("NIFTY", nearest)]
+    assert kite.expiry_requests == ["NIFTY"]
