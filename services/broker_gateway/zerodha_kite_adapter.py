@@ -536,6 +536,57 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             "strikes": [strikes[key] for key in sorted(strikes)],
         }
 
+    async def get_option_contract_quote(self, instrument_id: str) -> dict[str, Any]:
+        """Fetch ONE Kite option quote for an active AI PAPER trade.
+
+        Unlike get_option_chain_view, this avoids refreshing ~122 contracts on
+        each independent trailing-stop poll. Listed NFO metadata is the sole
+        contract authority; no guessed symbols or synthetic fallback.
+        """
+        if not self.is_active:
+            return {}
+        match = re.fullmatch(
+            r"INST-(NIFTY|BANKNIFTY)-(\\d{4}-\\d{2}-\\d{2})-(\\d+)-(CE|PE)",
+            instrument_id,
+        )
+        if not match:
+            return {}
+        underlying, expiry, strike, right = match.groups()
+        if self._nfo_instruments is None:
+            self._nfo_instruments = await self._run(lambda: self._kite.instruments("NFO"))
+        rows = [
+            row for row in self._nfo_instruments or []
+            if str(row.get("name", "")).upper() == underlying
+            and str(row.get("expiry", ""))[:10] == expiry
+            and int(float(row.get("strike") or 0)) == int(strike)
+            and str(row.get("instrument_type", "")).upper() == right
+            and row.get("tradingsymbol")
+        ]
+        if len(rows) != 1:
+            return {}
+        row = rows[0]
+        symbol = str(row["tradingsymbol"])
+        key = f"NFO:{symbol}"
+        quotes = await self._run_quote(lambda: self._kite.quote([key]))
+        quote = quotes.get(key) if isinstance(quotes, dict) else None
+        if not isinstance(quote, dict) or float(quote.get("last_price") or 0) <= 0:
+            return {}
+        depth = quote.get("depth") or {}
+        buy, sell = depth.get("buy") or [], depth.get("sell") or []
+        timestamp = _parse_exchange_quote_datetime(
+            quote.get("timestamp") or quote.get("last_trade_time")
+        )
+        return {
+            "source": "KITE",
+            "expiry": expiry,
+            "instrument_id": instrument_id,
+            "symbol": symbol,
+            "bid": float((buy[0] if buy else {}).get("price") or 0),
+            "ask": float((sell[0] if sell else {}).get("price") or 0),
+            "lot_size": int(row.get("lot_size") or 0),
+            "market_timestamp": timestamp.isoformat() if timestamp else None,
+        }
+
     async def fetch_historical_candles(
         self,
         instrument_id: str,
