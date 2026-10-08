@@ -98,6 +98,10 @@ class PlatformSettings(BaseSettings):
         alias="LIVE_MARKET_DATA_MAX_AGE_SECONDS",
     )
 
+    # Local AI-only runtime: no background strategy/OMS/execution polling.
+    # External AI routes own market refresh; AI PAPER exits keep their own worker.
+    ai_only_mode: bool = Field(default=False, alias="AI_ONLY_MODE")
+
     # External AI trade intent gateway. These values are server-owned: clients
     # cannot select their own execution mode or trailing-stop policy.
     ai_trust_local_docker_gateway: bool = Field(

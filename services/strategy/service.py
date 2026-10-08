@@ -582,7 +582,7 @@ class StrategyService:
         await self.repo.save_runtime(self.strategy_b.export_state(), "volatility_breakout")
         await self.repo.save_runtime(self.strategy_e.export_state(), "pivot_vwap_scalp")
 
-    async def initialize(self) -> None:
+    async def initialize(self, *, start_scheduler: bool = True) -> None:
         await self.repo.initialize()
         self.config = await self.repo.get_auto_config()
         # Arming is deliberately process-local in effect. A restart must never
@@ -647,7 +647,7 @@ class StrategyService:
         await self._seed_default_strategy()
 
         # Start background evaluation loop if enabled
-        if not self._loop_task or self._loop_task.done():
+        if start_scheduler and (not self._loop_task or self._loop_task.done()):
             self._is_running = True
             self._loop_task = asyncio.create_task(self._run_scheduler_loop())
 
@@ -4798,7 +4798,7 @@ class StrategyService:
 
     async def get_trigger_diagnostics(self) -> TriggerDiagnosticsResponse:
         """Gathers granular condition diagnostics across all strategies and session gates."""
-        features = self._last_features or MarketFeatures(timestamp=utc_now(), data_reason="Awaiting first completed evaluation")
+        features = self._last_features or MarketFeatures(timestamp=utc_now(), spot_price=0.0, data_reason="Awaiting first completed evaluation")
         candles_5m, candles_15m, futures_candles = self._market_snapshot
 
         diag_a = self.strategy_a.diagnose(features, candles_5m, candles_15m, overrides=self._active_overrides, futures_candles=futures_candles)
@@ -5262,7 +5262,7 @@ class StrategyService:
         """Status payload consumed by the Auto-Trading UI."""
         # UI polling is read-only; only evaluate_cycle owns broker I/O.
         active_trades = await self.repo.get_active_trades()
-        features = self._last_features or MarketFeatures(timestamp=utc_now(), data_reason="Awaiting first completed evaluation")
+        features = self._last_features or MarketFeatures(timestamp=utc_now(), spot_price=0.0, data_reason="Awaiting first completed evaluation")
 
         # Position lifecycle updates run only inside evaluate_cycle().
         # Keeping this endpoint read-only prevents UI polling from racing the

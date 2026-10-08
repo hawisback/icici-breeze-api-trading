@@ -125,3 +125,37 @@ async def test_stale_or_non_kite_cached_spot_cannot_replace_broker_ltp():
         assert chain["source"] == "KITE"
         assert chain["atm_strike"] == 25000
         assert client.spot_requests == [["NSE:NIFTY 50"]]
+
+
+@pytest.mark.asyncio
+async def test_one_kite_option_quote_for_open_trade_does_not_refresh_full_chain():
+    client = LargeNfoKite()
+    adapter = ZerodhaKiteAdapter(custom_client=client)
+    adapter._access_token = "test-token"
+    instrument_id = f"INST-NIFTY-{client.expiry}-25000-CE"
+    quote = await adapter.get_option_contract_quote(instrument_id)
+    assert quote["source"] == "KITE"
+    assert quote["instrument_id"] == instrument_id
+    assert quote["bid"] == 99.0
+    assert quote["ask"] == 101.0
+    assert len(client.quote_requests) == 1
+    assert client.quote_requests[0] == [f"NFO:NIFTY-{client.expiry}-25000-CE"]
+    assert client.spot_requests == []
+
+    # Existing cached NFO instrument metadata must be reused.
+    again = await adapter.get_option_contract_quote(instrument_id)
+    assert again["source"] == "KITE"
+    assert client.instrument_calls == 1
+    assert len(client.quote_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_unlisted_kite_contract_is_never_approximated_from_option_chain():
+    client = LargeNfoKite()
+    adapter = ZerodhaKiteAdapter(custom_client=client)
+    adapter._access_token = "test-token"
+    quote = await adapter.get_option_contract_quote(
+        f"INST-NIFTY-{client.expiry}-999999-CE"
+    )
+    assert quote == {}
+    assert client.quote_requests == []

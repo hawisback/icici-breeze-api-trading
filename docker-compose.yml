@@ -50,6 +50,10 @@ services:
       - KITE_ACCESS_TOKEN=${KITE_ACCESS_TOKEN:-}
       - KITE_PRODUCT=${KITE_PRODUCT:-NRML}
       - TRADING_MODE=PAPER
+      # Local-only AI scheduler owns market-data refreshes; backend monitors open AI PAPER stops.
+      - AI_ONLY_MODE=true
+      - MARKET_DATA_BACKEND=kite
+      - FREQUENT_DATA_BROKER=kite
       # Backend port is published on host loopback only (127.0.0.1:8000).
       # Docker forwards host-loopback requests from its bridge gateway IP.
       - AI_TRUST_LOCAL_DOCKER_GATEWAY=true

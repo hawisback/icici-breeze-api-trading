@@ -3,8 +3,8 @@ import type { Metadata } from "next";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
-  title: "ICICI Direct Options Trading Terminal",
-  description: "Enterprise options trading platform powered by microservices architecture and SQLite-first durability",
+  title: "NIFTY AI Trade Monitor",
+  description: "Read-only local NIFTY AI PAPER trade monitor.",
 };
 
 export default function RootLayout({

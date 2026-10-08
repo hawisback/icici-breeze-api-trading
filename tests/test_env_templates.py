@@ -41,12 +41,13 @@ def test_env_templates_cover_all_typed_platform_settings():
         assert missing == set(), f"{name} missing typed settings: {sorted(missing)}"
 
 
-def test_live_env_template_is_kite_first_hybrid_and_live_capable():
+def test_live_env_template_uses_kite_ai_only_data():
     values = _parse_env(ROOT / ".env.local-live.example")
 
     assert values["LIVE_TRADING_ENABLED"] == "true"
     assert values["LIVE_EXECUTION_BROKER"] == "kite"
-    assert values["MARKET_DATA_BACKEND"] == "hybrid"
+    assert values["MARKET_DATA_BACKEND"] == "kite"
+    assert values["AI_ONLY_MODE"] == "true"
     assert values["FREQUENT_DATA_BROKER"] == "kite"
     assert values["REFERENCE_DATA_BROKER"] == "breeze"
 

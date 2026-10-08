@@ -8,6 +8,8 @@ scores, or pre-ranked option contracts.
 from __future__ import annotations
 
 from datetime import date
+import asyncio
+from time import monotonic
 
 from pydantic import BaseModel, ConfigDict, Field
 from services.ai_context.trading import AITradeError
@@ -17,6 +19,25 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from services.ai_context.service import AIContextService
 from services.api_gateway.service_container import get_services
+
+_index_refresh_lock = asyncio.Lock()
+_last_index_refresh = 0.0
+
+
+async def _refresh_ai_only_index() -> None:
+    """Refresh the real Kite index on demand, not via a global polling worker."""
+    global _last_index_refresh
+    services = get_services()
+    if not getattr(services.settings, "ai_only_mode", False):
+        return
+    if monotonic() - _last_index_refresh < 2.0:
+        return
+    async with _index_refresh_lock:
+        if monotonic() - _last_index_refresh < 2.0:
+            return
+        _last_index_refresh = monotonic()
+        await services.market_svc.sync_quotes_from_broker()
+
 
 router = APIRouter(
     prefix="/api/v1/ai",
@@ -36,12 +57,14 @@ def _context_service() -> AIContextService:
         broker_session_service=services.session_svc,
         risk_service=services.risk_svc,
         order_management_service=services.oms_svc,
+        ai_only_mode=getattr(services.settings, "ai_only_mode", False),
     )
 
 
 @router.get("/nifty/snapshot")
 async def get_nifty_ai_snapshot():
     """Validated entry context, with blockers; never grants order authority."""
+    await _refresh_ai_only_index()
     return await _context_service().get_snapshot()
 
 
@@ -51,6 +74,7 @@ async def get_nifty_ai_candles(
     limit: int = Query(default=100, ge=20, le=500),
 ):
     """Completed real-market candles for AI drill-down."""
+    await _refresh_ai_only_index()
     return await _context_service().get_candles(
         interval=interval,
         limit=limit,
@@ -63,6 +87,7 @@ async def get_nifty_ai_technicals(
     limit: int = Query(default=200, ge=50, le=500),
 ):
     """Completed-bar RSI/MACD histories, EMA, ATR, VWAP and returns."""
+    await _refresh_ai_only_index()
     return await _context_service().get_technicals(
         interval=interval,
         limit=limit,
@@ -91,6 +116,7 @@ async def get_ai_account_context():
 @router.get("/data-quality")
 async def get_ai_data_quality():
     """Explicit exchange and execution-feed freshness for AI gating."""
+    await _refresh_ai_only_index()
     return await _context_service().get_data_quality()
 
 

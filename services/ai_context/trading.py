@@ -64,6 +64,7 @@ class AITradeService:
                     current_stop REAL NOT NULL,
                     target_price REAL NOT NULL,
                     peak_bid REAL NOT NULL,
+                    last_bid REAL,
                     trailing_active INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL CHECK (status IN ('OPEN', 'CLOSED')),
                     entry_time TEXT NOT NULL,
@@ -77,6 +78,11 @@ class AITradeService:
                     policy_json TEXT NOT NULL
                 )
             """)
+            # Backwards-compatible migration for persisted pre-monitor trades.
+            columns = {row[1] for row in await (await db.execute("PRAGMA table_info(ai_paper_trades)")).fetchall()}
+            if "last_bid" not in columns:
+                await db.execute("ALTER TABLE ai_paper_trades ADD COLUMN last_bid REAL")
+                await db.execute("UPDATE ai_paper_trades SET last_bid=entry_bid WHERE last_bid IS NULL")
             await db.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS ai_one_open_trade
                 ON ai_paper_trades(status) WHERE status='OPEN'
@@ -100,6 +106,12 @@ class AITradeService:
     def _row(row: aiosqlite.Row) -> dict[str, Any]:
         record = dict(row)
         record["trailing_active"] = bool(record["trailing_active"])
+        bid = record.get("last_bid")
+        record["unrealized_pnl"] = (
+            round((float(bid) - float(record["entry_price"])) * int(record["quantity"]), 2)
+            if record["status"] == "OPEN" and bid is not None and record.get("data_status") == "VALID"
+            else None
+        )
         record.pop("policy_json", None)
         # Never expose the backend's execution mode to the external AI.
         return record
@@ -144,9 +156,22 @@ class AITradeService:
         self, instrument_id: str, expiry: str | None = None,
     ) -> dict[str, Any]:
         """Get a real Kite contract, not synthetic option approximations."""
-        chain = await self.chain.get_chain(
-            underlying="NIFTY", expiry=expiry, provider="kite"
-        )
+        # A live AI position needs just ONE option quote, not a full 122-leg
+        # chain each 2.5s. Mock/legacy chain providers retain the old adapter.
+        get_single = getattr(self.chain, "get_contract_quote", None)
+        if callable(get_single):
+            leg = await get_single(instrument_id)
+            if not leg or str(leg.get("source") or "").upper() != "KITE":
+                raise AITradeError("REAL_OPTION_CHAIN_UNAVAILABLE")
+            chain = {
+                "source": "KITE",
+                "expiry": leg.get("expiry"),
+                "strikes": [{"call": leg, "put": None}],
+            }
+        else:
+            chain = await self.chain.get_chain(
+                underlying="NIFTY", expiry=expiry, provider="kite"
+            )
         if str(chain.get("source") or "").upper() != "KITE":
             raise AITradeError("REAL_OPTION_CHAIN_UNAVAILABLE")
         for row in chain.get("strikes") or []:
@@ -247,12 +272,12 @@ class AITradeService:
                         """INSERT INTO ai_paper_trades
                           (trade_id, signal_id, instrument_id, symbol, expiry,
                            quantity, entry_price, entry_bid, initial_stop,
-                           current_stop, target_price, peak_bid, status, entry_time,
+                           current_stop, target_price, peak_bid, last_bid, status, entry_time,
                            last_quote_at, policy_json)
-                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (trade_id, signal_id, instrument_id, quote["symbol"],
                          quote["expiry"], quantity, entry, quote["bid"], stop,
-                         stop, target, quote["bid"], "OPEN", now,
+                         stop, target, quote["bid"], quote["bid"], "OPEN", now,
                          quote["market_timestamp"], json.dumps(policy)),
                     )
                     await db.commit()
@@ -294,7 +319,8 @@ class AITradeService:
         # Do not turn data fetch time into an exchange observation.
         result = dict(record)
         result.update(
-            peak_bid=peak, current_stop=current_stop, trailing_active=int(trailing),
+            peak_bid=peak, last_bid=bid,
+            current_stop=current_stop, trailing_active=int(trailing),
             last_quote_at=quote["market_timestamp"],
             last_checked_at=now.isoformat(), data_status="VALID",
         )
@@ -335,12 +361,12 @@ class AITradeService:
                     revised = self.transition(record, quote, now)
                     await db.execute(
                         """UPDATE ai_paper_trades SET
-                            peak_bid=?, current_stop=?, trailing_active=?,
+                            peak_bid=?, last_bid=?, current_stop=?, trailing_active=?,
                             last_quote_at=?, last_checked_at=?, data_status=?,
                             status=?, exit_time=?, exit_price=?, exit_reason=?, pnl=?
                            WHERE trade_id=? AND status='OPEN'""",
                         (
-                            revised["peak_bid"], revised["current_stop"],
+                            revised["peak_bid"], revised["last_bid"], revised["current_stop"],
                             revised["trailing_active"], revised["last_quote_at"],
                             revised["last_checked_at"], revised["data_status"],
                             revised["status"], revised.get("exit_time"),

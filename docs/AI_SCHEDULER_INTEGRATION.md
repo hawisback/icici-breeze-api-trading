@@ -139,6 +139,45 @@ clear internal strategy ledgers, or delete `data/ai_trades.db`
 reconcile its actual cause and use the operator safety controls; never
 reset it automatically merely because PAPER orders were deleted.
 
+## Local AI-only mode and read-only trade dashboard
+
+Enable `AI_ONLY_MODE=true` and `MARKET_DATA_BACKEND=kite` on the local backend.
+The supplied Docker Compose backend enables both. In this mode:
+
+- The UI at `http://localhost:3000` exposes **no manual trading, live
+  mode, strategy, risk, kill-switch, or login controls**. It is an AI trade
+  monitor, not a second trade trigger.
+- The browser fetches ONLY `GET /api/v1/ai/trades?limit=100` (every 5s
+  while AI trades are open, otherwise every 15s) and
+  `GET /api/v1/ai/nifty/snapshot` (once per minute). There are no browser
+  WebSocket connections, non-AI polling, or automatic order POST requests.
+- The internal strategy scheduler, risk/OMS event replay loops, execution
+  reconciliation/recovery, Breeze autoactivation, and continuous market-data
+  polling are disabled at startup. The existing service APIs remain present
+  for compatibility, but UI does not call them.
+- AI data routes trigger **on-demand** fresh Kite index reads, coalesced
+  within 2 seconds, and load real completed candles as needed. The snapshot
+  omits expensive broker/account reconciliation; detailed account diagnostics
+  are available explicitly through `GET /api/v1/ai/account/context`.
+- The **independent AI PAPER trade worker remains enabled** and polls every
+  `AI_TRADE_POLL_SECONDS` (default 2.5s) while a trade is open. Its quote
+  request targets exactly the listed active Kite option contract, **not**
+  a whole option chain. It persists observed `last_bid`, stop/peak/trailing
+  state, `unrealized_pnl` (only when quote status is valid), exit reason,
+  and gross realized `pnl`. Old SQLite trade journals migrate automatically.
+- The dashboard is read-only: never interprets market data to place a trade
+  or manages protective exits. Your external AI scheduler is the only trade
+  intent caller, via `POST /api/v1/ai/trades`.
+- When a quote goes stale or Kite fails, the worker preserves an OPEN PAPER
+  position with an explicit `data_status` rather than fabricating an exit.
+  This is a **simulated** lifecycle, not a broker-held stop order.
+- Daily Kite access/session activation is still required. If Kite is not
+  connected, option data will fail closed rather than use Breeze/synthetic.
+
+The AI-only setting is separate from the server-owned trading mode; it never
+enables LIVE trading or bypasses any backend contract/quote protections.
+Only loopback clients may access the local no-token AI endpoints.
+
 ## Scheduler cycle
 
 1. Once per minute during the configured Indian market trading window,
