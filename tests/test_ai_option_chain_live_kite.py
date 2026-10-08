@@ -268,3 +268,27 @@ async def test_concurrent_option_chain_requests_share_single_kite_quote_batch():
     assert all(x["source"] == "KITE" for x in output)
     assert len(kite.chain_requests) == 1
     assert len(kite.expiry_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_cached_far_expiry_never_replaces_default_nearest_expiry():
+    nearest = (ist_today() + timedelta(days=7)).isoformat()
+    far = (ist_today() + timedelta(days=14)).isoformat()
+
+    class TwoExpiryKite(_KiteAdapter):
+        async def get_option_expiries(self, underlying: str):
+            self.expiry_requests.append(underlying)
+            return [nearest, far]
+
+    kite = TwoExpiryKite(nearest)
+    service = OptionChainService(
+        instrument_service=_NoLocalOptionMaster(),
+        market_data_service=_MarketData(),
+        broker_gateway=_Gateway(kite),
+    )
+    requested = await service.get_chain("NIFTY", expiry=far)
+    assert requested["expiry"] == far
+    default = await service.get_chain("NIFTY")
+    assert default["expiry"] == nearest
+    assert kite.chain_requests == [("NIFTY", far), ("NIFTY", nearest)]
+    assert kite.expiry_requests == ["NIFTY"]
