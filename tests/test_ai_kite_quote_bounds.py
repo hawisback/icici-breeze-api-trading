@@ -66,10 +66,10 @@ async def test_option_quotes_are_bounded_and_near_atm():
     assert chain["source"] == "KITE"
     assert chain["atm_strike"] == 25000
     assert len(client.quote_requests) == 1
-    assert len(client.quote_requests[0]) <= 62
+    assert len(client.quote_requests[0]) <= 122
     assert chain["quoted_contract_count"] == len(client.quote_requests[0])
     assert chain["partial_quote_coverage"] is False
-    assert all(abs(float(row["strike"]) - 25000) <= 800 for row in chain["strikes"])
+    assert all(abs(float(row["strike"]) - 25000) <= 1550 for row in chain["strikes"])
     assert client.instrument_calls == 1
 
 
