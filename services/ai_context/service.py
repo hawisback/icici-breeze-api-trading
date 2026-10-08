@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, time, timezone
 from typing import Any
 
+from libs.contracts.models import generate_id
+
 from libs.contracts.models import TradingMode, utc_now
 from libs.market_time import IST
 from services.ai_context.features import (
@@ -64,6 +66,49 @@ class AIContextService:
         except ValueError:
             return None
 
+    @staticmethod
+    def _completed_real_candles(candles: list[Any], interval: str) -> list[Any]:
+        """Do not expose synthetic, malformed or in-progress bars as evidence."""
+        step = {"1m": 60, "5m": 300, "15m": 900}.get(interval)
+        if step is None:
+            return []
+        now = utc_now()
+        validated: dict[datetime, Any] = {}
+        for candle in candles:
+            if not is_real_market_source(getattr(candle, "source", None)):
+                continue
+            if getattr(candle, "interval", None) != interval:
+                continue
+            start, end = candle.start_time, candle.end_time
+            if start.tzinfo is None or end.tzinfo is None:
+                continue
+            if abs((end - start).total_seconds() - step) > 5 or end > now:
+                continue
+            if not (0 < candle.low <= min(candle.open, candle.close)
+                    <= max(candle.open, candle.close) <= candle.high):
+                continue
+            if candle.volume < 0:
+                continue
+            validated[start] = candle
+        return sorted(validated.values(), key=lambda bar: bar.end_time)
+
+    @staticmethod
+    def _recent_session_missing_bars(candles: list[Any]) -> int:
+        """Count holes within the latest session only, not overnight closures."""
+        if not candles:
+            return 0
+        session = candles[-1].start_time.astimezone(IST).date()
+        recent = [c for c in candles if c.start_time.astimezone(IST).date() == session]
+        if len(recent) < 2:
+            return 0
+        step = (recent[-1].end_time - recent[-1].start_time).total_seconds()
+        missing = 0
+        for previous, current in zip(recent, recent[1:]):
+            gap = (current.start_time - previous.end_time).total_seconds()
+            if gap > step / 2:
+                missing += max(1, round(gap / step))
+        return missing
+
     async def get_candles(
         self,
         *,
@@ -89,7 +134,7 @@ class AIContextService:
                 "candles": [],
                 "generated_at": utc_now().isoformat(),
             }
-        real = [c for c in candles if is_real_market_source(c.source)]
+        real = self._completed_real_candles(candles, interval)
         if not real:
             return {
                 "available": False,
@@ -110,6 +155,7 @@ class AIContextService:
             "data_through": latest.end_time.isoformat(),
             "age_seconds": self._age_seconds(latest.end_time),
             "sources": sorted({str(c.source).upper() for c in ordered}),
+            "missing_recent_session_bars": self._recent_session_missing_bars(ordered),
             "candles": [c.model_dump(mode="json") for c in ordered],
             "generated_at": utc_now().isoformat(),
         }
@@ -138,7 +184,7 @@ class AIContextService:
                 "metrics": compute_technicals([]),
                 "calculated_at": utc_now().isoformat(),
             }
-        real = [c for c in candles if is_real_market_source(c.source)]
+        real = self._completed_real_candles(candles, interval)
         if not real:
             return {
                 "available": False,
@@ -157,6 +203,7 @@ class AIContextService:
             "data_through": latest.end_time.isoformat(),
             "age_seconds": self._age_seconds(latest.end_time),
             "sources": sorted({str(c.source).upper() for c in ordered}),
+            "missing_recent_session_bars": self._recent_session_missing_bars(ordered),
             "metrics": compute_technicals(ordered),
             "calculated_at": utc_now().isoformat(),
         }
