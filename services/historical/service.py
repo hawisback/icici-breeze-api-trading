@@ -50,8 +50,8 @@ class HistoricalService:
         local = now.astimezone(IST)
         unavailable = {"available": False, "source": "KITE", "basis": "NIFTY_FUTURES",
                        "value": None, "reason": "FUTURES_SESSION_VWAP_UNAVAILABLE"}
-        if local.weekday() >= 5 or local.time() < time(9, 20):
-            return {**unavailable, "reason": "NO_COMPLETED_SESSION_BARS"}
+        if local.weekday() >= 5 or not (time(9, 20) <= local.time() <= time(15, 30)):
+            return {**unavailable, "reason": "OUTSIDE_FUTURES_SESSION"}
         cached = self._futures_vwap_cache
         if cached and monotonic() - cached[0] < (55 if cached[1].get("available") else 10):
             return dict(cached[1])
