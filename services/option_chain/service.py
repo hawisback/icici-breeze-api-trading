@@ -42,6 +42,7 @@ class OptionChainService:
         self,
         underlying: str = "NIFTY",
         expiry: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> dict[str, Any]:
         """Build matrix of option strikes with Call and Put pricing."""
         clean_underlying = underlying.upper().strip()
@@ -55,8 +56,12 @@ class OptionChainService:
         else:
             default_expiries = ["2026-09-22", "2026-09-29", "2026-10-06", "2026-10-13", "2026-10-27", "2026-11-23"]
 
-        expiries = await self.inst_svc.get_expiries(clean_underlying)
-        all_expiries = sorted(e for e in (expiries or []) if e >= ist_today().isoformat())
+        requested_provider = str(provider or "").strip().lower()
+        if requested_provider and requested_provider not in {"kite", "breeze"}:
+            raise ValueError(f"Unsupported option-chain provider: {provider}")
+
+        local_expiries: list[str] = []
+        all_expiries: list[str] = []
         reference_provider = (
             str(
                 getattr(
@@ -84,6 +89,30 @@ class OptionChainService:
                 "active_adapter",
                 reference_adapter,
             )
+
+        # AI/read-only callers can explicitly request Kite. In that mode Kite's
+        # live NFO instrument dump is the source of truth for expiries/contracts;
+        # the local option master must not gate the request.
+        if requested_provider and self.broker_gateway:
+            requested_adapter = getattr(
+                self.broker_gateway,
+                f"{requested_provider}_adapter",
+                None,
+            )
+            if requested_adapter is None:
+                adapter_for_broker = getattr(
+                    self.broker_gateway,
+                    "adapter_for_broker",
+                    None,
+                )
+                if callable(adapter_for_broker):
+                    try:
+                        requested_adapter = adapter_for_broker(requested_provider)
+                    except (TypeError, ValueError):
+                        requested_adapter = None
+            reference_provider = requested_provider
+            reference_adapter = requested_adapter
+
         if (
             reference_provider == "kite"
             and reference_adapter
@@ -94,10 +123,34 @@ class OptionChainService:
                 try:
                     live_expiries = await get_expiries(clean_underlying)
                     if live_expiries:
-                        all_expiries = live_expiries
+                        all_expiries = sorted(
+                            {
+                                str(value)[:10]
+                                for value in live_expiries
+                                if str(value)[:10] >= ist_today().isoformat()
+                            }
+                        )
                 except Exception as exc:
                     logger.warning("Unable to refresh Kite option expiries: %s", exc)
+
+        # Preserve the existing local-master fallback for normal platform
+        # consumers. An explicit Kite request is intentionally fail-closed:
+        # if Kite cannot supply current expiries, do not substitute stale local
+        # contracts or another broker.
+        if not all_expiries and requested_provider != "kite":
+            local_expiries = await self.inst_svc.get_expiries(clean_underlying)
+            all_expiries = sorted(
+                e
+                for e in (local_expiries or [])
+                if e >= ist_today().isoformat()
+            )
+
         if not all_expiries:
+            rejection_reason = (
+                "KITE_OPTION_CHAIN_UNAVAILABLE"
+                if requested_provider == "kite"
+                else "OPTION_CHAIN_UNAVAILABLE"
+            )
             return {
                 "underlying": clean_underlying,
                 "source": "UNAVAILABLE",
@@ -106,7 +159,7 @@ class OptionChainService:
                     "verified_delta_available": False,
                     "verified_greeks_available": False,
                     "strategy_a_contract_selection_ready": False,
-                    "strategy_a_rejection_reason": "OPTION_CHAIN_UNAVAILABLE",
+                    "strategy_a_rejection_reason": rejection_reason,
                 },
             }
         selected_expiry = expiry if (expiry and expiry in all_expiries) else all_expiries[0]
@@ -321,7 +374,7 @@ class OptionChainService:
             "underlying": clean_underlying,
             "spot_price": spot_price,
             "expiry": selected_expiry,
-            "available_expiries": expiries,
+            "available_expiries": all_expiries,
             "atm_strike": atm_strike,
             "source": "SIMULATED",
             "capabilities": {
