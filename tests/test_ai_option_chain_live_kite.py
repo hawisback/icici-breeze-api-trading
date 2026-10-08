@@ -133,3 +133,63 @@ async def test_explicit_kite_chain_fails_closed_when_kite_is_inactive():
     )
     assert kite.expiry_requests == []
     assert kite.chain_requests == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_kite_chain_rejects_an_unlisted_expiry():
+    expiry = (ist_today() + timedelta(days=7)).isoformat()
+    kite = _KiteAdapter(expiry)
+    service = OptionChainService(
+        instrument_service=_NoLocalOptionMaster(),
+        market_data_service=_MarketData(),
+        broker_gateway=_Gateway(kite),
+    )
+
+    result = await service.get_chain(
+        underlying="NIFTY",
+        expiry=(ist_today() + timedelta(days=14)).isoformat(),
+        provider="kite",
+    )
+
+    assert result["source"] == "UNAVAILABLE"
+    assert result["available_expiries"] == [expiry]
+    assert result["capabilities"]["strategy_a_rejection_reason"] == "KITE_EXPIRY_NOT_AVAILABLE"
+    assert kite.chain_requests == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_kite_chain_does_not_seed_after_broker_error():
+    class FailingKite(_KiteAdapter):
+        async def get_option_chain_view(self, underlying: str, expiry: str):
+            raise ConnectionError("test broker failure")
+
+    expiry = (ist_today() + timedelta(days=7)).isoformat()
+    kite = FailingKite(expiry)
+    service = OptionChainService(
+        instrument_service=_NoLocalOptionMaster(),
+        market_data_service=_MarketData(),
+        broker_gateway=_Gateway(kite),
+    )
+
+    result = await service.get_chain(underlying="NIFTY", provider="kite")
+    assert result["source"] == "UNAVAILABLE"
+    assert result["strikes"] == []
+    assert result["capabilities"]["strategy_a_rejection_reason"] == "KITE_OPTION_CHAIN_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_explicit_kite_chain_does_not_seed_when_broker_returns_no_quotes():
+    class EmptyKite(_KiteAdapter):
+        async def get_option_chain_view(self, underlying: str, expiry: str):
+            return {}
+
+    expiry = (ist_today() + timedelta(days=7)).isoformat()
+    service = OptionChainService(
+        instrument_service=_NoLocalOptionMaster(),
+        market_data_service=_MarketData(),
+        broker_gateway=_Gateway(EmptyKite(expiry)),
+    )
+
+    result = await service.get_chain(underlying="NIFTY", provider="kite")
+    assert result["source"] == "UNAVAILABLE"
+    assert result["strikes"] == []
