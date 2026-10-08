@@ -7,9 +7,11 @@ contracts. Interpretation belongs to the AI consumer.
 
 from __future__ import annotations
 
+from datetime import time
 from typing import Any, Sequence
 
 from libs.contracts.models import Candle
+from libs.market_time import IST
 
 REAL_MARKET_SOURCES = {"BREEZE", "KITE", "LIVE"}
 
@@ -90,6 +92,19 @@ def _vwap(candles: Sequence[Candle]) -> float | None:
     return numerator / total_volume
 
 
+def _session_vwap(candles: Sequence[Candle]) -> float | None:
+    """Volume-weighted typical price for the last candle's IST trading session."""
+    if not candles:
+        return None
+    session_date = candles[-1].end_time.astimezone(IST).date()
+    regular = [
+        candle for candle in candles
+        if candle.start_time.astimezone(IST).date() == session_date
+        and time(9, 15) <= candle.start_time.astimezone(IST).time() < time(15, 30)
+    ]
+    return _vwap(regular)
+
+
 def _pct_change(current: float, previous: float) -> float | None:
     if previous == 0:
         return None
@@ -112,6 +127,8 @@ def compute_technicals(candles: Sequence[Candle]) -> dict[str, Any]:
             "macd_histogram": None,
             "atr_14": None,
             "vwap": None,
+            "session_vwap": None,
+            "vwap_scope": "requested_candles",
             "return_1_bar_pct": None,
             "return_3_bar_pct": None,
         }
@@ -148,6 +165,8 @@ def compute_technicals(candles: Sequence[Candle]) -> dict[str, Any]:
         "macd_histogram": _round(macd_histogram),
         "atr_14": _round(_atr_wilder(ordered, 14)),
         "vwap": _round(_vwap(ordered)),
+        "session_vwap": _round(_session_vwap(ordered)),
+        "vwap_scope": "requested_candles",
         "return_1_bar_pct": _round(
             _pct_change(closes[-1], closes[-2]) if len(closes) >= 2 else None
         ),
@@ -167,6 +186,8 @@ def summarize_option_chain(chain: dict[str, Any]) -> dict[str, Any]:
     put_oi_change = 0
     call_contracts = 0
     put_contracts = 0
+    call_oi_change_complete = True
+    put_oi_change_complete = True
 
     for row in chain.get("strikes", []) or []:
         call = row.get("call") or {}
@@ -175,12 +196,18 @@ def summarize_option_chain(chain: dict[str, Any]) -> dict[str, Any]:
             call_contracts += 1
             call_oi += int(call.get("open_interest") or 0)
             call_volume += int(call.get("volume") or 0)
-            call_oi_change += int(call.get("oi_change") or 0)
+            if call.get("oi_change") is None:
+                call_oi_change_complete = False
+            else:
+                call_oi_change += int(call["oi_change"])
         if put:
             put_contracts += 1
             put_oi += int(put.get("open_interest") or 0)
             put_volume += int(put.get("volume") or 0)
-            put_oi_change += int(put.get("oi_change") or 0)
+            if put.get("oi_change") is None:
+                put_oi_change_complete = False
+            else:
+                put_oi_change += int(put["oi_change"])
 
     return {
         "source": chain.get("source"),
@@ -192,8 +219,8 @@ def summarize_option_chain(chain: dict[str, Any]) -> dict[str, Any]:
         "put_contract_count": put_contracts,
         "call_open_interest": call_oi,
         "put_open_interest": put_oi,
-        "call_oi_change": call_oi_change,
-        "put_oi_change": put_oi_change,
+        "call_oi_change": call_oi_change if call_oi_change_complete else None,
+        "put_oi_change": put_oi_change if put_oi_change_complete else None,
         "call_volume": call_volume,
         "put_volume": put_volume,
         "pcr_oi": _round(put_oi / call_oi if call_oi else None),
