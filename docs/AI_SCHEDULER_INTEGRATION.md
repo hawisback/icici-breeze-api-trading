@@ -12,6 +12,81 @@ Do not put broker credentials, access tokens, account numbers, or secrets into
 LLM prompts or decision logs. Run the API on the loopback interface and use a
 private service identity for a separately hosted scheduler.
 
+## Mode-neutral AI trade submission (PAPER first)
+
+The external AI scheduler **does not** know or choose the execution mode.
+The backend owns its own separate config in `.env`; restart the backend
+after operator changes. Defaults are **disabled**, PAPER mode.
+
+```dotenv
+AI_TRADE_ENABLED=false
+AI_TRADE_MODE=PAPER
+AI_TRADE_MAX_QUANTITY=65
+AI_TRADE_MAX_PREMIUM_NOTIONAL=15000
+AI_TRADE_MAX_DAILY_ENTRIES=3
+AI_TRADE_INITIAL_STOP_PCT=6
+AI_TRADE_TRAIL_ACTIVATION_PCT=5
+AI_TRADE_TRAIL_GAP_PCT=3
+AI_TRADE_TARGET_PCT=7
+AI_TRADE_MAX_HOLD_SECONDS=480
+AI_TRADE_POLL_SECONDS=2.5
+```
+
+After testing in a non-production paper environment, the operator may set
+`AI_TRADE_ENABLED=true`. Sending `PAPER` or `LIVE` in a trade request is
+rejected as an unknown field. **If the operator selects LIVE, this new
+adapter blocks submissions** with `EXECUTION_MODE_NOT_READY`. The existing
+OMS/Risk/LiveTradingGate/protective-stop services must be integrated and
+end-to-end validated for externally originated trades *before* allowing
+LIVE; there is no silent mode fallback.
+
+On a validated, fresh signal from the external scheduler:
+
+```http
+POST /api/v1/ai/trades
+Authorization: Bearer <trader-scoped-token>
+Content-Type: application/json
+
+{"signal_id":"signal-20261008-1033-pe","instrument_id":"INST-NIFTY-2026-10-13-22500-PE","quantity":65}
+```
+
+`signal_id` is a durable idempotency key. The AI chooses a live
+Kite-listed NIFTY option instrument from `GET /nifty/options`, but **never**
+the fill price, stop, execution mode or trailing policy. The server
+requires context readiness, flat reconciled account, no open strategy
+trade, no unresolved orders, a real exchange-timestamped contract quote,
+a valid spread, lot-size alignment and operator quantity/notional/daily
+caps. In PAPER, the assumed entry is the *observed ask*; exits use
+the *observed bid*. These are simulated fills, not guaranteed executable
+market prices. The response omits the backend's execution mode.
+
+Use `GET /api/v1/ai/trades` and `GET /api/v1/ai/trades/{trade_id}` to
+track state. The same generic state schema is returned for a repeated
+`signal_id`. Trader/Admin authorization is required; the generic
+market-context endpoints remain read-only.
+
+An independent backend loop polls Kite contract quotes every 2.5 seconds
+(configurable). It persists entry, trailing state, last observed quote,
+and exit/reason in `AI_TRADE_DB_PATH` (default `./data/ai_trades.db`).
+The loop resumes persisted open PAPER trades after backend restarts:
+
+1. Fixed stop initially **6% below simulated ask fill**.
+2. On observed bid reaching **+5% from entry**, activate a stop no lower
+   than breakeven, then ratchet at **3% below peak observed bid**.
+3. Exit on stop breach, **+7% target**, or **8-minute maximum hold**,
+   using the next available valid observed bid. Stops only ratchet upward.
+4. Stale/unavailable option quotes do **not** produce fictional exits;
+   `data_status` records the outage. A PAPER trade can remain open
+   longer than planned during an outage. The operator must monitor these
+   states; no broker protective order exists for PAPER simulated fills.
+5. `pnl` is **gross simulated premium P&L** before fees and slippage.
+
+This PAPER lifecycle is intentionally separate from the existing
+strategy-generated trade ledger. It checks strategy active positions and
+kill switch to avoid overlapping position authority. A future release
+should unify PAPER ledger reporting and the OMS/PAPER broker adapter,
+and separately wire broker-held protective orders for LIVE.
+
 ## Scheduler cycle
 
 1. Once per minute during the configured Indian market trading window,
@@ -62,9 +137,9 @@ watching a protective stop, exit deadline, or broker order status.
   submission is unresolved.
 - Test trailing-stop alternatives using actual option bid/ask/quote history
   and event-time backtests before enabling them in LIVE mode.
-- The AI-facing endpoints intentionally expose no `/schedule` or
-  trade-placement endpoint. Those behaviors are external and require
-  independent integration tests.
+- `/schedule` remains external; the backend offers one restricted
+  mode-neutral trade-intent endpoint, not direct order placement authority.
+  The new trade endpoint is PAPER-only until LIVE safety integration passes.
 
 ## Test and monitoring requirements
 
