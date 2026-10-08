@@ -47,7 +47,9 @@ LIVE routing by this API is not supported and fails closed. See
 
 ## Local POC setup and Kite option-chain diagnostics
 
-The API base URL is `http://127.0.0.1:8000/api/v1/ai`. The Docker Compose
+The API base URL is `http://127.0.0.1:8000/api/v1/ai`. **No login, Bearer token,
+or Authorization header is needed for any local AI endpoint (including POST
+/trades).** Nonlocal callers are rejected with HTTP 403. Docker Compose
 backend port is host-loopback-only (`127.0.0.1:8000:8000`). When running
 `python run_platform.py` directly, set `API_HOST=127.0.0.1` in your environment
 to achieve the same local-only boundary.
