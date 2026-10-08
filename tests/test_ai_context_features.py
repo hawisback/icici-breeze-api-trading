@@ -41,6 +41,8 @@ def test_compute_technicals_returns_measurements_only():
     assert metrics["macd_histogram"] is not None
     assert metrics["atr_14"] is not None
     assert metrics["vwap"] is not None
+    assert metrics["session_vwap"] is not None
+    assert metrics["vwap_scope"] == "requested_candles"
 
     forbidden = {
         "bias",
@@ -98,3 +100,36 @@ def test_option_chain_summary_is_numeric_not_directional():
     assert summary["pcr_volume"] == 1.0
     assert "bias" not in summary
     assert "recommendation" not in summary
+
+
+def test_session_vwap_resets_for_new_trading_day():
+    candles = _candles(2)
+    next_day = candles[1].model_copy(
+        update={
+            "start_time": candles[1].start_time + timedelta(days=1),
+            "end_time": candles[1].end_time + timedelta(days=1),
+            "high": 26010.0,
+            "low": 25990.0,
+            "close": 26000.0,
+        }
+    )
+    metrics = compute_technicals([candles[0], next_day])
+    assert metrics["session_vwap"] == 26000.0
+    assert metrics["vwap"] != metrics["session_vwap"]
+
+
+def test_kite_missing_oi_change_is_null_not_a_false_zero():
+    chain = {
+        "source": "KITE",
+        "strikes": [
+            {
+                "strike": 25000,
+                "call": {"open_interest": 5000, "volume": 300, "oi_change": None},
+                "put": {"open_interest": 4000, "volume": 250, "oi_change": None},
+            }
+        ],
+    }
+    metrics = summarize_option_chain(chain)
+    assert metrics["call_oi_change"] is None
+    assert metrics["put_oi_change"] is None
+    assert metrics["pcr_oi"] == 0.8
