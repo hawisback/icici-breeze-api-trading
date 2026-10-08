@@ -421,17 +421,22 @@ class ZerodhaKiteAdapter(BrokerAdapter):
 
         step = 100 if clean_underlying == "BANKNIFTY" else 50
         atm = round(spot / step) * step
-        # 31 nearest strike levels x two rights = at most 62 contracts, well
-        # below Kite's full-quote limit of 500 instruments per request.
+        # 61 nearest strike levels x two rights = at most 122 contracts,
+        # covering the AI API's maximum strike_window=30 on both sides of ATM.
+        # This stays well below Kite's full-quote limit of 500 instruments.
         levels = sorted(
             {float(row["strike"]) for row in contracts},
             key=lambda strike: (abs(strike - atm), strike),
-        )[:31]
+        )[:61]
         selected_strikes = set(levels)
-        nearby = [
-            row for row in contracts
-            if float(row["strike"]) in selected_strikes
-        ]
+        # Only one contract per strike/right belongs in an option matrix.
+        nearby_by_side = {}
+        for row in contracts:
+            strike = float(row["strike"])
+            right = str(row["instrument_type"]).upper()
+            if strike in selected_strikes:
+                nearby_by_side.setdefault((strike, right), row)
+        nearby = list(nearby_by_side.values())
         quote_keys = [f"NFO:{row['tradingsymbol']}" for row in nearby]
         quotes = await self._run(lambda: self._kite.quote(quote_keys))
         if not isinstance(quotes, dict):
@@ -455,11 +460,15 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             quote_time = _parse_exchange_quote_datetime(
                 quote.get("timestamp") or quote.get("last_trade_time")
             )
+            last_price = float(quote.get("last_price") or 0)
+            previous_close = float((quote.get("ohlc") or {}).get("close") or 0)
             item = {
                 "instrument_id": f"INST-{clean_underlying}-{expiry}-{int(strike)}-{right}",
                 "symbol": symbol,
-                "ltp": float(quote.get("last_price") or 0),
-                "change_pct": float(quote.get("net_change") or 0),
+                "ltp": last_price,
+                "change_pct": round(
+                    (last_price - previous_close) / previous_close * 100, 4
+                ) if previous_close > 0 else None,
                 "volume": int(quote.get("volume") or 0),
                 "open_interest": int(quote.get("oi") or 0),
                 # Kite full quotes do not provide change in OI directly.
