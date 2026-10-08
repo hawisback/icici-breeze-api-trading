@@ -155,7 +155,7 @@ async def test_unconfirmed_order_blocks_an_accurate_flat_account():
 
 
 @pytest.mark.asyncio
-async def test_snapshot_never_grants_entry_with_unverified_account():
+async def test_snapshot_data_readiness_ignores_other_process_account_blockers():
     quote = Quote(
         instrument_id="INST-NIFTY-INDEX", symbol="NIFTY 50",
         source="KITE", last_price=22500.0, timestamp=utc_now(),
@@ -189,7 +189,7 @@ async def test_snapshot_never_grants_entry_with_unverified_account():
     async def get_account_context():
         return {
             "entry_context_ready": False,
-            "entry_blockers": ["BROKER_POSITIONS_UNVERIFIED"],
+            "entry_blockers": ["SYSTEM_MODE_NOT_NORMAL", "PENDING_OR_UNKNOWN_ORDERS"],
             "local_open_positions_count": 0,
             "broker_open_positions_count": None,
             "local_portfolio": {"positions": [], "pnl": None},
@@ -202,6 +202,50 @@ async def test_snapshot_never_grants_entry_with_unverified_account():
     svc._session_context = lambda expiry: {"regular_session": True}
     result = await svc.get_snapshot()
     assert result["entry_data_ready"] is True
-    assert result["entry_permitted"] is False
-    assert "BROKER_POSITIONS_UNVERIFIED" in result["blocking_reasons"]
-    assert result["schema_version"] == "1.1"
+    # Strategy/OMS risk states are returned as evidence, never as an AI entry veto.
+    assert result["entry_permitted"] is True
+    assert result["blocking_reasons"] == []
+    assert result["account"]["entry_context_ready"] is False
+    assert result["account"]["entry_blockers"] == ["SYSTEM_MODE_NOT_NORMAL", "PENDING_OR_UNKNOWN_ORDERS"]
+    assert result["readiness_scope"] == "MARKET_DATA_ONLY"
+    assert result["schema_version"] == "1.2"
+
+
+@pytest.mark.asyncio
+async def test_risk_rejected_order_is_terminal_not_a_pending_order():
+    class Portfolio:
+        async def get_positions(self):
+            return []
+        async def get_pnl_summary(self):
+            return {"total_pnl": 0}
+
+    class Broker:
+        async def get_positions(self, mode):
+            return []
+        async def get_funds(self, mode):
+            return {"available": 50000}
+
+    class Session:
+        async def get_all_session_statuses(self):
+            return []
+        async def get_session_status(self):
+            return {"connected": True}
+
+    class Risk:
+        async def get_system_mode(self):
+            return SystemMode.ENTRY_BLOCKED
+
+    class Oms:
+        async def list_orders(self, limit):
+            return [SimpleNamespace(status="RISK_REJECTED", order_id="rejected-001")]
+
+    svc = _service(
+        portfolio_service=Portfolio(), broker_gateway=Broker(),
+        broker_session_service=Session(), risk_service=Risk(),
+        order_management_service=Oms(),
+    )
+    account = await svc.get_account_context()
+    assert account["order_book"]["pending_count"] == 0
+    assert "PENDING_OR_UNKNOWN_ORDERS" not in account["entry_blockers"]
+    assert account["risk_system_mode"] == "ENTRY_BLOCKED"
+    assert "SYSTEM_MODE_NOT_NORMAL" in account["entry_blockers"]
