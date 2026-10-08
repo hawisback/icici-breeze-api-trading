@@ -560,7 +560,9 @@ class ZerodhaKiteAdapter(BrokerAdapter):
                     (last_price - previous_close) / previous_close * 100, 4
                 ) if previous_close > 0 else None,
                 "volume": int(quote.get("volume") or 0),
-                "open_interest": int(quote.get("oi") or 0),
+                "open_interest": (
+                    int(quote["oi"]) if quote.get("oi") is not None else None
+                ),
                 # Kite full quotes do not provide change in OI directly.
                 "oi_change": None,
                 "bid": float((buy_depth[0] if buy_depth else {}).get("price") or 0),
