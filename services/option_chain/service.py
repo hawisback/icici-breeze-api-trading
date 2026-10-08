@@ -51,16 +51,10 @@ class OptionChainService:
         else:
             clean_underlying = "NIFTY"
 
-        if clean_underlying == "BANKNIFTY":
-            default_expiries = ["2026-09-29", "2026-10-27", "2026-11-23"]
-        else:
-            default_expiries = ["2026-09-22", "2026-09-29", "2026-10-06", "2026-10-13", "2026-10-27", "2026-11-23"]
-
         requested_provider = str(provider or "").strip().lower()
         if requested_provider and requested_provider not in {"kite", "breeze"}:
             raise ValueError(f"Unsupported option-chain provider: {provider}")
 
-        local_expiries: list[str] = []
         all_expiries: list[str] = []
         reference_provider = (
             str(
@@ -140,8 +134,7 @@ class OptionChainService:
         if not all_expiries and requested_provider != "kite":
             local_expiries = await self.inst_svc.get_expiries(clean_underlying)
             all_expiries = sorted(
-                e
-                for e in (local_expiries or [])
+                e for e in (local_expiries or [])
                 if e >= ist_today().isoformat()
             )
 
@@ -160,6 +153,21 @@ class OptionChainService:
                     "verified_greeks_available": False,
                     "strategy_a_contract_selection_ready": False,
                     "strategy_a_rejection_reason": rejection_reason,
+                },
+            }
+        # Never silently substitute a different expiry for a direct Kite AI call.
+        if requested_provider == "kite" and expiry and expiry not in all_expiries:
+            return {
+                "underlying": clean_underlying,
+                "source": "UNAVAILABLE",
+                "expiry": expiry,
+                "available_expiries": all_expiries,
+                "strikes": [],
+                "capabilities": {
+                    "verified_delta_available": False,
+                    "verified_greeks_available": False,
+                    "strategy_a_contract_selection_ready": False,
+                    "strategy_a_rejection_reason": "KITE_EXPIRY_NOT_AVAILABLE",
                 },
             }
         selected_expiry = expiry if (expiry and expiry in all_expiries) else all_expiries[0]
@@ -303,7 +311,24 @@ class OptionChainService:
                                 return deepcopy(kite_chain)
                         except Exception as exc:
                             self._kite_chain_retry_after = monotonic() + 15.0
-                            logger.warning("Live Kite option chain query error: %s; falling back to local instruments.", exc)
+                            logger.warning("Live Kite option chain query error: %s", type(exc).__name__)
+
+        # A caller that explicitly requested real Kite quotes must never trigger
+        # the synthetic/local-master fallback, even on timeout or missing quotes.
+        if requested_provider == "kite":
+            return {
+                "underlying": clean_underlying,
+                "source": "UNAVAILABLE",
+                "expiry": selected_expiry,
+                "available_expiries": all_expiries,
+                "strikes": [],
+                "capabilities": {
+                    "verified_delta_available": False,
+                    "verified_greeks_available": False,
+                    "strategy_a_contract_selection_ready": False,
+                    "strategy_a_rejection_reason": "KITE_OPTION_CHAIN_UNAVAILABLE",
+                },
+            }
 
         # 3. Fallback / Offline / Market Closed Complete Strike Matrix
         instruments = await self.inst_svc.get_option_chain_instruments(
