@@ -98,6 +98,21 @@ class PlatformSettings(BaseSettings):
         alias="LIVE_MARKET_DATA_MAX_AGE_SECONDS",
     )
 
+    # External AI trade intent gateway. These values are server-owned: clients
+    # cannot select their own execution mode or trailing-stop policy.
+    ai_trade_enabled: bool = Field(default=False, alias="AI_TRADE_ENABLED")
+    ai_trade_mode: TradingMode = Field(default=TradingMode.PAPER, alias="AI_TRADE_MODE")
+    ai_trade_db_path: Path = Field(default=Path("./data/ai_trades.db"), alias="AI_TRADE_DB_PATH")
+    ai_trade_max_quantity: int = Field(default=65, ge=1, le=1800, alias="AI_TRADE_MAX_QUANTITY")
+    ai_trade_max_premium_notional: float = Field(default=15000, gt=0, alias="AI_TRADE_MAX_PREMIUM_NOTIONAL")
+    ai_trade_max_daily_entries: int = Field(default=3, ge=1, le=50, alias="AI_TRADE_MAX_DAILY_ENTRIES")
+    ai_trade_initial_stop_pct: float = Field(default=6.0, gt=0, le=30, alias="AI_TRADE_INITIAL_STOP_PCT")
+    ai_trade_trail_activation_pct: float = Field(default=5.0, gt=0, le=30, alias="AI_TRADE_TRAIL_ACTIVATION_PCT")
+    ai_trade_trail_gap_pct: float = Field(default=3.0, gt=0, le=20, alias="AI_TRADE_TRAIL_GAP_PCT")
+    ai_trade_target_pct: float = Field(default=7.0, gt=0, le=50, alias="AI_TRADE_TARGET_PCT")
+    ai_trade_max_hold_seconds: int = Field(default=480, ge=30, le=3600, alias="AI_TRADE_MAX_HOLD_SECONDS")
+    ai_trade_poll_seconds: float = Field(default=2.5, ge=1.0, le=30.0, alias="AI_TRADE_POLL_SECONDS")
+
     # API & Network & Boundary Security
     api_host: str = Field(default="127.0.0.1", alias="API_HOST")
     api_port: int = Field(default=8000, alias="API_PORT")
@@ -111,6 +126,12 @@ class PlatformSettings(BaseSettings):
     rate_limit_orders_per_minute: int = Field(default=60, alias="RATE_LIMIT_ORDERS_PER_MINUTE")
     rate_limit_general_per_minute: int = Field(default=120, alias="RATE_LIMIT_GENERAL_PER_MINUTE")
     idempotency_ttl_seconds: int = Field(default=86400, alias="IDEMPOTENCY_TTL_SECONDS")
+
+    @model_validator(mode="after")
+    def validate_ai_trade_mode(self) -> "PlatformSettings":
+        if self.ai_trade_mode == TradingMode.SHADOW:
+            raise ValueError("AI_TRADE_MODE must be PAPER or LIVE")
+        return self
 
     # Broker execution ownership and data/API routing are intentionally separate.
     market_data_backend: MarketDataBackend = Field(
