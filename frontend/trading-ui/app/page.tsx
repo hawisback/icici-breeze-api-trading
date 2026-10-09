@@ -1,6 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import BrokerConnections from "../features/broker_connections/BrokerConnections";
 
 const AI_BASE = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/ai`;
 
@@ -54,8 +55,8 @@ const time = (s: string | null | undefined) => s
   : "—";
 
 export default function AIPaperTerminal() {
-  // The dashboard never submits an order, changes risk/config, or opens a
-  // websocket. It reads ONLY the dedicated /api/v1/ai namespace.
+  // The dashboard never submits orders or changes execution mode. Broker
+  // connection buttons use the local AI route solely for daily authentication.
   const trades = useQuery({
     queryKey: ["ai-trades"],
     queryFn: () => getAI<AITrade[]>("/trades?limit=100"),
@@ -77,7 +78,7 @@ export default function AIPaperTerminal() {
     <main className="h-screen overflow-auto bg-[#0a0e17] text-slate-100 p-4 md:p-7 space-y-6">
       <header className="flex flex-wrap justify-between gap-4 items-center border-b border-slate-800 pb-5">
         <div>
-          <p className="text-xs font-semibold tracking-[0.25em] text-blue-400">LOCAL · READ-ONLY</p>
+          <p className="text-xs font-semibold tracking-[0.25em] text-blue-400">LOCAL · AI TRADE MONITOR</p>
           <h1 className="text-2xl md:text-3xl font-bold mt-1">NIFTY AI Trade Monitor</h1>
           <p className="text-sm text-slate-400 mt-1">Signals arrive through the AI API. The backend manages simulated stops, trailing, and exits.</p>
         </div>
@@ -85,6 +86,8 @@ export default function AIPaperTerminal() {
           AI PAPER · No manual trading controls
         </span>
       </header>
+
+      <BrokerConnections />
 
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Stat title="NIFTY" value={money(snapshot.data?.underlying?.last_price)} detail={snapshot.data?.underlying?.source || "No live index quote"} />
@@ -140,7 +143,7 @@ export default function AIPaperTerminal() {
           </div>}
       </section>
       <footer className="text-xs text-slate-500 pb-5">
-        Source: /api/v1/ai/nifty/snapshot and /api/v1/ai/trades only.
+        Source: /api/v1/ai/nifty/snapshot and /api/v1/ai/trades. Broker login/status also use /api/v1/ai/broker/* only.
         Quote timestamps reflect Kite exchange observations, not browser refresh time.
         PAPER entries/exits are simulated, not broker fills.
         Snapshot: {time(snapshot.data?.as_of)} · Market data: {snapshot.data?.data_quality?.quote_ready ? "Ready" : "Unavailable / not ready"}.

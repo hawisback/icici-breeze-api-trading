@@ -47,7 +47,12 @@ def _service(**kwargs):
 
 def test_ai_routes_require_local_peer_not_login():
     assert any(dependency.dependency is require_local_ai_client for dependency in router.dependencies)
-    assert all(route.methods == {"GET"} for route in router.routes if route.path != "/api/v1/ai/trades")
+    non_readonly = {route.path for route in router.routes if route.methods == {"POST"}}
+    assert non_readonly == {
+        "/api/v1/ai/trades",
+        "/api/v1/ai/broker/session/login-url",
+        "/api/v1/ai/broker/session/activate",
+    }
     assert any(route.methods == {"POST"} for route in router.routes)
 
 
