@@ -41,7 +41,7 @@ for `entry_data_ready`: **market-data diagnostics only**. Shared strategy
 positions, global system risk mode, and OMS order state remain available
 as account information but do not block `POST /api/v1/ai/trades` PAPER
 submissions. The independent AI PAPER manager enforces only AI-specific
-quantity/notional/open-position/daily limits and real Kite quote integrity.
+quantity/notional/one-open-position limits, an optional configurable daily-entry cap (`AI_TRADE_MAX_DAILY_ENTRIES=0` disables the daily count), and real Kite quote integrity.
 LIVE routing by this API is not supported and fails closed. See
 `docs/AI_SCHEDULER_INTEGRATION.md` for the mode-neutral trade lifecycle.
 

@@ -38,7 +38,7 @@ AI_TRADE_ENABLED=true
 AI_TRADE_MODE=PAPER
 AI_TRADE_MAX_QUANTITY=65
 AI_TRADE_MAX_PREMIUM_NOTIONAL=15000
-AI_TRADE_MAX_DAILY_ENTRIES=3
+AI_TRADE_MAX_DAILY_ENTRIES=0
 AI_TRADE_INITIAL_STOP_PCT=6
 AI_TRADE_TRAIL_ACTIVATION_PCT=5
 AI_TRADE_TRAIL_GAP_PCT=3
@@ -46,6 +46,10 @@ AI_TRADE_TARGET_PCT=7
 AI_TRADE_MAX_HOLD_SECONDS=480
 AI_TRADE_POLL_SECONDS=2.5
 ```
+
+Daily entry count is **unlimited by default** for PAPER signals: `AI_TRADE_MAX_DAILY_ENTRIES=0` disables just the daily-count guard. Set a positive integer (for example `10`) to enforce that many AI entries per IST calendar day. The setting is read at backend startup; after changing it in the **actual local `.env`**, restart Uvicorn. A previous `AI_TRADE_MAX_DAILY_ENTRIES=3` in your existing `.env` continues to enforce three entries until you change it to `0` (updating an example template does not edit your workstation's `.env`). Changing the limit does not erase any persisted trades.
+
+This does **not** disable AI PAPER trading protections: one concurrent OPEN trade, lot/quantity and premium notional ceilings, real Kite contract/freshness/spread verification, stop/target/trailing/holding-time rules, and unsupported LIVE execution remain enforced. High-frequency repeat submissions should still be intentional; the backend does not limit aggregate daily losses across an unlimited series of simulated trades.
 
 To disable new AI paper entries, set `AI_TRADE_ENABLED=false` and restart
  the backend. Existing open simulated trades remain monitored until closed.
@@ -70,7 +74,7 @@ Kite-listed NIFTY option instrument from `GET /nifty/options`, but **never**
 the fill price, stop, execution mode or trailing policy. The server
 requires a real exchange-timestamped Kite contract quote, an acceptable
 spread, lot-size alignment and **AI-specific** quantity/notional/daily/open
-trade caps. Internal strategy positions, the strategy kill switch, the
+trade caps (daily count only when >0). Internal strategy positions, the strategy kill switch, the
 global risk mode, broker portfolio and OMS orders **do not veto AI PAPER**
 submissions. They may still appear in account context as evidence. In PAPER, the assumed entry is the *observed ask*; exits use
 the *observed bid*. These are simulated fills, not guaranteed executable

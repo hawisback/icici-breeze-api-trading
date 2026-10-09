@@ -118,7 +118,12 @@ class PlatformSettings(BaseSettings):
     ai_trade_db_path: Path = Field(default=Path("./data/ai_trades.db"), alias="AI_TRADE_DB_PATH")
     ai_trade_max_quantity: int = Field(default=65, ge=1, le=1800, alias="AI_TRADE_MAX_QUANTITY")
     ai_trade_max_premium_notional: float = Field(default=15000, gt=0, alias="AI_TRADE_MAX_PREMIUM_NOTIONAL")
-    ai_trade_max_daily_entries: int = Field(default=3, ge=1, le=50, alias="AI_TRADE_MAX_DAILY_ENTRIES")
+    ai_trade_max_daily_entries: int = Field(
+        default=0,
+        ge=0,
+        alias="AI_TRADE_MAX_DAILY_ENTRIES",
+        description="Maximum AI PAPER entries per IST day. 0 disables the daily count cap; positive values enforce it.",
+    )
     ai_trade_initial_stop_pct: float = Field(default=6.0, gt=0, le=30, alias="AI_TRADE_INITIAL_STOP_PCT")
     ai_trade_trail_activation_pct: float = Field(default=5.0, gt=0, le=30, alias="AI_TRADE_TRAIL_ACTIVATION_PCT")
     ai_trade_trail_gap_pct: float = Field(default=3.0, gt=0, le=20, alias="AI_TRADE_TRAIL_GAP_PCT")

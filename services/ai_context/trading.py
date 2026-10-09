@@ -144,6 +144,7 @@ class AITradeService:
             "max_quantity": s.ai_trade_max_quantity,
             "max_premium_notional": s.ai_trade_max_premium_notional,
             "max_daily_entries": s.ai_trade_max_daily_entries,
+            "daily_entry_limit_enabled": s.ai_trade_max_daily_entries > 0,
             "initial_stop_pct": s.ai_trade_initial_stop_pct,
             "trail_activation_pct": s.ai_trade_trail_activation_pct,
             "trail_gap_pct": s.ai_trade_trail_gap_pct,
@@ -235,14 +236,19 @@ class AITradeService:
                 ) as cursor:
                     if (await cursor.fetchone())[0] > 0:
                         raise AITradeError("ANOTHER_AI_TRADE_IS_OPEN")
-                today = utc_now().astimezone(IST).date().isoformat()
-                async with db.execute(
-                    "SELECT count(*) FROM ai_paper_trades WHERE substr(entry_time,1,10)=?",
-                    (today,),
-                ) as cursor:
-                    # Store entry_time in IST ISO format for local session limits.
-                    if (await cursor.fetchone())[0] >= self.settings.ai_trade_max_daily_entries:
-                        raise AITradeError("AI_DAILY_ENTRY_LIMIT_REACHED")
+                # 0 means unlimited AI PAPER entries per IST day; no journal
+                # count query is needed. Positive values are enforced against
+                # persisted entries across process restarts.
+                daily_limit = self.settings.ai_trade_max_daily_entries
+                if daily_limit > 0:
+                    today = utc_now().astimezone(IST).date().isoformat()
+                    async with db.execute(
+                        "SELECT count(*) FROM ai_paper_trades WHERE substr(entry_time,1,10)=?",
+                        (today,),
+                    ) as cursor:
+                        # entry_time is stored with the local IST date prefix.
+                        if (await cursor.fetchone())[0] >= daily_limit:
+                            raise AITradeError("AI_DAILY_ENTRY_LIMIT_REACHED")
 
                 # The external AI makes its own entry classification. Shared
                 # strategy kill switches, global risk mode, broker portfolio and
