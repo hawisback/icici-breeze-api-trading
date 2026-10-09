@@ -171,6 +171,25 @@ use the existing local port-80 forwarder; alternatively paste the
 `apisession` manually. Refresh both connection statuses after the
 broker's confirmation page.
 
+Troubleshooting on local Uvicorn:
+- If the dashboard says **NOT CONFIGURED**, set `KITE_API_KEY` and
+  `KITE_API_SECRET` or `BREEZE_API_KEY` and `BREEZE_SECRET_KEY`
+  in the backend project's `.env`, restart Uvicorn and click
+  **Refresh status**. The Connect button remains clickable and reports
+  a clear backend error instead of being permanently disabled.
+- If a broker popup is closed or the callback fails, **Retry login** or
+  **Cancel waiting**; the short 5-second connection check automatically
+  stops after two minutes if no connection is confirmed.
+- Check `http://127.0.0.1:8000/api/v1/ai/broker/sessions` directly if
+  the browser cannot load broker status. It requires no JWT when called
+  from the same workstation.
+- A Next.js hydration warning that specifically lists `data-liner-*` or
+  `data-be-installed` attributes on `html`/`body` is caused by a browser
+  extension modifying DOM attributes before React hydrates. The layout
+  suppresses harmless attribute mismatches on these two tags only; if
+  deeper changes still trigger warnings, disable the responsible extension
+  for the local dashboard and reload.
+
 In **AI_ONLY_MODE=true**, configured Breeze session autoactivation
 on Uvicorn restart is supported, but no Breeze option-chain polling is
 started. Kite stays the AI market-data source; neither login button
