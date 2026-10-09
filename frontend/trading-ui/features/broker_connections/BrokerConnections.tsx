@@ -69,9 +69,21 @@ export default function BrokerConnections() {
   useEffect(() => {
     if (connecting && sessions.data?.[connecting]?.connected) {
       setConnecting(null);
+      setFallbackLogin(null);
       setNotice(`${connecting === "kite" ? "Kite" : "Breeze"} connected successfully.`);
     }
   }, [connecting, sessions.data]);
+
+  useEffect(() => {
+    if (!connecting) return;
+    // A closed/failed broker popup must not cause unlimited 5s status polls.
+    const timeout = window.setTimeout(() => {
+      setConnecting(null);
+      setFallbackLogin(null);
+      setNotice("Broker login was not confirmed. Retry Connect or enter today's token manually.");
+    }, 120000);
+    return () => window.clearTimeout(timeout);
+  }, [connecting]);
 
   async function openBrokerLogin(broker: Broker) {
     setError(null);
@@ -183,11 +195,24 @@ export default function BrokerConnections() {
                 <button
                   type="button"
                   className="rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-3 py-2 text-xs font-medium"
-                  disabled={connecting === broker || submitting !== null}
+                  disabled={submitting !== null}
                   onClick={() => void openBrokerLogin(broker)}
                 >
-                  {connecting === broker ? "Waiting for login…" : connected ? "Reconnect" : `Connect ${broker === "kite" ? "Kite" : "Breeze"}`}
+                  {connecting === broker
+                    ? `Retry ${broker === "kite" ? "Kite" : "Breeze"} login`
+                    : connected ? "Reconnect" : `Connect ${broker === "kite" ? "Kite" : "Breeze"}`}
                 </button>
+                {connecting === broker && (
+                  <button
+                    type="button"
+                    className="rounded border border-slate-600 px-3 py-2 text-xs text-slate-300"
+                    onClick={() => {
+                      setConnecting(null);
+                      setFallbackLogin(null);
+                      setNotice("Broker login cancelled. You may try again.");
+                    }}
+                  >Cancel waiting</button>
+                )}
                 <button
                   type="button"
                   className="rounded border border-slate-600 hover:border-slate-400 px-3 py-2 text-xs"
