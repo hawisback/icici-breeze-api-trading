@@ -186,7 +186,10 @@ def test_broker_dashboard_connect_is_not_gated_by_status_or_key_configuration():
     ).read_text(encoding="utf-8")
     assert "disabled={!ready" not in source
     assert "disabled={submitting !== null || !ready}" not in source
-    assert "disabled={connecting === broker || submitting !== null}" in source
+    assert "disabled={submitting !== null}" in source
+    assert "Retry " in source
+    assert "Cancel waiting" in source
+    assert "120000" in source
     assert "KITE_API_KEY and KITE_API_SECRET" in source
     assert "BREEZE_API_KEY and BREEZE_SECRET_KEY" in source
     assert "restart Uvicorn" in source
