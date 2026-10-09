@@ -139,6 +139,46 @@ clear internal strategy ledgers, or delete `data/ai_trades.db`
 reconcile its actual cause and use the operator safety controls; never
 reset it automatically merely because PAPER orders were deleted.
 
+## Daily broker login from the local AI dashboard
+
+The AI-only dashboard keeps trading controls removed, but restores two
+**broker session connection controls** at `http://localhost:3000`:
+**Connect Kite** and **Connect Breeze**. Use these each trading day when
+the broker session expires. The API gateway must be running under local
+Uvicorn on `127.0.0.1:8000` and the appropriate broker API key and
+secret must already be configured in `.env`.
+
+- `GET /api/v1/ai/broker/sessions` — local, no-JWT read of configured/
+  connected Kite and Breeze sessions (30s dashboard refresh). Does not
+  return credentials, access tokens, or session keys.
+- `POST /api/v1/ai/broker/session/login-url` with
+  `{"broker":"kite"}` or `{"broker":"breeze"}` — generates the existing
+  short-lived broker-login challenge and a localhost URL. The browser opens
+  it in a new window; `/api/v1/broker/session/start` redirects to the
+  broker, and the existing one-time-state callback activates the session.
+- `POST /api/v1/ai/broker/session/activate` with
+  `{"broker":"kite","token":"<TODAY_REQUEST_TOKEN>"}` or
+  `{"broker":"breeze","token":"<TODAY_APISESSION>"}` — fallback when
+  the broker's registered redirect doesn't complete. Token is exchanged
+  server-side using `.env` credentials. Only an exchanged Kite access
+  token or the valid Breeze apisession is persisted to `.env` after
+  successful authentication. No token is returned to the browser.
+
+The official Kite login redirect URL should point to
+`http://127.0.0.1:8000/api/v1/broker/session/callback` in the Kite
+developer console. ICICI Direct's default `127.0.0.1` callback may
+use the existing local port-80 forwarder; alternatively paste the
+`apisession` manually. Refresh both connection statuses after the
+broker's confirmation page.
+
+In **AI_ONLY_MODE=true**, configured Breeze session autoactivation
+on Uvicorn restart is supported, but no Breeze option-chain polling is
+started. Kite stays the AI market-data source; neither login button
+places an order, bypasses PAPER-only AI execution, enables the legacy
+strategy scheduler, or adds any dashboard trading triggers.
+The broker OAuth callback routes themselves remain part of the existing
+broker gateway; ordinary dashboard data requests use only `/api/v1/ai/*`.
+
 ## Local AI-only mode and read-only trade dashboard
 
 Enable `AI_ONLY_MODE=true` and `MARKET_DATA_BACKEND=kite` on the local backend.
@@ -147,7 +187,7 @@ The supplied Docker Compose backend enables both. In this mode:
 - The UI at `http://localhost:3000` exposes **no manual trading, live
   mode, strategy, risk, kill-switch, or login controls**. It is an AI trade
   monitor, not a second trade trigger.
-- The browser fetches ONLY `GET /api/v1/ai/trades?limit=100` (every 5s
+- For the read-only **trading dashboard**, the browser fetches `GET /api/v1/ai/trades?limit=100` (every 5s
   while AI trades are open, otherwise every 15s) and
   `GET /api/v1/ai/nifty/snapshot` (once per minute). There are no browser
   WebSocket connections, non-AI polling, or automatic order POST requests.
@@ -165,8 +205,8 @@ The supplied Docker Compose backend enables both. In this mode:
   a whole option chain. It persists observed `last_bid`, stop/peak/trailing
   state, `unrealized_pnl` (only when quote status is valid), exit reason,
   and gross realized `pnl`. Old SQLite trade journals migrate automatically.
-- The dashboard is read-only: never interprets market data to place a trade
-  or manages protective exits. Your external AI scheduler is the only trade
+- The dashboard's **trade section** is read-only: never interprets market data to place a trade
+  or manages protective exits. Broker connection buttons are the only UI actions. Your external AI scheduler is the only trade
   intent caller, via `POST /api/v1/ai/trades`.
 - When a quote goes stale or Kite fails, the worker preserves an OPEN PAPER
   position with an explicit `data_status` rather than fabricating an exit.
