@@ -10,6 +10,9 @@ from __future__ import annotations
 from datetime import date
 import asyncio
 from time import monotonic
+from urllib.parse import urlencode
+
+from libs.config import update_env_variable
 
 from pydantic import BaseModel, ConfigDict, Field
 from services.ai_context.trading import AITradeError
@@ -59,6 +62,126 @@ def _context_service() -> AIContextService:
         order_management_service=services.oms_svc,
         ai_only_mode=getattr(services.settings, "ai_only_mode", False),
     )
+
+
+
+class AIBrokerLoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    broker: str = Field(pattern=r"^(kite|breeze)$")
+
+
+class AIBrokerTokenRequest(AIBrokerLoginRequest):
+    """Paste the broker's daily request_token (Kite) / apisession (Breeze)."""
+
+    token: str = Field(min_length=5, max_length=4096)
+
+
+def _broker_credentials(services, broker: str) -> tuple[str, str]:
+    settings = services.settings
+    raw_key = settings.kite_api_key if broker == "kite" else settings.breeze_api_key
+    raw_secret = settings.kite_api_secret if broker == "kite" else settings.breeze_secret_key
+    key = raw_key.get_secret_value() if raw_key else ""
+    secret = raw_secret.get_secret_value() if raw_secret else ""
+    if not key or not secret or key.startswith("your_") or secret.startswith("your_"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"BROKER_CREDENTIALS_NOT_CONFIGURED: configure {broker.upper()} keys in .env",
+        )
+    return key, secret
+
+
+@router.get("/broker/sessions")
+async def get_ai_broker_sessions():
+    """Read-only daily Kite/Breeze connection status; do not expose tokens."""
+    services = get_services()
+    statuses = await services.session_svc.get_all_session_statuses()
+    def public_status(broker: str) -> dict:
+        setting = services.settings
+        api_key = setting.kite_api_key if broker == "kite" else setting.breeze_api_key
+        secret = setting.kite_api_secret if broker == "kite" else setting.breeze_secret_key
+        key = api_key.get_secret_value() if api_key else ""
+        sec = secret.get_secret_value() if secret else ""
+        status = statuses.get(broker) or {}
+        return {
+            "broker": broker,
+            "configured": bool(key and sec and not key.startswith("your_") and not sec.startswith("your_")),
+            "connected": bool(status.get("connected")),
+            "status": status.get("status", "DISCONNECTED"),
+            "expires_at": status.get("expires_at"),
+            "message": status.get("message"),
+        }
+    return {
+        "kite": public_status("kite"),
+        "breeze": public_status("breeze"),
+        "market_data_broker": "kite",
+        "trading_mode": services.settings.ai_trade_mode.value,
+    }
+
+
+@router.post("/broker/session/login-url")
+async def issue_ai_broker_login_url(req: AIBrokerLoginRequest):
+    """Start existing official broker redirect flow without platform-user login."""
+    services = get_services()
+    _broker_credentials(services, req.broker)
+    challenge = services.session_svc.issue_login_challenge(
+        initiated_by="LOCAL_AI_DASHBOARD",
+        broker_backend=req.broker,
+    )
+    # /start sets the HttpOnly state cookie and redirects to the official
+    # broker login page. The existing callback exchanges/persists the token.
+    return {
+        "broker": req.broker,
+        "login_url": "http://127.0.0.1:8000/api/v1/broker/session/start?" + urlencode(
+            {"broker": req.broker, "state": challenge["state"]}
+        ),
+        "expires_at": challenge["expires_at"],
+    }
+
+
+@router.post("/broker/session/activate")
+async def activate_ai_broker_session(req: AIBrokerTokenRequest):
+    """Local manual fallback for daily Kite request token or Breeze apisession."""
+    services = get_services()
+    api_key, secret_key = _broker_credentials(services, req.broker)
+    token = req.token.strip()
+    if not token:
+        raise HTTPException(status_code=422, detail="EMPTY_BROKER_TOKEN")
+    try:
+        result = await services.session_svc.activate_session(
+            api_key=api_key,
+            secret_key=secret_key,
+            session_token=token,
+            account_id="ZERODHA_PRIMARY" if req.broker == "kite" else "ICICI_PRIMARY",
+            broker_backend=req.broker,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"BROKER_SESSION_ACTIVATION_FAILED:{type(exc).__name__}"
+        ) from exc
+    if not result.get("connected"):
+        raise HTTPException(
+            status_code=400, detail=result.get("status", "AUTHENTICATION_FAILED")
+        )
+    # Kite request tokens are one-time; persist exchanged daily access token.
+    # Do not return tokens in HTTP responses or browser storage.
+    env_key = "KITE_ACCESS_TOKEN" if req.broker == "kite" else "BREEZE_SESSION_TOKEN"
+    persist_token = (
+        getattr(services.gateway_svc.kite_adapter, "access_token", "")
+        if req.broker == "kite" else token
+    )
+    persisted = False
+    if persist_token:
+        persisted = update_env_variable(key=env_key, value=persist_token)
+    return {
+        "broker": req.broker,
+        "status": "CONNECTED",
+        "connected": True,
+        "persisted_for_restart": bool(persisted),
+        "message": (
+            "Broker session connected. Restart persistence succeeded."
+            if persisted else "Broker session connected; .env token persistence unavailable."
+        ),
+    }
 
 
 @router.get("/nifty/snapshot")
