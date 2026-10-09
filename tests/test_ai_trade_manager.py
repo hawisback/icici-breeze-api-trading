@@ -44,14 +44,14 @@ class Chain:
         }
 
 
-def settings(path: Path, *, mode=TradingMode.PAPER, enabled=True):
+def settings(path: Path, *, mode=TradingMode.PAPER, enabled=True, daily_limit=0):
     return SimpleNamespace(
         ai_trade_db_path=path,
         ai_trade_enabled=enabled,
         ai_trade_mode=mode,
         ai_trade_max_quantity=65,
         ai_trade_max_premium_notional=15000,
-        ai_trade_max_daily_entries=3,
+        ai_trade_max_daily_entries=daily_limit,
         ai_trade_initial_stop_pct=6.0,
         ai_trade_trail_activation_pct=5.0,
         ai_trade_trail_gap_pct=3.0,
@@ -61,9 +61,9 @@ def settings(path: Path, *, mode=TradingMode.PAPER, enabled=True):
     )
 
 
-def service(path: Path, *, chain=None, mode=TradingMode.PAPER, enabled=True):
+def service(path: Path, *, chain=None, mode=TradingMode.PAPER, enabled=True, daily_limit=0):
     return AITradeService(
-        settings=settings(path, mode=mode, enabled=enabled),
+        settings=settings(path, mode=mode, enabled=enabled, daily_limit=daily_limit),
         option_chain_service=chain or Chain(),
     )
 
@@ -312,3 +312,121 @@ async def test_old_ai_journal_is_migrated_for_last_bid(tmp_path):
     async with aiosqlite.connect(path) as db:
         columns = [row[1] for row in await (await db.execute("PRAGMA table_info(ai_paper_trades)")).fetchall()]
         assert "last_bid" in columns
+
+
+@pytest.mark.asyncio
+async def test_unlimited_daily_entries_allows_multiple_sequential_paper_trades(tmp_path):
+    """0 removes only the per-day entry count limit, not the one-OPEN rule."""
+    import aiosqlite
+
+    path = tmp_path / "unlimited-ai.db"
+    manager = service(path, daily_limit=0)
+    await manager.initialize()
+    assert manager.operator_config()["max_daily_entries"] == 0
+    assert manager.operator_config()["daily_entry_limit_enabled"] is False
+    for number in range(7):
+        trade = await manager.submit(
+            signal_id=f"unlimited-entry-{number:03d}",
+            instrument_id=INSTRUMENT,
+            quantity=65,
+        )
+        assert trade["status"] == "OPEN"
+        # Simulate a completed PAPER trade in the journal without triggering
+        # market protection logic; the next signal is independently checked.
+        async with aiosqlite.connect(path) as db:
+            await db.execute(
+                "UPDATE ai_paper_trades SET status='CLOSED' WHERE trade_id=?",
+                (trade["trade_id"],),
+            )
+            await db.commit()
+
+    restarted = service(path, daily_limit=0)
+    await restarted.initialize()
+    eighth = await restarted.submit(
+        signal_id="unlimited-entry-008",
+        instrument_id=INSTRUMENT,
+        quantity=65,
+    )
+    assert eighth["status"] == "OPEN"
+    assert len(await restarted.list(limit=25)) == 8
+
+    # The one-open-position restriction still applies even with no daily cap.
+    with pytest.raises(AITradeError) as error:
+        await restarted.submit(
+            signal_id="unlimited-entry-009",
+            instrument_id=INSTRUMENT,
+            quantity=65,
+        )
+    assert error.value.code == "ANOTHER_AI_TRADE_IS_OPEN"
+
+
+@pytest.mark.asyncio
+async def test_positive_daily_entry_limit_enforced_across_restart_and_idempotent(tmp_path):
+    import aiosqlite
+
+    path = tmp_path / "capped-ai.db"
+    manager = service(path, daily_limit=2)
+    await manager.initialize()
+    assert manager.operator_config()["daily_entry_limit_enabled"] is True
+
+    for number in (1, 2):
+        signal_id = f"capped-entry-{number:03d}"
+        trade = await manager.submit(
+            signal_id=signal_id, instrument_id=INSTRUMENT, quantity=65,
+        )
+        # A retry of an accepted signal remains idempotent even at the cap.
+        same = await manager.submit(
+            signal_id=signal_id, instrument_id=INSTRUMENT, quantity=65,
+        )
+        assert same["trade_id"] == trade["trade_id"]
+        async with aiosqlite.connect(path) as db:
+            await db.execute(
+                "UPDATE ai_paper_trades SET status='CLOSED' WHERE trade_id=?",
+                (trade["trade_id"],),
+            )
+            await db.commit()
+
+    restarted = service(path, daily_limit=2)
+    await restarted.initialize()
+    with pytest.raises(AITradeError) as error:
+        await restarted.submit(
+            signal_id="capped-entry-003",
+            instrument_id=INSTRUMENT,
+            quantity=65,
+        )
+    assert error.value.code == "AI_DAILY_ENTRY_LIMIT_REACHED"
+    assert len(await restarted.list(limit=25)) == 2
+
+    # The previously accepted signal can still be retrieved by idempotent retry.
+    accepted = await restarted.submit(
+        signal_id="capped-entry-002", instrument_id=INSTRUMENT, quantity=65,
+    )
+    assert accepted["signal_id"] == "capped-entry-002"
+
+
+def test_ai_daily_entries_env_defaults_to_zero_and_accepts_operator_override(monkeypatch):
+    from libs.config.settings import PlatformSettings
+    from pydantic import ValidationError
+
+    monkeypatch.delenv("AI_TRADE_MAX_DAILY_ENTRIES", raising=False)
+    assert PlatformSettings(_env_file=None).ai_trade_max_daily_entries == 0
+
+    monkeypatch.setenv("AI_TRADE_MAX_DAILY_ENTRIES", "10")
+    assert PlatformSettings(_env_file=None).ai_trade_max_daily_entries == 10
+
+    monkeypatch.setenv("AI_TRADE_MAX_DAILY_ENTRIES", "0")
+    assert PlatformSettings(_env_file=None).ai_trade_max_daily_entries == 0
+
+    monkeypatch.setenv("AI_TRADE_MAX_DAILY_ENTRIES", "75")
+    assert PlatformSettings(_env_file=None).ai_trade_max_daily_entries == 75
+
+    monkeypatch.setenv("AI_TRADE_MAX_DAILY_ENTRIES", "-1")
+    with pytest.raises(ValidationError):
+        PlatformSettings(_env_file=None)
+
+
+def test_ai_daily_entries_templates_explicitly_disable_count_limit():
+    root = Path(__file__).resolve().parents[1]
+    for env_file in (".env.example", ".env.local-live.example"):
+        source = (root / env_file).read_text(encoding="utf-8")
+        assert "AI_TRADE_MAX_DAILY_ENTRIES=0" in source
