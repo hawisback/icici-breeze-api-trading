@@ -175,13 +175,15 @@ export default function BrokerConnections() {
               </div>
               <p className="text-xs text-slate-400">
                 {connected ? `Session expiry: ${istTime(connection?.expires_at) || "not reported"}`
-                  : ready ? "Daily broker authentication required." : "Set API key and secret in backend .env."}
+                  : ready ? "Daily broker authentication required."
+                    : connection ? `Backend credentials are missing. Set ${broker === "kite" ? "KITE_API_KEY and KITE_API_SECRET" : "BREEZE_API_KEY and BREEZE_SECRET_KEY"} in the project's .env and restart Uvicorn, then refresh status.`
+                    : "Checking the local broker API… You can still attempt to connect."}
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   className="rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-3 py-2 text-xs font-medium"
-                  disabled={!ready || connecting === broker || submitting !== null}
+                  disabled={connecting === broker || submitting !== null}
                   onClick={() => void openBrokerLogin(broker)}
                 >
                   {connecting === broker ? "Waiting for login…" : connected ? "Reconnect" : `Connect ${broker === "kite" ? "Kite" : "Breeze"}`}
@@ -215,7 +217,7 @@ export default function BrokerConnections() {
                     className="w-full rounded bg-slate-950 border border-slate-700 px-3 py-2 text-sm"
                   />
                   <button
-                    disabled={submitting !== null || !ready}
+                    disabled={submitting !== null}
                     className="rounded border border-sky-700 bg-sky-950 text-sky-300 px-3 py-2 text-xs disabled:opacity-50"
                     type="submit"
                   >{submitting === broker ? "Connecting…" : "Activate session"}</button>
@@ -234,7 +236,7 @@ export default function BrokerConnections() {
         </p>
       )}
       {sessions.error && <p role="alert" className="text-sm text-amber-300">
-        Could not load broker status: {sessions.error instanceof Error ? sessions.error.message : "Unavailable"}
+        Could not load broker status: {sessions.error instanceof Error ? sessions.error.message : "Unavailable"}. Check that Uvicorn is running on http://127.0.0.1:8000, then click Refresh status.
       </p>}
       {error && <p role="alert" className="text-sm text-rose-300">{error}</p>}
       {notice && <p role="status" className="text-sm text-sky-300">{notice}</p>}
