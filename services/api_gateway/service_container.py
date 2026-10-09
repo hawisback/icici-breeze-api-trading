@@ -160,9 +160,10 @@ async def initialize_services(
         except Exception as exc:
             logger.warning("Startup Kite auto-activation deferred: %s", exc)
 
+    # Local AI-only mode disables Breeze data/strategy polling, not the
+    # optional daily session activation if Breeze credentials are configured.
     if (
-        not app_settings.ai_only_mode
-        and app_settings.breeze_api_key
+        app_settings.breeze_api_key
         and app_settings.breeze_secret_key
         and app_settings.breeze_session_token
     ):
