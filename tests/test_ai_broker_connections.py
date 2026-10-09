@@ -174,3 +174,32 @@ async def test_missing_api_keys_and_wrong_source_cannot_issue_login(local_broker
         assert "BROKER_CREDENTIALS_NOT_CONFIGURED" in res.json()["detail"]
         bad = await client.post("/api/v1/ai/broker/session/login-url", json={"broker": "invalid"})
         assert bad.status_code == 422
+
+
+def test_broker_dashboard_connect_is_not_gated_by_status_or_key_configuration():
+    """A failed status fetch must not leave Connect/Activate permanently disabled."""
+    from pathlib import Path
+
+    project = Path(__file__).resolve().parents[1]
+    source = (
+        project / "frontend/trading-ui/features/broker_connections/BrokerConnections.tsx"
+    ).read_text(encoding="utf-8")
+    assert "disabled={!ready" not in source
+    assert "disabled={submitting !== null || !ready}" not in source
+    assert "disabled={connecting === broker || submitting !== null}" in source
+    assert "KITE_API_KEY and KITE_API_SECRET" in source
+    assert "BREEZE_API_KEY and BREEZE_SECRET_KEY" in source
+    assert "restart Uvicorn" in source
+
+
+def test_next_layout_ignores_only_extension_level_hydration_attributes():
+    from pathlib import Path
+
+    project = Path(__file__).resolve().parents[1]
+    layout = (
+        project / "frontend/trading-ui/app/layout.tsx"
+    ).read_text(encoding="utf-8")
+    # Browser extensions inject data-* attributes into html/body before the
+    # client hydrates. Next suppressHydrationWarning applies one level only.
+    assert 'className="dark h-full" suppressHydrationWarning' in layout
+    assert 'font-sans" suppressHydrationWarning' in layout
