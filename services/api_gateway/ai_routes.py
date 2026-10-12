@@ -399,6 +399,15 @@ async def get_ai_execution_order(order_id: str):
         raise _execution_api_error(exc) from exc
 
 
+@router.delete("/execution/orders/{order_id}", dependencies=[Depends(require_ai_execution_key)])
+async def cancel_ai_execution_order(order_id: str):
+    """Cancel a pending/partial entry or exit; never assume broker ACK is final."""
+    try:
+        return await get_services().ai_execution_svc.cancel_pending_order(order_id)
+    except AITradeError as exc:
+        raise _execution_api_error(exc) from exc
+
+
 @router.post("/execution/orders", status_code=201, dependencies=[Depends(require_ai_execution_key)])
 async def place_ai_execution_entry(req: AIExecutionEntryRequest):
     try:
