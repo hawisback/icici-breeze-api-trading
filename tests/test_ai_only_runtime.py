@@ -71,9 +71,11 @@ def test_ai_only_deployment_is_kite_and_not_live():
     root = Path(__file__).resolve().parents[1]
     compose = (root / "docker-compose.yml").read_text()
     assert "AI_ONLY_MODE=true" in compose
-    assert "MARKET_DATA_BACKEND=kite" in compose
+    assert "MARKET_DATA_BACKEND=${MARKET_DATA_BACKEND:-kite}" in compose
     for filename in (".env.example", ".env.local-live.example"):
         template = (root / filename).read_text()
         assert "AI_ONLY_MODE=true" in template
-        assert "MARKET_DATA_BACKEND=kite" in template
+        assert "AI_EXECUTION_ENABLED=false" in template
         assert "AI_TRADE_MODE=PAPER" in template
+    assert "MARKET_DATA_BACKEND=kite" in (root / ".env.example").read_text()
+    assert "MARKET_DATA_BACKEND=hybrid" in (root / ".env.local-live.example").read_text()
