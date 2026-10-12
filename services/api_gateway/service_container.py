@@ -12,6 +12,7 @@ from libs.config.settings import BrokerBackend, MarketDataBackend, PlatformSetti
 from libs.contracts.models import SystemMode, TradingMode
 from libs.events.bus import EventBus, InMemoryEventBus, get_event_bus
 from services.ai_context.trading import AITradeService
+from services.ai_context.execution import AIExecutionService
 from services.audit.repository import AuditRepository
 from services.audit.service import AuditService
 from services.auth.repository import AuthRepository
@@ -61,6 +62,7 @@ class ServiceContainer:
     portfolio_svc: PortfolioService
     strategy_svc: StrategyService
     ai_trade_svc: AITradeService
+    ai_execution_svc: AIExecutionService
     audit_svc: AuditService
     auth_svc: AuthService
     idempotency_repo: IdempotencyRepository
@@ -336,6 +338,11 @@ async def initialize_services(
         option_chain_service=option_chain_svc,
     )
     await ai_trade_svc.initialize()
+    ai_execution_svc = AIExecutionService(
+        settings=app_settings, gateway=gateway_svc, chain=option_chain_svc,
+        sessions=session_svc, live_gate=live_gate,
+    )
+    await ai_execution_svc.initialize()
 
     idempotency_repo = IdempotencyRepository(db_path=app_settings.gateway_db_path)
     await idempotency_repo.initialize()
@@ -358,6 +365,7 @@ async def initialize_services(
         portfolio_svc=portfolio_svc,
         strategy_svc=strategy_svc,
         ai_trade_svc=ai_trade_svc,
+        ai_execution_svc=ai_execution_svc,
         audit_svc=audit_svc,
         auth_svc=auth_svc,
         idempotency_repo=idempotency_repo,
