@@ -2,7 +2,7 @@
 
 The external AI owns entry, stop-loss, modification, cancellation and exit decisions. The platform routes orders to PaperBrokerAdapter in PAPER and to Kite Connect in LIVE, while the UI remains read-only. Breeze may remain a reference-data source.
 
-The mode is PAPER on every backend restart; the AI requests a mode switch through the authenticated mode API. A mode switch is rejected if unresolved orders or broker positions exist.
+The mode is PAPER on every backend restart; the AI requests a mode switch through the authenticated mode API. Switching from LIVE back to PAPER is rejected if unresolved LIVE orders or positions exist. Following a restart, the service begins in PAPER; the AI can explicitly re-authorize LIVE to manage an existing journal-owned LIVE position/stop once the broker session is connected and PAPER is flat.
 
 ## Configuration
 
@@ -12,7 +12,7 @@ Keep LIVE_TRADING_ENABLED=false and AI_EXECUTION_LIVE_SWITCH_ENABLED=false durin
 
 ## API endpoints
 
-All routes begin with /api/v1/ai. GET /execution/status returns the mode and permissions. POST /execution/mode accepts mode PAPER or LIVE. POST /execution/orders accepts request_id, instrument_id, quantity and limit_price to place a BUY LIMIT entry. GET /execution/orders and GET /execution/orders/{order_id} reconcile and report broker status. GET /execution/positions reports positions for the active mode. POST /execution/stops accepts request_id, entry_order_id, trigger_price and limit_price for a SELL SL-LIMIT. PATCH /execution/stops/{stop_order_id} accepts trigger_price and limit_price for a broker stop modification. DELETE /execution/stops/{stop_order_id} cancels the stop, subject to broker confirmation. POST /execution/exit accepts request_id, entry_order_id and limit_price to sell the verified remaining long position. GET /execution/monitor is a local read-only dashboard feed.
+All routes begin with /api/v1/ai. GET /execution/status returns the mode and permissions. POST /execution/mode accepts mode PAPER or LIVE. POST /execution/orders accepts request_id, instrument_id, quantity and limit_price to place a BUY LIMIT entry. GET /execution/orders and GET /execution/orders/{order_id} reconcile and report broker status. DELETE /execution/orders/{order_id} cancels a pending or partially filled entry or exit, with broker verification. GET /execution/positions reports positions for the active mode. POST /execution/stops accepts request_id, entry_order_id, trigger_price and limit_price for a SELL SL-LIMIT. PATCH /execution/stops/{stop_order_id} accepts trigger_price and limit_price for a broker stop modification. DELETE /execution/stops/{stop_order_id} cancels the stop, subject to broker confirmation. POST /execution/exit accepts request_id, entry_order_id and limit_price to sell the verified remaining long position. GET /execution/monitor is a local read-only dashboard feed.
 
 The entry_order_id for stops/exits is the API's local order_id, not Kite's broker order ID. For an exit, first cancel any pending stop and verify cancellation in Kite; otherwise the API rejects a competing SELL.
 
