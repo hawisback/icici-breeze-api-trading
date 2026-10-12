@@ -46,7 +46,7 @@ def test_live_env_template_uses_kite_ai_only_data():
 
     assert values["LIVE_TRADING_ENABLED"] == "true"
     assert values["LIVE_EXECUTION_BROKER"] == "kite"
-    assert values["MARKET_DATA_BACKEND"] == "kite"
+    assert values["MARKET_DATA_BACKEND"] == "hybrid"
     assert values["AI_ONLY_MODE"] == "true"
     assert values["FREQUENT_DATA_BROKER"] == "kite"
     assert values["REFERENCE_DATA_BROKER"] == "breeze"
