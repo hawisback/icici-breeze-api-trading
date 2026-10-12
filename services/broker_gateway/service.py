@@ -161,8 +161,11 @@ class BrokerGatewayService:
         quantity: Optional[int] = None,
         price: Optional[float] = None,
         mode: TradingMode = TradingMode.PAPER,
+        trigger_price: Optional[float] = None,
     ) -> BrokerOrderResponse:
-        return await self.get_adapter(mode).modify_order(broker_order_id, quantity, price)
+        return await self.get_adapter(mode).modify_order(
+            broker_order_id, quantity, price, trigger_price=trigger_price
+        )
 
     async def cancel_order(
         self,
