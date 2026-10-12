@@ -372,7 +372,9 @@ async def initialize_services(
         rate_limiter=rate_limiter,
     )
 
-    ai_trade_svc.start()
+    # New external execution API never runs the old automatic AI PAPER exit loop.
+    if not app_settings.ai_execution_enabled:
+        ai_trade_svc.start()
     logger.info("All microservices initialized successfully.")
     return _container
 
