@@ -208,3 +208,101 @@ async def test_live_daily_count_cap_cannot_be_skipped(tmp_path):
     )
     with pytest.raises(AITradeError, match="LIVE_DAILY_ENTRY_CAP_REACHED"):
         await order_entry(svc, request_id="AI-entry-002")
+
+
+@pytest.mark.asyncio
+async def test_restart_requires_rearm_but_live_stop_remains_manageable(tmp_path):
+    svc, gateway, sessions = await make_service(tmp_path)
+    await svc.set_mode(TradingMode.LIVE)
+    entry = await order_entry(svc)
+    stop = await svc.place_stop(
+        request_id="AI-stop-restart-1", entry_order_id=entry["order_id"],
+        trigger_price=94.0, limit_price=92.0,
+    )
+    resumed = AIExecutionService(
+        settings=svc.settings, gateway=gateway, chain=Chain(),
+        sessions=sessions, live_gate=SimpleNamespace(),
+    )
+    await resumed.initialize()
+    assert resumed.mode == TradingMode.PAPER
+    assert (await resumed.set_mode(TradingMode.LIVE))["mode"] == "LIVE"
+    adjusted = await resumed.modify_stop(
+        stop_order_id=stop["order_id"], trigger_price=95.0,
+        limit_price=93.0,
+    )
+    assert adjusted["trigger_price"] == 95.0
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_entry_does_not_submit_duplicate(tmp_path):
+    svc, gateway, _ = await make_service(tmp_path)
+    await svc.set_mode(TradingMode.LIVE)
+    original = gateway.place_order
+
+    async def leave_entry_pending(req, mode=TradingMode.PAPER):
+        if req.action.lower() == "buy":
+            fake_id = "PENDING-ENTRY"
+            gateway.live._orders[fake_id] = {
+                "broker_order_id": fake_id, "client_order_id": req.client_order_id,
+                "stock_code": req.stock_code, "action": "buy",
+                "quantity": req.quantity, "price": req.price, "status": "OPEN",
+                "filled_quantity": 0, "average_price": 0.0,
+            }
+            return BrokerOrderResponse(
+                success=True, broker_order_id=fake_id,
+                client_order_id=req.client_order_id, status="PLACED",
+            )
+        return await original(req, mode=mode)
+
+    gateway.place_order = leave_entry_pending
+    entry = await order_entry(svc)
+    assert entry["status"] == "OPEN"
+    with pytest.raises(AITradeError, match="ACTIVE_ENTRY_OR_EXIT_EXISTS"):
+        await order_entry(svc, request_id="AI-entry-unique-2")
+    cancelled = await svc.cancel_pending_order(entry["order_id"])
+    assert cancelled["status"] == "CANCELLED"
+    assert (await svc.get_order(entry["order_id"]))["status"] == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_execution_http_writes_require_local_peer_and_key(monkeypatch):
+    from fastapi import FastAPI
+    from pydantic import SecretStr
+    import httpx
+    import services.api_gateway.ai_routes as routes
+    import services.api_gateway.ai_local_access as access
+
+    class FakeExecution:
+        async def status(self):
+            return {"mode": "PAPER", "execution_enabled": True}
+        async def set_mode(self, mode):
+            return {"mode": mode.value}
+
+    settings = SimpleNamespace(
+        ai_trust_local_docker_gateway=False,
+        ai_execution_enabled=True, ai_execution_api_key=SecretStr("a" * 40),
+    )
+    instance = SimpleNamespace(settings=settings, ai_execution_svc=FakeExecution())
+    monkeypatch.setattr(routes, "get_services", lambda: instance)
+    monkeypatch.setattr(access, "get_services", lambda: instance)
+    app = FastAPI()
+    app.include_router(routes.router)
+    local = httpx.ASGITransport(app=app, client=("127.0.0.1", 5000))
+    async with httpx.AsyncClient(transport=local, base_url="http://localhost:8000") as client:
+        assert (await client.get("/api/v1/ai/execution/status")).status_code == 200
+        path = "/api/v1/ai/execution/mode"
+        assert (await client.post(path, json={"mode": "LIVE"})).status_code == 401
+        assert (await client.post(path, json={"mode": "LIVE"},
+                                  headers={"X-AI-Execution-Key": "bad"})).status_code == 401
+        result = await client.post(
+            path, json={"mode": "LIVE"},
+            headers={"X-AI-Execution-Key": "a" * 40},
+        )
+        assert result.status_code == 200 and result.json()["mode"] == "LIVE"
+    remote = httpx.ASGITransport(app=app, client=("198.51.100.10", 5000))
+    async with httpx.AsyncClient(transport=remote, base_url="http://localhost:8000") as client:
+        result = await client.post(
+            "/api/v1/ai/execution/mode", json={"mode": "LIVE"},
+            headers={"X-AI-Execution-Key": "a" * 40, "X-Forwarded-For": "127.0.0.1"},
+        )
+        assert result.status_code == 403
