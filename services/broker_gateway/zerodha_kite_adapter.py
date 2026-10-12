@@ -236,6 +236,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         broker_order_id: str,
         quantity: Optional[int] = None,
         price: Optional[float] = None,
+        trigger_price: Optional[float] = None,
     ) -> BrokerOrderResponse:
         if not self.is_active:
             return _failure("", "Kite session is not active", broker_order_id)
@@ -244,6 +245,8 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             params["quantity"] = quantity
         if price is not None:
             params["price"] = price
+        if trigger_price is not None:
+            params["trigger_price"] = trigger_price
         try:
             async with self._write_lock:
                 await self._run(lambda: self._kite.modify_order(**params))
