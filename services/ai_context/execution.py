@@ -19,6 +19,7 @@ import aiosqlite
 
 from libs.broker_models.adapter import BrokerOrderRequest
 from libs.contracts.models import TradingMode, utc_now
+from libs.market_time import IST
 from services.ai_context.trading import AITradeError
 from services.broker_gateway.service import BrokerGatewayService
 
@@ -65,13 +66,17 @@ class AIExecutionService:
             raise AITradeError("AI_EXECUTION_REQUIRES_KITE_BROKER", 409)
 
     async def status(self) -> dict[str, Any]:
-        gate_ok, gate_reason = self.live_gate.validate_live_order("ZERODHA_PRIMARY")
+        server_enabled = bool(self.settings.live_trading_enabled)
+        agent_arming = bool(self.settings.ai_execution_live_switch_enabled)
         return {
             "mode": self.mode.value,
             "execution_enabled": self.settings.ai_execution_enabled,
-            "live_capability_enabled": self.settings.live_trading_enabled,
-            "live_authorized": gate_ok,
-            "live_authorization_reason": gate_reason,
+            "live_capability_enabled": server_enabled,
+            "live_authorized": server_enabled and agent_arming,
+            "live_authorization_reason": (
+                "AUTHORIZED_AI_LOCAL_EXECUTION_KEY" if server_enabled and agent_arming
+                else "OPERATOR_MUST_ENABLE_LIVE_CAPABILITY_AND_AI_LIVE_SWITCH"
+            ),
             "execution_broker": "kite",
             "market_data_backend": self.settings.market_data_backend.value,
             "paper_simulation": "IMMEDIATE_LIMIT_FILL_RESTING_STOP_NO_AUTOMATIC_TRIGGER",
@@ -170,14 +175,21 @@ class AIExecutionService:
     async def _validate_live_entry(self) -> None:
         if not self.settings.live_trading_enabled:
             raise AITradeError("LIVE_CAPABILITY_DISABLED", 403)
-        ok, reason = self.live_gate.validate_live_order("ZERODHA_PRIMARY")
-        if not ok:
-            raise AITradeError("LIVE_AUTHORIZATION_REQUIRED", 403)
+        # The dedicated local AI execution API uses independent, explicit
+        # server-owned LIVE permission rather than the legacy strategy ARM UX.
+        # API key + loopback peer are checked at the HTTP boundary.
+        if not self.settings.ai_execution_live_switch_enabled:
+            raise AITradeError("AI_LIVE_SWITCH_NOT_AUTHORIZED", 403)
         await self._check_session()
 
     async def _flat(self) -> None:
         """No mode switching while *either* broker environment has exposure."""
-        for row in await self._all(500):
+        rows = await self._all(500)
+        if any(r["mode"] == TradingMode.LIVE.value for r in rows):
+            if not self.gateway.kite_adapter.is_active:
+                raise AITradeError("LIVE_RECONCILIATION_REQUIRES_KITE_SESSION", 409)
+            await self._check_session()
+        for row in rows:
             row = await self._refresh(row)
             if row["status"] in _ACTIVE:
                 raise AITradeError("UNRESOLVED_ORDER_BLOCKS_MODE_SWITCH", 409)
@@ -321,9 +333,19 @@ class AIExecutionService:
             ask = float(leg["ask"])
             if not (ask * .97 <= limit_price <= ask * 1.03):
                 raise AITradeError("LIMIT_PRICE_OUTSIDE_QUOTE_BAND", 409)
-            if any(r["kind"] == "ENTRY" and r["status"] in _ACTIVE
-                   for r in [await self._refresh(x) for x in await self._all(500)]):
-                raise AITradeError("ACTIVE_ENTRY_EXISTS", 409)
+            prior = [await self._refresh(x) for x in await self._all(500)]
+            if any(r["kind"] in {"ENTRY", "EXIT"} and r["status"] in _ACTIVE
+                   and r["mode"] == self.mode.value for r in prior):
+                raise AITradeError("ACTIVE_ENTRY_OR_EXIT_EXISTS", 409)
+            if self.mode == TradingMode.LIVE:
+                count = sum(
+                    1 for r in prior
+                    if r["kind"] == "ENTRY" and r["mode"] == "LIVE"
+                    and datetime.fromisoformat(r["created_at"]).astimezone(IST).date()
+                        == utc_now().astimezone(IST).date()
+                )
+                if count >= self.settings.ai_execution_live_max_daily_entries:
+                    raise AITradeError("LIVE_DAILY_ENTRY_CAP_REACHED", 409)
             positions = await self.gateway.get_positions(mode=self.mode)
             if any(int(p.quantity) != 0 for p in positions):
                 raise AITradeError("EXISTING_POSITION_BLOCKS_NEW_ENTRY", 409)
@@ -405,6 +427,12 @@ class AIExecutionService:
                 await self._save(row)
                 raise AITradeError("STOP_MODIFICATION_OUTCOME_UNKNOWN", 409) from None
             if not resp.success:
+                # A timeout may be UNKNOWN, so reject writes until reconciled.
+                if str(resp.status or "").upper() == "UNKNOWN":
+                    row["status"] = "UNKNOWN"
+                    row["message"] = "STOP_MODIFICATION_OUTCOME_UNKNOWN"
+                    await self._save(row)
+                    raise AITradeError("STOP_MODIFICATION_OUTCOME_UNKNOWN", 409)
                 raise AITradeError("STOP_MODIFICATION_REJECTED", 409)
             row["price"], row["trigger_price"] = limit_price, trigger_price
             row["message"] = resp.message
@@ -431,6 +459,11 @@ class AIExecutionService:
                 await self._save(row)
                 raise AITradeError("STOP_CANCEL_OUTCOME_UNKNOWN", 409) from None
             if not resp.success:
+                if str(resp.status or "").upper() == "UNKNOWN":
+                    row["status"] = "UNKNOWN"
+                    row["message"] = "STOP_CANCEL_OUTCOME_UNKNOWN"
+                    await self._save(row)
+                    raise AITradeError("STOP_CANCEL_OUTCOME_UNKNOWN", 409)
                 raise AITradeError("STOP_CANCEL_REJECTED", 409)
             # Check the broker's order book; ACK is not proof of cancellation.
             updated = await self._refresh(row)
