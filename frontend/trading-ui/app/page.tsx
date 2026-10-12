@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import BrokerConnections from "../features/broker_connections/BrokerConnections";
+import AIExecutionMonitor from "./AIExecutionMonitor";
 
 const AI_BASE = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/ai`;
 
@@ -57,7 +58,13 @@ const time = (s: string | null | undefined) => s
 export default function AIPaperTerminal() {
   // The dashboard never submits orders or changes execution mode. Broker
   // connection buttons use the local AI route solely for daily authentication.
+  const executionStatus = useQuery({
+    queryKey: ["ai-execution-status"],
+    queryFn: () => getAI<{ execution_enabled: boolean }>("/execution/status"),
+    refetchInterval: 3000,
+  });
   const trades = useQuery({
+    enabled: executionStatus.data?.execution_enabled !== true,
     queryKey: ["ai-trades"],
     queryFn: () => getAI<AITrade[]>("/trades?limit=100"),
     refetchInterval: (query) =>
@@ -68,6 +75,8 @@ export default function AIPaperTerminal() {
     queryFn: () => getAI<AISnapshot>("/nifty/snapshot"),
     refetchInterval: 60000,
   });
+
+  if (executionStatus.data?.execution_enabled) return <AIExecutionMonitor />;
 
   const all = trades.data || [];
   const active = all.filter((trade) => trade.status === "OPEN");
