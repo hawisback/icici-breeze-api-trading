@@ -29,6 +29,10 @@ class FakeKite:
         self.placed = kwargs
         return "KITE-ORDER-1"
 
+    def modify_order(self, **kwargs):
+        self.modified = kwargs
+        return "KITE-ORDER-1"
+
 
 @pytest.mark.asyncio
 async def test_kite_adapter_authenticates_and_places_normalized_order():
@@ -205,3 +209,20 @@ async def test_kite_historical_window_converts_utc_to_exchange_wall_clock():
     assert args["to_date"].utcoffset() == timedelta(hours=5, minutes=30)
     assert args["to_date"].hour == 13
     assert args["to_date"].minute == 40
+
+
+@pytest.mark.asyncio
+async def test_kite_can_modify_existing_stop_trigger_and_limit():
+    client = FakeKite()
+    adapter = ZerodhaKiteAdapter(custom_client=client)
+    assert await adapter.authenticate(
+        "api-key", SecretStr("api-secret"), "request-token"
+    ) is True
+    response = await adapter.modify_order(
+        "KITE-ORDER-1", price=92.0, trigger_price=94.0
+    )
+    assert response.success
+    assert client.modified["order_id"] == "KITE-ORDER-1"
+    assert client.modified["variety"] == "regular"
+    assert client.modified["price"] == 92.0
+    assert client.modified["trigger_price"] == 94.0
