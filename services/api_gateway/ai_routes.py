@@ -367,6 +367,22 @@ async def set_ai_execution_mode(req: AIExecutionModeRequest):
         raise _execution_api_error(exc) from exc
 
 
+@router.get("/execution/monitor")
+async def ai_execution_monitor():
+    """Local workstation read-only orders and exposure for the UI."""
+    svc = get_services().ai_execution_svc
+    status = await svc.status()
+    if not status["execution_enabled"]:
+        return {"status": status, "orders": [], "positions": []}
+    try:
+        return {"status": status,
+                "orders": await svc.list_orders(),
+                "positions": (await svc.positions())["positions"]}
+    except AITradeError as exc:
+        return {"status": status, "orders": await svc.list_orders(),
+                "positions": [], "positions_error": exc.code}
+
+
 @router.get("/execution/orders", dependencies=[Depends(require_ai_execution_key)])
 async def list_ai_execution_orders():
     try:
