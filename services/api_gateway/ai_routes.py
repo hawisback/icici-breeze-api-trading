@@ -117,8 +117,10 @@ async def get_ai_broker_sessions():
         "breeze": public_status("breeze"),
         "market_data_broker": "kite",
         "trading_mode": services.settings.ai_trade_mode.value,
-        "execution_mode": services.ai_execution_svc.mode.value,
-        "execution_enabled": services.settings.ai_execution_enabled,
+        "execution_mode": getattr(
+            getattr(services, "ai_execution_svc", None), "mode", TradingMode.PAPER
+        ).value,
+        "execution_enabled": bool(getattr(services.settings, "ai_execution_enabled", False)),
     }
 
 
@@ -267,7 +269,7 @@ async def submit_ai_trade(
     req: AISignalIntent,
 ):
     """Legacy autonomous PAPER engine; disabled when external execution API is active."""
-    if get_services().settings.ai_execution_enabled:
+    if getattr(get_services().settings, "ai_execution_enabled", False):
         raise HTTPException(status_code=409, detail="USE_AI_EXECUTION_API")
     try:
         return await get_services().ai_trade_svc.submit(
