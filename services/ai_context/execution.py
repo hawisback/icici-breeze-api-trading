@@ -207,9 +207,30 @@ class AIExecutionService:
             raise AITradeError("INVALID_EXECUTION_MODE", 422)
         async with self._lock:
             if mode != self.mode:
-                await self._flat()
                 if mode == TradingMode.LIVE:
                     await self._validate_live_entry()
+                    # A restart always resets authority to PAPER, but existing
+                    # broker-held LIVE positions/stops must remain manageable.
+                    # Explicitly rearm LIVE only after verifying PAPER is flat,
+                    # Kite is connected, and any LIVE exposure is journal-owned.
+                    paper_orders = [await self._refresh(r) for r in await self._all(500)
+                                    if r["mode"] == TradingMode.PAPER.value]
+                    if any(r["status"] in _ACTIVE for r in paper_orders):
+                        raise AITradeError("PAPER_PENDING_ORDER_BLOCKS_LIVE", 409)
+                    paper_positions = await self.gateway.get_positions(mode=TradingMode.PAPER)
+                    if any(int(p.quantity) != 0 for p in paper_positions):
+                        raise AITradeError("PAPER_POSITIONS_BLOCK_LIVE", 409)
+                    live_positions = await self.gateway.get_positions(mode=TradingMode.LIVE)
+                    if any(int(p.quantity) != 0 for p in live_positions):
+                        live_entries = [r for r in await self._all(500)
+                                        if r["kind"] == "ENTRY" and r["mode"] == "LIVE"
+                                        and int(r["filled_quantity"]) > 0]
+                        symbols = {r["symbol"] for r in live_entries}
+                        if any(p.stock_code not in symbols for p in live_positions
+                               if int(p.quantity) != 0):
+                            raise AITradeError("UNTRACKED_LIVE_POSITION_REQUIRES_OPERATOR", 409)
+                else:
+                    await self._flat()
                 self.mode = mode
         return await self.status()
 
@@ -501,3 +522,37 @@ class AIExecutionService:
                 trigger_price=None, parent_order_id=entry_order_id,
                 side="SELL", order_type="LIMIT",
             )
+
+
+    async def cancel_pending_order(self, order_id: str) -> dict[str, Any]:
+        """Allow AI to cancel an unfilled/part-filled ENTRY or EXIT.
+
+        A cancellation acknowledgment is not a confirmed broker cancellation.
+        GET the order again before placing another order for the residual size.
+        """
+        self._enabled()
+        async with self._lock:
+            row = await self._refresh(await self._one(order_id))
+            if row["mode"] != self.mode.value or row["kind"] not in {"ENTRY", "EXIT"}:
+                raise AITradeError("NOT_AN_ACTIVE_ENTRY_OR_EXIT", 409)
+            if row["status"] in _FINISHED:
+                return self._public(row)
+            if not row["broker_order_id"]:
+                raise AITradeError("ORDER_OUTCOME_UNKNOWN", 409)
+            try:
+                resp = await self.gateway.cancel_order(
+                    row["broker_order_id"], mode=self.mode
+                )
+            except Exception:
+                row["status"] = "UNKNOWN"
+                row["message"] = "ORDER_CANCEL_OUTCOME_UNKNOWN"
+                await self._save(row)
+                raise AITradeError("ORDER_CANCEL_OUTCOME_UNKNOWN", 409) from None
+            if not resp.success:
+                if str(resp.status or "").upper() == "UNKNOWN":
+                    row["status"] = "UNKNOWN"
+                    row["message"] = "ORDER_CANCEL_OUTCOME_UNKNOWN"
+                    await self._save(row)
+                    raise AITradeError("ORDER_CANCEL_OUTCOME_UNKNOWN", 409)
+                raise AITradeError("ORDER_CANCEL_REJECTED", 409)
+            return self._public(await self._refresh(row))
