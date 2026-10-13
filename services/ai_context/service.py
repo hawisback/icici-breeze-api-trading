@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timezone
+import asyncio
+
+from datetime import datetime, time, timedelta, timezone
+from math import ceil
 from typing import Any
 
 from libs.contracts.models import generate_id
@@ -231,6 +234,107 @@ class AIContextService:
             "missing_recent_session_bars": self._recent_session_missing_bars(ordered),
             "metrics": metrics,
             "calculated_at": utc_now().isoformat(),
+        }
+
+    async def get_nifty_option_technicals(
+        self,
+        *,
+        instrument_ids: list[str],
+        interval: str = "5m",
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Technical indicators from each listed option's OWN Kite premium candles.
+
+        No index/futures substitution, no synthetic data, and no cross-contract
+        aggregation. Fail a contract independently when history is unavailable.
+        """
+        generated_at = utc_now()
+        kite = getattr(self.gateway_svc, "kite_adapter", None)
+        output: list[dict[str, Any]] = []
+        bars_per_session = {"1m": 375, "5m": 75, "15m": 25}[interval]
+        # Include weekends/holidays and enough history for EMA50/MACD warmup.
+        days_back = min(38, max(7, 6 + ceil(limit / bars_per_session) * 2))
+        for index, instrument_id in enumerate(instrument_ids):
+            row: dict[str, Any] = {
+                "instrument_id": instrument_id,
+                "available": False,
+                "source": "KITE",
+                "basis": "OPTION_PREMIUM",
+                "interval": interval,
+                "requested_limit": limit,
+                "candle_count": 0,
+                "data_through": None,
+                "age_seconds": None,
+                "missing_recent_session_bars": None,
+                "metrics": compute_technicals([]),
+            }
+            if not kite or not getattr(kite, "is_active", False):
+                row["reason"] = "KITE_SESSION_DISCONNECTED"
+                output.append(row)
+                continue
+            try:
+                contract = await kite.resolve_option_contract(instrument_id)
+            except Exception as exc:
+                row["reason"] = "KITE_CONTRACT_RESOLUTION_FAILED"
+                row["error_type"] = type(exc).__name__
+                output.append(row)
+                continue
+            if not contract:
+                row["reason"] = "OPTION_NOT_LISTED_IN_KITE_NFO_MASTER"
+                output.append(row)
+                continue
+            row.update({
+                "symbol": contract["symbol"],
+                "expiry": contract["expiry"],
+                "strike": contract["strike"],
+                "right": contract["right"],
+                "lot_size": contract["lot_size"],
+            })
+            try:
+                end = utc_now()
+                candles = await kite.fetch_historical_candles_window(
+                    instrument_id=instrument_id,
+                    interval=interval,
+                    start_time=end - timedelta(days=days_back),
+                    end_time=end,
+                )
+            except Exception as exc:
+                row["reason"] = "KITE_OPTION_CANDLE_FETCH_FAILED"
+                row["error_type"] = type(exc).__name__
+                output.append(row)
+                continue
+            filtered = [
+                candle for candle in candles
+                if candle.instrument_id == instrument_id
+                and str(candle.source).upper() == "KITE"
+            ]
+            valid = self._completed_real_candles(filtered, interval)[-limit:]
+            row["candle_count"] = len(valid)
+            if valid:
+                last = valid[-1]
+                row["data_through"] = last.end_time.isoformat()
+                row["age_seconds"] = self._age_seconds(last.end_time)
+                row["missing_recent_session_bars"] = self._recent_session_missing_bars(valid)
+                row["metrics"] = compute_technicals(valid)
+            # A complete technical result needs enough bars for EMA50.
+            if len(valid) < 50:
+                row["reason"] = "INSUFFICIENT_COMPLETED_OPTION_CANDLES"
+            else:
+                row["available"] = True
+            output.append(row)
+            # Avoid Kite historical rate-limit bursts in multi-contract reads.
+            if index < len(instrument_ids) - 1:
+                await asyncio.sleep(0.45)
+        return {
+            "underlying": "NIFTY",
+            "basis": "OPTION_PREMIUM",
+            "source": "KITE",
+            "interval": interval,
+            "requested_limit": limit,
+            "requested_count": len(instrument_ids),
+            "available_count": sum(1 for row in output if row["available"]),
+            "contracts": output,
+            "calculated_at": generated_at.isoformat(),
         }
 
     async def get_options(
