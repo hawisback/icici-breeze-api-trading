@@ -8,6 +8,8 @@ scores, or pre-ranked option contracts.
 from __future__ import annotations
 
 from datetime import date
+import hmac
+import re
 import asyncio
 from time import monotonic
 from urllib.parse import urlencode
@@ -18,13 +20,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from services.ai_context.trading import AITradeError
 from services.api_gateway.ai_local_access import require_local_ai_client
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from libs.contracts.models import TradingMode
 
 from services.ai_context.service import AIContextService
 from services.api_gateway.service_container import get_services
 
 _index_refresh_lock = asyncio.Lock()
 _last_index_refresh = 0.0
+
+# The route is read-only but historical calls are broker-rate-limited.
+_option_technicals_lock = asyncio.Lock()
+_option_technicals_cache: dict[tuple, tuple[float, dict]] = {}
+_OPTION_TECHNICALS_CACHE_SECONDS = 20.0
 
 
 async def _refresh_ai_only_index() -> None:
@@ -115,6 +123,10 @@ async def get_ai_broker_sessions():
         "breeze": public_status("breeze"),
         "market_data_broker": "kite",
         "trading_mode": services.settings.ai_trade_mode.value,
+        "execution_mode": getattr(
+            getattr(services, "ai_execution_svc", None), "mode", TradingMode.PAPER
+        ).value,
+        "execution_enabled": bool(getattr(services.settings, "ai_execution_enabled", False)),
     }
 
 
@@ -217,6 +229,44 @@ async def get_nifty_ai_technicals(
     )
 
 
+@router.get("/nifty/options/technicals")
+async def get_nifty_option_technicals(
+    instrument_ids: list[str] = Query(min_length=1, max_length=6),
+    interval: str = Query(default="5m", pattern=r"^(1m|5m|15m)$"),
+    limit: int = Query(default=200, ge=50, le=500),
+):
+    """Read-only batch indicators from each exact NIFTY CE/PE premium series.
+
+    Pass repeated instrument_ids parameters; no commas, rankings or trades.
+    Missing/invalid Kite candles return a per-contract unavailable reason.
+    """
+    if len(instrument_ids) != len(set(instrument_ids)):
+        raise HTTPException(status_code=422, detail="DUPLICATE_OPTION_CONTRACT")
+    for contract_id in instrument_ids:
+        match = re.fullmatch(
+            r"INST-NIFTY-(\d{4}-\d{2}-\d{2})-(\d+)-(CE|PE)",
+            contract_id,
+        )
+        if match is None:
+            raise HTTPException(status_code=422, detail="INVALID_NIFTY_OPTION_INSTRUMENT_ID")
+        try:
+            date.fromisoformat(match.group(1))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="INVALID_OPTION_EXPIRY") from None
+    key = (tuple(instrument_ids), interval, limit)
+    async with _option_technicals_lock:
+        cached = _option_technicals_cache.get(key)
+        if cached and monotonic() - cached[0] < _OPTION_TECHNICALS_CACHE_SECONDS:
+            return cached[1]
+        result = await _context_service().get_nifty_option_technicals(
+            instrument_ids=instrument_ids, interval=interval, limit=limit,
+        )
+        if len(_option_technicals_cache) >= 128:
+            _option_technicals_cache.clear()
+        _option_technicals_cache[key] = (monotonic(), result)
+        return result
+
+
 @router.get("/nifty/options")
 async def get_nifty_ai_options(
     expiry: date | None = Query(default=None),
@@ -262,7 +312,9 @@ class AISignalIntent(BaseModel):
 async def submit_ai_trade(
     req: AISignalIntent,
 ):
-    """Submit an idempotent signal ID; backend decides execution and all exits."""
+    """Legacy autonomous PAPER engine; disabled when external execution API is active."""
+    if getattr(get_services().settings, "ai_execution_enabled", False):
+        raise HTTPException(status_code=409, detail="USE_AI_EXECUTION_API")
     try:
         return await get_services().ai_trade_svc.submit(
             signal_id=req.signal_id,
@@ -289,3 +341,174 @@ async def get_ai_trade(
         raise HTTPException(status_code=404, detail="TRADE_NOT_FOUND")
     return trade
 
+
+
+# ---------------------------------------------------------------------------
+# Independent AI execution API (no strategy scheduler, no OMS, no auto stops).
+# A mode-switching AI MUST present a separate shared secret on every command.
+# Local peer filtering from the parent router still applies on every route.
+# ---------------------------------------------------------------------------
+
+async def require_ai_execution_key(
+    token: str | None = Header(default=None, alias="X-AI-Execution-Key"),
+) -> None:
+    settings = get_services().settings
+    if not settings.ai_execution_enabled:
+        raise HTTPException(status_code=403, detail="AI_EXECUTION_DISABLED")
+    expected = (settings.ai_execution_api_key.get_secret_value()
+                if settings.ai_execution_api_key else "")
+    if not token or not expected or not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="INVALID_AI_EXECUTION_KEY")
+
+
+class AIExecutionModeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: TradingMode
+
+
+class AIExecutionEntryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=8, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    instrument_id: str = Field(min_length=12, max_length=140)
+    quantity: int = Field(gt=0, le=1800)
+    limit_price: float = Field(gt=0)
+
+
+class AIExecutionStopRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=8, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    entry_order_id: str = Field(min_length=16, max_length=64)
+    trigger_price: float = Field(gt=0)
+    limit_price: float = Field(gt=0)
+
+
+class AIExecutionStopModifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    trigger_price: float = Field(gt=0)
+    limit_price: float = Field(gt=0)
+
+
+class AIExecutionExitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=8, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    entry_order_id: str = Field(min_length=16, max_length=64)
+    limit_price: float = Field(gt=0)
+
+
+def _execution_api_error(exc: AITradeError) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.code)
+
+
+@router.get("/execution/status")
+async def ai_execution_status():
+    """Local read-only effective mode/capability. LIVE mode resets on restart."""
+    return await get_services().ai_execution_svc.status()
+
+
+@router.post("/execution/mode", dependencies=[Depends(require_ai_execution_key)])
+async def set_ai_execution_mode(req: AIExecutionModeRequest):
+    try:
+        return await get_services().ai_execution_svc.set_mode(req.mode)
+    except AITradeError as exc:
+        raise _execution_api_error(exc) from exc
+
+
+@router.get("/execution/monitor")
+async def ai_execution_monitor():
+    """Local workstation read-only orders and exposure for the UI."""
+    svc = get_services().ai_execution_svc
+    status = await svc.status()
+    if not status["execution_enabled"]:
+        return {"status": status, "orders": [], "positions": []}
+    try:
+        return {"status": status,
+                "orders": await svc.list_orders(),
+                "positions": (await svc.positions())["positions"]}
+    except AITradeError as exc:
+        return {"status": status, "orders": await svc.list_orders(),
+                "positions": [], "positions_error": exc.code}
+
+
+@router.get("/execution/orders", dependencies=[Depends(require_ai_execution_key)])
+async def list_ai_execution_orders():
+    try:
+        return await get_services().ai_execution_svc.list_orders()
+    except AITradeError as exc:
+        raise _execution_api_error(exc) from exc
+
+
+@router.get("/execution/orders/{order_id}", dependencies=[Depends(require_ai_execution_key)])
+async def get_ai_execution_order(order_id: str):
+    try:
+        return await get_services().ai_execution_svc.get_order(order_id)
+    except AITradeError as exc:
+        raise _execution_api_error(exc) from exc
+
+
+@router.delete("/execution/orders/{order_id}", dependencies=[Depends(require_ai_execution_key)])
+async def cancel_ai_execution_order(order_id: str):
+    """Cancel a pending/partial entry or exit; never assume broker ACK is final."""
+    try:
+        return await get_services().ai_execution_svc.cancel_pending_order(order_id)
+    except AITradeError as exc:
+        raise _execution_api_error(exc) from exc
+
+
+@router.post("/execution/orders", status_code=201, dependencies=[Depends(require_ai_execution_key)])
+async def place_ai_execution_entry(req: AIExecutionEntryRequest):
+    try:
+        return await get_services().ai_execution_svc.entry(
+            request_id=req.request_id, instrument_id=req.instrument_id,
+            quantity=req.quantity, limit_price=req.limit_price,
+        )
+    except AITradeError as exc:
+        raise _execution_api_error(exc) from exc
+
+
+@router.get("/execution/positions", dependencies=[Depends(require_ai_execution_key)])
+async def get_ai_execution_positions():
+    try:
+        return await get_services().ai_execution_svc.positions()
+    except AITradeError as exc:
+        raise _execution_api_error(exc) from exc
+
+
+@router.post("/execution/stops", status_code=201, dependencies=[Depends(require_ai_execution_key)])
+async def place_ai_execution_stop(req: AIExecutionStopRequest):
+    try:
+        return await get_services().ai_execution_svc.place_stop(
+            request_id=req.request_id, entry_order_id=req.entry_order_id,
+            trigger_price=req.trigger_price, limit_price=req.limit_price,
+        )
+    except AITradeError as exc:
+        raise _execution_api_error(exc) from exc
+
+
+@router.patch("/execution/stops/{stop_order_id}", dependencies=[Depends(require_ai_execution_key)])
+async def modify_ai_execution_stop(stop_order_id: str, req: AIExecutionStopModifyRequest):
+    try:
+        return await get_services().ai_execution_svc.modify_stop(
+            stop_order_id=stop_order_id, trigger_price=req.trigger_price,
+            limit_price=req.limit_price,
+        )
+    except AITradeError as exc:
+        raise _execution_api_error(exc) from exc
+
+
+@router.delete("/execution/stops/{stop_order_id}", dependencies=[Depends(require_ai_execution_key)])
+async def cancel_ai_execution_stop(stop_order_id: str):
+    try:
+        return await get_services().ai_execution_svc.cancel_stop(stop_order_id)
+    except AITradeError as exc:
+        raise _execution_api_error(exc) from exc
+
+
+@router.post("/execution/exit", status_code=201, dependencies=[Depends(require_ai_execution_key)])
+async def exit_ai_execution_position(req: AIExecutionExitRequest):
+    try:
+        return await get_services().ai_execution_svc.exit(
+            request_id=req.request_id, entry_order_id=req.entry_order_id,
+            limit_price=req.limit_price,
+        )
+    except AITradeError as exc:
+        raise _execution_api_error(exc) from exc

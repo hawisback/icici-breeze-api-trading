@@ -412,7 +412,12 @@ class IciciBreezeAdapter(BrokerAdapter):
         broker_order_id: str,
         quantity: Optional[int] = None,
         price: Optional[float] = None,
+        trigger_price: Optional[float] = None,
     ) -> BrokerOrderResponse:
+        if trigger_price is not None:
+            return BrokerOrderResponse(success=False, broker_order_id=broker_order_id,
+                                       client_order_id="", status="REJECTED",
+                                       message="Breeze stop modification unsupported by this adapter")
         """Modify order via clean service."""
         if not self.api_key or self.api_key.startswith("test_"):
             return BrokerOrderResponse(

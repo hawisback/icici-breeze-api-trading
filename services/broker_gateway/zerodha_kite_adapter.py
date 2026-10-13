@@ -236,6 +236,7 @@ class ZerodhaKiteAdapter(BrokerAdapter):
         broker_order_id: str,
         quantity: Optional[int] = None,
         price: Optional[float] = None,
+        trigger_price: Optional[float] = None,
     ) -> BrokerOrderResponse:
         if not self.is_active:
             return _failure("", "Kite session is not active", broker_order_id)
@@ -244,6 +245,8 @@ class ZerodhaKiteAdapter(BrokerAdapter):
             params["quantity"] = quantity
         if price is not None:
             params["price"] = price
+        if trigger_price is not None:
+            params["trigger_price"] = trigger_price
         try:
             async with self._write_lock:
                 await self._run(lambda: self._kite.modify_order(**params))
@@ -712,8 +715,56 @@ class ZerodhaKiteAdapter(BrokerAdapter):
                 candles_by_time[candle_start] = candle
         return [candles_by_time[key] for key in sorted(candles_by_time)]
 
+    async def resolve_option_contract(self, instrument_id: str) -> dict[str, Any] | None:
+        """Resolve an *exact listed* NIFTY option; never guess a Kite token.
+
+        Token, expiry, strike and right all come from Kite's NFO instrument
+        master. This is used for contract-premium historical indicators.
+        """
+        if not self.is_active:
+            return None
+        match = re.fullmatch(
+            r"INST-NIFTY-(\d{4}-\d{2}-\d{2})-(\d+)-(CE|PE)",
+            instrument_id,
+        )
+        if not match:
+            return None
+        expiry, strike, right = match.groups()
+        try:
+            date.fromisoformat(expiry)
+        except ValueError:
+            return None
+        if self._nfo_instruments is None:
+            self._nfo_instruments = await self._run(lambda: self._kite.instruments("NFO"))
+        matches = [
+            row for row in self._nfo_instruments or []
+            if str(row.get("name", "")).upper() == "NIFTY"
+            and str(row.get("exchange", "NFO")).upper() == "NFO"
+            and str(row.get("expiry", ""))[:10] == expiry
+            and str(row.get("instrument_type", "")).upper() == right
+            and int(float(row.get("strike") or 0)) == int(strike)
+            and row.get("tradingsymbol")
+            and int(row.get("instrument_token") or 0) > 0
+        ]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+        return {
+            "instrument_id": instrument_id,
+            "symbol": str(row["tradingsymbol"]),
+            "instrument_token": int(row["instrument_token"]),
+            "expiry": expiry,
+            "strike": int(strike),
+            "right": right,
+            "lot_size": int(row.get("lot_size") or 0),
+        }
+
     async def _find_instrument_token(self, instrument_id: str) -> Optional[int]:
         is_index = "NIFTY-INDEX" in instrument_id or "BANKNIFTY-INDEX" in instrument_id
+        # Option IDs must never silently resolve to the nearest NIFTY FUTURE.
+        if instrument_id.startswith("INST-NIFTY-") and not is_index and "-FUT-" not in instrument_id:
+            option = await self.resolve_option_contract(instrument_id)
+            return int(option["instrument_token"]) if option else None
         if is_index:
             if self._nse_instruments is None:
                 self._nse_instruments = await self._run(lambda: self._kite.instruments("NSE"))

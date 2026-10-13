@@ -108,8 +108,9 @@ class BrokerAdapter(Protocol):
         broker_order_id: str,
         quantity: Optional[int] = None,
         price: Optional[float] = None,
+        trigger_price: Optional[float] = None,
     ) -> BrokerOrderResponse:
-        """Modify an existing open order."""
+        """Modify an existing open order, including protective trigger."""
         ...
 
     async def cancel_order(self, broker_order_id: str) -> BrokerOrderResponse:

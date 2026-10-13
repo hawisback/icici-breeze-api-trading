@@ -113,6 +113,17 @@ class PlatformSettings(BaseSettings):
             "Enable only when Docker publishes the API port on 127.0.0.1."
         ),
     )
+    # Dedicated AI-commanded execution API: completely separate from legacy
+    # AI PAPER auto-stop engine and full strategy/OMS workers.
+    ai_execution_enabled: bool = Field(default=False, alias="AI_EXECUTION_ENABLED")
+    ai_execution_api_key: Optional[SecretStr] = Field(default=None, alias="AI_EXECUTION_API_KEY")
+    ai_execution_live_switch_enabled: bool = Field(
+        default=False, alias="AI_EXECUTION_LIVE_SWITCH_ENABLED",
+        description="Operator-configured permission for the authenticated local AI agent to select LIVE.",
+    )
+    ai_execution_live_max_daily_entries: int = Field(
+        default=3, ge=1, le=100, alias="AI_EXECUTION_LIVE_MAX_DAILY_ENTRIES",
+    )
     ai_trade_enabled: bool = Field(default=True, alias="AI_TRADE_ENABLED")
     ai_trade_mode: TradingMode = Field(default=TradingMode.PAPER, alias="AI_TRADE_MODE", description="Operator-owned mode. PAPER is supported; LIVE submissions fail closed until protective-order integration is implemented.")
     ai_trade_db_path: Path = Field(default=Path("./data/ai_trades.db"), alias="AI_TRADE_DB_PATH")
@@ -244,6 +255,16 @@ class PlatformSettings(BaseSettings):
             raise ValueError(
                 "REDPANDA_BROKERS must be configured when EVENT_BUS_BACKEND is set to 'redpanda'."
             )
+
+        if self.ai_execution_enabled:
+            token = (self.ai_execution_api_key.get_secret_value()
+                     if self.ai_execution_api_key else "")
+            if len(token.encode("utf-8")) < 32:
+                raise ValueError(
+                    "AI_EXECUTION_API_KEY must be at least 32 bytes when the AI execution API is enabled."
+                )
+            if self.broker_backend != BrokerBackend.KITE:
+                raise ValueError("AI execution API requires LIVE_EXECUTION_BROKER=kite.")
 
         # Any process capable of LIVE trading must carry production-grade
         # identity and real-market safeguards, even if APP_ENV was left in a

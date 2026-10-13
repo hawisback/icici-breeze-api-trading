@@ -43,17 +43,28 @@ services:
       - BREEZE_API_KEY=${BREEZE_API_KEY:-test_api_key}
       - BREEZE_SECRET_KEY=${BREEZE_SECRET_KEY:-test_secret_key}
       - BREEZE_SESSION_TOKEN=${BREEZE_SESSION_TOKEN:-test_session_token}
-      - BROKER_BACKEND=${BROKER_BACKEND:-breeze}
+      - BROKER_BACKEND=${BROKER_BACKEND:-kite}
+      - LIVE_EXECUTION_BROKER=${LIVE_EXECUTION_BROKER:-kite}
+      - LIVE_TRADING_ENABLED=${LIVE_TRADING_ENABLED:-false}
+      - LIVE_ALLOWED_ACCOUNTS=${LIVE_ALLOWED_ACCOUNTS:-["ZERODHA_PRIMARY"]}
+      - AUTH_SIGNING_KEY=${AUTH_SIGNING_KEY:-}
+      - AI_EXECUTION_ENABLED=${AI_EXECUTION_ENABLED:-false}
+      - AI_EXECUTION_LIVE_SWITCH_ENABLED=${AI_EXECUTION_LIVE_SWITCH_ENABLED:-false}
+      - AI_EXECUTION_API_KEY=${AI_EXECUTION_API_KEY:-}
+      - AI_EXECUTION_LIVE_MAX_DAILY_ENTRIES=${AI_EXECUTION_LIVE_MAX_DAILY_ENTRIES:-3}
+      - AI_TRADE_MAX_QUANTITY=${AI_TRADE_MAX_QUANTITY:-65}
+      - AI_TRADE_MAX_PREMIUM_NOTIONAL=${AI_TRADE_MAX_PREMIUM_NOTIONAL:-15000}
       - KITE_API_KEY=${KITE_API_KEY:-}
       - KITE_API_SECRET=${KITE_API_SECRET:-}
       - KITE_REQUEST_TOKEN=${KITE_REQUEST_TOKEN:-}
       - KITE_ACCESS_TOKEN=${KITE_ACCESS_TOKEN:-}
       - KITE_PRODUCT=${KITE_PRODUCT:-NRML}
       - TRADING_MODE=PAPER
-      # Local-only AI scheduler owns market-data refreshes; backend monitors open AI PAPER stops.
+      # Isolated AI execution service; old internal strategies never run.
       - AI_ONLY_MODE=true
-      - MARKET_DATA_BACKEND=kite
-      - FREQUENT_DATA_BROKER=kite
+      - MARKET_DATA_BACKEND=${MARKET_DATA_BACKEND:-kite}
+      - FREQUENT_DATA_BROKER=${FREQUENT_DATA_BROKER:-kite}
+      - REFERENCE_DATA_BROKER=${REFERENCE_DATA_BROKER:-breeze}
       # Backend port is published on host loopback only (127.0.0.1:8000).
       # Docker forwards host-loopback requests from its bridge gateway IP.
       - AI_TRUST_LOCAL_DOCKER_GATEWAY=true

@@ -177,6 +177,7 @@ class PaperBrokerAdapter(BrokerAdapter):
         broker_order_id: str,
         quantity: Optional[int] = None,
         price: Optional[float] = None,
+        trigger_price: Optional[float] = None,
     ) -> BrokerOrderResponse:
         order = self._orders.get(broker_order_id)
         if not order:
@@ -199,6 +200,12 @@ class PaperBrokerAdapter(BrokerAdapter):
             order["quantity"] = quantity
         if price is not None:
             order["price"] = price
+        if trigger_price is not None:
+            if "trigger_price" not in order:
+                return BrokerOrderResponse(success=False, broker_order_id=broker_order_id,
+                                           client_order_id=order["client_order_id"], status="REJECTED",
+                                           message="Only stop orders have a trigger price")
+            order["trigger_price"] = trigger_price
         return BrokerOrderResponse(
             success=True,
             broker_order_id=broker_order_id,
