@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 import hmac
+import re
 import asyncio
 from time import monotonic
 from urllib.parse import urlencode
@@ -27,6 +28,11 @@ from services.api_gateway.service_container import get_services
 
 _index_refresh_lock = asyncio.Lock()
 _last_index_refresh = 0.0
+
+# The route is read-only but historical calls are broker-rate-limited.
+_option_technicals_lock = asyncio.Lock()
+_option_technicals_cache: dict[tuple, tuple[float, dict]] = {}
+_OPTION_TECHNICALS_CACHE_SECONDS = 20.0
 
 
 async def _refresh_ai_only_index() -> None:
@@ -221,6 +227,44 @@ async def get_nifty_ai_technicals(
         interval=interval,
         limit=limit,
     )
+
+
+@router.get("/nifty/options/technicals")
+async def get_nifty_option_technicals(
+    instrument_ids: list[str] = Query(min_length=1, max_length=6),
+    interval: str = Query(default="5m", pattern=r"^(1m|5m|15m)$"),
+    limit: int = Query(default=200, ge=50, le=500),
+):
+    """Read-only batch indicators from each exact NIFTY CE/PE premium series.
+
+    Pass repeated instrument_ids parameters; no commas, rankings or trades.
+    Missing/invalid Kite candles return a per-contract unavailable reason.
+    """
+    if len(instrument_ids) != len(set(instrument_ids)):
+        raise HTTPException(status_code=422, detail="DUPLICATE_OPTION_CONTRACT")
+    for contract_id in instrument_ids:
+        match = re.fullmatch(
+            r"INST-NIFTY-(\d{4}-\d{2}-\d{2})-(\d+)-(CE|PE)",
+            contract_id,
+        )
+        if match is None:
+            raise HTTPException(status_code=422, detail="INVALID_NIFTY_OPTION_INSTRUMENT_ID")
+        try:
+            date.fromisoformat(match.group(1))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="INVALID_OPTION_EXPIRY") from None
+    key = (tuple(instrument_ids), interval, limit)
+    async with _option_technicals_lock:
+        cached = _option_technicals_cache.get(key)
+        if cached and monotonic() - cached[0] < _OPTION_TECHNICALS_CACHE_SECONDS:
+            return cached[1]
+        result = await _context_service().get_nifty_option_technicals(
+            instrument_ids=instrument_ids, interval=interval, limit=limit,
+        )
+        if len(_option_technicals_cache) >= 128:
+            _option_technicals_cache.clear()
+        _option_technicals_cache[key] = (monotonic(), result)
+        return result
 
 
 @router.get("/nifty/options")
