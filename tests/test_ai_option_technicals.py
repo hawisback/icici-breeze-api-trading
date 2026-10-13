@@ -104,11 +104,7 @@ class OptionHistory:
 
 
 @pytest.mark.asyncio
-async def test_batch_uses_each_option_premium_not_underlying_index(monkeypatch):
-    monkeypatch.setattr(
-        "services.ai_context.service.asyncio.sleep",
-        lambda _seconds: __import__("asyncio").sleep(0),
-    )
+async def test_batch_uses_each_option_premium_not_underlying_index():
     kite = OptionHistory()
     svc = AIContextService(
         market_data_service=None, historical_service=None, option_chain_service=None,
