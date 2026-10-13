@@ -21,3 +21,17 @@ The entry_order_id for stops/exits is the API's local order_id, not Kite's broke
 PAPER LIMIT orders are immediately filled by the existing mock broker at the requested price, and PAPER stop orders remain pending; they do not automatically trigger. The AI must explicitly request the exit. PAPER positions are held in memory and reset after a backend restart. LIVE SL-LIMIT orders can remain unfilled after trigger; broker acceptance is not fill confirmation. Do not retry UNKNOWN submissions blindly; use Kite orders/positions to reconcile. No automatic trading decisions or trailing-stop scheduler runs.
 
 Before LIVE testing, verify API authentication, fresh Kite quotes, contract symbols, lot sizes and funds. Test PAPER entry, stop, modify, cancel and exit in that order. Test rejected/unknown order and mode-switch cases. Then, under direct supervision, validate one minimum-lot real trade and its broker-held stop. Stop new entries if order status or broker position cannot be verified. No broker orders are placed by this implementation or its tests.
+
+## NIFTY option-premium technical indicators
+
+GET /api/v1/ai/nifty/options/technicals returns each *listed NIFTY CE/PE option's own* completed Kite premium candles and objective indicators. This is NOT the NIFTY underlying/futures technical series and does not generate trading recommendations. The endpoint is read-only, limited to local callers and does not need the AI execution key.
+
+Pass 1-6 repeated instrument_ids query parameters (not comma-separated), plus interval=1m, 5m or 15m and limit=50..500 (default 200):
+
+~~~http
+GET /api/v1/ai/nifty/options/technicals?instrument_ids=INST-NIFTY-2026-10-13-25000-CE&instrument_ids=INST-NIFTY-2026-10-13-25000-PE&interval=5m&limit=200
+~~~
+
+The example IDs illustrate the instrument identifier format, not guaranteed active contracts. Use the instrument_id values obtained from GET /nifty/options. Response contains source KITE, basis OPTION_PREMIUM, interval, requested_count, available_count, calculated_at and an ordered contracts array. Each element includes instrument_id, symbol, expiry, strike, right, lot_size, candle_count, data_through, age_seconds, missing_recent_session_bars, available and the same metrics schema as GET /nifty/technicals (including EMA, RSI, MACD, ATR, VWAP and session VWAP). The option's session VWAP is computed from its own trading volume; there is no NIFTY_FUTURES VWAP substitution.
+
+Each option is matched to the exact Kite NFO instrument token by expiry, strike and CE/PE. Only completed, valid KITE candles are used. Fewer than 50 bars, a missing contract, disconnected broker, or a failed historical request returns available=false with an explicit reason for that contract rather than guessed data. Results are cached for 20 seconds. The backend limits batch size and spaces historical requests to reduce rate-limit bursts. Option history is limited by what Kite can return for the listed contract, particularly near expiry.
